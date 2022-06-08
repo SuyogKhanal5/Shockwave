@@ -11,7 +11,7 @@ async def on_ready():
     print('Bot is online')
 
 @client.command(aliases = ['james', 'hashmap'])
-async def createTeam(ctx):
+async def createRandom(ctx):
     x = np.array(["Smit", "Patrick", "Amaan", "Suyog", "Pranav", "Pengu", "David", "James", "Keith", "Ahmed"])
     
     result = ""
@@ -28,8 +28,7 @@ async def createTeam(ctx):
         result += " " + roles[i%5]
         result += "\n"
 
-
-    await ctx.send(result)
-    
+    team_embed = discord.Embed(title = "TEAMS", description = result, color = discord.Color.red())
+    await ctx.send(embed = team_embed)
 
 client.run(token)
