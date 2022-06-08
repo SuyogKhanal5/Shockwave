@@ -2,7 +2,10 @@ import discord
 from discord.ext import commands
 import numpy as np
 
-client = commands.Bot(command_prefix = '.')
+intents = discord.Intents.default()
+intents.members = True
+
+client = commands.Bot(command_prefix = '.', intents=intents)
 token = 'token'
 
 @client.event
@@ -12,8 +15,12 @@ async def on_ready():
 
 @client.command(aliases = ['james', 'hashmap'])
 async def createRandom(ctx):
-    x = np.array(["Smit", "Patrick", "Amaan", "Suyog", "Pranav", "Pengu", "David", "James", "Keith", "Ahmed"])
+    channel = ctx.message.author.voice.channel
+    members = []
+    for i in channel.members:
+        members.append(i.name)
     
+    x = np.array(members)
     result = ""
 
     roles = {0 : "top", 1 : "jg", 2 : "mid", 3 : "adc", 4 : "sup"}
