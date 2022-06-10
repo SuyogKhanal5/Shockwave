@@ -8,7 +8,7 @@ intents.members = True
 
 client = commands.Bot(command_prefix = '.', intents=intents, help_command=None)
 token = 'token'
-
+#hello this is smit
 team_size = 5
 team1 = []
 team2 = []
