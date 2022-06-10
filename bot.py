@@ -7,7 +7,7 @@ intents = discord.Intents.default()
 intents.members = True
 
 client = commands.Bot(command_prefix = '.', intents=intents, help_command=None)
-token = 'OTgzOTE5NDMyNzU1NzMyNTMy.GtGA8y.lVVU-s7aZfZJDUrlroXv5dLqf-M6L9BBdfseos'
+token = ''
 
 team_size = 5
 team1 = []
