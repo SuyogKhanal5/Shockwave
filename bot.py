@@ -7,7 +7,12 @@ intents = discord.Intents.default()
 intents.members = True
 
 client = commands.Bot(command_prefix = '.', intents=intents, help_command=None)
-token = ''
+
+token = 'token'
+
+with open('token.txt') as f:
+    token = f.read()
+
 
 team_size = 5
 team1 = []
@@ -288,7 +293,5 @@ async def randomAll(ctx, *, teams):
             member = ctx.guild.get_member(id)
             await member.move_to(channel2)
         counter += 1
-
-
 
 client.run(token)
