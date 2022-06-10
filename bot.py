@@ -11,6 +11,7 @@ token = 'token'
 
 team_size = 5
 team1 = []
+team2 = []
 
 channel1 = None
 channel2 = None
@@ -36,7 +37,7 @@ async def createRandom(ctx):
     result1 = ""
     result2 = ""
 
-    roles = {0 : "Top - ", 1 : "Jungle - ", 2 : "Mid - ", 3 : "Bot - ", 4 : "Sup - "}
+    roles = {0 : "Top - ", 1 : "Jungle - ", 2 : "Mid - ", 3 : "Bot - ", 4 : "Support - "}
     np.random.shuffle(x)
 
     y = x
