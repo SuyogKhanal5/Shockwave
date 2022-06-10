@@ -7,8 +7,8 @@ intents = discord.Intents.default()
 intents.members = True
 
 client = commands.Bot(command_prefix = '.', intents=intents, help_command=None)
-token = 'token'
-#hello this is smit
+token = 'OTgzOTE5NDMyNzU1NzMyNTMy.GtGA8y.lVVU-s7aZfZJDUrlroXv5dLqf-M6L9BBdfseos'
+
 team_size = 5
 team1 = []
 team2 = []
@@ -102,7 +102,7 @@ async def move(ctx):
 @client.command()
 async def help(ctx, *, specific):
     if (specific == "setTeamSize"):
-        helpembed = discord.Embed(title = "setTeamSize", description = "Change the size of the team. \nWARNING: This command doesn't really work currently.", color = discord.Color.blue())
+        helpembed = discord.Embed(title = "setTeamSize", description = "Change the size of the team. \nWARNING: This command doesn't work on \".fullRandom\" or \".fullRandomAll\"", color = discord.Color.blue())
         await ctx.send(embed = helpembed)
     elif (specific == "fullRandom"):
         helpembed = discord.Embed(title = "fullRandom", description = "Create random teams of random roles. Aliases are \"james\" and \"hashmap\"", color = discord.Color.blue())
@@ -116,12 +116,18 @@ async def help(ctx, *, specific):
     elif (specific == "setTeamChannels"):
         helpembed = discord.Embed(title = "setTeamChannels", description = "Takes in two arguments seperated by space, two names of voice channels. \nWARNING: This command does not work with voice channels that have spaces in their name. Try hypenating voice channels that need spaces.", color = discord.Color.blue())
         await ctx.send(embed = helpembed)
+    elif (specific == "random"):
+        helpembed = discord.Embed(title = "setTeamChannels", description = "Randomize teams without assigning roles. Useful with setTeamSize for use in other games.", color = discord.Color.blue())
+        await ctx.send(embed = helpembed)
+    elif (specific == "randomAll"):
+        helpembed = discord.Embed(title = "setTeamChannels", description = "Randomize teams without assigning roles and move into channels all in one command. Useful with setTeamSize for use in other games.", color = discord.Color.blue())
+        await ctx.send(embed = helpembed)
     else:
         await ctx.send("Command not found!")
 
 @client.command(aliases = ["commands"])
 async def commandList(ctx):
-    helpembed = discord.Embed(title = "Commands", description = "setTeamSize\nfullRandom\nfullRandomAll\nmove\nsetTeamChannels", color = discord.Color.blue())
+    helpembed = discord.Embed(title = "Commands", description = "setTeamSize\nfullRandom\nfullRandomAll\nmove\nsetTeamChannels\nrandom\nrandomAll", color = discord.Color.blue())
     await ctx.send(embed = helpembed)
     await ctx.send("Type \".help  ____\" in order to get info on a specific command.")
 
@@ -187,5 +193,102 @@ async def fullRandomAll(ctx, *, teams):
             member = ctx.guild.get_member(id)
             await member.move_to(channel2)
         counter += 1
+
+@client.command()
+async def random(ctx):
+    channel = ctx.message.author.voice.channel
+    members = []
+    for i in channel.members:
+        members.append(i)
+    
+    m = np.array(members)
+
+    np.random.shuffle(m)
+
+    names = []
+    
+    for i in m:
+        names.append(i.name)
+    
+    global ids
+    ids = []
+    
+    for i in m:
+        ids.append(i.id)
+
+    x = np.array(m)
+
+    for i in range(team_size*2):
+        if(i < team_size):
+            result1 += str(x[i]) + "\n"
+        else:
+            result2 += str(x[i]) + "\n"
+
+    team1_embed = discord.Embed(title = "TEAM 1", description = result1, color = discord.Color.blue())
+    team2_embed = discord.Embed(title = "TEAM 2", description = result2, color = discord.Color.red())
+
+    await ctx.send(embed = team1_embed)
+    await ctx.send(embed = team2_embed)
+
+@client.command()
+async def randomAll(ctx, *, teams):
+    teamsList = teams.split()
+
+    global channel1
+    channel1 = discord.utils.get(ctx.guild.channels, name = teamsList[0])
+
+    global channel2
+    channel2 = discord.utils.get(ctx.guild.channels, name = teamsList[1])
+
+    await ctx.send("Channels set!")
+
+    channel = ctx.message.author.voice.channel
+    members = []
+    for i in channel.members:
+        members.append(i)
+    
+    m = np.array(members)
+
+    np.random.shuffle(m)
+
+    names = []
+    
+    for i in m:
+        names.append(i.name)
+    
+    global ids
+    ids = []
+    
+    for i in m:
+        ids.append(i.id)
+
+    x = np.array(m)
+
+    for i in range(team_size*2):
+        if(i < team_size):
+            result1 += str(x[i]) + "\n"
+        else:
+            result2 += str(x[i]) + "\n"
+
+    team1_embed = discord.Embed(title = "TEAM 1", description = result1, color = discord.Color.blue())
+    team2_embed = discord.Embed(title = "TEAM 2", description = result2, color = discord.Color.red())
+
+    await ctx.send(embed = team1_embed)
+    await ctx.send(embed = team2_embed)
+
+    counter = 0
+    
+    for i in range(0,10):
+        if counter <=4:
+            id = ids[i]
+            member = ctx.guild.get_member(id)
+            await member.move_to(channel1)
+        else:
+            id = ids[i]
+            member = ctx.guild.get_member(id)
+            await member.move_to(channel2)
+        counter += 1
+
+
 
 client.run(token)
