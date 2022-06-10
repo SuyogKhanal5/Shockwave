@@ -168,6 +168,6 @@ async def randomAll(ctx, *, teams):
             id = ids[i]
             member = ctx.guild.get_member(id)
             await member.move_to(channel2)
-    counter += 1
+        counter += 1
 
 client.run(token)
