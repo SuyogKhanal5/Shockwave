@@ -6,7 +6,7 @@ import numpy as np
 intents = discord.Intents.default()
 intents.members = True
 
-client = commands.Bot(command_prefix = '.', intents=intents)
+client = commands.Bot(command_prefix = '.', intents=intents, help_command=None)
 token = 'token'
 
 team_size = 5
@@ -18,7 +18,7 @@ channel2 = None
 
 @client.event
 async def on_ready():
-    await client.change_presence(activity = discord.Game('10 Man??'))
+    await client.change_presence(activity = discord.Game('Use .commands for a list of commands.'))
     print('Bot is online')
 
 @client.command(aliases = ['size'])
@@ -29,7 +29,7 @@ async def setTeamSize(ctx, *, sizeChange):
     await ctx.send("Set team size!")
 
 @client.command(aliases = ['james', 'hashmap'])
-async def createRandom(ctx):
+async def fullRandom(ctx):
     channel = ctx.message.author.voice.channel
     members = []
     for i in channel.members:
@@ -40,7 +40,7 @@ async def createRandom(ctx):
     result1 = ""
     result2 = ""
 
-    roles = {0 : "Top - ", 1 : "Jungle - ", 2 : "Mid - ", 3 : "Bot - ", 4 : "Support - "}
+    roles = {0 : "Top - ", 1 : "Jungle - ", 2 : "Mid - ", 3 : "Bottom - ", 4 : "Support - "}
     np.random.shuffle(m)
 
     names = []
@@ -89,7 +89,7 @@ async def move(ctx):
     if not team1 or not team2:
         await ctx.send("Team is empty! Set teams before using this command.")
     elif channel1 == None or channel2 == None:
-        await ctx.send("Channels not set! Set channels before using this command")
+        await ctx.send("Channels not set! Set channels before using this command.")
     else:
         counter = 0
         for i in range(0,10):
@@ -104,7 +104,33 @@ async def move(ctx):
             counter += 1
 
 @client.command()
-async def randomAll(ctx, *, teams):
+async def help(ctx, *, specific):
+    if (specific == "setTeamSize"):
+        helpembed = discord.Embed(title = "setTeamSize", description = "Change the size of the team. \nWARNING: This command doesn't really work currently.", color = discord.Color.blue())
+        await ctx.send(embed = helpembed)
+    elif (specific == "fullRandom"):
+        helpembed = discord.Embed(title = "fullRandom", description = "Create random teams of random roles. Aliases are \"james\" and \"hashmap\"", color = discord.Color.blue())
+        await ctx.send(embed = helpembed)
+    elif (specific == "fullRandomAll"):
+        helpembed = discord.Embed(title = "fullRandomAll", description = "Create random teams of random roles, set team channels, and move members all in one command.", color = discord.Color.blue())
+        await ctx.send(embed = helpembed)
+    elif (specific == "move"):
+        helpembed = discord.Embed(title = "move", description = "Move team members into set channels. Make sure channels are set already with .setTeamChannels.", color = discord.Color.blue())
+        await ctx.send(embed = helpembed)
+    elif (specific == "setTeamChannels"):
+        helpembed = discord.Embed(title = "setTeamChannels", description = "Takes in two arguments seperated by space, two names of voice channels. \nWARNING: This command does not work with voice channels that have spaces in their name. Try hypenating voice channels that need spaces.", color = discord.Color.blue())
+        await ctx.send(embed = helpembed)
+    else:
+        await ctx.send("Command not found!")
+
+@client.command(aliases = ["commands"])
+async def commandList(ctx):
+    helpembed = discord.Embed(title = "Commands", description = "setTeamSize\nfullRandom\nfullRandomAll\nmove\nsetTeamChannels", color = discord.Color.blue())
+    await ctx.send(embed = helpembed)
+    await ctx.send("Type \".help  ____\" in order to get info on a specific command.")
+
+@client.command()
+async def fullRandomAll(ctx, *, teams):
     teamsList = teams.split()
 
     global channel1
