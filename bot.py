@@ -169,13 +169,9 @@ async def fullRandomAll(ctx, *, teams):
 
     for i in range(team_size*2):
         if(i < team_size):
-            result1 += roles[i%5] + " "
-            result1 += str(x[i])
-            result1 += "\n"
+            result1 += roles[i%5] + " " + str(x[i]) + "\n"
         else:
-            result2 += roles[i%5] + " "
-            result2 += str(x[i])
-            result2 += "\n"
+            result2 += roles[i%5] + " " + str(x[i]) + "\n"
 
     team1_embed = discord.Embed(title = "TEAM 1", description = result1, color = discord.Color.blue())
     team2_embed = discord.Embed(title = "TEAM 2", description = result2, color = discord.Color.red())
