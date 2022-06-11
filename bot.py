@@ -429,6 +429,6 @@ async def clearAll(ctx):
     captain1 = None
     captain2 = None
 
-
+    await ctx.send("Cleared!")
 
 client.run(token)
