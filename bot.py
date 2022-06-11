@@ -195,7 +195,13 @@ async def fullRandomAll(ctx, *, teams):
     members = []
     for i in channel.members:
         members.append(i)
-    
+
+    if (len(members) < 10):
+        await ctx.send("You must have exactly 10 people in the call to use this command.")
+    elif (len(members) > 10):
+        await ctx.send("You must have exactly 10 people in the call to use this command.")
+        return
+
     m = np.array(members)
 
     result1 = ""
@@ -378,6 +384,64 @@ async def captains(ctx, captain_1: discord.Member, captain_2: discord.Member):
     global original_channel
     original_channel = ctx.message.author.voice.channel
     using_captains = True
+
+    if (captain_1 == None or captain_2 == None):
+        await ctx.send("Mention two team captains!")
+    else:
+        captain1 = captain_1
+        captain2 = captain_2
+
+        global teamList1
+        global teamList2
+        
+        teamList1 += str(captain1.display_name)
+        teamList2 += str(captain2.display_name)
+
+        team1ids.append(captain1.id)
+        team2ids.append(captain2.id)
+
+        team1.append(captain1)
+        team2.append(captain2)
+
+        team1_embed = discord.Embed(title = "TEAM 1", description = teamList1, color = discord.Color.blue())
+        team2_embed = discord.Embed(title = "TEAM 2", description = teamList2, color = discord.Color.red())
+
+        await ctx.send(embed = team1_embed)
+        await ctx.send(embed = team2_embed)
+        
+        channel = ctx.message.author.voice.channel
+        playersString = ""
+        for player in channel.members:
+            if(player.display_name != captain1.display_name and player.display_name != captain2.display_name):
+                players.append(player.display_name)
+                playersString += player.display_name + "\n"
+         
+        players_embed = discord.Embed(title = "PLAYERS", description = playersString, color = discord.Color.dark_purple())
+        await ctx.send(embed = players_embed)
+        
+        await ctx.send("Captains selected!")
+        await ctx.send(captain_1.mention + ", type \".choose  @_____\" to pick a player for your team")
+
+@client.command()
+async def captainsAll(ctx, captain_1: discord.Member, captain_2: discord.Member, *, teams):
+    global captain1
+    global captain2
+    global members
+    global players
+    global using_captains
+    global original_channel
+    original_channel = ctx.message.author.voice.channel
+    using_captains = True
+
+    teamsList = teams.split()
+
+    global channel1
+    channel1 = discord.utils.get(ctx.guild.channels, name = teamsList[0])
+
+    global channel2
+    channel2 = discord.utils.get(ctx.guild.channels, name = teamsList[1])
+
+    await ctx.send("Channels set!")
 
     if (captain_1 == None or captain_2 == None):
         await ctx.send("Mention two team captains!")
