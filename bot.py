@@ -665,7 +665,7 @@ async def randomCaptains(ctx):
     players_embed = discord.Embed(title = "PLAYERS", description = playersString, color = discord.Color.dark_purple())
     await ctx.send(embed = players_embed)
         
-    await ctx.send("The captains are " + captain1.display_name + " and " + captain2.display_name)
+    await ctx.send("The captains are <@{}>".format(captain1.id) + " and <@{}>".format(captain2.id))
     await ctx.send(captain1.mention + ", type \".choose  @_____\" to pick a player for your team")
 
 @client.command()
@@ -686,6 +686,9 @@ async def chooseRandom(ctx):
 
     channel = ctx.message.author.voice.channel
 
+    if (len(players) == 0):
+        await ctx.send("All players have been selected")
+
     for player in channel.members:
         if(player.display_name != captain1.display_name and player.display_name != captain2.display_name and players.__contains__(player.display_name) == True):
             player_members.append(player)
@@ -698,7 +701,6 @@ async def chooseRandom(ctx):
 
     if drafted < (team_size * 2):
         if (captainNum == 1 and ctx.message.author.id == captain1.id):
-            captainNum = 2
 
             if (team1.__contains__(member) == False and team2.__contains__(member) == False and players.__contains__(member.display_name) == True):    
                 teamList1 += "\n" + member.display_name
