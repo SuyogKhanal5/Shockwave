@@ -347,8 +347,8 @@ async def captains(ctx, captain_1: discord.Member, captain_2: discord.Member):
         global teamList1
         global teamList2
 
-        teamList1 += captain1.display_name
-        teamList2 += captain2.display_name
+        teamList1 += str(captain1.display_name)
+        teamList2 += str(captain2.display_name)
 
         team1_embed = discord.Embed(title = "TEAM 1", description = teamList1, color = discord.Color.blue())
         team2_embed = discord.Embed(title = "TEAM 2", description = teamList2, color = discord.Color.red())
@@ -362,16 +362,35 @@ async def captains(ctx, captain_1: discord.Member, captain_2: discord.Member):
 @client.command()
 async def choose(ctx, member: discord.Member):
     # Make sure to create a random version
-     
+
+    global teamList1
+    global teamList2
+
     if drafted < (team_size * 2):
         if (captainNum == 1 and ctx.message.author == captain1.id):
             captainNum = 2
             member.move_to(channel1)
+
+            teamList1 += member.display_name
+
+            team1_embed = discord.Embed(title = "TEAM 1", description = teamList1, color = discord.Color.blue())
+            team2_embed = discord.Embed(title = "TEAM 2", description = teamList2, color = discord.Color.red())
+
+            await ctx.send(embed = team1_embed)
+            await ctx.send(embed = team2_embed)
         elif (captainNum == 2 and ctx.message.author == captain2.id):
             captainNum = 1
             member.move_to(channel2)
+
+            teamList2 += member.display_name
+
+            team1_embed = discord.Embed(title = "TEAM 1", description = teamList1, color = discord.Color.blue())
+            team2_embed = discord.Embed(title = "TEAM 2", description = teamList2, color = discord.Color.red())
+
+            await ctx.send(embed = team1_embed)
+            await ctx.send(embed = team2_embed)
         else:
-            await ctx.send()
+            await ctx.send("Only team captains can use this command!")
     else:
         await ctx.send("You've drafted the maximum number of people for the team size! Use \".move\" to move everyone to the channels!")
 
