@@ -10,6 +10,8 @@ client = commands.Bot(command_prefix = '.', intents=intents, help_command=None)
 
 token = 'token'
 original_channel = ""
+captainNum = 1
+drafted = 2
 
 with open('token.txt') as f:
     token = f.read()
@@ -18,8 +20,14 @@ team_size = 5
 team1 = []
 team2 = []
 
+teamList1 = None
+teamList2 = None
+
 channel1 = None
 channel2 = None
+
+captain1 = None
+captain2 = None
 
 @client.event
 async def on_ready():
@@ -133,12 +141,21 @@ async def help(ctx, *, specific):
     elif (specific == "returnAll"):
         helpembed = discord.Embed(title = "returnAll", description = "Return all players to their original channel.\n WARNING: \".move\", \"fullRandomAll\", or \"randomAll\" must be used before using this.", color = discord.Color.blue())
         await ctx.send(embed = helpembed)
+    elif (specific == "captains"):
+        helpembed = discord.Embed(title = "captains", description = "Start the process of creating new teams. Parameters are team captains.", color = discord.Color.blue())
+        await ctx.send(embed = helpembed)
+    elif (specific == "choose"):
+        helpembed = discord.Embed(title = "choose", description = "Team captains can use this command to choose new team members in alternating order.\nWARNING: Use this command after using \".captains\" or \".randomCaptains\"", color = discord.Color.blue())
+        await ctx.send(embed = helpembed)
+    elif (specific == "clearAll"):
+        helpembed = discord.Embed(title = "clearAll", description = "Clear all stored teams.", color = discord.Color.blue())
+        await ctx.send(embed = helpembed)
     else:
         await ctx.send("Command not found!")
 
 @client.command(aliases = ["commands"])
 async def commandList(ctx):
-    helpembed = discord.Embed(title = "Commands", description = "setTeamSize\nfullRandom\nfullRandomAll\nmove\nsetTeamChannels\nrandom\nrandomAll\nreturnAll", color = discord.Color.blue())
+    helpembed = discord.Embed(title = "Commands", description = "setTeamSize\nfullRandom\nfullRandomAll\nmove\nsetTeamChannels\nrandom\nrandomAll\nreturnAll\ncaptains\nchoose\nrandomCaptains", color = discord.Color.blue())
     await ctx.send(embed = helpembed)
     await ctx.send("Type \".help  ____\" in order to get info on a specific command.")
 
@@ -315,5 +332,77 @@ async def returnAll(ctx):
             id = ids[i]
             member = ctx.guild.get_member(id)
             await member.move_to(original_channel)
+
+@client.command()
+async def captains(ctx, captain_1: discord.Member, captain_2: discord.Member):
+    global captain1
+    global captain2
+
+    if (captain_1 or captain_2):
+        await ctx.send("Mention two team captains!")
+    else:
+        captain1 = captain_1
+        captain2 = captain_2
+
+        global teamList1
+        global teamList2
+
+        teamList1 += captain1
+        teamList2 += captain2
+
+        team1_embed = discord.Embed(title = "TEAM 1", description = teamList1, color = discord.Color.blue())
+        team2_embed = discord.Embed(title = "TEAM 2", description = teamList2, color = discord.Color.red())
+
+        await ctx.send(embed = team1_embed)
+        await ctx.send(embed = team2_embed)
+        
+        await ctx.send("Captains selected!")
+        await ctx.send(captain_1 + ", type \".choose  _____\" to pick a player for your team")
+
+@client.command()
+async def choose(ctx, member: discord.Member):
+    # Make sure to create a random version
+     
+    if drafted < (team_size * 2):
+        if (captainNum == 1 and ctx.message.author == captain1.id):
+            captainNum = 2
+            member.move_to(channel1)
+        elif (captainNum == 2 and ctx.message.author == captain2.id):
+            captainNum = 1
+            member.move_to(channel2)
+        else:
+            await ctx.send()
+    else:
+        await ctx.send("You've drafted the maximum number of people for the team size! Use \".move\" to move everyone to the channels!")
+
+@client.command()
+async def clearAll():
+    global original_channel
+    global captainNum
+    global drafted
+    global team_size
+    global team1
+    global team2
+    global teamList1
+    global teamList2
+    global channel1
+    global channel2
+    global captain1
+    global captain2
+    
+    original_channel = ""
+    captainNum = 1
+    drafted = 2
+    team_size = 5
+    team1 = []
+    team2 = []
+    teamList1 = None
+    teamList2 = None
+    channel1 = None
+    channel2 = None
+    captain1 = None
+    captain2 = None
+
+
 
 client.run(token)
