@@ -106,7 +106,9 @@ async def move(ctx):
         await ctx.send("Channels not set! Set channels before using this command.")
     else:
         counter = 0
+        #cange 10 to ids length
         for i in range(0,10):
+            #change 4 to ids length/2
             if counter <=4:
                 id = ids[i]
                 member = ctx.guild.get_member(id)
