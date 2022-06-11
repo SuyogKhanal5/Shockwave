@@ -20,8 +20,8 @@ team_size = 5
 team1 = []
 team2 = []
 
-teamList1 = None
-teamList2 = None
+teamList1 = ""
+teamList2 = ""
 
 channel1 = None
 channel2 = None
@@ -357,7 +357,7 @@ async def captains(ctx, captain_1: discord.Member, captain_2: discord.Member):
         await ctx.send(embed = team2_embed)
         
         await ctx.send("Captains selected!")
-        await ctx.send(captain_1 + ", type \".choose  _____\" to pick a player for your team")
+        await ctx.send(captain_1.mention + ", type \".choose  _____\" to pick a player for your team")
 
 @client.command()
 async def choose(ctx, member: discord.Member):
@@ -365,30 +365,37 @@ async def choose(ctx, member: discord.Member):
 
     global teamList1
     global teamList2
+    global captainNum
+    global captain1
+    global captain2
 
     if drafted < (team_size * 2):
-        if (captainNum == 1 and ctx.message.author == captain1.id):
+        if (captainNum == 1 and ctx.message.author.id == captain1.id):
             captainNum = 2
-            member.move_to(channel1)
+            await member.move_to(channel1)
 
-            teamList1 += member.display_name
+            teamList1 += "\n" + member.display_name
 
             team1_embed = discord.Embed(title = "TEAM 1", description = teamList1, color = discord.Color.blue())
             team2_embed = discord.Embed(title = "TEAM 2", description = teamList2, color = discord.Color.red())
 
             await ctx.send(embed = team1_embed)
             await ctx.send(embed = team2_embed)
-        elif (captainNum == 2 and ctx.message.author == captain2.id):
+
+            await ctx.send(captain2.mention + ", type \".choose  _____\" to pick a player for your team")
+        elif (captainNum == 2 and ctx.message.author.id == captain2.id):
             captainNum = 1
-            member.move_to(channel2)
+            await member.move_to(channel2)
 
-            teamList2 += member.display_name
+            teamList2 += "\n" + member.display_name
 
             team1_embed = discord.Embed(title = "TEAM 1", description = teamList1, color = discord.Color.blue())
             team2_embed = discord.Embed(title = "TEAM 2", description = teamList2, color = discord.Color.red())
 
             await ctx.send(embed = team1_embed)
             await ctx.send(embed = team2_embed)
+
+            await ctx.send(captain1.mention + ", type \".choose  _____\" to pick a player for your team")
         else:
             await ctx.send("Only team captains can use this command!")
     else:
