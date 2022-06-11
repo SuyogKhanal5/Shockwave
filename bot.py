@@ -493,7 +493,7 @@ async def choose(ctx, member: discord.Member):
     if drafted < (team_size * 2):
         if (captainNum == 1 and ctx.message.author.id == captain1.id):
             
-            if (team1.__contains__(member) == False and team2.__contains__(member) == False and players.__contains__(member) == True):
+            if (team1.__contains__(member) == False and team2.__contains__(member) == False and players.__contains__(member.display_name) == True):
                 teamList1 += "\n" + member.display_name
 
             team1_embed = discord.Embed(title = "TEAM 1", description = teamList1, color = discord.Color.blue())
@@ -502,7 +502,7 @@ async def choose(ctx, member: discord.Member):
             await ctx.send(embed = team1_embed)
             await ctx.send(embed = team2_embed)
 
-            if (team1.__contains__(member) == False and team2.__contains__(member) == False and players.__contains__(member) == True):    
+            if (team1.__contains__(member) == False and team2.__contains__(member) == False and players.__contains__(member.display_name) == True):    
                 players.remove(member.display_name)
                 team1ids.append(member.id)
                 team1.append(member)
@@ -529,7 +529,7 @@ async def choose(ctx, member: discord.Member):
                     await ctx.send(captain1.mention + ", type \".choose  @_____\" to pick a player for your team")
         elif (captainNum == 2 and ctx.message.author.id == captain2.id):
 
-            if (team2.__contains__(member) == False and team1.__contains__(member) == False and players.__contains__(member) == True):
+            if (team2.__contains__(member) == False and team1.__contains__(member) == False and players.__contains__(member.display_name) == True):
                 teamList2 += "\n" + member.display_name
 
             team1_embed = discord.Embed(title = "TEAM 1", description = teamList1, color = discord.Color.blue())
@@ -538,7 +538,7 @@ async def choose(ctx, member: discord.Member):
             await ctx.send(embed = team1_embed)
             await ctx.send(embed = team2_embed)
 
-            if (team2.__contains__(member) == False and team1.__contains__(member) == False and players.__contains__(member) == True): 
+            if (team2.__contains__(member) == False and team1.__contains__(member) == False and players.__contains__(member.display_name) == True): 
                 players.remove(member.display_name)
                 team2ids.append(member.id)
                 team2.append(member)
