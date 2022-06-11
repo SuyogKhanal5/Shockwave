@@ -327,6 +327,7 @@ async def randomAll(ctx, *, teams):
 
 @client.command()
 async def returnAll(ctx):
+    global original_channel
     if (original_channel == ""):
         await ctx.send("You have not been seperated into team voice channels! Use \".move\" first.")
     else:
@@ -341,7 +342,8 @@ async def captains(ctx, captain_1: discord.Member, captain_2: discord.Member):
     global captain2
     global members
     global players
-
+    global original_channel
+    original_channel = ctx.message.author.voice.channel
 
     if (captain_1 == None or captain_2 == None):
         await ctx.send("Mention two team captains!")
