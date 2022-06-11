@@ -515,12 +515,70 @@ async def clearAll(ctx):
 
 @client.command(aliases = ['invite'])
 async def notify(ctx, member: discord.Member):
-    # create and send invite 
-
     global team_size
     channel = await member.create_dm()
-    content = ctx.message.author.name + " has invited you to a " + str(team_size * 2) + ' man!'
+    invite_channel = ctx.message.author.voice.channel
+    invite_link = await invite_channel.create_invite(max_uses=1,unique=True)
+    content = ctx.message.author.name + " has invited you to a " + str(team_size * 2) + ' man!\n\n' + str(invite_link)
     await channel.send(content)
     await ctx.send('Sent an invite for the ' + str(team_size * 2) + ' man!')
+
+@client.command()
+async def randomCaptains(ctx):
+    channel = ctx.message.author.voice.channel
+    
+    global members
+    global captain1
+    global captain2
+    global members
+    global players
+    global using_captains
+    global original_channel
+
+    global teamList1
+    global teamList2
+
+    original_channel = ctx.message.author.voice.channel
+    using_captains = True
+
+    for i in channel.members:
+        members.append(i)
+    
+    m = np.array(members)
+
+    np.random.shuffle(m)
+
+    captain1 = m[0]
+    captain2 = m[1]
+
+    teamList1 += str(captain1.display_name)
+    teamList2 += str(captain2.display_name)
+
+    team1ids.append(captain1.id)
+    team2ids.append(captain2.id)
+
+    team1.append(captain1)
+    team2.append(captain2)
+
+    team1_embed = discord.Embed(title = "TEAM 1", description = teamList1, color = discord.Color.blue())
+    team2_embed = discord.Embed(title = "TEAM 2", description = teamList2, color = discord.Color.red())
+
+    await ctx.send(embed = team1_embed)
+    await ctx.send(embed = team2_embed)
+        
+    channel = ctx.message.author.voice.channel
+    playersString = ""
+    
+    for player in channel.members:
+        if (player.display_name != captain1.display_name and player.display_name != captain2.display_name):
+            players.append(player.display_name)
+            playersString += player.display_name + "\n"
+         
+    players_embed = discord.Embed(title = "PLAYERS", description = playersString, color = discord.Color.dark_purple())
+    await ctx.send(embed = players_embed)
+        
+    await ctx.send("The captains are " + captain1.display_name + " and " + captain2.display_name)
+    await ctx.send(captain1.mention + ", type \".choose  @_____\" to pick a player for your team")
+
 
 client.run(token)
