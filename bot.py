@@ -22,6 +22,8 @@ team2 = []
 
 teamList1 = ""
 teamList2 = ""
+players = []
+members = []
 
 channel1 = None
 channel2 = None
@@ -44,7 +46,7 @@ async def setTeamSize(ctx, *, sizeChange):
 @client.command(aliases = ['james', 'hashmap'])
 async def fullRandom(ctx):
     channel = ctx.message.author.voice.channel
-    members = []
+    global members
     for i in channel.members:
         members.append(i)
     
@@ -337,6 +339,8 @@ async def returnAll(ctx):
 async def captains(ctx, captain_1: discord.Member, captain_2: discord.Member):
     global captain1
     global captain2
+    global members
+
 
     if (captain_1 == None or captain_2 == None):
         await ctx.send("Mention two team captains!")
@@ -346,7 +350,7 @@ async def captains(ctx, captain_1: discord.Member, captain_2: discord.Member):
 
         global teamList1
         global teamList2
-        # print(type(captain1.display_name))
+        
         teamList1 += str(captain1.display_name)
         teamList2 += str(captain2.display_name)
 
@@ -356,8 +360,23 @@ async def captains(ctx, captain_1: discord.Member, captain_2: discord.Member):
         await ctx.send(embed = team1_embed)
         await ctx.send(embed = team2_embed)
         
+        channel = ctx.message.author.voice.channel
+        playersString = ""
+        for player in channel.members:
+            if(player.name != captain1 or player.name != captain2):
+                players.append(player.name)
+                playersString += player.name + "\n"
+         
+        players_embed = discord.Embed(title = "PLAYERS", description = playersString, color = discord.Color.dark_purple())
+        await ctx.send(embed = players_embed)
+        
         await ctx.send("Captains selected!")
         await ctx.send(captain_1.mention + ", type \".choose  _____\" to pick a player for your team")
+
+        
+
+    
+            
 
 @client.command()
 async def choose(ctx, member: discord.Member):
@@ -368,6 +387,9 @@ async def choose(ctx, member: discord.Member):
     global captainNum
     global captain1
     global captain2
+    global players
+
+    
 
     if drafted < (team_size * 2):
         if (captainNum == 1 and ctx.message.author.id == captain1.id):
@@ -381,6 +403,14 @@ async def choose(ctx, member: discord.Member):
 
             await ctx.send(embed = team1_embed)
             await ctx.send(embed = team2_embed)
+
+            players.remove(str(member.display_name))
+            playersString = ""
+            for player in players:
+                playersString += player + "\n"
+
+            players_embed = discord.Embed(title = "PLAYERS", description = playersString, color = discord.Color.dark_purple())
+            await ctx.send(embed = players_embed)
 
             await ctx.send(captain2.mention + ", type \".choose  _____\" to pick a player for your team")
         elif (captainNum == 2 and ctx.message.author.id == captain2.id):
@@ -396,10 +426,18 @@ async def choose(ctx, member: discord.Member):
             await ctx.send(embed = team2_embed)
 
             await ctx.send(captain1.mention + ", type \".choose  _____\" to pick a player for your team")
+            players.remove(str(member.display_name))
         else:
             await ctx.send("Only team captains can use this command!")
     else:
         await ctx.send("You've drafted the maximum number of people for the team size! Use \".move\" to move everyone to the channels!")
+
+    playersString = ""
+    for player in players:
+        playersString += player + "\n"
+
+    players_embed = discord.Embed(title = "PLAYERS", description = playersString, color = discord.Color.dark_purple())
+    await ctx.send(embed = players_embed)
 
 @client.command()
 async def clearAll(ctx):
