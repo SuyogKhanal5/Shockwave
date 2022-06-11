@@ -338,7 +338,7 @@ async def captains(ctx, captain_1: discord.Member, captain_2: discord.Member):
     global captain1
     global captain2
 
-    if (captain_1 or captain_2):
+    if (captain_1 == None or captain_2 == None):
         await ctx.send("Mention two team captains!")
     else:
         captain1 = captain_1
@@ -347,8 +347,8 @@ async def captains(ctx, captain_1: discord.Member, captain_2: discord.Member):
         global teamList1
         global teamList2
 
-        teamList1 += captain1
-        teamList2 += captain2
+        teamList1 += captain1.display_name
+        teamList2 += captain2.display_name
 
         team1_embed = discord.Embed(title = "TEAM 1", description = teamList1, color = discord.Color.blue())
         team2_embed = discord.Embed(title = "TEAM 2", description = teamList2, color = discord.Color.red())
@@ -376,7 +376,7 @@ async def choose(ctx, member: discord.Member):
         await ctx.send("You've drafted the maximum number of people for the team size! Use \".move\" to move everyone to the channels!")
 
 @client.command()
-async def clearAll():
+async def clearAll(ctx):
     global original_channel
     global captainNum
     global drafted
