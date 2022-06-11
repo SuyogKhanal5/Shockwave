@@ -195,7 +195,13 @@ async def fullRandomAll(ctx, *, teams):
     members = []
     for i in channel.members:
         members.append(i)
-    
+
+    if (len(members) < 10):
+        await ctx.send("You must have exactly 10 people in the call to use this command.")
+    elif (len(members) > 10):
+        await ctx.send("You must have exactly 10 people in the call to use this command.")
+        return
+
     m = np.array(members)
 
     result1 = ""
