@@ -8,7 +8,7 @@ intents.members = True
 
 client = commands.Bot(command_prefix = '.', intents=intents, help_command=None)
 
-token = 'token'
+token = ''
 original_channel = ""
 captainNum = 1
 drafted = 2
@@ -346,7 +346,7 @@ async def captains(ctx, captain_1: discord.Member, captain_2: discord.Member):
 
         global teamList1
         global teamList2
-
+        # print(type(captain1.display_name))
         teamList1 += str(captain1.display_name)
         teamList2 += str(captain2.display_name)
 
