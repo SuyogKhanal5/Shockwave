@@ -9,6 +9,7 @@ intents.members = True
 client = commands.Bot(command_prefix = '.', intents=intents, help_command=None)
 
 token = 'token'
+original_channel = ""
 
 with open('token.txt') as f:
     token = f.read()
@@ -86,6 +87,9 @@ async def setTeamChannels(ctx, *, teams):
 
 @client.command()
 async def move(ctx):
+    global original_channel
+    original_channel = ctx.message.author.voice.channel
+
     if not team1 or not team2:
         await ctx.send("Team is empty! Set teams before using this command.")
     elif channel1 == None or channel2 == None:
@@ -126,12 +130,15 @@ async def help(ctx, *, specific):
     elif (specific == "randomAll"):
         helpembed = discord.Embed(title = "setTeamChannels", description = "Randomize teams without assigning roles and move into channels all in one command. Useful with setTeamSize for use in other games.", color = discord.Color.blue())
         await ctx.send(embed = helpembed)
+    elif (specific == "returnAll"):
+        helpembed = discord.Embed(title = "returnAll", description = "Return all players to their original channel.\n WARNING: \".move\", \"fullRandomAll\", or \"randomAll\" must be used before using this.", color = discord.Color.blue())
+        await ctx.send(embed = helpembed)
     else:
         await ctx.send("Command not found!")
 
 @client.command(aliases = ["commands"])
 async def commandList(ctx):
-    helpembed = discord.Embed(title = "Commands", description = "setTeamSize\nfullRandom\nfullRandomAll\nmove\nsetTeamChannels\nrandom\nrandomAll", color = discord.Color.blue())
+    helpembed = discord.Embed(title = "Commands", description = "setTeamSize\nfullRandom\nfullRandomAll\nmove\nsetTeamChannels\nrandom\nrandomAll\nreturnAll", color = discord.Color.blue())
     await ctx.send(embed = helpembed)
     await ctx.send("Type \".help  ____\" in order to get info on a specific command.")
 
@@ -186,6 +193,9 @@ async def fullRandomAll(ctx, *, teams):
     await ctx.send(embed = team2_embed)
 
     counter = 0
+
+    global original_channel
+    original_channel = ctx.message.author.voice.channel
     
     for i in range(0,10):
         if counter <=4:
@@ -280,6 +290,9 @@ async def randomAll(ctx, *, teams):
     await ctx.send(embed = team1_embed)
     await ctx.send(embed = team2_embed)
 
+    global original_channel
+    original_channel = ctx.message.author.voice.channel
+
     counter = 0
     
     for i in range(0,10):
@@ -292,5 +305,15 @@ async def randomAll(ctx, *, teams):
             member = ctx.guild.get_member(id)
             await member.move_to(channel2)
         counter += 1
+
+@client.command()
+async def returnAll(ctx):
+    if (original_channel == ""):
+        await ctx.send("You have not been seperated into team voice channels! Use \".move\" first.")
+    else:
+        for i in range(0,10):
+            id = ids[i]
+            member = ctx.guild.get_member(id)
+            await member.move_to(original_channel)
 
 client.run(token)
