@@ -104,6 +104,8 @@ async def setTeamChannels(ctx, *, teams):
 async def move(ctx):
     global original_channel
     original_channel = ctx.message.author.voice.channel
+    global channel1
+    global channel2
 
     if not team1 or not team2:
         await ctx.send("Team is empty! Set teams before using this command.")
@@ -267,8 +269,11 @@ async def random(ctx):
 
     x = np.array(m)
 
-    for i in range(team_size*2):
-        if(i < team_size):
+    result1 = ""
+    result2 = ""
+
+    for i in range(0, len(ids)):
+        if(i < (len(ids)/2)):
             result1 += str(x[i]) + "\n"
         else:
             result2 += str(x[i]) + "\n"
@@ -313,8 +318,11 @@ async def randomAll(ctx, *, teams):
 
     x = np.array(m)
 
-    for i in range(team_size*2):
-        if(i < team_size):
+    result1 = ""
+    result2 = ""
+
+    for i in range(0,len(ids)):
+        if(i <= len(ids)/2):
             result1 += str(x[i]) + "\n"
         else:
             result2 += str(x[i]) + "\n"
@@ -330,8 +338,8 @@ async def randomAll(ctx, *, teams):
 
     counter = 0
     
-    for i in range(0,10):
-        if counter <=4:
+    for i in range(0,len(ids)):
+        if counter <=(len(ids)/2):
             id = ids[i]
             member = ctx.guild.get_member(id)
             await member.move_to(channel1)
@@ -347,10 +355,18 @@ async def returnAll(ctx):
     if (original_channel == ""):
         await ctx.send("You have not been seperated into team voice channels! Use \".move\" first.")
     else:
-        for i in range(0,10):
-            id = ids[i]
-            member = ctx.guild.get_member(id)
-            await member.move_to(original_channel)
+        if (using_captains):
+            for i in team1ids:
+                member = ctx.guild.get_member(i)
+                await member.move_to(original_channel)
+            for i in team2ids:
+                member =  ctx.guild.get_member(i)
+                await member.move_to(original_channel)
+        else:
+            for i in range(0,10):
+                id = ids[i]
+                member = ctx.guild.get_member(id)
+                await member.move_to(original_channel)
 
 @client.command()
 async def captains(ctx, captain_1: discord.Member, captain_2: discord.Member):
@@ -358,6 +374,9 @@ async def captains(ctx, captain_1: discord.Member, captain_2: discord.Member):
     global captain2
     global members
     global players
+    global using_captains
+    global original_channel
+    original_channel = ctx.message.author.voice.channel
     using_captains = True
 
     if (captain_1 == None or captain_2 == None):
@@ -374,6 +393,9 @@ async def captains(ctx, captain_1: discord.Member, captain_2: discord.Member):
 
         team1ids.append(captain1.id)
         team2ids.append(captain2.id)
+
+        team1.append(captain1)
+        team2.append(captain2)
 
         team1_embed = discord.Embed(title = "TEAM 1", description = teamList1, color = discord.Color.blue())
         team2_embed = discord.Embed(title = "TEAM 2", description = teamList2, color = discord.Color.red())
@@ -408,7 +430,6 @@ async def choose(ctx, member: discord.Member):
     if drafted < (team_size * 2):
         if (captainNum == 1 and ctx.message.author.id == captain1.id):
             captainNum = 2
-            #await member.move_to(channel1)
 
             teamList1 += "\n" + member.display_name
 
@@ -420,6 +441,7 @@ async def choose(ctx, member: discord.Member):
 
             players.remove(member.display_name)
             team1ids.append(member.id)
+            team1.append(member)
             playersString = ""
             for player in players:
                 playersString += player + "\n"
@@ -432,7 +454,6 @@ async def choose(ctx, member: discord.Member):
                 await ctx.send(captain2.mention + ", type \".choose  @_____\" to pick a player for your team")
         elif (captainNum == 2 and ctx.message.author.id == captain2.id):
             captainNum = 1
-            #await member.move_to(channel2)
 
             teamList2 += "\n" + member.display_name
             
@@ -445,6 +466,7 @@ async def choose(ctx, member: discord.Member):
             
             players.remove(member.display_name)
             team2ids.append(member.id)
+            team2.append(member)
             playersString = ""
             for player in players:
                 playersString += player + "\n"
