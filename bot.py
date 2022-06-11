@@ -150,6 +150,9 @@ async def help(ctx, *, specific):
     elif (specific == "clearAll"):
         helpembed = discord.Embed(title = "clearAll", description = "Clear all stored teams.", color = discord.Color.blue())
         await ctx.send(embed = helpembed)
+    elif (specific == "notify"):
+        helpembed = discord.Embed(title = "notify", description = "Sends a direct message to who you mention in order to invite them to the 10 man.", color = discord.Color.blue())
+        await ctx.send(embed = helpembed)
     else:
         await ctx.send("Command not found!")
 
@@ -433,6 +436,8 @@ async def clearAll(ctx):
 
 @client.command(aliases = ['invite'])
 async def notify(ctx, member: discord.Member):
+    # create and send invite 
+    
     global team_size
     channel = await member.create_dm()
     content = ctx.message.author.name + " has invited you to a " + str(team_size * 2) + ' man!'
