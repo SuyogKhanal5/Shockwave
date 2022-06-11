@@ -431,4 +431,12 @@ async def clearAll(ctx):
 
     await ctx.send("Cleared!")
 
+@client.command()
+async def notify(ctx, member: discord.Member):
+    global team_size
+    channel = await member.create_dm()
+    content = ctx.message.author.name + " has invited you to a " + str(team_size * 2) + ' man!'
+    await channel.send(content)
+    await ctx.send('Sent an invite for the ' + str(team_size * 2) + ' man!')
+
 client.run(token)
