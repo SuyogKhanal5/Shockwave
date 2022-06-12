@@ -779,4 +779,118 @@ async def chooseRandom(ctx):
             elif (ctx.message.author.id != captain1.id and ctx.message.author.id != captain2.id):
                 await ctx.send("Only team captains can use this command!")
 
+@client.command()
+async def chooseGroup(ctx, *_available_players: discord.Member):
+    global teamList1
+    global teamList2
+    global captainNum
+    global captain1
+    global captain2
+    global players
+    global player_members
+    player_members = []
+    switch = True
+
+
+    items = _available_players
+    
+    available_players = []
+
+    for i in items:
+        available_players.append(i)
+
+    print(available_players[0])
+
+    channel = ctx.message.author.voice.channel
+
+    if (len(players) == 0):
+        await ctx.send("All players have been selected")
+    
+    m = np.array(available_players)
+
+    np.random.shuffle(m)
+
+    member = m[0]
+
+    if drafted < (team_size * 2):
+        if (captainNum == 1 and ctx.message.author.id == captain1.id):
+
+            if (team1.__contains__(member) == False and team2.__contains__(member) == False and players.__contains__(member.display_name) == True):    
+                teamList1 += "\n" + member.display_name
+
+            team1_embed = discord.Embed(title = "TEAM 1", description = teamList1, color = discord.Color.blue())
+            team2_embed = discord.Embed(title = "TEAM 2", description = teamList2, color = discord.Color.red())
+
+            await ctx.send(embed = team1_embed)
+            await ctx.send(embed = team2_embed)
+
+            if (team1.__contains__(member) == False and team2.__contains__(member) == False and players.__contains__(member.display_name) == True):
+                players.remove(member.display_name)
+                team1ids.append(member.id)
+                team1.append(member)
+                playersString = ""
+                for player in players:
+                    playersString += player + "\n"
+            else:
+                playersString = ""
+                switch = False
+                for player in players:
+                    playersString += player + "\n"
+                await ctx.send("Player has already been selected or does not exist in the player list.")
+
+            players_embed = discord.Embed(title = "PLAYERS", description = playersString, color = discord.Color.dark_purple())
+            await ctx.send(embed = players_embed)
+            if(players == []):
+                await ctx.send("You've drafted the maximum number of people for the team size! Use \".move\" to move everyone to the channels!")
+            else:
+                if (switch):
+                    captainNum = 2
+                    await ctx.send(captain2.mention + ", type \".choose  @_____\" to pick a player for your team")
+                else:
+                    captainNum = 1
+                    await ctx.send(captain1.mention + ", type \".choose  @_____\" to pick a player for your team")
+        elif (captainNum == 2 and ctx.message.author.id == captain2.id):
+            
+            if (team2.__contains__(member) == False and team1.__contains__(member) == False and players.__contains__(member.display_name) == True):
+                teamList2 += "\n" + member.display_name
+
+            team1_embed = discord.Embed(title = "TEAM 1", description = teamList1, color = discord.Color.blue())
+            team2_embed = discord.Embed(title = "TEAM 2", description = teamList2, color = discord.Color.red())
+
+            await ctx.send(embed = team1_embed)
+            await ctx.send(embed = team2_embed)
+            
+            if (team2.__contains__(member) == False and team1.__contains__(member) == False and players.__contains__(member.display_name) == True):
+                players.remove(member.display_name)
+                team2ids.append(member.id)
+                team2.append(member)
+                playersString = ""
+                for player in players:
+                    playersString += player + "\n"
+            else:
+                playersString = ""
+                switch = False
+                for player in players:
+                    playersString += player + "\n"
+                await ctx.send("Player has already been selected or does not exist in the player list.")
+
+            players_embed = discord.Embed(title = "PLAYERS", description = playersString, color = discord.Color.dark_purple())
+            await ctx.send(embed = players_embed)
+
+            if(players == []):
+                await ctx.send("You've drafted the maximum number of people for the team size! Use \".move\" to move everyone to the channels!")
+            else:
+                if (switch):
+                    captainNum = 1
+                    await ctx.send(captain1.mention + ", type \".choose  @_____\" to pick a player for your team")
+                else:
+                    captainNum = 2
+                    await ctx.send(captain2.mention + ", type \".choose  @_____\" to pick a player for your team")
+        else:
+            if ((captainNum == 1 and ctx.message.author.id == captain2.id) or (captainNum == 2 and ctx.message.author.id == captain1.id)):
+                await ctx.send("Not Your Turn!")
+            elif (ctx.message.author.id != captain1.id and ctx.message.author.id != captain2.id):
+                await ctx.send("Only team captains can use this command!")
+
+
 client.run(token)
