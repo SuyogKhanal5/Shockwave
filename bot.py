@@ -1,4 +1,5 @@
 from queue import Empty
+from random import randrange
 import discord
 from discord.ext import commands
 import numpy as np
@@ -698,7 +699,9 @@ async def randomCaptains(ctx):
 
 @client.command()
 async def sravika(ctx):
-    await ctx.send("le pee pee")
+    num = randrange(5) + 1
+    s = "pp" + str(num) + ".jpg"
+    await ctx.send("le pp", file = discord.File(s))
 
 @client.command()
 async def chooseRandom(ctx):
