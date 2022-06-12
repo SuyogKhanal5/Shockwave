@@ -3,6 +3,7 @@ from random import randrange
 import discord
 from discord.ext import commands
 import numpy as np
+from random import *
 
 intents = discord.Intents.default()
 intents.members = True
@@ -699,7 +700,7 @@ async def randomCaptains(ctx):
 
 @client.command()
 async def sravika(ctx):
-    num = randrange(5) + 1
+    num = randint(1,8)
     s = "pp" + str(num) + ".jpg"
     await ctx.send("le pp", file = discord.File(s))
 
