@@ -601,6 +601,34 @@ async def clearAll(ctx):
 
     await ctx.send("Cleared!")
 
+@client.command()
+async def clearTeams(ctx):
+    global original_channel
+    global captainNum
+    global drafted
+    global team_size
+    global team1
+    global team2
+    global teamList1
+    global teamList2
+    global channel1
+    global channel2
+    global captain1
+    global captain2
+    
+    original_channel = ""
+    captainNum = 1
+    drafted = 2
+    team_size = 5
+    team1 = []
+    team2 = []
+    teamList1 = None
+    teamList2 = None
+    captain1 = None
+    captain2 = None
+
+    await ctx.send("Cleared!")
+
 @client.command(aliases = ['invite'])
 async def notify(ctx, member: discord.Member):
     global team_size
