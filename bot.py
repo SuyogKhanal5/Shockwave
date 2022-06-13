@@ -1,10 +1,16 @@
 from queue import Empty
+import random
 import discord
 from discord.ext import commands
 import numpy as np
+from random import *
+import os
 
 intents = discord.Intents.default()
 intents.members = True
+
+#Gets the path for the pp folder by combining the Python file's directory with a folder named "ppFolder\"
+ppFolderPath = os.path.join(os.path.dirname(__file__), "ppFolder\\")
 
 client = commands.Bot(command_prefix = '.', intents=intents, help_command=None)
 
@@ -696,9 +702,12 @@ async def randomCaptains(ctx):
     await ctx.send("The captains are <@{}>".format(captain1.id) + " and <@{}>".format(captain2.id))
     await ctx.send(captain1.mention + ", type \".choose  @_____\" to pick a player for your team")
 
+#=====Image Upload Command=====
 @client.command()
 async def sravika(ctx):
-    await ctx.send("le pee pee")
+    myImages = os.listdir(ppFolderPath) #Gets list of all images in the pp folder
+    s = random.choice(myImages) #Picks a random image from the pp folder
+    return await ctx.send("le pp", file = discord.File(os.path.join(ppFolderPath, s))) #Connects the path of the pp folder with the name of the picked image
 
 @client.command()
 async def chooseRandom(ctx):
