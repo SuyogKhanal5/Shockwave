@@ -920,5 +920,4 @@ async def chooseGroup(ctx, *_available_players: discord.Member):
             elif (ctx.message.author.id != captain1.id and ctx.message.author.id != captain2.id):
                 await ctx.send("Only team captains can use this command!")
 
-
 client.run(token)
