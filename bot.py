@@ -928,8 +928,9 @@ async def chooseGroup(ctx, *_available_players: discord.Member):
 
 @client.command()
 async def roll(ctx, *, num):
-    if (num > 1):
-        random.randint(1, num)
+    if (int(num) > 1):
+        rand = random.randint(1, int(num))
+        await ctx.send("You rolled " + str(rand))
     else:
         await ctx.send("Please use a number greater than 1.")
 
