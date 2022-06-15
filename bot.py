@@ -3,7 +3,6 @@ import random
 import discord
 from discord.ext import commands
 import numpy as np
-from random import *
 import os
 
 intents = discord.Intents.default()
@@ -257,7 +256,7 @@ async def fullRandomAll(ctx, *, teams):
         counter += 1
 
 @client.command()
-async def random(ctx):
+async def randomTeams(ctx):
     channel = ctx.message.author.voice.channel
     members = []
     for i in channel.members:
@@ -703,7 +702,7 @@ async def randomCaptains(ctx):
 
 @client.command()
 async def sravika(ctx):
-    myImages = os.listdir(ppFolderPath) 
+    myImages = os.listdir(ppFolderPath)
     s = random.choice(myImages) 
     return await ctx.send("le pp", file = discord.File(os.path.join(ppFolderPath, s))) 
 
