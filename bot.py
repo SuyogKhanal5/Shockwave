@@ -9,7 +9,6 @@ import os
 intents = discord.Intents.default()
 intents.members = True
 
-#Gets the path for the pp folder by combining the Python file's directory with a folder named "ppFolder\"
 ppFolderPath = os.path.join(os.path.dirname(__file__), "ppFolder\\")
 
 client = commands.Bot(command_prefix = '.', intents=intents, help_command=None)
@@ -702,12 +701,11 @@ async def randomCaptains(ctx):
     await ctx.send("The captains are <@{}>".format(captain1.id) + " and <@{}>".format(captain2.id))
     await ctx.send(captain1.mention + ", type \".choose  @_____\" to pick a player for your team")
 
-#=====Image Upload Command=====
 @client.command()
 async def sravika(ctx):
-    myImages = os.listdir(ppFolderPath) #Gets list of all images in the pp folder
-    s = random.choice(myImages) #Picks a random image from the pp folder
-    return await ctx.send("le pp", file = discord.File(os.path.join(ppFolderPath, s))) #Connects the path of the pp folder with the name of the picked image
+    myImages = os.listdir(ppFolderPath) 
+    s = random.choice(myImages) 
+    return await ctx.send("le pp", file = discord.File(os.path.join(ppFolderPath, s))) 
 
 @client.command()
 async def chooseRandom(ctx):
@@ -928,5 +926,12 @@ async def chooseGroup(ctx, *_available_players: discord.Member):
                 await ctx.send("Not Your Turn!")
             elif (ctx.message.author.id != captain1.id and ctx.message.author.id != captain2.id):
                 await ctx.send("Only team captains can use this command!")
+
+@client.command()
+async def roll(ctx, *, num):
+    if (num > 1):
+        random.randint(1, num)
+    else:
+        await ctx.send("Please use a number greater than 1.")
 
 client.run(token)
