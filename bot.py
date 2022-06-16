@@ -8,8 +8,6 @@ import os
 intents = discord.Intents.default()
 intents.members = True
 
-ppFolderPath = os.path.join(os.path.dirname(__file__), "ppFolder\\")
-
 client = commands.Bot(command_prefix = '.', intents=intents, help_command=None)
 
 token = ''
@@ -699,12 +697,6 @@ async def randomCaptains(ctx):
         
     await ctx.send("The captains are <@{}>".format(captain1.id) + " and <@{}>".format(captain2.id))
     await ctx.send(captain1.mention + ", type \".choose  @_____\" to pick a player for your team")
-
-@client.command()
-async def sravika(ctx):
-    myImages = os.listdir(ppFolderPath)
-    s = random.choice(myImages) 
-    return await ctx.send("le pp", file = discord.File(os.path.join(ppFolderPath, s))) 
 
 @client.command()
 async def chooseRandom(ctx):
