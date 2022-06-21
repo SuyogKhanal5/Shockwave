@@ -371,10 +371,10 @@ async def returnAll(ctx):
                 member =  ctx.guild.get_member(i)
                 await member.move_to(original_channel)
         else:
-            for i in range(0,10):
-                id = ids[i]
-                member = ctx.guild.get_member(id)
-                await member.move_to(original_channel)
+            for i in channel1.members:
+                await i.move_to(original_channel)
+            for i in channel2.members:
+                await i.move_to(original_channel)
 
 @client.command()
 async def captains(ctx, captain_1: discord.Member, captain_2: discord.Member):
