@@ -363,18 +363,10 @@ async def returnAll(ctx):
     if (original_channel == ""):
         await ctx.send("You have not been seperated into team voice channels! Use \".move\" first.")
     else:
-        if (using_captains):
-            for i in team1ids:
-                member = ctx.guild.get_member(i)
-                await member.move_to(original_channel)
-            for i in team2ids:
-                member =  ctx.guild.get_member(i)
-                await member.move_to(original_channel)
-        else:
-            for i in channel1.members:
-                await i.move_to(original_channel)
-            for i in channel2.members:
-                await i.move_to(original_channel)
+        for i in channel1.members:
+            await i.move_to(original_channel)
+        for i in channel2.members:
+            await i.move_to(original_channel)
 
 @client.command()
 async def captains(ctx, captain_1: discord.Member, captain_2: discord.Member):
