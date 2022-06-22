@@ -382,7 +382,8 @@ async def returnTeams(ctx):
                     continue
                 else:
                     member = ctx.guild.get_member(id)
-                    await member.move_to(original_channel)
+                    if (member is not None and member.voice):
+                        await member.move_to(original_channel)
 
 @client.command()
 async def returnAll(ctx):
