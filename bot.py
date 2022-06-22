@@ -929,9 +929,9 @@ async def randomRoles(ctx):
 
     for i in range (10):
         if(i < 5):
-            result1 += roles.get(i) + str(teamList1[i]) + "\n"
+            result1 += roles.get(i) + str(team1[i].display_name) + "\n"
         else:
-            result1 += roles.get(i) + str(teamList2[i]) + "\n"
+            result1 += roles.get(i) + str(team2[i].display_name) + "\n"
 
     team1_embed = discord.Embed(title = "TEAM 1", description = result1, color = discord.Color.blue())
     team2_embed = discord.Embed(title = "TEAM 2", description = result2, color = discord.Color.red())
