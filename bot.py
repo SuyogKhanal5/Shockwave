@@ -91,7 +91,7 @@ async def fullRandom(ctx):
     await ctx.send(embed = team2_embed)
 
 @client.command()
-async def setTeamChannels(ctx, *, teams):
+async def setTeamChannels(ctx, *, teams="Team-1 Team-2"):
     teamsList = teams.split()
 
     global channel1
@@ -182,7 +182,7 @@ async def commandList(ctx):
     await ctx.send("Type \".help  ____\" in order to get info on a specific command.")
 
 @client.command()
-async def fullRandomAll(ctx, *, teams):
+async def fullRandomAll(ctx, *, teams="Team-1 Team-2"):
     teamsList = teams.split()
 
     global channel1
@@ -297,7 +297,7 @@ async def randomTeams(ctx):
     await ctx.send(embed = team2_embed)
 
 @client.command()
-async def randomAll(ctx, *, teams):
+async def randomAll(ctx, *, teams="Team-1 Team-2"):
     teamsList = teams.split()
 
     global channel1
@@ -444,7 +444,7 @@ async def captains(ctx, captain_1: discord.Member, captain_2: discord.Member):
         await ctx.send(captain_1.mention + ", type \".choose  @_____\" to pick a player for your team")
 
 @client.command()
-async def captainsAll(ctx, captain_1: discord.Member, captain_2: discord.Member, *, teams):
+async def captainsAll(ctx, captain_1: discord.Member, captain_2: discord.Member, *, teams="Team-1 Team-2"):
     global captain1
     global captain2
     global members
@@ -938,7 +938,7 @@ async def chooseGroup(ctx, *_available_players: discord.Member):
                 await ctx.send("Only team captains can use this command!")
 
 @client.command()
-async def roll(ctx, *, num):
+async def roll(ctx, *, num=6):
     if (int(num) > 1):
         rand = random.randint(1, int(num))
         await ctx.send("You rolled " + str(rand))
