@@ -358,6 +358,28 @@ async def randomAll(ctx, *, teams):
         counter += 1
 
 @client.command()
+async def returnTeams(ctx):
+    global original_channel
+    if (original_channel == ""):
+        await ctx.send("You have not been seperated into team voice channels! Use \".move\" first.")
+    else:
+        if (using_captains):
+            for i in team1ids:
+                member = ctx.guild.get_member(i)
+                await member.move_to(original_channel)
+            for i in team2ids:
+                member =  ctx.guild.get_member(i)
+                await member.move_to(original_channel)
+        else:
+            for i in range(0,10):
+                id = ids[i]
+                if (id is None):
+                    continue
+                else:
+                    member = ctx.guild.get_member(id)
+                    await member.move_to(original_channel)
+
+@client.command()
 async def returnAll(ctx):
     global original_channel
     if (original_channel == ""):
