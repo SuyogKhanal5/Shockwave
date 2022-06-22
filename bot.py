@@ -255,6 +255,8 @@ async def fullRandomAll(ctx, *, teams):
 
 @client.command()
 async def randomTeams(ctx):
+    global team1
+    global team2
     channel = ctx.message.author.voice.channel
     members = []
     for i in channel.members:
@@ -283,8 +285,11 @@ async def randomTeams(ctx):
     for i in range(0, len(ids)):
         if(i < (len(ids)/2)):
             result1 += str(x[i]) + "\n"
+            team1 += members[i]
+            
         else:
             result2 += str(x[i]) + "\n"
+            team2 += members[i]
 
     team1_embed = discord.Embed(title = "TEAM 1", description = result1, color = discord.Color.blue())
     team2_embed = discord.Embed(title = "TEAM 2", description = result2, color = discord.Color.red())
