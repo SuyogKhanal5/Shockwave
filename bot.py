@@ -255,6 +255,8 @@ async def fullRandomAll(ctx, *, teams):
 
 @client.command()
 async def randomTeams(ctx):
+    global team1
+    global team2
     channel = ctx.message.author.voice.channel
     members = []
     for i in channel.members:
@@ -283,8 +285,11 @@ async def randomTeams(ctx):
     for i in range(0, len(ids)):
         if(i < (len(ids)/2)):
             result1 += str(x[i]) + "\n"
+            team1 += members[i]
+            
         else:
             result2 += str(x[i]) + "\n"
+            team2 += members[i]
 
     team1_embed = discord.Embed(title = "TEAM 1", description = result1, color = discord.Color.blue())
     team2_embed = discord.Embed(title = "TEAM 2", description = result2, color = discord.Color.red())
@@ -939,5 +944,29 @@ async def roll(ctx, *, num):
         await ctx.send("You rolled " + str(rand))
     else:
         await ctx.send("Please use a number greater than 1.")
+
+@client.command()
+async def randomRoles(ctx):
+    roles = {0 : "Top - ", 1 : "Jungle - ", 2 : "Mid - ", 3 : "Bottom - ", 4 : "Support - "}
+    random.shuffle(team1)
+    random.shuffle(team2)
+
+    result1 = ""
+    result2 = ""
+
+    for i in range (10):
+        if(i < 5):
+            result1 += roles.get(i%5) + str(team1[i%5].display_name) + "\n"
+        else:
+            result2 += roles.get(i%5) + str(team2[i%5].display_name) + "\n"
+
+    team1_embed = discord.Embed(title = "TEAM 1", description = result1, color = discord.Color.blue())
+    team2_embed = discord.Embed(title = "TEAM 2", description = result2, color = discord.Color.red())
+
+    await ctx.send(embed = team1_embed)
+    await ctx.send(embed = team2_embed)
+
+
+
 
 client.run(token)
