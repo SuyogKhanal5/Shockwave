@@ -918,4 +918,28 @@ async def roll(ctx, *, num):
     else:
         await ctx.send("Please use a number greater than 1.")
 
+@client.command()
+async def randomRoles(ctx):
+    roles = {0 : "Top - ", 1 : "Jungle - ", 2 : "Mid - ", 3 : "Bottom - ", 4 : "Support - "}
+    random.shuffle(team1)
+    random.shuffle(team2)
+
+    result1 = ""
+    result2 = ""
+
+    for i in range (10):
+        if(i < 5):
+            result1 += roles.get(i) + team1[i] + "\n"
+        else:
+            result1 += roles.get(i) + team1[i] + "\n"
+
+    team1_embed = discord.Embed(title = "TEAM 1", description = result1, color = discord.Color.blue())
+    team2_embed = discord.Embed(title = "TEAM 2", description = result2, color = discord.Color.red())
+
+    await ctx.send(embed = team1_embed)
+    await ctx.send(embed = team2_embed)
+
+
+
+
 client.run(token)
