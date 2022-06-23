@@ -21,7 +21,7 @@ with open('token.txt') as f:
 team_size = 5
 team1 = []
 team2 = []
-
+#ryan
 teamList1 = ""
 teamList2 = ""
 players = []
