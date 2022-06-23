@@ -21,7 +21,7 @@ with open('token.txt') as f:
 team_size = 5
 team1 = []
 team2 = []
-#ryan
+
 teamList1 = ""
 teamList2 = ""
 players = []
@@ -37,6 +37,22 @@ channel2 = None
 
 captain1 = None
 captain2 = None
+
+global roles
+roles = {0 : "Top - ", 1 : "Jungle - ", 2 : "Mid - ", 3 : "Bottom - ", 4 : "Support - "}
+
+def movefunc(ctx, name):
+    global ids
+    for i in range(0,10):
+        if i <=4:
+            id = ids[i]
+            name = ctx.guild.get_member(id)
+            name.move_to(channel1)
+        else:
+            id = ids[i]
+            name = ctx.guild.get_member(id)
+            name.move_to(channel2)
+
 
 @client.event
 async def on_ready():
@@ -62,7 +78,6 @@ async def fullRandom(ctx):
     result1 = ""
     result2 = ""
 
-    roles = {0 : "Top - ", 1 : "Jungle - ", 2 : "Mid - ", 3 : "Bottom - ", 4 : "Support - "}
     np.random.shuffle(m)
 
     names = []
@@ -108,31 +123,34 @@ async def move(ctx):
     original_channel = ctx.message.author.voice.channel
     global channel1
     global channel2
+    global ids
 
-    if not team1 or not team2:
-        await ctx.send("Team is empty! Set teams before using this command.")
-    elif channel1 == None or channel2 == None:
-        await ctx.send("Channels not set! Set channels before using this command.")
-    else:
-        counter = 0
-        if (using_captains):
-            for i in team1ids:
-                member = ctx.guild.get_member(i)
-                await member.move_to(channel1)
-            for i in team2ids:
-                member =  ctx.guild.get_member(i)
-                await member.move_to(channel2)
-        else:
-            for i in range(0,10):
-                if counter <=4:
-                    id = ids[i]
-                    member = ctx.guild.get_member(id)
-                    await member.move_to(channel1)
-                else:
-                    id = ids[i]
-                    member = ctx.guild.get_member(id)
-                    await member.move_to(channel2)
-                counter += 1
+    # if not team1 or not team2:
+    #     await ctx.send("Team is empty! Set teams before using this command.")
+    # elif channel1 == None or channel2 == None:
+    #     await ctx.send("Channels not set! Set channels before using this command.")
+    # else:
+    #     counter = 0
+    #     if (using_captains):
+    #         for i in team1ids:
+    #             member = ctx.guild.get_member(i)
+    #             await member.move_to(channel1)
+    #         for i in team2ids:
+    #             member =  ctx.guild.get_member(i)
+    #             await member.move_to(channel2)
+    #     else:
+    #         for i in range(0,10):
+    #             if counter <=4:
+    #                 id = ids[i]
+    #                 member = ctx.guild.get_member(id)
+    #                 await member.move_to(channel1)
+    #             else:
+    #                 id = ids[i]
+    #                 member = ctx.guild.get_member(id)
+    #                 await member.move_to(channel2)
+    #             counter += 1
+
+    movefunc(ctx, members, ids)
 
 @client.command()
 async def help(ctx, *, specific):
