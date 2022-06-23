@@ -1,3 +1,4 @@
+from glob import glob
 from queue import Empty
 import random
 import discord
@@ -41,18 +42,20 @@ captain2 = None
 global roles
 roles = {0 : "Top - ", 1 : "Jungle - ", 2 : "Mid - ", 3 : "Bottom - ", 4 : "Support - "}
 
-def movefunc(ctx, name):
+async def movefunc(ctx):
     global ids
-    for i in range(0,10):
-        if i <=4:
-            id = ids[i]
-            name = ctx.guild.get_member(id)
-            name.move_to(channel1)
-        else:
-            id = ids[i]
-            name = ctx.guild.get_member(id)
-            name.move_to(channel2)
+    global channel1
+    global channel2
+    global team1
+    global team2
+    global original_channel
+    original_channel = ctx.message.author.voice.channel
+    
+    for i in team1:
+        await i.move_to(channel1)
 
+    for i in team2:
+        await i.move_to(channel2)
 
 @client.event
 async def on_ready():
@@ -119,38 +122,7 @@ async def setTeamChannels(ctx, *, teams="Team-1 Team-2"):
 
 @client.command()
 async def move(ctx):
-    global original_channel
-    original_channel = ctx.message.author.voice.channel
-    global channel1
-    global channel2
-    global ids
-
-    # if not team1 or not team2:
-    #     await ctx.send("Team is empty! Set teams before using this command.")
-    # elif channel1 == None or channel2 == None:
-    #     await ctx.send("Channels not set! Set channels before using this command.")
-    # else:
-    #     counter = 0
-    #     if (using_captains):
-    #         for i in team1ids:
-    #             member = ctx.guild.get_member(i)
-    #             await member.move_to(channel1)
-    #         for i in team2ids:
-    #             member =  ctx.guild.get_member(i)
-    #             await member.move_to(channel2)
-    #     else:
-    #         for i in range(0,10):
-    #             if counter <=4:
-    #                 id = ids[i]
-    #                 member = ctx.guild.get_member(id)
-    #                 await member.move_to(channel1)
-    #             else:
-    #                 id = ids[i]
-    #                 member = ctx.guild.get_member(id)
-    #                 await member.move_to(channel2)
-    #             counter += 1
-
-    movefunc(ctx, members, ids)
+    await movefunc(ctx)
 
 @client.command()
 async def help(ctx, *, specific):
