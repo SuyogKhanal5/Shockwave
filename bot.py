@@ -114,10 +114,18 @@ async def setTeamChannels(ctx, *, teams="Team-1 Team-2"):
     teamsList = teams.split()
 
     global channel1
+    guild = ctx.guild
+
     channel1 = discord.utils.get(ctx.guild.channels, name = teamsList[0])
+    if (channel1 is None):
+        newChannel1 = await guild.create_voice_channel(name=teamsList[0])
+        channel1 = discord.utils.get(ctx.guild.channels, name = teamsList[0])
 
     global channel2
     channel2 = discord.utils.get(ctx.guild.channels, name = teamsList[1])
+    if (channel2 is None):
+        newChannel2 = await guild.create_voice_channel(name=teamsList[1])
+        channel2 = discord.utils.get(ctx.guild.channels, name = teamsList[1])
 
     await ctx.send("Channels set!")
 
@@ -174,15 +182,7 @@ async def commandList(ctx):
 
 @client.command()
 async def fullRandomAll(ctx, *, teams="Team-1 Team-2"):
-    teamsList = teams.split()
-
-    global channel1
-    channel1 = discord.utils.get(ctx.guild.channels, name = teamsList[0])
-
-    global channel2
-    channel2 = discord.utils.get(ctx.guild.channels, name = teamsList[1])
-
-    await ctx.send("Channels set!")
+    await setTeamChannels(ctx, teams)
 
     channel = ctx.message.author.voice.channel
     members = []
