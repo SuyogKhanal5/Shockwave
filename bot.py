@@ -129,6 +129,25 @@ async def setTeamChannels(ctx, *, teams="Team-1 Team-2"):
 
     await ctx.send("Channels set!")
 
+async def setTeamHelper(ctx, teams="Team-1 Team-2"):
+    teamsList = teams.split()
+
+    global channel1
+    guild = ctx.guild
+
+    channel1 = discord.utils.get(ctx.guild.channels, name = teamsList[0])
+    if (channel1 is None):
+        newChannel1 = await guild.create_voice_channel(name=teamsList[0])
+        channel1 = discord.utils.get(ctx.guild.channels, name = teamsList[0])
+
+    global channel2
+    channel2 = discord.utils.get(ctx.guild.channels, name = teamsList[1])
+    if (channel2 is None):
+        newChannel2 = await guild.create_voice_channel(name=teamsList[1])
+        channel2 = discord.utils.get(ctx.guild.channels, name = teamsList[1])
+
+    await ctx.send("Channels set!")
+
 @client.command()
 async def move(ctx):
     await movefunc(ctx)
@@ -182,7 +201,7 @@ async def commandList(ctx):
 
 @client.command()
 async def fullRandomAll(ctx, *, teams="Team-1 Team-2"):
-    await setTeamChannels(ctx, teams)
+    await setTeamHelper(ctx, teams)
 
     channel = ctx.message.author.voice.channel
     members = []
@@ -289,15 +308,7 @@ async def randomTeams(ctx):
 
 @client.command()
 async def randomAll(ctx, *, teams="Team-1 Team-2"):
-    teamsList = teams.split()
-
-    global channel1
-    channel1 = discord.utils.get(ctx.guild.channels, name = teamsList[0])
-
-    global channel2
-    channel2 = discord.utils.get(ctx.guild.channels, name = teamsList[1])
-
-    await ctx.send("Channels set!")
+    await setTeamHelper(ctx, teams)
 
     channel = ctx.message.author.voice.channel
     members = []
@@ -446,15 +457,7 @@ async def captainsAll(ctx, captain_1: discord.Member, captain_2: discord.Member,
     original_channel = ctx.message.author.voice.channel
     using_captains = True
 
-    teamsList = teams.split()
-
-    global channel1
-    channel1 = discord.utils.get(ctx.guild.channels, name = teamsList[0])
-
-    global channel2
-    channel2 = discord.utils.get(ctx.guild.channels, name = teamsList[1])
-
-    await ctx.send("Channels set!")
+    await setTeamHelper(ctx, teams)
 
     if (captain_1 == None or captain_2 == None):
         await ctx.send("Mention two team captains!")
