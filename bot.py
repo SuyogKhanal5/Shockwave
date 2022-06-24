@@ -5,6 +5,7 @@ import discord
 from discord.ext import commands
 import numpy as np
 import os
+import time
 
 intents = discord.Intents.default()
 intents.members = True
@@ -380,9 +381,10 @@ async def returnAll(ctx):
     if (original_channel == ""):
         await ctx.send("You have not been seperated into team voice channels! Use \".move\" first.")
     else:
-        for i in channel1.members:
-            await i.move_to(original_channel)
-        for i in channel2.members:
+        aggregate = channel1.members
+        aggregate.extend(channel2.members)
+
+        for i in aggregate:
             await i.move_to(original_channel)
 
 @client.command()
