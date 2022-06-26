@@ -9,10 +9,6 @@ import numpy as np
 intents = discord.Intents.default()
 intents.members = True
 
-# Set command prefix
-
-client = commands.Bot(command_prefix='.', intents=intents, help_command=None)
-
 # Get token from text file
 
 token = ''
@@ -27,12 +23,18 @@ captainNum, drafted, team_size = 1, 2, 5
 
 team1, team2, players, members, team1ids, team2ids = [], [], [], [], [], []
 
-channel1, channel2, captain1, captain2 = None, None, None, None
+channel1, channel2, captain1, captain2, client = None, None, None, None, None
 
 using_captains = False
 
 roles = {0: "Top - ", 1: "Jungle - ",
          2: "Mid - ", 3: "Bottom - ", 4: "Support - "}
+
+# Set command prefix
+
+commandPrefix = '.'
+client = commands.Bot(command_prefix=commandPrefix,
+                      intents=intents, help_command=None)
 
 # Events
 
@@ -440,13 +442,19 @@ async def randomizeRoles(ctx):
     await printEmbed(ctx)
 
 
-@client.command()
-async def changePrefix(ctx, *, prefix):
-    global commandPrefix
-    temp = commandPrefix
-    commandPrefix = prefix
+# @client.command()
+# async def changePrefix(ctx, *, prefix):
+#     global client, commandPrefix
+#     temp = commandPrefix
+#     commandPrefix = prefix
 
-    await ctx.send('Changed the prefix from ' + temp + ' to ' + prefix)
+#     client = commands.Bot(
+#         command_prefix=commandPrefix, intents=intents, help_command=None)
+
+#     await ctx.bot.logout()
+#     client.run(token)
+
+#     await ctx.send('Changed the prefix from ' + temp + ' to ' + prefix)
 
 
 client.run(token)
