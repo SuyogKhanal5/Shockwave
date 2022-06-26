@@ -139,6 +139,31 @@ async def randomRoleHelper(ctx):
         else:
             result2 += roles.get(i % 5) + str(team2[i % 5].display_name) + "\n"
 
+
+async def captainsHelper(ctx, captain_1, captain_2):
+    global captain1, captain2, members, players, using_captains, original_channel, teamList1, teamList2
+    original_channel = ctx.message.author.voice.channel
+    channel = ctx.message.author.voice.channel
+    using_captains = True
+
+    if (captain_1 == None or captain_2 == None):
+        await ctx.send("Mention two team captains!")
+    else:
+        captain1 = captain_1
+        teamList1 += str(captain1.display_name)
+        team1ids.append(captain1.id)
+        team1.append(captain1)
+
+        captain2 = captain_2
+        teamList2 += str(captain2.display_name)
+        team2ids.append(captain2.id)
+        team2.append(captain2)
+
+        await printEmbed(ctx, channel)
+
+        await ctx.send("Captains selected!")
+        await ctx.send(captain_1.mention + ", type \".choose  @_____\" to pick a player for your team")
+
 # Commands
 
 
@@ -236,85 +261,13 @@ async def returnAll(ctx):
 
 @client.command()
 async def captains(ctx, captain_1: discord.Member, captain_2: discord.Member):
-    global captain1, captain2, members, players, using_captains, original_channel, teamList1, teamList2
-    original_channel = ctx.message.author.voice.channel
-    channel = ctx.message.author.voice.channel
-    using_captains = True
-    playersString = ""
-
-    if (captain_1 == None or captain_2 == None):
-        await ctx.send("Mention two team captains!")
-    else:
-        captain1 = captain_1
-        teamList1 += str(captain1.display_name)
-        team1ids.append(captain1.id)
-        team1.append(captain1)
-        team1_embed = discord.Embed(
-            title="TEAM 1", description=teamList1, color=discord.Color.blue())
-
-        captain2 = captain_2
-        teamList2 += str(captain2.display_name)
-        team2ids.append(captain2.id)
-        team2.append(captain2)
-        team2_embed = discord.Embed(
-            title="TEAM 2", description=teamList2, color=discord.Color.red())
-
-        await ctx.send(embed=team1_embed)
-        await ctx.send(embed=team2_embed)
-
-        for player in channel.members:
-            if(player.display_name != captain1.display_name and player.display_name != captain2.display_name):
-                players.append(player.display_name)
-                playersString += player.display_name + "\n"
-
-        players_embed = discord.Embed(
-            title="PLAYERS", description=playersString, color=discord.Color.dark_purple())
-        await ctx.send(embed=players_embed)
-        await ctx.send("Captains selected!")
-        await ctx.send(captain_1.mention + ", type \".choose  @_____\" to pick a player for your team")
+    await captainsHelper(ctx, captain_1, captain_2)
 
 
 @client.command()
 async def captainsAll(ctx, captain_1: discord.Member, captain_2: discord.Member, *, teams="Team-1 Team-2"):
-    global captain1, captain2, members, players, using_captains, original_channel, teamList1, teamList2
-    original_channel = ctx.message.author.voice.channel
-    using_captains = True
-
     await setTeamHelper(ctx, teams)
-
-    if (captain_1 == None or captain_2 == None):
-        await ctx.send("Mention two team captains!")
-    else:
-        channel = ctx.message.author.voice.channel
-        playersString = ""
-
-        captain1 = captain_1
-        teamList1 += str(captain1.display_name)
-        team1ids.append(captain1.id)
-        team1.append(captain1)
-        team1_embed = discord.Embed(
-            title="TEAM 1", description=teamList1, color=discord.Color.blue())
-
-        captain2 = captain_2
-        teamList2 += str(captain2.display_name)
-        team2ids.append(captain2.id)
-        team2.append(captain2)
-        team2_embed = discord.Embed(
-            title="TEAM 2", description=teamList2, color=discord.Color.red())
-
-        await ctx.send(embed=team1_embed)
-        await ctx.send(embed=team2_embed)
-
-        for player in channel.members:
-            if(player.display_name != captain1.display_name and player.display_name != captain2.display_name):
-                players.append(player.display_name)
-                playersString += player.display_name + "\n"
-
-        players_embed = discord.Embed(
-            title="PLAYERS", description=playersString, color=discord.Color.dark_purple())
-        await ctx.send(embed=players_embed)
-        await ctx.send("Captains selected!")
-        await ctx.send(captain_1.mention + ", type \".choose  @_____\" to pick a player for your team")
+    await captainsHelper(ctx, captain_1, captain_2)
 
 
 @client.command()
