@@ -21,13 +21,13 @@ with open('token.txt') as f:
 
 # Global Variables
 
-original_channel, teamList1, teamList2, result1, result2, commandPrefix = ""
+original_channel, result1, result2, commandPrefix, playerString = "", "", "", "", ""
 
 captainNum, drafted, team_size = 1, 2, 5
 
-team1, team2, players, members, team1ids, team2ids = []
+team1, team2, players, members, team1ids, team2ids = [], [], [], [], [], []
 
-channel1, channel2, captain1, captain2 = None
+channel1, channel2, captain1, captain2 = None, None, None, None
 
 using_captains = False
 
@@ -57,9 +57,13 @@ async def movefunc(ctx):
 
 
 async def randomizeTeamHelper(ctx):
+    await clearTeamsHelper(ctx)
+
     global members, ids, team1, team2, result1, result2
     channel = ctx.message.author.voice.channel
     names, ids = [], []
+    result1 = ""
+    result2 = ""
 
     for i in channel.members:
         members.append(i)
@@ -81,7 +85,7 @@ async def randomizeTeamHelper(ctx):
 
 
 async def printEmbed(ctx, channel=None):
-    global result1, result2, captain1, captain2
+    global result1, result2, captain1, captain2, playerString
 
     team1_embed = discord.Embed(
         title="TEAM 1", description=result1, color=discord.Color.blue())
@@ -92,10 +96,10 @@ async def printEmbed(ctx, channel=None):
         for player in channel.members:
             if(player.display_name != captain1.display_name and player.display_name != captain2.display_name):
                 players.append(player.display_name)
-                playersString += player.display_name + "\n"
+                playerString += player.display_name + "\n"
 
         players_embed = discord.Embed(
-            title="PLAYERS", description=playersString, color=discord.Color.dark_purple())
+            title="PLAYERS", description=playerString, color=discord.Color.dark_purple())
         await ctx.send(embed=players_embed)
 
     await ctx.send(embed=team1_embed)
@@ -123,12 +127,15 @@ async def setTeamHelper(ctx, teams="Team-1 Team-2"):
 
 
 async def both(ctx):
-    randomizeTeamHelper(ctx)
-    randomRoleHelper(ctx)
+    await randomizeTeamHelper(ctx)
+    await randomRoleHelper(ctx)
 
 
 async def randomRoleHelper(ctx):
     global roles, team1, team2, result1, result2
+
+    result1 = ""
+    result2 = ""
 
     random.shuffle(team1)
     random.shuffle(team2)
@@ -141,7 +148,9 @@ async def randomRoleHelper(ctx):
 
 
 async def captainsHelper(ctx, captain_1, captain_2):
-    global captain1, captain2, members, players, using_captains, original_channel, teamList1, teamList2
+    await clearTeamsHelper(ctx)
+
+    global captain1, captain2, members, players, using_captains, original_channel, result1, result2
     original_channel = ctx.message.author.voice.channel
     channel = ctx.message.author.voice.channel
     using_captains = True
@@ -150,12 +159,12 @@ async def captainsHelper(ctx, captain_1, captain_2):
         await ctx.send("Mention two team captains!")
     else:
         captain1 = captain_1
-        teamList1 += str(captain1.display_name)
+        result1 += str(captain1.display_name)
         team1ids.append(captain1.id)
         team1.append(captain1)
 
         captain2 = captain_2
-        teamList2 += str(captain2.display_name)
+        result2 += str(captain2.display_name)
         team2ids.append(captain2.id)
         team2.append(captain2)
 
@@ -170,9 +179,9 @@ async def chooseFunc(ctx, member):
 
     if drafted < (team_size * 2):
         if (captainNum == 1 and ctx.message.author.id == captain1.id):
-            chooseHelper(ctx, member, team1, team1ids, result1)
+            await chooseHelper(ctx, member, team1, team1ids, result1)
         elif (captainNum == 2 and ctx.message.author.id == captain2.id):
-            chooseHelper(ctx, member, team2, team2ids, result2)
+            await chooseHelper(ctx, member, team2, team2ids, result2)
         else:
             if ((captainNum == 1 and ctx.message.author.id == captain2.id) or (captainNum == 2 and ctx.message.author.id == captain1.id)):
                 await ctx.send("Not Your Turn!")
@@ -194,14 +203,14 @@ async def getRandomMember():
 
 
 async def chooseHelper(ctx, member, team, ids, result):
-    global teamList1, teamList2, captainNum, captain1, captain2, players, team1, team2
+    global captainNum, captain1, captain2, players, team1, team2
 
     channel = ctx.message.author.voice.channel
 
-    if (team1.__contains__(member) == False and team2.__contains__(member) == False and players.__contains__(member.display_name) == True):
-        result += "\n" + member.display_name
+    if (team1.__contains__(member) == False and team2.__contains__(member) == False and players.__contains__(member) == True):
+        result += "\n" + member.name
 
-        players.remove(member.display_name)
+        players.remove(member)
         ids.append(member.id)
         team.append(member)
 
@@ -227,16 +236,12 @@ async def all(ctx, teams):
 
 
 async def clearTeamsHelper(ctx):
-    global original_channel, captainNum, drafted, team_size, team1, team2, teamList1, teamList2, channel1, channel2, captain1, captain2
+    global original_channel, captainNum, drafted, team_size, team1, team2, channel1, channel2, captain1, captain2, playerString
 
-    original_channel = ""
-    captainNum, drafted = 1, 2
-    team_size = 5
+    original_channel, playerString = "", ""
+    captainNum, drafted, team_size = 1, 2, 5
     team1, team2 = [], []
-    teamList1, teamList2 = None, None
     captain1,  captain2 = None, None
-
-    await ctx.send("Cleared!")
 
 
 # Commands
@@ -352,10 +357,14 @@ async def clearAll(ctx):
 
     channel1, channel2 = None, None
 
+    await ctx.send("Cleared!")
+
 
 @client.command()
 async def clearTeams(ctx):
     await clearTeamsHelper(ctx)
+
+    await ctx.send("Cleared!")
 
 
 @client.command(aliases=['invite'])
@@ -388,7 +397,7 @@ async def randomCaptains(ctx):
 
 @client.command()
 async def chooseRandom(ctx):
-    global teamList1, teamList2, captainNum, captain1, captain2, players, player_members
+    global captainNum, captain1, captain2, players, player_members
     channel = ctx.message.author.voice.channel
     player_members = []
 
@@ -404,7 +413,7 @@ async def chooseRandom(ctx):
 
 @client.command()
 async def chooseFrom(ctx, *_available_players: discord.Member):
-    global teamList1, teamList2, captainNum, captain1, captain2, players, player_members
+    global captainNum, captain1, captain2, players, player_members
     player_members, available_players = [], []
 
     for i in _available_players:
