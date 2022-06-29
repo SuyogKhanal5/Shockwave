@@ -21,7 +21,8 @@ original_channel, result1, result2, commandPrefix, playerString = "", "", "", ""
 
 captainNum, drafted, team_size = 1, 2, 5
 
-team1, team2, players, members, team1ids, team2ids = [], [], [], [], [], []
+team1, team2, players, members, team1ids, team2ids, names, ids = [
+], [], [], [], [], [], [], []
 
 channel1, channel2, captain1, captain2, client = None, None, None, None, None
 
@@ -61,11 +62,8 @@ async def movefunc(ctx):
 async def randomizeTeamHelper(ctx):
     await clearTeamsHelper(ctx)
 
-    global members, ids, team1, team2, result1, result2
+    global members, ids, team1, team2, result1, result2, names
     channel = ctx.message.author.voice.channel
-    names, ids = [], []
-    result1 = ""
-    result2 = ""
 
     for i in channel.members:
         members.append(i)
@@ -77,8 +75,8 @@ async def randomizeTeamHelper(ctx):
         names.append(i.name)
         ids.append(i.id)
 
-    for i in range(team_size*2):
-        if(i < team_size):
+    for i in range(len(members)):
+        if(i < len(members)/2):
             team1.append(m[i])
             result1 += str(m[i]) + "\n"
         else:
@@ -238,11 +236,11 @@ async def all(ctx, teams):
 
 
 async def clearTeamsHelper(ctx):
-    global original_channel, captainNum, drafted, team_size, team1, team2, channel1, channel2, captain1, captain2, playerString
+    global original_channel, captainNum, drafted, team_size, team1, team2, channel1, channel2, captain1, captain2, playerString, result1, result2, ids, names, members
 
-    original_channel, playerString = "", ""
+    original_channel, playerString, result1, result2 = "", "", "", ""
     captainNum, drafted, team_size = 1, 2, 5
-    team1, team2 = [], []
+    team1, team2, ids, names, members = [], [], [], [], []
     captain1,  captain2 = None, None
 
 
