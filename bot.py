@@ -52,11 +52,14 @@ async def movefunc(ctx):
     global ids, channel1, channel2, team1, team2, original_channel
     original_channel = ctx.message.author.voice.channel
 
-    for i in team1:
-        await i.move_to(channel1)
+    if channel1 != None or channel2 != None:
+        for i in team1:
+            await i.move_to(channel1)
 
-    for i in team2:
-        await i.move_to(channel2)
+        for i in team2:
+            await i.move_to(channel2)
+    else:
+        await ctx.send("Team Channels Not Set! Use \".setTeams\" to set teams.")
 
 
 async def randomizeTeamHelper(ctx):
