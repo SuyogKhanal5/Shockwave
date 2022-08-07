@@ -1,19 +1,30 @@
 # Import Statements
+import collections
 import random
 import discord
 from discord.ext import commands
 import numpy as np
+from pymongo import MongoClient
+from pprint import pprint
 
 # Set Intents
 
 intents = discord.Intents.default()
 intents.members = True
 
-# Get token from text file
+# Get token and connection string from text file
 
 token = ''
+connectionString = ''
 with open('token.txt') as f:
-    token = f.read()
+    token = f.readline()
+    connectionString = f.readline()
+
+# Connect to Database
+
+cluster = MongoClient(connectionString)
+db = cluster['ServerInfo']
+collection = db["GuildData"]
 
 # Global Variables
 
@@ -40,12 +51,18 @@ client = commands.Bot(command_prefix=commandPrefix,
 # Events
 
 
-@client.event
+@ client.event
 async def on_ready():
     await client.change_presence(activity=discord.Game('Visit https://shockwave.lol for a list of commands.'))
     print('Bot is online')
 
 # Helper Functions
+
+
+def get(name, var):
+    results = collection.find({"name": name})
+
+    return results[0][var]
 
 
 async def movefunc(ctx):
