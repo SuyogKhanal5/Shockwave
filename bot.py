@@ -59,10 +59,15 @@ async def on_ready():
 # Helper Functions
 
 
-def get(name, var):
-    results = collection.find({"name": name})
+def get(id, var):
+    results = collection.find({"id": id})
 
     return results[0][var]
+
+
+def update(id, var, val):
+    results = collection.update_one({"id": id}, {"$set": {var: val}})
+    return results
 
 
 async def movefunc(ctx):
