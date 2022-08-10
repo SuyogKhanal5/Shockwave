@@ -204,10 +204,17 @@ async def randomRoleHelper(ctx):
 async def captainsHelper(ctx, captain_1, captain_2):
     await clearTeamsHelper(ctx)
 
-    global captain1, captain2, members, players, using_captains, original_channel, result1, result2
-    original_channel = ctx.message.author.voice.channel
-    channel = ctx.message.author.voice.channel
-    using_captains = True
+    update(ctx.guild.id, "captain1", captain_1)
+    captain1 = get(ctx.guild.id, "captain1")
+    update(ctx.guild.id, "captain2", captain_2)
+    captain2 = get(ctx.guild.id, "captain2")
+    #members = 
+    players = get(ctx.guild.id, "player")
+    result1 = get(ctx.guild.id, "result1") 
+    result2 = get(ctx.guild.id, "result2")
+    using_captains = get(ctx.get.id, "using_captains")
+    original_channel = get(ctx.get.id, "original_channel")
+    
 
     if (captain_1 == None or captain_2 == None):
         await ctx.send("Mention two team captains!")
@@ -222,7 +229,7 @@ async def captainsHelper(ctx, captain_1, captain_2):
         team2ids.append(captain2.id)
         team2.append(captain2)
 
-        await printEmbed(ctx, channel)
+        await printEmbed(ctx, original_channel)
 
         await ctx.send("Captains selected!")
         await ctx.send(captain_1.mention + ", type \".choose  @_____\" to pick a player for your team")
@@ -379,6 +386,7 @@ async def randomAll(ctx, *, teams="Team-1 Team-2"):
 async def returnTeams(ctx):
     og = get(ctx.guild.id, "original_channel")
     original_channel = discord.utils.get(ctx.guild.channels, name=og)
+    using_captains = get(ctx.guild.id, "using_captains")
     ids = get(ctx.guild.id, "ids")
 
     if (original_channel == ""):
