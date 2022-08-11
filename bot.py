@@ -90,14 +90,19 @@ async def randomizeTeamHelper(ctx):
 async def printEmbed(ctx, channel=None):
     global result1, result2, captain1, captain2, playerString
 
+    print(result1)
     team1_embed = discord.Embed(
         title="TEAM 1", description=result1, color=discord.Color.blue())
     team2_embed = discord.Embed(
         title="TEAM 2", description=result2, color=discord.Color.red())
 
+    await ctx.send(embed=team1_embed)
+    await ctx.send(embed=team2_embed)
+
     if (channel != None):
+        playerString = ""
         for player in channel.members:
-            if(player.display_name != captain1.display_name and player.display_name != captain2.display_name):
+            if(player.display_name != captain1.display_name and player.display_name != captain2.display_name and result1.__contains__(player.display_name) == False and result2.__contains__(player.display_name) == False):
                 players.append(player.display_name)
                 playerString += player.display_name + "\n"
 
@@ -105,8 +110,7 @@ async def printEmbed(ctx, channel=None):
             title="PLAYERS", description=playerString, color=discord.Color.dark_purple())
         await ctx.send(embed=players_embed)
 
-    await ctx.send(embed=team1_embed)
-    await ctx.send(embed=team2_embed)
+    
 
 
 async def setTeamHelper(ctx, teams="Team-1 Team-2"):
@@ -160,6 +164,8 @@ async def captainsHelper(ctx, captain_1, captain_2):
 
     if (captain_1 == None or captain_2 == None):
         await ctx.send("Mention two team captains!")
+    elif (captain_1 == captain_2):
+        await ctx.send("Mention two different people!")
     else:
         captain1 = captain_1
         result1 += str(captain1.display_name)
@@ -182,9 +188,9 @@ async def chooseFunc(ctx, member):
 
     if drafted < (team_size * 2):
         if (captainNum == 1 and ctx.message.author.id == captain1.id):
-            await chooseHelper(ctx, member, team1, team1ids, result1)
+            await chooseHelper(ctx, member, team1, team1ids, 1)
         elif (captainNum == 2 and ctx.message.author.id == captain2.id):
-            await chooseHelper(ctx, member, team2, team2ids, result2)
+            await chooseHelper(ctx, member, team2, team2ids, 2)
         else:
             if ((captainNum == 1 and ctx.message.author.id == captain2.id) or (captainNum == 2 and ctx.message.author.id == captain1.id)):
                 await ctx.send("Not Your Turn!")
@@ -205,17 +211,23 @@ async def getRandomMember():
     return m[0]
 
 
-async def chooseHelper(ctx, member, team, ids, result):
-    global captainNum, captain1, captain2, players, team1, team2
+async def chooseHelper(ctx, member, team, ids, capNum):
+    global captainNum, captain1, captain2, players, team1, team2, result1, result2
 
     channel = ctx.message.author.voice.channel
 
-    if (team1.__contains__(member) == False and team2.__contains__(member) == False and players.__contains__(member) == True):
-        result += "\n" + member.name
-
-        players.remove(member)
+    if (team1.__contains__(member) == False and team2.__contains__(member) == False and players.__contains__(member.display_name) == True):
+        if (capNum == 1):
+            result1 += "\n" + member.display_name
+        else:
+            result2+= "\n" + member.display_name
+        
+        players.remove(member.display_name)
+        print(players)
         ids.append(member.id)
+        print(ids)
         team.append(member)
+        print (team)
 
         await printEmbed(ctx, channel)
     else:
@@ -226,10 +238,10 @@ async def chooseHelper(ctx, member, team, ids, result):
 
     if (captainNum == 2):
         captainNum = 1
-        await ctx.send(captain2.mention + ", type \".choose  @_____\" to pick a player for your team")
+        await ctx.send(captain1.mention + ", type \".choose  @_____\" to pick a player for your team")
     elif (captainNum == 1):
         captainNum = 2
-        await ctx.send(captain1.mention + ", type \".choose  @_____\" to pick a player for your team")
+        await ctx.send(captain2.mention + ", type \".choose  @_____\" to pick a player for your team")
 
 
 async def all(ctx, teams):
