@@ -56,7 +56,7 @@ def get(id, var):
 
 def update(id, var, val):
     results = collection.update_one({"id": id}, {"$set": {var: val}})
-    return results
+    #return results
 
 
 async def movefunc(ctx):
@@ -209,16 +209,11 @@ async def randomRoleHelper(ctx):
 async def captainsHelper(ctx, captain_1, captain_2):
     await clearTeamsHelper(ctx)
 
-    update(ctx.guild.id, "captain1", captain_1)
-    captain1 = get(ctx.guild.id, "captain1")
-    update(ctx.guild.id, "captain2", captain_2)
-    captain2 = get(ctx.guild.id, "captain2")
-    #members = 
-    players = get(ctx.guild.id, "player")
-    result1 = get(ctx.guild.id, "result1") 
-    result2 = get(ctx.guild.id, "result2")
-    using_captains = get(ctx.get.id, "using_captains")
-    original_channel = get(ctx.get.id, "original_channel")
+    update(ctx.guild.id, "captain1", captain_1.id)
+    update(ctx.guild.id, "captain2", captain_2.id)
+    update(ctx.guild.id, "using_captains", True)
+    update(ctx.guild.id, "original_channel", str(ctx.message.author.voice.channel))
+    original_channel = get(ctx.guild.id, "original_channel")
     
 
     if (captain_1 == None or captain_2 == None):
@@ -228,13 +223,19 @@ async def captainsHelper(ctx, captain_1, captain_2):
     else:
         captain1 = captain_1
         result1 += str(captain1.display_name)
+        update(ctx.guild.id, "result1", result1)
         team1ids.append(captain1.id)
+        update(ctx.guild.id, "team1ids", team1ids)
         team1.append(captain1)
+        update(ctx.guild.id, "team1", team1)
 
         captain2 = captain_2
         result2 += str(captain2.display_name)
+        update(ctx.guild.id, "result2", result2)
         team2ids.append(captain2.id)
+        update(ctx.guild.id, "team2ids", team2ids)
         team2.append(captain2)
+        update(ctx.guild.id, "team2", team2)
 
         await printEmbed(ctx, original_channel)
 
