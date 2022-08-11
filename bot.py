@@ -12,6 +12,7 @@ import json
 
 intents = discord.Intents.default()
 intents.members = True
+intents.guilds = True
 
 # Get token and connection string from text file
 
@@ -20,8 +21,6 @@ connectionString = ''
 with open('token.txt') as f:
     token = f.readline()
     connectionString = f.readline()
-
-path = os.path.join(os.path.dirname(__file__), "data\\")
 
 # Connect to Database
 
@@ -45,13 +44,10 @@ client = commands.Bot(command_prefix=commandPrefix,
 
 @client.event
 async def on_guild_join(ctx):
-    myFiles = os.listdir(path)
-    template = myFiles[2]
-
-    with open(template) as json_file:
+    with open('D:\Coding Projects\LeagueTeamManager\data\guildData\serverInfo\\template.txt') as json_file:
         data = json.load(json_file)
-        data['id'] = ctx.guild.id
-        data['name'] = ctx.guild.name
+        data['id'] = ctx.id
+        data['name'] = ctx.name
 
         collection.insert_one(data)
 
@@ -72,7 +68,7 @@ def get(id, var):
 
 def update(id, var, val):
     results = collection.update_one({"id": id}, {"$set": {var: val}})
-    #return results
+    # return results
 
 
 async def movefunc(ctx):
@@ -226,9 +222,9 @@ async def captainsHelper(ctx, captain_1, captain_2):
     update(ctx.guild.id, "captain1", captain_1.id)
     update(ctx.guild.id, "captain2", captain_2.id)
     update(ctx.guild.id, "using_captains", True)
-    update(ctx.guild.id, "original_channel", str(ctx.message.author.voice.channel))
+    update(ctx.guild.id, "original_channel",
+           str(ctx.message.author.voice.channel))
     original_channel = get(ctx.guild.id, "original_channel")
-
 
     if (captain_1 == None or captain_2 == None):
         await ctx.send("Mention two team captains!")
