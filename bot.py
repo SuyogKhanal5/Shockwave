@@ -216,6 +216,7 @@ async def chooseHelper(ctx, member, team, ids, capNum):
     global captainNum, captain1, captain2, players, team1, team2, result1, result2
 
     channel = ctx.message.author.voice.channel
+    switch = True
 
     if (team1.__contains__(member) == False and team2.__contains__(member) == False and players.__contains__(member.display_name) == True):
         if (capNum == 1):
@@ -232,17 +233,24 @@ async def chooseHelper(ctx, member, team, ids, capNum):
 
         await printEmbed(ctx, channel)
     else:
+        switch = False
         await ctx.send("Player has already been selected or does not exist in the player list.")
 
     if (players == []):
         await ctx.send("You've drafted the maximum number of people for the team size! Use \".move\" to move everyone to the channels!")
+        return
 
-    if (captainNum == 2):
+    if (captainNum == 2 and switch):
         captainNum = 1
         await ctx.send(captain1.mention + ", type \".choose  @_____\" to pick a player for your team")
-    elif (captainNum == 1):
+    elif (captainNum == 1 and switch):
         captainNum = 2
         await ctx.send(captain2.mention + ", type \".choose  @_____\" to pick a player for your team")
+    else:
+        if (capNum == 1):
+            await ctx.send(captain1.mention + ", type \".choose  @_____\" to pick a player for your team")
+        else:
+            await ctx.send(captain2.mention + ", type \".choose  @_____\" to pick a player for your team")
 
 
 async def all(ctx, teams):
