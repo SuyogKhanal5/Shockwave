@@ -1,5 +1,4 @@
 # Import Statements
-import collections
 import random
 import discord
 from discord.ext import commands
@@ -61,13 +60,13 @@ async def on_ready():
 
 
 def get(id, var):
-    results = collection.find({"id": id})
+    results = collection.find({"id": int(id)})
 
     return results[0][var]
 
 
 def update(id, var, val):
-    results = collection.update_one({"id": id}, {"$set": {var: val}})
+    results = collection.update_one({"id": int(id)}, {"$set": {var: val}})
     # return results
 
 
