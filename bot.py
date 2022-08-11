@@ -103,7 +103,8 @@ async def printEmbed(ctx, channel=None):
         playerString = ""
         for player in channel.members:
             if(player.display_name != captain1.display_name and player.display_name != captain2.display_name and result1.__contains__(player.display_name) == False and result2.__contains__(player.display_name) == False):
-                players.append(player.display_name)
+                if (players.__contains__(player.display_name) == False):
+                    players.append(player.display_name)
                 playerString += player.display_name + "\n"
 
         players_embed = discord.Embed(
@@ -221,7 +222,7 @@ async def chooseHelper(ctx, member, team, ids, capNum):
             result1 += "\n" + member.display_name
         else:
             result2+= "\n" + member.display_name
-        
+        print(players)
         players.remove(member.display_name)
         print(players)
         ids.append(member.id)
