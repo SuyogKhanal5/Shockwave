@@ -5,7 +5,8 @@ import discord
 from discord.ext import commands
 import numpy as np
 from pymongo import MongoClient
-from pprint import pprint
+import os
+import json
 
 # Set Intents
 
@@ -19,6 +20,8 @@ connectionString = ''
 with open('token.txt') as f:
     token = f.readline()
     connectionString = f.readline()
+
+path = os.path.join(os.path.dirname(__file__), "data\\")
 
 # Connect to Database
 
@@ -40,7 +43,20 @@ client = commands.Bot(command_prefix=commandPrefix,
 # Events
 
 
-@ client.event
+@client.event
+async def on_guild_join(ctx):
+    myFiles = os.listdir(path)
+    template = myFiles[2]
+
+    with open(template) as json_file:
+        data = json.load(json_file)
+        data['id'] = ctx.guild.id
+        data['name'] = ctx.guild.name
+
+        collection.insert_one(data)
+
+
+@client.event
 async def on_ready():
     await client.change_presence(activity=discord.Game('Visit https://shockwave.lol for a list of commands.'))
     print('Bot is online')
@@ -153,8 +169,6 @@ async def printEmbed(ctx, channel=None):
             title="PLAYERS", description=playerString, color=discord.Color.dark_purple())
         await ctx.send(embed=players_embed)
 
-    
-
 
 async def setTeamHelper(ctx, teams="Team-1 Team-2"):
     teamsList = teams.split()
@@ -214,7 +228,7 @@ async def captainsHelper(ctx, captain_1, captain_2):
     update(ctx.guild.id, "using_captains", True)
     update(ctx.guild.id, "original_channel", str(ctx.message.author.voice.channel))
     original_channel = get(ctx.guild.id, "original_channel")
-    
+
 
     if (captain_1 == None or captain_2 == None):
         await ctx.send("Mention two team captains!")
@@ -280,7 +294,6 @@ async def getRandomMember(ctx):
 async def chooseHelper(ctx, member, team, ids, capNum):
     global captainNum, captain1, captain2, players, team1, team2, result1, result2
 
-
     channel = ctx.message.author.voice.channel
     switch = True
 
@@ -288,14 +301,14 @@ async def chooseHelper(ctx, member, team, ids, capNum):
         if (capNum == 1):
             result1 += "\n" + member.display_name
         else:
-            result2+= "\n" + member.display_name
+            result2 += "\n" + member.display_name
         print(players)
         players.remove(member.display_name)
         print(players)
         ids.append(member.id)
         print(ids)
         team.append(member)
-        print (team)
+        print(team)
 
         await printEmbed(ctx, channel)
     else:
