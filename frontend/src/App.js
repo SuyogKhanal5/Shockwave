@@ -7,10 +7,12 @@ import Layout from './components/Layout';
 
 function App() {
   return (
-    <Routes>
+    <Layout>
+      <Routes>
         <Route path="/" element={<HomePage />} />
         <Route path="/reference" element={<Reference />} />
-    </Routes>
+      </Routes>
+    </Layout>
   );
 }
 
