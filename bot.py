@@ -4,7 +4,6 @@ import discord
 from discord.ext import commands
 import numpy as np
 from pymongo import MongoClient
-import os
 import json
 
 # Set Intents
@@ -17,9 +16,11 @@ intents.guilds = True
 
 token = ''
 connectionString = ''
+templatepath = ''
 with open('token.txt') as f:
     token = f.readline()
     connectionString = f.readline()
+    templatepath = f.readLine()
 
 # Connect to Database
 
@@ -43,7 +44,7 @@ client = commands.Bot(command_prefix=commandPrefix,
 
 @client.event
 async def on_guild_join(ctx):
-    with open('D:\Coding Projects\LeagueTeamManager\data\guildData\serverInfo\\template.txt') as json_file:
+    with open(templatepath) as json_file:
         data = json.load(json_file)
         data['id'] = ctx.id
         data['name'] = ctx.name
