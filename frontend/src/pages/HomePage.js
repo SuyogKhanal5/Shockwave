@@ -11,7 +11,7 @@ export default function HomePage() {
 
   return (
     <div>
-      <h1>Hello</h1>
+      <h1>Shockwave</h1>
       <button onClick={buttonHandler}>Go to Reference</button>
     </div>
   )
