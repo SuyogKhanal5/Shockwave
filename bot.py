@@ -20,7 +20,7 @@ templatepath = ''
 with open('token.txt') as f:
     token = f.readline()
     connectionString = f.readline()
-    templatepath = f.readLine()
+    templatepath = f.readline()
 
 # Connect to Database
 
@@ -355,6 +355,7 @@ async def clearTeamsHelper(ctx):
     update(guild_id, "members", [])
     update(guild_id, "captain1", "")
     update(guild_id, "captain2", "")
+    update(guild_id, "using_captains", False)
 
 
 # Commands
