@@ -19,3 +19,4 @@ Visit the project website at https://shockwave.lol
 # Languages/Frameworks Used:
 - python
 - html5
+- mongodb
