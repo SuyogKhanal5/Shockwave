@@ -1,18 +1,24 @@
 import React from 'react'
-import { useNavigate } from 'react-router-dom';
+import logo from '../components/logo.png'
+import classes from './HomePage.module.css'
+import ParticleBackground from './ParticleBackground.js'
 
 export default function HomePage() {
 
-    const navigate = useNavigate();
     
     function buttonHandler() {
-        navigate('/reference')
+      window.location.replace('https://tinyurl.com/AddShockwave')
     }
 
   return (
+    <>
     <div>
-      <h1>Shockwave</h1>
-      <button onClick={buttonHandler}>Go to Reference</button>
+      <ParticleBackground />
     </div>
+    <img src={logo} className={classes.img} alt=""></img>
+    <h1 className={classes.h1}>Create custom teams in your own Discord server</h1>
+    <button onClick={buttonHandler} className={classes.button}>Invite To Server</button>
+    
+    </>
   )
 }
