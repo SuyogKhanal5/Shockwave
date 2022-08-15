@@ -4,8 +4,8 @@
     display: block;
     margin-left: 3rem;
     margin-right: auto;
-    z-index: 100;
     position: relative;
+    z-index: 100;
 }
 
 .h1 {
@@ -14,12 +14,12 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 0 7%;
+    padding: 0 5%;
     text-align: center;
     font-family: 'open sans';
-    z-index: 100;
-    position: relative;
     color: azure;
+    position: relative;
+    z-index: 100;
 }
 
 .button {

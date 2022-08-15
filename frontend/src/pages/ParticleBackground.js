@@ -14,7 +14,8 @@ const particlesLoaded = (container) => {
 
 const ParticleBackground = () => {
   return (
-    <div className={layers.main}>
+    <div >
+    <body className={layers.main}>
       <Particles 
         id="tsparticles"
         init={particlesInit}
@@ -68,6 +69,7 @@ const ParticleBackground = () => {
             }
         }}
       />
+      </body>
     </div>
   )
 }

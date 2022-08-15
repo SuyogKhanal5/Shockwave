@@ -1,12 +1,10 @@
 import React from 'react'
-import { useNavigate } from 'react-router-dom';
 import logo from '../components/logo.png'
 import classes from './HomePage.module.css'
 import ParticleBackground from './ParticleBackground.js'
 
 export default function HomePage() {
 
-    const navigate = useNavigate();
     
     function buttonHandler() {
       window.location.replace('https://tinyurl.com/AddShockwave')
