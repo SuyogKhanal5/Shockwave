@@ -57,14 +57,14 @@ const ParticleBackground = () => {
                     value: 1
                 },
                 shape: {
-                    type: "circle",
+                    type: "polygon",
                 },
                 size: {
                     random: {
                         enable: true,
                         minimumValue: 0.5
                     },
-                    value: 1
+                    value: 2
                 }
             }
         }}

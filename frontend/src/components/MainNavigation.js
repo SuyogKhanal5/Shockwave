@@ -20,6 +20,9 @@ export default function MainNavigation() {
                         <li className={classes.nav_tab}>
                           <Link to='/reference'>Reference</Link>
                         </li>
+                        <li className={classes.nav_tab}>
+                          <a href='https://github.com/SuyogKhanal5/Shockwave'>GitHub</a>
+                        </li>
                     </ul>
                 </div>
             </nav>
