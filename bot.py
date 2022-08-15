@@ -20,7 +20,7 @@ templatepath = ''
 with open('token.txt') as f:
     token = f.readline()
     connectionString = f.readline()
-    templatepath = f.readLine()
+
 
 # Connect to Database
 

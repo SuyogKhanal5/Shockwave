@@ -1,6 +1,7 @@
 import React from 'react'
 import Particles from 'react-tsparticles'
 import {loadFull} from 'tsparticles'
+import layers from './ParticleBackground.module.css'
 
 const particlesInit = async (main) => {
     console.log(main);
@@ -13,7 +14,7 @@ const particlesLoaded = (container) => {
 
 const ParticleBackground = () => {
   return (
-    <div>
+    <div className={layers.main}>
       <Particles 
         id="tsparticles"
         init={particlesInit}
