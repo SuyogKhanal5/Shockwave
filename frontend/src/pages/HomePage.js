@@ -8,14 +8,14 @@ export default function HomePage() {
     const navigate = useNavigate();
     
     function buttonHandler() {
-        navigate('/reference')
+      window.location.replace('https://tinyurl.com/AddShockwave')
     }
 
   return (
     <div>
-      <img src={logo} className={classes.img}></img>
+      <img src={logo} className={classes.img} alt=""></img>
       <h1 className={classes.h1}>Create custom teams in your own Discord server</h1>
-      <button onClick={buttonHandler}>Go to Reference</button>
+      <button onClick={buttonHandler} className={classes.button}>Invite To Server</button>
     </div>
   )
 }
