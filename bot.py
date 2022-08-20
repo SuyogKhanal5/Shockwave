@@ -20,7 +20,7 @@ templatepath = ''
 with open('token.txt') as f:
     token = f.readline()
     connectionString = f.readline()
-    templatepath = f.readLine()
+    templatepath = f.readline()
 
 # Connect to Database
 
@@ -72,20 +72,25 @@ def update(id, var, val):
 
 
 async def movefunc(ctx):
-    channel1 = get(ctx.guild.id, "channel1")
-    channel2 = get(ctx.guild.id, "channel2")
+    channel1name = get(ctx.guild.id, "channel1")
+    channel2name = get(ctx.guild.id, "channel2")
     team1 = get(ctx.guild.id, "team1")
     team2 = get(ctx.guild.id, "team2")
     new_og = str(ctx.message.author.voice.channel)
 
     update(ctx.guild.id, "original_channel", new_og)
 
+    channel1 = discord.utils.get(ctx.guild.channels, name=channel1name)
+    channel2 = discord.utils.get(ctx.guild.channels, name=channel2name)
+
     if channel1 != None or channel2 != None:
         for i in team1:
-            await i.move_to(channel1)
+            member = discord.utils.get(ctx.guild.members, name=i)
+            await member.move_to(channel1)
 
         for i in team2:
-            await i.move_to(channel2)
+            member = discord.utils.get(ctx.guild.members, name=i)
+            await member.move_to(channel2)
     else:
         await ctx.send("Team Channels Not Set! Use \".setTeams\" to set teams.")
 
@@ -121,7 +126,7 @@ async def randomizeTeamHelper(ctx):
             team1ids.append(m[i].id)
             result1 += str(m[i]) + "\n"
         else:
-            team2.append(m[i])
+            team2.append(m[i].name)
             team2ids.append(m[i].id)
             result2 += str(m[i]) + "\n"
 
@@ -143,6 +148,7 @@ async def printEmbed(ctx, channel=None):
     captain1 = discord.utils.get(ctx.guild.members, id=captain1id)
     captain2 = discord.utils.get(ctx.guild.members, id=captain2id)
     playerString = get(ctx.guild.id, "playerString")
+    players = get(ctx.guild.id, "players")
 
     print(result1)
     team1_embed = discord.Embed(
@@ -219,6 +225,13 @@ async def randomRoleHelper(ctx):
 async def captainsHelper(ctx, captain_1, captain_2):
     await clearTeamsHelper(ctx)
 
+    result1 = ""
+    result2 = ""
+    team1ids = []
+    team2ids = []
+    team1 = []
+    team2 = []
+
     update(ctx.guild.id, "captain1", captain_1.id)
     update(ctx.guild.id, "captain2", captain_2.id)
     update(ctx.guild.id, "using_captains", True)
@@ -236,7 +249,7 @@ async def captainsHelper(ctx, captain_1, captain_2):
         update(ctx.guild.id, "result1", result1)
         team1ids.append(captain1.id)
         update(ctx.guild.id, "team1ids", team1ids)
-        team1.append(captain1)
+        team1.append(captain1.display_name)
         update(ctx.guild.id, "team1", team1)
 
         captain2 = captain_2
@@ -244,17 +257,22 @@ async def captainsHelper(ctx, captain_1, captain_2):
         update(ctx.guild.id, "result2", result2)
         team2ids.append(captain2.id)
         update(ctx.guild.id, "team2ids", team2ids)
-        team2.append(captain2)
+        team2.append(captain2.display_name)
         update(ctx.guild.id, "team2", team2)
 
-        await printEmbed(ctx, original_channel)
+        await printEmbed(ctx, discord.utils.get(ctx.guild.channels, name=original_channel))
 
         await ctx.send("Captains selected!")
         await ctx.send(captain_1.mention + ", type \".choose  @_____\" to pick a player for your team")
 
 
 async def chooseFunc(ctx, member):
-    global captainNum, captain1, captain2, team_size, drafted, team1, team2, team1ids, team2ids, result1, result2
+    drafted = get(ctx.guild.id, "drafted")
+    team_size = get(ctx.guild.id, "team_size")
+    team1ids = get(ctx.guild.id, "team1ids")
+    team2ids = get(ctx.guild.id, "team2ids")
+    team1 = get(ctx.guild.id, "team1")
+    team2 = get(ctx.guild.id, "team2")
 
     if drafted < (team_size * 2):
         if (captainNum == 1 and ctx.message.author.id == captain1.id):
@@ -288,7 +306,14 @@ async def getRandomMember(ctx):
 
 
 async def chooseHelper(ctx, member, team, ids, capNum):
-    global captainNum, captain1, captain2, players, team1, team2, result1, result2
+    captainNum = get(ctx.guild.id, "captainNum")
+    captain1 = get(ctx.guild.id, "captain1")
+    captain2 = get(ctx.guild.id, "captain2")
+    players = get(ctx.guild.id, "players")
+    team1 = get(ctx.guild.id, "team1")
+    team2 = get(ctx.guild.id, "team2")
+    result1 = get(ctx.guild.id, "result1")
+    result2 = get(ctx.guild.id, "result2")
 
     channel = ctx.message.author.voice.channel
     switch = True
@@ -303,7 +328,7 @@ async def chooseHelper(ctx, member, team, ids, capNum):
         print(players)
         ids.append(member.id)
         print(ids)
-        team.append(member)
+        team.append(member.display_name)
         print(team)
 
         await printEmbed(ctx, channel)
@@ -355,6 +380,7 @@ async def clearTeamsHelper(ctx):
     update(guild_id, "members", [])
     update(guild_id, "captain1", "")
     update(guild_id, "captain2", "")
+    update(guild_id, "using_captains", False)
 
 
 # Commands
@@ -441,8 +467,8 @@ async def returnAll(ctx):
     chan1 = get(ctx.guild.id, "channel1")
     chan2 = get(ctx.guild.id, "channel2")
     original_channel = discord.utils.get(ctx.guild.channels, name=og)
-    channel1 = discord.utils.get(ctx.guild.channels, id=chan1)
-    channel2 = discord.utils.get(ctx.guild.channels, id=chan2)
+    channel1 = discord.utils.get(ctx.guild.channels, name=chan1)
+    channel2 = discord.utils.get(ctx.guild.channels, name=chan2)
 
     if (original_channel == ""):
         await ctx.send("You have not been seperated into team voice channels! Use \".move\" first.")
