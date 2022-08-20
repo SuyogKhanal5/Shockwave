@@ -438,6 +438,8 @@ async def returnTeams(ctx):
     original_channel = discord.utils.get(ctx.guild.channels, name=og)
     using_captains = get(ctx.guild.id, "using_captains")
     ids = get(ctx.guild.id, "ids")
+    team1ids = get(ctx.guild.id, "team1ids")
+    team2ids = get(ctx.guild.id, "team2ids")
 
     if (original_channel == ""):
         await ctx.send("You have not been seperated into team voice channels! Use \".move\" first.")
