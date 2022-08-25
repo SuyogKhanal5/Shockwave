@@ -150,7 +150,6 @@ async def printEmbed(ctx, channel=None):
     playerString = get(ctx.guild.id, "playerString")
     players = get(ctx.guild.id, "players")
 
-    print(result1)
     team1_embed = discord.Embed(
         title="TEAM 1", description=result1, color=discord.Color.blue())
     team2_embed = discord.Embed(
@@ -539,11 +538,11 @@ async def notify(ctx, member: discord.Member):
 
 @client.command()
 async def randomCaptains(ctx):
-    captain1 = getRandomMember()
+    captain1 = getRandomMember(ctx)
     captain2 = None
 
     while captain2 == None:
-        possible = getRandomMember()
+        possible = getRandomMember(ctx)
 
         if (possible != captain1 or len(ctx.message.author.voice.channel.members) < 2):
             captain2 = possible
