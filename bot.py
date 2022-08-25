@@ -273,6 +273,12 @@ async def chooseFunc(ctx, member):
     team2ids = get(ctx.guild.id, "team2ids")
     team1 = get(ctx.guild.id, "team1")
     team2 = get(ctx.guild.id, "team2")
+    captainNum = get(ctx.guild.id, "captainNum")
+    captain1id = get(ctx.guild.id, "captain1")
+    captain2id = get(ctx.guild.id, "captain2")
+
+    captain1 = discord.utils.get(ctx.guild.members, id=captain1id)
+    captain2 = discord.utils.get(ctx.guild.members, id=captain2id)
 
     if drafted < (team_size * 2):
         if (captainNum == 1 and ctx.message.author.id == captain1.id):
@@ -307,13 +313,16 @@ async def getRandomMember(ctx):
 
 async def chooseHelper(ctx, member, team, ids, capNum):
     captainNum = get(ctx.guild.id, "captainNum")
-    captain1 = get(ctx.guild.id, "captain1")
-    captain2 = get(ctx.guild.id, "captain2")
+    captain1id = get(ctx.guild.id, "captain1")
+    captain2id = get(ctx.guild.id, "captain2")
     players = get(ctx.guild.id, "players")
     team1 = get(ctx.guild.id, "team1")
     team2 = get(ctx.guild.id, "team2")
     result1 = get(ctx.guild.id, "result1")
     result2 = get(ctx.guild.id, "result2")
+
+    captain1 = discord.utils.get(ctx.guild.members, id=captain1id)
+    captain2 = discord.utils.get(ctx.guild.members, id=captain2id)
 
     channel = ctx.message.author.voice.channel
     switch = True
@@ -530,8 +539,6 @@ async def notify(ctx, member: discord.Member):
 
 @client.command()
 async def randomCaptains(ctx):
-    global captain1, captain2
-
     captain1 = getRandomMember()
     captain2 = None
 
@@ -546,7 +553,13 @@ async def randomCaptains(ctx):
 
 @client.command()
 async def chooseRandom(ctx):
-    global captainNum, captain1, captain2, players, player_members
+    players = get(ctx.guild.id, "players")
+    captain1id = get(ctx.guild.id, "captain1")
+    captain2id = get(ctx.guild.id, "captain2")
+
+    captain1 = discord.utils.get(ctx.guild.members, id=captain1id)
+    captain2 = discord.utils.get(ctx.guild.members, id=captain2id)
+
     channel = ctx.message.author.voice.channel
     player_members = []
 
@@ -562,8 +575,9 @@ async def chooseRandom(ctx):
 
 @client.command()
 async def chooseFrom(ctx, *_available_players: discord.Member):
-    global captainNum, captain1, captain2, players, player_members
-    player_members, available_players = [], []
+    available_players = []
+
+    players = get(ctx.guild.id, "players")
 
     for i in _available_players:
         available_players.append(i)
