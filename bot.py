@@ -326,6 +326,7 @@ async def chooseHelper(ctx, member, team, ids, capNum):
     captain2 = discord.utils.get(ctx.guild.members, id=captain2id)
 
     channel = ctx.message.author.voice.channel
+    switch = True
 
     if (team1.__contains__(member) == False and team2.__contains__(member) == False and players.__contains__(member.display_name) == True):
         if (captainNum == 1):
@@ -345,10 +346,10 @@ async def chooseHelper(ctx, member, team, ids, capNum):
         await ctx.send("You've drafted the maximum number of people for the team size! Use \".move\" to move everyone to the channels!")
         return
 
-    if (captainNum == 2):
+    if (captainNum == 2 and switch):
         captainNum = 1
         await ctx.send(captain1.mention + ", type \".choose  @_____\" to pick a player for your team")
-    elif (captainNum == 1):
+    elif (captainNum == 1 and switch):
         captainNum = 2
         await ctx.send(captain2.mention + ", type \".choose  @_____\" to pick a player for your team")
     else:
