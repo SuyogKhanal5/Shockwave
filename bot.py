@@ -547,7 +547,7 @@ async def randomCaptains(ctx):
         if (possible != captain1 or len(ctx.message.author.voice.channel.members) < 2):
             captain2 = possible
 
-    captainsHelper(ctx, captain1, captain2)
+    await captainsHelper(ctx, captain1, captain2)
 
 
 @client.command()
