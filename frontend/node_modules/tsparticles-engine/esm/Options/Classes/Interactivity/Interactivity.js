@@ -1,0 +1,39 @@
+var __classPrivateFieldSet = (this && this.__classPrivateFieldSet) || function (receiver, state, value, kind, f) {
+    if (kind === "m") throw new TypeError("Private method is not writable");
+    if (kind === "a" && !f) throw new TypeError("Private accessor was defined without a setter");
+    if (typeof state === "function" ? receiver !== state || !f : !state.has(receiver)) throw new TypeError("Cannot write private member to an object whose class did not declare it");
+    return (kind === "a" ? f.call(receiver, value) : f ? f.value = value : state.set(receiver, value)), value;
+};
+var _Interactivity_container, _Interactivity_engine;
+import { Events } from "./Events/Events";
+import { Modes } from "./Modes/Modes";
+export class Interactivity {
+    constructor(engine, container) {
+        _Interactivity_container.set(this, void 0);
+        _Interactivity_engine.set(this, void 0);
+        __classPrivateFieldSet(this, _Interactivity_engine, engine, "f");
+        __classPrivateFieldSet(this, _Interactivity_container, container, "f");
+        this.detectsOn = "window";
+        this.events = new Events();
+        this.modes = new Modes(engine, container);
+    }
+    get detect_on() {
+        return this.detectsOn;
+    }
+    set detect_on(value) {
+        this.detectsOn = value;
+    }
+    load(data) {
+        var _a;
+        if (!data) {
+            return;
+        }
+        const detectsOn = (_a = data.detectsOn) !== null && _a !== void 0 ? _a : data.detect_on;
+        if (detectsOn !== undefined) {
+            this.detectsOn = detectsOn;
+        }
+        this.events.load(data.events);
+        this.modes.load(data.modes);
+    }
+}
+_Interactivity_container = new WeakMap(), _Interactivity_engine = new WeakMap();
