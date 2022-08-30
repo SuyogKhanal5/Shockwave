@@ -1,0 +1,23 @@
+{
+    "id": 0,
+    "name": "PLACEHOLDER",
+    "original_channel": "",
+    "result1": "",
+    "result2": "",
+    "playerString": "",
+    "team1": [],
+    "team2": [],
+    "players": [],
+    "team1ids": [],
+    "team2ids": [],
+    "names": [],
+    "ids": [],
+    "channel1": null,
+    "channel2": null,
+    "captain1": null,
+    "captain2": null,
+    "using_captains": false,
+    "captainNum": 1,
+    "drafted": 2,
+    "team_size": 5
+}
