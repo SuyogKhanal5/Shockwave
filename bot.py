@@ -306,7 +306,8 @@ async def chooseFunc(ctx, member):
 
 
 async def chooseRandomMember(ctx):
-    await chooseFunc(ctx, getRandomMember)
+    randomMember = await getRandomMember(ctx)
+    await chooseFunc(ctx, randomMember)
 
 
 async def getRandomMember(ctx):
@@ -554,6 +555,12 @@ async def notify(ctx, member: discord.Member):
 
 @client.command()
 async def randomCaptains(ctx):
+    players = []
+    for player in ctx.message.author.voice.channel.members:
+        players.append(player.name)
+
+    update(ctx.guild.id, "players", players)
+
     captain1 = await getRandomMember(ctx)
     captain2 = None
 
