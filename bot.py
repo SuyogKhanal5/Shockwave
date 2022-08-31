@@ -436,7 +436,7 @@ async def move(ctx):
 
 @client.command()
 async def help(ctx):
-    await ctx.send('Visit https://shockwave.lol for a full list of commands')
+    await ctx.send('Visit https://shockwave.lol/reference for a full list of commands')
 
 
 @client.command()
