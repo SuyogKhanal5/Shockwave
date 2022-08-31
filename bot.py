@@ -525,11 +525,10 @@ async def choose(ctx, member: discord.Member):
 
 @client.command()
 async def clearAll(ctx):
-    global channel1, channel2
-
     clearTeamsHelper(ctx)
 
-    channel1, channel2 = None, None
+    update(ctx.guild.id, "channel1", None)
+    update(ctx.guild.id, "channel2", None)
 
     await ctx.send("Cleared!")
 
