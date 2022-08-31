@@ -8,14 +8,26 @@ Visit the project website at https://shockwave.lol
 - fullRandom
 - fullRandomAll
 - move
+- help
 - setTeamChannels
-- random
+- randomTeams
 - randomAll
 - returnAll
+- returnTeams
 - captains
+- captainsAll
+- clearAll
+- clearTeams
 - choose
+- notify
 - randomCaptains
+- chooseRandom
+- chooseFrom
+- roll
+- randomizeRoles
 
 # Languages/Frameworks Used:
-- python
-- html5
+- Python
+- HTML5
+- MongoDB
+- Netlify
