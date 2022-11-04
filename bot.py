@@ -105,8 +105,8 @@ async def randomizeTeamHelper(ctx):
     team2 = []
     team1ids = []
     team2ids = []
-    result1 = []
-    result2 = []
+    result1 = ""
+    result2 = ""
 
     channel = ctx.message.author.voice.channel
 
@@ -124,11 +124,13 @@ async def randomizeTeamHelper(ctx):
         if(i < len(members)/2):
             team1.append(m[i].name)
             team1ids.append(m[i].id)
-            result1 += str(m[i]) + "\n"
+            result1 += m[i].name
+            result1 += "\n"
         else:
             team2.append(m[i].name)
             team2ids.append(m[i].id)
-            result2 += str(m[i]) + "\n"
+            result2 += m[i].name
+            result2 += "\n"
 
     update(ctx.guild.id, "names", names)
     update(ctx.guild.id, "ids", ids)
