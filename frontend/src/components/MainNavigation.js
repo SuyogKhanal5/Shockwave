@@ -3,7 +3,6 @@ import classes from './MainNavigation.module.css'
 import { useNavigate } from 'react-router-dom';
 import logo from './logo.png'
 import { Button } from '@mantine/core';
-import { MantineProvider } from '@mantine/core';
 
 export default function MainNavigation() {
 
