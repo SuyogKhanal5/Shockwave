@@ -1,24 +1,37 @@
 import React from 'react'
 import logo from '../components/logo.png'
+import { Image, Container, Center, Button } from '@mantine/core'
 import classes from './HomePage.module.css'
-import ParticleBackground from './ParticleBackground.js'
+import { IconBrandDiscord } from '@tabler/icons';
+
 
 export default function HomePage() {
 
-    
-    function buttonHandler() {
-      window.location.replace('https://tinyurl.com/AddShockwave')
-    }
+  function invHandler() {
+    window.location.replace('https://tinyurl.com/AddShockwave')
+  }
 
   return (
     <>
-    <div>
-      <ParticleBackground />
+    <div className={classes.div}>
+      <Container size="sm" className={classes.starth1}>
+        <Center>
+          <Image src={logo} className={classes.pic}></Image>
+        </Center>
+      </Container>
+      <Container>
+        <Center>
+          <h1 className={classes.text}>Create Custom Teams In Your Own Discord Server</h1>
+        </Center>
+      </Container>
+      <Container>
+        <Center>
+          <Button color="violet" radius="md" size="lg" leftIcon={<IconBrandDiscord />} onClick={invHandler} className={classes.btn}>
+            Invite To Server
+          </Button>
+        </Center>
+      </Container>
     </div>
-    <img src={logo} className={classes.img} alt=""></img>
-    <h1 className={classes.h1}>Create custom teams in your own Discord server</h1>
-    <button onClick={buttonHandler} className={classes.button}>Invite To Server</button>
-    
     </>
   )
 }

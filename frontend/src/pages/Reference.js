@@ -1,79 +1,55 @@
 import React from 'react'
-import ParticleBackground from './ParticleBackground'
-import './Reference.scss'
-
+import { Table, Container, Center } from "@mantine/core";
+import classes from './Reference.module.css'
 
 export default function Reference() {
+
+  const elements = [
+    { command: ".setTeamSize", desc: "Sets the size of each team", input: 'Integer'},
+    { command: ".fullRandom", desc: "Randomizes teams and roles for League of Legends", input: 'N/A'},
+    { command: ".fullRandomAll", desc: "Randomizes teams and roles for League of Legends while setting the team voice channels", input: 'Two voice channels'},
+    { command: ".move", desc: "Moves the players in the call to their respective teams once they are set (.setTeamChannels is a prerequiste)", input: 'N/A'},
+    { command: ".help", desc: "Links this webpage", input: 'N/A'},
+    { command: ".setTeamChannels", desc: "Sets the voice channels for each team to be moved to", input: 'Two voice channels'},
+    { command: ".randomTeams", desc: "Randomizes teams", input: 'N/A'},
+    { command: ".randomAll", desc: "Randomizes teams and sets the team voice channels", input: 'Two Voice Channels'},
+    { command: ".returnAll", desc: "Returns all users in the current voice channel back to the original voice channel", input: 'N/A'},
+    { command: ".returnTeams", desc: "Returns just the players back to the original voice channel", input: 'N/A'},
+    { command: ".captains", desc: "Sets team captains and allows them to choose players", input: 'Two player ids (mentions, i.e @user#91420 @other#21930'},
+    { command: ".captainsAll", desc: "Sets team captains and allows them to choose players and sets the team voice channels", input: 'Two player ids (mentions, i.e @user#91420 @other#21930) and Two Voice Channels'},
+    { command: ".choose", desc: "Command for team captains to choose their teammates", input: 'One player id (mention, i.e @user#91420)'},
+    { command: ".notify", desc: "Notify and send an Direct Message/Invite to the server and voice channel. (.invite is an alias)", input: 'One player id (mention, i.e @user#91420)'},
+    { command: ".randomCaptains", desc: "Chooses two team captains at random", input: 'N/A'},
+    { command: ".chooseRandom", desc: "Chooses a random player to add to your team. Used in place of .choose", input: 'N/A'},
+    { command: ".chooseFrom", desc: "Chooses a random player from a few given players. Used in place of .choose", input: 'A variable number of player ids (mentions, i.e @user#91420 @other#21930)'},
+    { command: ".roll", desc: "Rolls a die with the number of sides depending on input given", input: 'Integer'},
+    { command: ".randomizeRoles", desc: "Randomizes roles for each team. Teams must have been created before using this command.", input: 'N/A'},
+  ];
+
+  const rows = elements.map((element) => (
+    <tr key={element.name} >
+      <td>{element.command}</td>
+      <td>{element.desc}</td>
+      <td>{element.input}</td>
+    </tr>
+  ));
+
   return (
-    <>
-     <ParticleBackground/>
-    <div class="container">
-	
-      <div class="table">
-        <div class="table-header">
-          <div class="header__item"><p id="name" class="filter__link" href="#">Command</p></div>
-          <div class="header__item"><p id="wins" class="filter__link filter__link--number" href="#">Description</p></div>
-          <div class="header__item"><p id="draws" class="filter__link filter__link--number" href="#">Inputs</p></div>
-        </div>
-        <div class="table-content">	
-          <div class="table-row">		
-            <div class="table-data">.setTeamSize</div>
-            <div class="table-data">Sets the size of each team</div>
-            <div class="table-data">integer</div>
-          </div>
-          <div class="table-row">
-            <div class="table-data">.fullRandom</div>
-            <div class="table-data">Randomizes teams and roles for League of Legends</div>
-            <div class="table-data">n/A</div>
-          </div>
-          <div class="table-row">
-            <div class="table-data">.fullRandomAll</div>
-            <div class="table-data">Randomizes teams and roles for League of Legends while setting the team voice channels</div>
-            <div class="table-data">Two voice channels</div>
-          </div>
-          <div class="table-row">
-            <div class="table-data">.move</div>
-            <div class="table-data">Moves the players in the call to their respective teams once they are set (.setTeamChannels is a prerequiste)</div>
-            <div class="table-data">n/A</div>
-          </div>
-          <div class="table-row">
-            <div class="table-data">.setTeamChannels</div>
-            <div class="table-data">Sets the voice channels for each team to be moved to</div>
-            <div class="table-data">Two voice channels</div>
-          </div>
-          <div class="table-row">
-            <div class="table-data">.random</div>
-            <div class="table-data">Randomizes teams</div>
-            <div class="table-data">n/A</div>
-          </div>
-          <div class="table-row">
-            <div class="table-data">.randomAll</div>
-            <div class="table-data">Randomizes teams and sets the team voice channels</div>
-            <div class="table-data">Two Voice Channels</div>
-          </div>
-          <div class="table-row">
-            <div class="table-data">.returnAll</div>
-            <div class="table-data">Returns all players who have been moved to the original voice channel</div>
-            <div class="table-data">n/A</div>
-          </div>
-          <div class="table-row">
-            <div class="table-data">.captains</div>
-            <div class="table-data">Sets team captains and allows them to choose players</div>
-            <div class="table-data">Two player ids</div>
-          </div>
-          <div class="table-row">
-            <div class="table-data">.choose</div>
-            <div class="table-data">Command for team captains to choose their teammates</div>
-            <div class="table-data">One player id</div>
-          </div>
-          <div class="table-row">
-            <div class="table-data">.randomCaptains</div>
-            <div class="table-data">Chooses two team captains at random</div>
-            <div class="table-data">n/A</div>
-          </div>
-        </div>	
-      </div>
+    <div className={classes.div}>
+      <Container>
+        <Center>
+          <Table withColumnBorders className={classes.entry}>
+            <thead>
+              <tr>
+                <th className={classes.th}>Command</th>
+                <th className={classes.th}>Description</th>
+                <th className={classes.th}>Input(s)</th>
+              </tr>
+            </thead>
+            <tbody>{rows}</tbody>
+          </Table>
+        </Center>
+      </Container>
     </div>
-    </>
   )
 }

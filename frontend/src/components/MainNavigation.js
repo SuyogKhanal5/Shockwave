@@ -1,10 +1,28 @@
 import React from 'react'
-import {Link} from 'react-router-dom';
 import classes from './MainNavigation.module.css'
+import { useNavigate } from 'react-router-dom';
 import logo from './logo.png'
+import { Button } from '@mantine/core';
 
 export default function MainNavigation() {
+
+    const navigate = useNavigate();
+
+    function homeHandler() {
+        navigate('/');
+    }
+
+    function referenceHandler() {
+        navigate('/reference');
+    }
+
+    function githubHandler() {
+        window.location.replace('https://github.com/SuyogKhanal5/Shockwave/tree/main');
+    }
+
   return (
+    <>
+
     <header>
         <div className={classes.nav_wrapper}>
             <div className={classes.logo_container}>
@@ -14,19 +32,26 @@ export default function MainNavigation() {
             <nav>
                 <div className={classes.nav_container}>
                     <ul className={classes.nav_tabs}>
-                        <li className={classes.nav_tab}>
-                          <Link to='/'>Home</Link>
+                        <li>
+                            <Button variant="subtle" color="gray" onClick={homeHandler}>
+                                Home
+                            </Button>
                         </li>
-                        <li className={classes.nav_tab}>
-                          <Link to='/reference'>Reference</Link>
+                        <li>
+                            <Button variant="subtle" color="gray" onClick={referenceHandler}>
+                                Reference
+                            </Button>
                         </li>
-                        <li className={classes.nav_tab}>
-                          <a href='https://github.com/SuyogKhanal5/Shockwave'>GitHub</a>
+                        <li>
+                            <Button variant="subtle" color="gray" onClick={githubHandler}>
+                                Github
+                            </Button>
                         </li>
                     </ul>
                 </div>
             </nav>
         </div>
     </header>
+    </>
   )
 }
