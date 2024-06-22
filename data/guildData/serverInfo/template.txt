@@ -19,5 +19,9 @@
     "using_captains": false,
     "captainNum": 1,
     "drafted": 2,
-    "team_size": 5
+    "team_size": 5,
+    "team_num": 16,
+    "teamnames": [],
+    "teamplayers": [],
+    "teamids": []
 }
