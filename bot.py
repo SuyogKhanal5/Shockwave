@@ -32,7 +32,6 @@ cursor = mainDB.cursor()
 if not exist:
     cursor.execute("CREATE TABLE servers(guildId, serverName, original_channel, result1, result2, playerString, team1, team2, players, channel1, channel2, captain1, captain2, using_captains, captainNum, drafted, team_size)")
 
-
 # Hash Map
 
 roles = {0: "Top - ", 1: "Jungle - ", 2: "Mid - ", 3: "Bottom - ", 4: "Support - "}
@@ -47,35 +46,23 @@ client = commands.Bot(command_prefix=commandPrefix, intents=intents, help_comman
 
 @client.event
 async def on_guild_join(ctx):
-    with open(templatepath) as json_file:
-        data = json.load(json_file)
-        data["id"] = ctx.id
-        data["name"] = ctx.name
+    cursor.execute("INSERT INTO servers VALUES(" + ctx.id + "," + ctx.name + ")")
+    mainDB.commit()
 
-        collection.insert_one(data)
-
+@client.event
+async def on_guild_remove(ctx):
+    cursor.execute("DELETE FROM servers WHERE guildId=" + ctx.id)
+    mainDB.commit()
 
 @client.event
 async def on_ready():
     await client.change_presence(
-        activity=discord.Game("Visit https://shockwave.lol for a list of commands.")
+        activity=discord.Game("Rewrite in progress, new features coming soon!")
     )
-    print("Bot is online")
+    print("Command: Shockwave")
 
 
 # Helper Functions
-
-
-def get(id, var):
-    results = collection.find({"id": int(id)})
-
-    return results[0][var]
-
-
-def update(id, var, val):
-    results = collection.update_one({"id": int(id)}, {"$set": {var: val}})
-    # return results
-
 
 async def movefunc(ctx):
     channel1name = get(ctx.guild.id, "channel1")
