@@ -21,7 +21,7 @@ with open("token.txt") as f:
 
 # Connect to Database
 
-dataFolder = "data\\guildData\\serverInfo\\"  # CHANGE TO / IF ON WINDOWS MACHINE!!!!!!!!!!
+dataFolder = "data/guildData/serverInfo/"  # CHANGE TO / IF ON WINDOWS MACHINE!!!!!!!!!!
 dbpath = dataFolder + "main.db"
 
 exist = path.isfile(dbpath)
