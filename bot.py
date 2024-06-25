@@ -21,8 +21,8 @@ with open("token.txt") as f:
 
 # Connect to Database
 
-dataFolder = "data/guildData/serverInfo/"  # CHANGE TO / IF ON WINDOWS MACHINE!!!!!!!!!!
-dbpath = dataFolder + "main.db"
+dataFolder = "data/guildData/serverInfo/"  
+dbpath = dataFolder + "main.db" 
 
 exist = path.isfile(dbpath)
 
@@ -31,7 +31,6 @@ cursor = mainDB.cursor()
 
 if not exist:
     cursor.execute("CREATE TABLE servers(guildId, serverName, original_channel, result1, result2, playerString, team1, team2, players, channel1, channel2, captain1, captain2, using_captains, captainNum, drafted, team_size)")
-
 
 # Hash Map
 
