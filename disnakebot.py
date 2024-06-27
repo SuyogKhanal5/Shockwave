@@ -42,11 +42,11 @@ class Shockwave(disnake.Client):
     async def on_ready(self):
         print('Command: Shockwave')
 
-    async def on_guild_join(guild):
+    async def on_guild_join(ctx, guild):
         cursor.execute("INSERT INTO servers VALUES(?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)", (guild.id, guild.name))
         mainDB.commit()
 
-    async def on_guild_remove(guild):
+    async def on_guild_remove(ctx, guild):
         cursor.execute("""DELETE FROM servers WHERE guildId=?""", (guild.id,))
         mainDB.commit()
 
