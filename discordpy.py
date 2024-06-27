@@ -43,15 +43,14 @@ client = commands.Bot(command_prefix=commandPrefix, intents=intents, help_comman
 
 # Events
 
-
 @client.event
 async def on_guild_join(ctx):
-    cursor.execute("INSERT INTO servers VALUES(" + ctx.id + "," + ctx.name + ")")
+    cursor.execute("INSERT INTO servers VALUES(?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)", (ctx.id, ctx.name))
     mainDB.commit()
 
 @client.event
 async def on_guild_remove(ctx):
-    cursor.execute("DELETE FROM servers WHERE guildId=" + ctx.id)
+    cursor.execute("""DELETE FROM servers WHERE guildId=?""", (ctx.id,))
     mainDB.commit()
 
 @client.event
