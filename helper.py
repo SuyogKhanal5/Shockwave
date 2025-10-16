@@ -88,6 +88,7 @@ class helpers():
 
         self.update(ctx.guild.id, "team1", serialzedTeam1)
         self.update(ctx.guild.id, "team2", serialzedTeam2)
+        self.update(ctx.guild.id, "mode", "Normal")
 
 
     # TODO: Identify captain
@@ -186,75 +187,76 @@ class helpers():
     async def captainsHelper(self, ctx, captain_1, captain_2):
         await self.clearTeamsHelper(ctx)
 
-        # TODO: remove result1, result2, using_captains_ and original_channel
-        result1 = ""
-        result2 = ""
-        team1ids = []
-        team2ids = []
-        team1 = []
-        team2 = []
+        captain1 = Player(captain_1.id, captain_1.name)
+        captain2 = Player(captain_2.id, captain_2.name)
 
-        self.update(ctx.guild.id, "captain1", captain_1.id)
-        self.update(ctx.guild.id, "captain2", captain_2.id)
-        self.update(ctx.guild.id, "using_captains", True)
-        self.update(ctx.guild.id, "original_channel",
-            str(ctx.message.author.voice.channel))
-        original_channel = self.get(ctx.guild.id, "original_channel")
+        self.update(ctx.guild.id, "captain1", captain1.serializePlayer())
+        self.update(ctx.guild.id, "captain2", captain2.serializePlayer())
+        self.update(ctx.guild.id, "mode", "Captains")
+        
+        original_channel = ctx.user.voice.channel
+
+        self.update(ctx.guild.id, "original_channel", str(original_channel))
 
         if captain_1 is None or captain_2 is None:
             await ctx.response.send_message("Mention two team captains!")
         elif captain_1 == captain_2:
             await ctx.response.send_message("Mention two different people!")
         else:
-            # TODO: why do we use captain_1? seems useless asf
-            captain1 = captain_1
-            result1 += str(captain1.name)
-            self.update(ctx.guild.id, "result1", result1)
-            team1ids.append(captain1.id)
-            self.update(ctx.guild.id, "team1ids", team1ids)
-            team1.append(captain1.name)
-            self.update(ctx.guild.id, "team1", team1)
+            team1 = Team()
+            team2 = Team()
 
-            captain2 = captain_2
-            result2 += str(captain2.name)
-            self.update(ctx.guild.id, "result2", result2)
-            team2ids.append(captain2.id)
-            self.update(ctx.guild.id, "team2ids", team2ids)
-            team2.append(captain2.name)
-            self.update(ctx.guild.id, "team2", team2)
+            team1.add_player(captain1)
+            team2.add_player(captain2)
 
-            await self.printEmbed(
-                ctx, discord.utils.get(ctx.guild.channels, name=original_channel)
-            )
+            team1.name="Team 1"
+            team2.name="Team 2"
 
-            await ctx.response.send_message("Captains selected!")
-            await ctx.response.send_message(
+            self.update(ctx.guild.id, "team1", team1.serializeTeam())
+            self.update(ctx.guild.id, "team2", team2.serializeTeam())
+
+            players = Team()
+            for player in ctx.user.voice.channel.members:
+                if player != captain_1 and player != captain_2:
+                    players.add_player(Player(player.id, player.name))
+            
+            self.update(ctx.guild.id, "players", players.serializeTeam())
+
+            await self.printEmbed(ctx, team1, team2, players)
+
+            await ctx.channel.send("Captains selected!")
+            await ctx.channel.send(
                 captain_1.mention
-                + ', type ".choose  @_____" to pick a player for your team'
+                + ', use "/choose  @_____" to pick a player for your team'
             )
 
 
     # function for captain to choose a specific team member
     async def chooseFunc(self, ctx, member):
-        # TODO: remove drafted, captainsNum
-        drafted = self.get(ctx.guild.id, "drafted")
-        team_size = self.get(ctx.guild.id, "team_size")
-        captainNum = self.get(ctx.guild.id, "captainNum")
-        captain1id = self.get(ctx.guild.id, "captain1")
-        captain2id = self.get(ctx.guild.id, "captain2")
+        captain1Ser = self.get(ctx.guild.id, "captain1")
+        captain2Ser = self.get(ctx.guild.id, "captain2")
 
-        captain1 = discord.utils.get(ctx.guild.members, id=captain1id)
-        captain2 = discord.utils.get(ctx.guild.members, id=captain2id)
+        captain1 = Player()
+        captain1.deserializePlayer(captain1Ser)
+        captain2 = Player()
+        captain2.deserializePlayer(captain2Ser)
+
+        playersSer = self.get(ctx.guild.id, "players")
+        players = Team()
+        players.deserializeTeam(playersSer)
+
+        team_size = self.get(ctx.guild.id, "team_size")
+        turn = int(self.get(ctx.guild.id, "turn"))
 
         # TODO: clean this up. maybe use guard clauses instead?
-        if drafted < (team_size * 2):
-            if captainNum == 1 and ctx.message.author.id == captain1.id:
+        if players.get_players() != []:
+            if turn == 1 and ctx.user.id == captain1.id:
                 await self.chooseHelper(ctx, member, 1)
-            elif captainNum == 2 and ctx.message.author.id == captain2.id:
+            elif turn == 2 and ctx.message.author.id == captain2.id:
                 await self.chooseHelper(ctx, member, 2)
             else:
-                if (captainNum == 1 and ctx.message.author.id == captain2.id) or (
-                    captainNum == 2 and ctx.message.author.id == captain1.id
+                if (turn == 1 and ctx.user.id == captain2.id) or (
+                    turn == 2 and ctx.user.id == captain1.id
                 ):
                     await ctx.response.send_message("Not Your Turn!")
                 elif (
@@ -271,63 +273,69 @@ class helpers():
 
 
     async def getRandomMember(self, ctx):
-        players = self.get(ctx.guild.id, "players")
+        playersSer = self.get(ctx.guild.id, "players")
 
-        player_members = []
+        players = Team().deserializeTeam(playersSer)
 
-        for player in players:
-            player_members.append(discord.utils.get(
-                ctx.guild.members, name=player))
+        player_members = players.get_players()
 
         # TODO: instead, choose a random index in [0, arr_size - 1] and use that.
         # no need to shuffle
         m = np.array(player_members)
         np.random.shuffle(m)
 
-        return m[0]
+        member = discord.utils.get(ctx.guild.members, id=m[0].get_id())
+
+        return member
 
 
     # helper fn for choosing team members from players that haven't been chosen
     # TODO: using capNum sounds messy. why not just use their id?
-    async def chooseHelper(self, ctx, member, capNum):
+    async def chooseHelper(self, ctx, member, turn):
         # TODO: remove result1, result2
-        captain1 = self.get(ctx.guild.id, "captain1")
-        captain2 = self.get(ctx.guild.id, "captain2")
-        players = self.get(ctx.guild.id, "players")
-        team1 = self.get(ctx.guild.id, "team1")
-        team2 = self.get(ctx.guild.id, "team2")
-        result1 = self.get(ctx.guild.id, "result1")
-        result2 = self.get(ctx.guild.id, "result2")
-        ids = self.get(ctx.guild.id, "ids")
+        captain1Ser = self.get(ctx.guild.id, "captain1")
+        captain2Ser = self.get(ctx.guild.id, "captain2")
+        playersSer = self.get(ctx.guild.id, "players")
+        team1Ser = self.get(ctx.guild.id, "team1")
+        team2Ser = self.get(ctx.guild.id, "team2")
 
-        captain1 = discord.utils.get(ctx.guild.members, id=captain1id)
-        captain2 = discord.utils.get(ctx.guild.members, id=captain2id)
+        captain1 = Player()
+        captain1.deserializePlayer(captain1Ser)
+        captain2 = Player()
+        captain2.deserializePlayer(captain2Ser)
 
-        channel = ctx.message.author.voice.channel
+        players = Team()
+        players.deserializeTeam(playersSer)
+        team1 = Team()
+        team1.deserializeTeam(team1Ser)
+        team2 = Team()
+        team2.deserializeTeam(team2Ser)
+
+        channel = ctx.user.voice.channel
         # TODO: what is the purpose of switch?
         switch = True
+        player = Player(member.id, member.name)
 
         if (
-            member not in team1
-            and member not in team2
-            and member.name in players
+            player not in team1.get_players()
+            and player not in team2.get_players()
+            and player in players.get_players()
         ):
-            if capNum == 1:
-                result1 += "\n" + member.name
-                team1.append(member.name)
-                self.update(ctx.guild.id, "team1", team1)
-                self.update(ctx.guild.id, "result1", result1)
+            if turn == 1:
+                team1.add_player(player)
+
+                team1Str = team1.serializeTeam()
+                self.update(ctx.guild.id, "team1", team1Str)
             else:
-                result2 += "\n" + member.name
-                team2.append(member.name)
-                self.update(ctx.guild.id, "team2", team2)
-                self.update(ctx.guild.id, "result2", result2)
+                team2.add_player(player)
 
-            players.remove(member.name)
-            ids.append(member.id)
+                team2Str = team2.serializeTeam()
+                self.update(ctx.guild.id, "team2", team2Str)
 
-            self.update(ctx.guild.id, "players", players)
-            self.update(ctx.guild.id, "ids", ids)
+            players.remove_player(player)
+
+            playersStr = players.serializeTeam()
+            self.update(ctx.guild.id, "players", playersStr)
 
             await self.printEmbed(ctx, channel)
         else:
@@ -343,25 +351,28 @@ class helpers():
             )
             return
 
-        if capNum == 2 and switch:
-            self.update(ctx.guild.id, "captainNum", 1)
+        c1member = discord.utils.get(ctx.guild.members, id=captain1.id)
+        c2member = discord.utils.get(ctx.guild.members, id=captain2.id)
+
+        if turn == 2 and switch:
+            self.update(ctx.guild.id, "turn", 1)
             await ctx.response.send_message(
-                captain1.mention + ', use "/choose  @_____" to pick a player for your team'
+                c1member.mention + ', use "/choose  @_____" to pick a player for your team'
             )
-        elif capNum == 1 and switch:
-            self.update(ctx.guild.id, "captainNum", 2)
+        elif turn == 1 and switch:
+            self.update(ctx.guild.id, "turn", 2)
             await ctx.response.send_message(
-                captain2.mention + ', use "/choose  @_____" to pick a player for your team'
+                c2member.mention + ', use "/choose  @_____" to pick a player for your team'
             )
         else:
-            if capNum == 1:
+            if turn == 1:
                 await ctx.response.send_message(
-                    captain1.mention
+                    c1member.mention
                     + ', type "/use  @_____" to pick a player for your team'
                 )
             else:
                 await ctx.response.send_message(
-                    captain2.mention
+                    c2member.mention
                     + ', use "/choose  @_____" to pick a player for your team'
                 )
 

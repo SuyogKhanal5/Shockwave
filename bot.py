@@ -164,28 +164,34 @@ async def returnAll(ctx):
     guild=discord.Object(id=526081127643873280)
 )
 async def captains(ctx, captain_1: discord.Member = None, captain_2: discord.Member = None, random: bool = False):
-    if len(ctx.message.author.voice.channel.members) < 2:
+    if ctx.user.voice.channel == None or len(ctx.user.voice.channel.members) < 2:
         ctx.response.send_message("Not enough players in the voice channel!")
     else:
+        playerTeam = Team()
+        playerTeam.set_name("Players")
+        playerTeam.set_id(0)
+
+        for player in ctx.user.voice.channel.members:
+            newPlayer = Player()
+            newPlayer.set_id(player.id)
+            newPlayer.set_name(player.name)
+            playerTeam.add_player(newPlayer)
+
+        helperObj.update(ctx.guild.id, "players", playerTeam.serializeTeam())
+        
         if random:
-            players = []
-            for player in ctx.message.author.voice.channel.members:
-                players.append(player.name)
-
-            helperObj.update(ctx.guild.id, "players", players)
-
             # randomly choose captains
-            captain1 = await helperObj.getRandomMember(ctx)
-            while captain1 is None:
-                captain1 = await helperObj.getRandomMember(ctx)
+            if captain_1 is None:
+                captain_1 = await helperObj.getRandomMember(ctx)
 
             # make sure captain1 and captain2 are different
-            captain2 = await helperObj.getRandomMember(ctx)
-            while captain2 is None and captain2 == captain1:
-                captain2 = await helperObj.getRandomMember(ctx)
+            captain_2 = await helperObj.getRandomMember(ctx)
+
+            while captain_2 is None or captain_2 == captain_1:
+                captain_2 = await helperObj.getRandomMember(ctx)
 
         # TODO: given our current code, is this check needed? yes since they can pass in no captains and random is false with more than 2 in vc
-        if captain1 is None or captain_2 is None:
+        if captain_1 is None or captain_2 is None:
             ctx.response.send_message("Mention two team captains!")
 
         await helperObj.captainsHelper(ctx, captain_1, captain_2)

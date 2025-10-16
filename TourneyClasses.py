@@ -1,9 +1,9 @@
 import discord
 
 class Player:
-    def __init__(self) -> None:
-        self.id = None
-        self.name = None
+    def __init__(self, id=None, name=None) -> None:
+        self.id = id
+        self.name = name
 
     def set_id(self, id: int) -> None:
         self.id = id
@@ -126,11 +126,13 @@ class Team:
 
         currentPlayer = ""
         i = 0
-
-        for i in range(int(serializedArr[3])):
+        
+        for playerIndex in range(int(serializedArr[3])):
             # iterate till (
             tupleLen = ''
-            j = 0 
+            currentPlayer = ""
+            j = 0
+
             while serializedArr[2][i+j] != '(':
                 tupleLen += serializedArr[2][i+j]
                 j += 1
@@ -141,14 +143,14 @@ class Team:
 
                 tupleLen = int(tupleLen)
                 
-                for k in range(i+1, i+tupleLen+2):
+                for k in range(i+2, i+tupleLen+2):
                     currentPlayer += serializedArr[2][k]
 
                 player = Player()
                 player.deserializePlayer(currentPlayer[1:])
 
                 newPlayerList.append(player)
-                i += tupleLen + 1
+                i += tupleLen + j
 
         self.players = newPlayerList
         self.size = serialized[3]
