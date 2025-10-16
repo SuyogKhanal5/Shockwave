@@ -10,12 +10,12 @@ class Player:
 
     def get_id(self) -> int:
         return self.id
+    
+    def get_name(self) -> str:
+        return self.name
 
     def set_name(self, name: str) -> None:
         self.name = name
-
-    def get_name(self) -> str:
-        return self.name
     
     # Convert from discord.Member to Player obj
     def convertFromMember(self, member: discord.Member) -> None:

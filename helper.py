@@ -411,4 +411,3 @@ class helpers():
             + str(invite_link)
         )
         await channel.send(content)
-        await ctx.response.send_message("Sent an invite for the " + str(team_size * 2) + " man!")

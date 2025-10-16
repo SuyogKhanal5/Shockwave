@@ -37,6 +37,7 @@ roles = {
 
 # create client object and slash commands
 intents = discord.Intents.default()
+intents.members = True
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
@@ -232,13 +233,27 @@ async def clearAll(ctx, clear_channels: bool = False, clear_tournament: bool = F
 
 @tree.command(
     name="notify",
-    description="Notify a player of an invite to a team",
+    description="Send a server member an invite to the channel",
     guild=discord.Object(id=526081127643873280)
 )
 async def notify(ctx, member: discord.Member):
     await helperObj.notifyHelper(ctx, member)
+    team_size = helperObj.get(ctx.guild.id, "team_size")
+    await ctx.response.send_message("Sent an invite for the " + str(team_size * 2) + " man!")
 
+@tree.command(
+    name="notify-role",
+    description="Send a role an invite to the channel",
+    guild=discord.Object(id=526081127643873280)
+)
+async def notify(ctx, role: discord.Role):
+    members = role.members
+    for member in members:
+        await helperObj.notifyHelper(ctx, member)
 
+    team_size = helperObj.get(ctx.guild.id, "team_size")
+    await ctx.response.send_message("Sent an invite for the " + str(team_size * 2) + " man!")
+    
 @tree.command(
     name="roll",
     description="Roll a number between 1 and the number you provide",
