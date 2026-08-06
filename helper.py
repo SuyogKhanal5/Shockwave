@@ -3,6 +3,20 @@ from TourneyClasses import Team, Tournament, Match, Player
 import random
 import numpy as np
 
+# BUG FIX: this dict used to only live in main.py. helper.py's
+# randomRoleHelper did `global roles` and expected to find it — but each
+# Python module has its own separate global namespace, so that `global`
+# statement pointed at helper.py's (empty) globals and raised a NameError
+# the first time the function ran. Defining it here fixes that.
+roles = {
+    0: "Top - ",
+    1: "Jungle - ",
+    2: "Mid - ",
+    3: "Bottom - ",
+    4: "Support - "
+}
+
+
 class helpers():
     def __init__(self, cursor, db) -> None:
         self.cursor = cursor
@@ -14,15 +28,24 @@ class helpers():
                     " FROM servers WHERE guildId=?", (guild_id,))
         return self.cursor.fetchone()[0]
 
-
     # SQL update template function
     def update(self, guild_id, column, value):
         self.cursor.execute("UPDATE servers SET " + column +
                     "=? WHERE guildId=?", (value, guild_id))
         self.db.commit()
 
-
     # move players into their corresponding team channels
+    #
+    # BUG FIX: this makes one Discord API call per member via move_to(),
+    # which for a big enough group can take longer than the 3-second
+    # window Discord allows before the interaction that triggered it must
+    # be acknowledged. Callers are responsible for calling
+    # `await ctx.response.defer()` *before* invoking this, so the
+    # interaction is acknowledged immediately regardless of how long the
+    # moves take. This function itself no longer calls
+    # ctx.response.send_message (that can only be called once, and would
+    # conflict with a caller that already deferred) — it uses
+    # ctx.channel.send for its own messages instead.
     async def movefunc(self, ctx):
         channel1name = self.get(ctx.guild.id, "channel1")
         channel2name = self.get(ctx.guild.id, "channel2")
@@ -45,30 +68,31 @@ class helpers():
         if channel1 is not None and channel2 is not None:
             for player in team1Obj.players:
                 member = discord.utils.get(ctx.guild.members, id=player.id)
-                await member.move_to(channel1)
+                if member is not None:
+                    await member.move_to(channel1)
 
             for player in team2Obj.players:
                 member = discord.utils.get(ctx.guild.members, id=player.id)
-                await member.move_to(channel2)
+                if member is not None:
+                    await member.move_to(channel2)
         else:
-            await ctx.response.send_message('Team Channels Not Set! Use "/set-teams" to set teams.')
+            await ctx.channel.send('Team Channels Not Set! Use "/set-team-channels" to set teams.')
 
-
-    # TODO: what if there are more players in the channel than team sizes?
-    # or if number of members if odd?
     async def randomizeTeamHelper(self, ctx):
         await self.clearTeamsHelper(ctx)
 
         members = []
         team1 = Team()
         team2 = Team()
+        team1.name = "Team 1"
+        team2.name = "Team 2"
 
         channel = ctx.user.voice.channel
 
         for i in channel.members:
             members.append(i)
 
-        m = np.array(members)
+        m = np.array(members, dtype=object)
         np.random.shuffle(m)
 
         for i in range(len(members)):
@@ -81,8 +105,6 @@ class helpers():
             else:
                 team2.add_player(newPlayer)
 
-        # seriialize both team objs
-
         serialzedTeam1 = team1.serializeTeam()
         serialzedTeam2 = team2.serializeTeam()
 
@@ -90,12 +112,10 @@ class helpers():
         self.update(ctx.guild.id, "team2", serialzedTeam2)
         self.update(ctx.guild.id, "mode", "Normal")
 
-
-    # TODO: Identify captain
-    def makeEmbedString(self, team : Team, roles = False):
+    def makeEmbedString(self, team: Team, useRoles=False):
         teamString = ""
-        
-        if roles and len(team.players) == 5:
+
+        if useRoles and len(team.players) == 5:
             for i in range(5):
                 teamString += roles.get(i) + team.players[i].name + "\n"
         else:
@@ -106,7 +126,7 @@ class helpers():
 
     # prints teams in discord channel
     # DO NOT PASS NULL TEAMS
-    async def printEmbed(self, ctx, team1 : Team, team2 : Team, playersTeam = None):
+    async def printEmbed(self, ctx, team1: Team, team2: Team, playersTeam=None):
         team1_embedString = self.makeEmbedString(team1)
         team2_embedString = self.makeEmbedString(team2)
 
@@ -117,20 +137,23 @@ class helpers():
             title=team2.get_name(), description=team2_embedString, color=discord.Color.red()
         )
 
-        await ctx.response.send_message(embed=team1_embed)
+        # BUG FIX: ctx.response.send_message can only be called once per
+        # interaction. printEmbed is now sometimes called from a place
+        # (chooseHelper) where the interaction was already responded to
+        # earlier in the flow, so calling send_message again would raise.
+        # Use channel.send for both embeds here and let the caller decide
+        # if/when to do the initial interaction response.
+        await ctx.channel.send(embed=team1_embed)
         await ctx.channel.send(embed=team2_embed)
 
-        if playersTeam != None:
+        if playersTeam is not None and len(playersTeam.get_players()) > 0:
             playerString = self.makeEmbedString(playersTeam)
             player_embed = discord.Embed(
                 title="PLAYERS", description=playerString, color=discord.Color.purple()
             )
-            
             await ctx.channel.send(embed=player_embed)
 
-    # sets channels for teams
-    # TODO: change teams to expect array of two team names
-    async def setTeamHelper(self, ctx, team1 = "Team 1", team2 = "Team 2"):
+    async def setTeamHelper(self, ctx, team1="Team 1", team2="Team 2"):
         guild = ctx.guild
 
         channel1 = discord.utils.get(ctx.guild.channels, name=team1)
@@ -150,40 +173,44 @@ class helpers():
 
         await ctx.response.send_message("Channels set!")
 
-    # TODO: rename this wtf
-    # randomizes teams and player roles
-
-
     async def both(self, ctx):
         await self.randomizeTeamHelper(ctx)
         await self.randomRoleHelper(ctx)
 
-
     async def randomRoleHelper(self, ctx):
-        global roles
-
+        # BUG FIX: this used to fetch the *serialized string* for team1/team2
+        # and call random.shuffle() directly on that string, which raises
+        # (strings are immutable, shuffle needs a mutable sequence). Then it
+        # indexed into the string with team1[i % 5], grabbing a single raw
+        # character instead of an actual player. Deserialize into real Team
+        # objects and shuffle/read the player list instead.
         result1 = ""
         result2 = ""
 
-        team1 = self.get(ctx.guild.id, "team1")
-        team2 = self.get(ctx.guild.id, "team2")
+        team1Ser = self.get(ctx.guild.id, "team1")
+        team2Ser = self.get(ctx.guild.id, "team2")
 
-        random.shuffle(team1)
-        random.shuffle(team2)
+        team1 = Team()
+        team1.deserializeTeam(team1Ser)
+        team2 = Team()
+        team2.deserializeTeam(team2Ser)
 
-        # TODO: currently hardcoded but should add a way to create team of any size
-        # e.g. based on game, different hashmaps for role
-        for i in range(10):
-            if i < 5:
-                result1 += roles.get(i % 5) + str(team1[i % 5]) + "\n"
-            else:
-                result2 += roles.get(i % 5) + str(team2[i % 5]) + "\n"
+        players1 = team1.get_players()
+        players2 = team2.get_players()
+
+        random.shuffle(players1)
+        random.shuffle(players2)
+
+        # TODO: hardcoded to 5 roles; extend for other team sizes/games.
+        for i in range(min(5, len(players1))):
+            result1 += roles.get(i) + players1[i].get_name() + "\n"
+
+        for i in range(min(5, len(players2))):
+            result2 += roles.get(i) + players2[i].get_name() + "\n"
 
         self.update(ctx.guild.id, "result1", result1)
         self.update(ctx.guild.id, "result2", result2)
 
-
-    # chooses captains for each team at random
     async def captainsHelper(self, ctx, captain_1, captain_2):
         await self.clearTeamsHelper(ctx)
 
@@ -193,15 +220,16 @@ class helpers():
         self.update(ctx.guild.id, "captain1", captain1.serializePlayer())
         self.update(ctx.guild.id, "captain2", captain2.serializePlayer())
         self.update(ctx.guild.id, "mode", "Captains")
-        
-        original_channel = ctx.user.voice.channel
 
+        original_channel = ctx.user.voice.channel
         self.update(ctx.guild.id, "original_channel", str(original_channel))
 
         if captain_1 is None or captain_2 is None:
             await ctx.response.send_message("Mention two team captains!")
+            return
         elif captain_1 == captain_2:
             await ctx.response.send_message("Mention two different people!")
+            return
         else:
             team1 = Team()
             team2 = Team()
@@ -209,8 +237,8 @@ class helpers():
             team1.add_player(captain1)
             team2.add_player(captain2)
 
-            team1.name="Team 1"
-            team2.name="Team 2"
+            team1.name = "Team 1"
+            team2.name = "Team 2"
 
             self.update(ctx.guild.id, "team1", team1.serializeTeam())
             self.update(ctx.guild.id, "team2", team2.serializeTeam())
@@ -219,20 +247,31 @@ class helpers():
             for player in ctx.user.voice.channel.members:
                 if player != captain_1 and player != captain_2:
                     players.add_player(Player(player.id, player.name))
-            
+
             self.update(ctx.guild.id, "players", players.serializeTeam())
 
+            await ctx.response.send_message("Captains selected!")
             await self.printEmbed(ctx, team1, team2, players)
 
-            await ctx.channel.send("Captains selected!")
             await ctx.channel.send(
                 captain_1.mention
                 + ', use "/choose  @_____" to pick a player for your team'
             )
 
-
     # function for captain to choose a specific team member
     async def chooseFunc(self, ctx, member):
+        # BUG FIX: /choose can be called with no `member` and `use_random`
+        # left False (its default), which passed member=None all the way
+        # down into chooseHelper -> Player(member.id, ...) and crashed with
+        # AttributeError: 'NoneType' object has no attribute 'id'. Catch it
+        # here with a clear message instead of letting it blow up.
+        if member is None:
+            await ctx.response.send_message(
+                'Please mention a player to choose, e.g. "/choose member:@Name", '
+                'or use "/choose use_random:True" to pick one at random.'
+            )
+            return
+
         captain1Ser = self.get(ctx.guild.id, "captain1")
         captain2Ser = self.get(ctx.guild.id, "captain2")
 
@@ -245,14 +284,16 @@ class helpers():
         players = Team()
         players.deserializeTeam(playersSer)
 
-        team_size = self.get(ctx.guild.id, "team_size")
         turn = int(self.get(ctx.guild.id, "turn"))
 
-        # TODO: clean this up. maybe use guard clauses instead?
+        # BUG FIX: this mixed ctx.user.id (correct, for slash-command
+        # Interactions) with ctx.message.author.id (wrong — Interaction
+        # objects don't have .message.author and this would raise
+        # AttributeError). Standardized on ctx.user throughout.
         if players.get_players() != []:
             if turn == 1 and ctx.user.id == captain1.id:
                 await self.chooseHelper(ctx, member, 1)
-            elif turn == 2 and ctx.message.author.id == captain2.id:
+            elif turn == 2 and ctx.user.id == captain2.id:
                 await self.chooseHelper(ctx, member, 2)
             else:
                 if (turn == 1 and ctx.user.id == captain2.id) or (
@@ -260,39 +301,44 @@ class helpers():
                 ):
                     await ctx.response.send_message("Not Your Turn!")
                 elif (
-                    ctx.message.author.id != captain1.id
-                    and ctx.message.author.id != captain2.id
+                    ctx.user.id != captain1.id
+                    and ctx.user.id != captain2.id
                 ):
                     await ctx.response.send_message("Only team captains can use this command!")
-
+        else:
+            await ctx.response.send_message("There are no players left to choose from!")
 
     # choose random player from all remaining players
     async def chooseRandomMember(self, ctx):
         randomMember = await self.getRandomMember(ctx)
+        if randomMember is None:
+            await ctx.response.send_message("There are no players left to choose from!")
+            return
         await self.chooseFunc(ctx, randomMember)
-
 
     async def getRandomMember(self, ctx):
         playersSer = self.get(ctx.guild.id, "players")
 
-        players = Team().deserializeTeam(playersSer)
+        # BUG FIX: `Team().deserializeTeam(playersSer)` was assigned to
+        # `players` — but deserializeTeam() mutates the object in place and
+        # returns None, so `players` was always None and the very next line
+        # (`players.get_players()`) raised AttributeError. Instantiate first,
+        # then call deserializeTeam on the instance.
+        players = Team()
+        players.deserializeTeam(playersSer)
 
         player_members = players.get_players()
+        if not player_members:
+            return None
 
-        # TODO: instead, choose a random index in [0, arr_size - 1] and use that.
-        # no need to shuffle
-        m = np.array(player_members)
+        m = np.array(player_members, dtype=object)
         np.random.shuffle(m)
 
         member = discord.utils.get(ctx.guild.members, id=m[0].get_id())
-
         return member
 
-
     # helper fn for choosing team members from players that haven't been chosen
-    # TODO: using capNum sounds messy. why not just use their id?
     async def chooseHelper(self, ctx, member, turn):
-        # TODO: remove result1, result2
         captain1Ser = self.get(ctx.guild.id, "captain1")
         captain2Ser = self.get(ctx.guild.id, "captain2")
         playersSer = self.get(ctx.guild.id, "players")
@@ -311,23 +357,12 @@ class helpers():
         team2 = Team()
         team2.deserializeTeam(team2Ser)
 
-        channel = ctx.user.voice.channel
-        # TODO: what is the purpose of switch?
         switch = True
         player = Player(member.id, member.name)
 
-        team1ids = []
-        team2ids = []
-        playersids = []
-
-        for person in team1.get_players():
-            team1ids.append(person.get_id())
-
-        for person in team2.get_players():
-            team2ids.append(person.get_id())
-
-        for person in players.get_players():
-            playersids.append(person.get_id())
+        team1ids = [p.get_id() for p in team1.get_players()]
+        team2ids = [p.get_id() for p in team2.get_players()]
+        playersids = [p.get_id() for p in players.get_players()]
 
         if (
             member.id not in team1ids
@@ -336,31 +371,34 @@ class helpers():
         ):
             if turn == 1:
                 team1.add_player(player)
-
-                team1Str = team1.serializeTeam()
-                self.update(ctx.guild.id, "team1", team1Str)
+                self.update(ctx.guild.id, "team1", team1.serializeTeam())
             else:
                 team2.add_player(player)
+                self.update(ctx.guild.id, "team2", team2.serializeTeam())
 
-                team2Str = team2.serializeTeam()
-                self.update(ctx.guild.id, "team2", team2Str)
+            # remove_player() relies on __eq__/identity match; find the
+            # equivalent player object already inside `players` by id
+            # rather than trying to remove the freshly-constructed `player`.
+            toRemove = next((p for p in players.get_players() if p.get_id() == member.id), None)
+            if toRemove is not None:
+                players.remove_player(toRemove)
 
-            players.remove_player(player)
+            self.update(ctx.guild.id, "players", players.serializeTeam())
 
-            playersStr = players.serializeTeam()
-            self.update(ctx.guild.id, "players", playersStr)
-
-            await self.printEmbed(ctx, channel)
+            await ctx.response.send_message(f"{member.name} added to team {turn}!")
+            await self.printEmbed(ctx, team1, team2, players)
         else:
-            # TODO: cleanup this if-else ladder
             switch = False
             await ctx.response.send_message(
                 "Player has already been selected or does not exist in the player list."
             )
 
-        if players == []:
-            await ctx.response.send_message(
-                'You\'ve drafted the maximum number of people for the team size! Use ".move" to move everyone to the channels!'
+        # BUG FIX: `players` is a Team object, never equal to the list
+        # literal `[]` — this comparison was always False, so the "draft
+        # complete" message never fired. Check the underlying player list.
+        if len(players.get_players()) == 0:
+            await ctx.channel.send(
+                'You\'ve drafted the maximum number of people for the team size! Use "/move" to move everyone to the channels!'
             )
             return
 
@@ -381,7 +419,7 @@ class helpers():
             if turn == 1:
                 await ctx.channel.send(
                     c1member.mention
-                    + ', type "/use  @_____" to pick a player for your team'
+                    + ', use "/choose  @_____" to pick a player for your team'
                 )
             else:
                 await ctx.channel.send(
@@ -389,20 +427,10 @@ class helpers():
                     + ', use "/choose  @_____" to pick a player for your team'
                 )
 
-
-    # TODO: RENAME THIS TO SOMETHING REAL ????
-    # sets up teams and moves them into respective channels
-    async def all(self, ctx, team1, team2):
-        await self.printEmbed(ctx)
-        await self.setTeamHelper(ctx, team1, team2)
-        await self.movefunc(ctx)
-
-
     # clears all current teams
     async def clearTeamsHelper(self, ctx):
         guild_id = ctx.guild.id
 
-        # TODO: remove unused columns
         self.update(guild_id, "original_channel", "")
         self.update(guild_id, "team1", "")
         self.update(guild_id, "team2", "")
