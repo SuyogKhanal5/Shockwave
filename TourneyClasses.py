@@ -26,10 +26,13 @@ class Player:
         return '({},{})'.format(self.id, self.name)
     
     def deserializePlayer(self, serialized: str) -> None:
-        serializedCut = serialized[1:-1]
+        serializedCut = serialized[0:-1]
         serializedArr = serializedCut.split(',')
+
+        if serializedArr[0][0] == '(':
+            serializedArr[0] = serializedArr[0][1:]
         
-        self.id = int(serializedArr[0])
+        self.id = int(serializedArr[0]) # issue was here where too much was cut off from players team, maybe issue with captains?
         self.name = serializedArr[1]
     
 class Team:
@@ -45,11 +48,11 @@ class Team:
 
     def add_player(self, player: Player) -> None:
         self.players.append(player)
-        self.size += 1
+        # self.size += 1
 
     def remove_player(self, player: Player) -> None:
         self.players.remove(player)
-        self.size -= 1
+        # self.size -= 1
 
     def set_name(self, name: str) -> None:
         self.name = name

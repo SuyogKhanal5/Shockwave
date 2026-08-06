@@ -316,10 +316,23 @@ class helpers():
         switch = True
         player = Player(member.id, member.name)
 
+        team1ids = []
+        team2ids = []
+        playersids = []
+
+        for person in team1.get_players():
+            team1ids.append(person.get_id())
+
+        for person in team2.get_players():
+            team2ids.append(person.get_id())
+
+        for person in players.get_players():
+            playersids.append(person.get_id())
+
         if (
-            player not in team1.get_players()
-            and player not in team2.get_players()
-            and player in players.get_players()
+            member.id not in team1ids
+            and member.id not in team2ids
+            and member.id in playersids
         ):
             if turn == 1:
                 team1.add_player(player)
@@ -356,22 +369,22 @@ class helpers():
 
         if turn == 2 and switch:
             self.update(ctx.guild.id, "turn", 1)
-            await ctx.response.send_message(
+            await ctx.channel.send(
                 c1member.mention + ', use "/choose  @_____" to pick a player for your team'
             )
         elif turn == 1 and switch:
             self.update(ctx.guild.id, "turn", 2)
-            await ctx.response.send_message(
+            await ctx.channel.send(
                 c2member.mention + ', use "/choose  @_____" to pick a player for your team'
             )
         else:
             if turn == 1:
-                await ctx.response.send_message(
+                await ctx.channel.send(
                     c1member.mention
                     + ', type "/use  @_____" to pick a player for your team'
                 )
             else:
-                await ctx.response.send_message(
+                await ctx.channel.send(
                     c2member.mention
                     + ', use "/choose  @_____" to pick a player for your team'
                 )
