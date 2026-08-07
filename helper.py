@@ -17,6 +17,33 @@ ELO_K_FACTOR = 32
 # teams — keeps matchups from being the exact same optimal split every
 # time, at the cost of the balance being only "roughly" fair.
 ELO_BALANCE_JITTER = 100
+# How long the /clear confirmation buttons stay clickable before the
+# reset is abandoned on its own.
+CLEAR_CONFIRM_TIMEOUT_SECONDS = 30
+
+# League-style rank tiers for /stats. Each tier spans 250 elo, with
+# DEFAULT_ELO (1000) landing every new player in the middle at Platinum —
+# ascending order, (elo threshold, tier name, emoji).
+ELO_TIERS = [
+    (0, "Iron", "⚙️"),
+    (250, "Bronze", "\U0001f949"),
+    (500, "Silver", "\U0001f948"),
+    (750, "Gold", "\U0001f947"),
+    (1000, "Platinum", "\U0001f537"),
+    (1250, "Diamond", "\U0001f48e"),
+    (1500, "Master", "\U0001f7e3"),
+    (1750, "Grandmaster", "\U0001f534"),
+    (2000, "Challenger", "\U0001f451"),
+]
+
+# Divisions within a tier, lowest to highest — the same I/II/III/IV split
+# League uses, with "I" nearest promotion into the next tier up.
+ELO_DIVISIONS = ["IV", "III", "II", "I"]
+
+# Only the first this-many tiers (Iron through Diamond) show a division —
+# Master and above show just the tier, same as League showing raw LP
+# instead of I-IV once you hit Master.
+ELO_DIVISIONED_TIER_COUNT = 6
 
 # BUG FIX: this dict used to only live in main.py. helper.py's
 # randomRoleHelper did `global roles` and expected to find it — but each
@@ -30,6 +57,58 @@ roles = {
     3: "Bottom - ",
     4: "Support - "
 }
+
+
+# Confirm/cancel buttons for /clear's clear_elo and clear_economy flags.
+# Both reset state for every player in the server, so neither runs until
+# whoever ran the command clicks "Confirm reset" on this view.
+class ConfirmResetView(discord.ui.View):
+    def __init__(self, helperObj, guild_id, guild_name, invoker_id, clear_economy):
+        super().__init__(timeout=CLEAR_CONFIRM_TIMEOUT_SECONDS)
+        self.helperObj = helperObj
+        self.guild_id = guild_id
+        self.guild_name = guild_name
+        self.invoker_id = invoker_id
+        self.clear_economy = clear_economy
+        self.message = None
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.invoker_id:
+            await interaction.response.send_message(
+                "Only the person who ran /clear can confirm this.", ephemeral=True
+            )
+            return False
+        return True
+
+    def _disable_buttons(self):
+        for item in self.children:
+            item.disabled = True
+
+    @discord.ui.button(label="Confirm reset", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction, button):
+        if self.clear_economy:
+            self.helperObj.resetEconomyHelper(self.guild_id)
+            result = (
+                "Economy data (balance, elo, game record, betting record, gold "
+                f"wagered/won/lost) has been reset for every player in **{self.guild_name}**."
+            )
+        else:
+            self.helperObj.resetEloHelper(self.guild_id)
+            result = f"Elo has been reset to {DEFAULT_ELO} for every player in **{self.guild_name}**."
+        self._disable_buttons()
+        self.stop()
+        await interaction.response.edit_message(content=result, view=self)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction, button):
+        self._disable_buttons()
+        self.stop()
+        await interaction.response.edit_message(content="Cancelled — nothing was reset.", view=self)
+
+    async def on_timeout(self):
+        self._disable_buttons()
+        if self.message is not None:
+            await self.message.edit(view=self)
 
 
 class helpers():
@@ -163,6 +242,31 @@ class helpers():
         if not members:
             return DEFAULT_ELO
         return round(sum(elo_by_id[m.id] for m in members) / len(members))
+
+    # Maps a raw elo number to a League-style "emoji tier division" label,
+    # e.g. "\U0001f537 Platinum III" or "\U0001f7e3 Master" once divisions
+    # stop applying. ELO_TIERS is sorted ascending, so the last threshold
+    # at or below elo wins — e.g. exactly 1000 is Platinum, not Gold;
+    # anything above the top tier's threshold is still Challenger.
+    def eloRankLabel(self, elo):
+        tier_index = 0
+        for i, (threshold, _name, _emoji) in enumerate(ELO_TIERS):
+            if elo >= threshold:
+                tier_index = i
+            else:
+                break
+
+        threshold, name, emoji = ELO_TIERS[tier_index]
+
+        if tier_index >= ELO_DIVISIONED_TIER_COUNT:
+            return f"{emoji} {name}"
+
+        span = ELO_TIERS[tier_index + 1][0] - threshold
+        offset = max(elo - threshold, 0)
+        segment_size = span / len(ELO_DIVISIONS)
+        division_index = min(int(offset // segment_size), len(ELO_DIVISIONS) - 1)
+
+        return f"{emoji} {name} {ELO_DIVISIONS[division_index]}"
 
     # Forms elo-balanced teams from the caller's voice channel and marks
     # the game as ranked, so elo actually gets updated when the winner is
@@ -658,6 +762,33 @@ class helpers():
         self.cursor.execute("DELETE FROM economy WHERE guildId=?", (guild_id,))
         self.db.commit()
 
+    # Resets every existing player's elo back to DEFAULT_ELO for a guild,
+    # leaving balance/wins/losses/gold untouched — unlike resetEconomyHelper,
+    # which wipes the whole row.
+    def resetEloHelper(self, guild_id):
+        self.cursor.execute(
+            "UPDATE economy SET elo=? WHERE guildId=?", (DEFAULT_ELO, guild_id)
+        )
+        self.db.commit()
+
+    # Posts the confirm/cancel view for /clear's clear_elo and clear_economy
+    # flags — neither actually touches player data until the invoker clicks
+    # "Confirm reset" on the message this sends.
+    async def confirmDestructiveClearHelper(self, ctx, clear_economy):
+        if clear_economy:
+            warning = (
+                "This will **wipe the entire economy** (balance, elo, game record, "
+                "betting record, gold wagered/won/lost) for **every player** in "
+                f"**{ctx.guild.name}**. This can't be undone."
+            )
+        else:
+            warning = (
+                f"This will **reset elo back to {DEFAULT_ELO}** for **every player** "
+                f"in **{ctx.guild.name}**. This can't be undone."
+            )
+        view = ConfirmResetView(self, ctx.guild.id, ctx.guild.name, ctx.user.id, clear_economy)
+        view.message = await ctx.followup.send(warning, view=view)
+
     def getEconomy(self, guild_id, user_id, column):
         self.cursor.execute(
             f"SELECT {column} FROM economy WHERE guildId=? AND userId=?",
@@ -1113,10 +1244,12 @@ class helpers():
         games_played = game_wins + game_losses
         game_win_rate = f"{(game_wins / games_played) * 100:.1f}%" if games_played > 0 else "N/A"
 
+        elo_rank = self.eloRankLabel(elo)
+
         embed = discord.Embed(
             title=f"{target.display_name}'s Stats", color=discord.Color.gold()
         )
-        embed.add_field(name="Elo", value=str(elo), inline=True)
+        embed.add_field(name="Elo", value=f"{elo} ({elo_rank})", inline=True)
         embed.add_field(name="Game Record", value=f"{game_wins}W - {game_losses}L", inline=True)
         embed.add_field(name="Game Win Rate", value=game_win_rate, inline=True)
         embed.add_field(name="Balance", value=f"{balance} gold", inline=True)

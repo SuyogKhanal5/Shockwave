@@ -109,14 +109,21 @@
             <span class="cmd-name"><span class="slash">/</span>clear</span>
             <span class="cmd-badge">setup</span>
           </div>
-          <p class="cmd-desc">Wipes the current teams and draft state so you can start a fresh session. Channel names, tournament data, and elo are kept unless you explicitly clear them too.</p>
+          <p class="cmd-desc">Wipes the current teams and draft state so you can start a fresh session. Channel names, tournament data, and player elo/economy are kept unless you explicitly clear them too.</p>
           <table class="params">
             <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
             <tr><td class="param-name">clear_channels</td><td class="param-type">boolean, optional</td><td>Also forget the saved team channel names.</td></tr>
             <tr><td class="param-name">clear_tournament</td><td class="param-type">boolean, optional</td><td>Also clear tournament bracket data.</td></tr>
-            <tr><td class="param-name">clear_elo</td><td class="param-type">boolean, optional</td><td>Legacy/unused field, kept for backwards compatibility — does not affect anyone's actual elo rating. Use <code class="inline">clear_economy</code> below to reset player elo.</td></tr>
-            <tr><td class="param-name">clear_economy</td><td class="param-type">boolean, optional</td><td>Also wipe every member's stats for this server — balance, elo, game record, betting record, and gold wagered/won/lost. This is server-wide and can't be undone.</td></tr>
+            <tr><td class="param-name">clear_elo</td><td class="param-type">boolean, optional</td><td>Resets every player's elo back to 1000 for this server — balance, wins/losses, and gold are untouched. Server-wide, so it asks for confirmation before it runs (see below).</td></tr>
+            <tr><td class="param-name">clear_economy</td><td class="param-type">boolean, optional</td><td>Wipes every member's stats for this server entirely — balance, elo, game record, betting record, and gold wagered/won/lost. Also server-wide and confirmation-gated; if both this and <code class="inline">clear_elo</code> are set, this one wins since it already includes an elo reset.</td></tr>
           </table>
+          <div class="cmd-note">
+            <strong>Both flags require confirmation.</strong> Since <code class="inline">clear_elo</code> and
+            <code class="inline">clear_economy</code> reset data for <em>every player</em> in the server, neither
+            runs immediately — Shockwave posts a warning with "Confirm reset" / "Cancel" buttons, and only the
+            member who ran <code class="inline">/clear</code> can click them. The prompt expires after 30
+            seconds with nothing changed if it's ignored.
+          </div>
         </div>
       </section>
 
@@ -425,7 +432,7 @@
             <span class="cmd-name"><span class="slash">/</span>stats</span>
             <span class="cmd-badge">betting</span>
           </div>
-          <p class="cmd-desc">The full picture for one player: elo, actual in-game win/loss record (separate from betting), betting record, balance, and net gold won or lost overall — all in one embed.</p>
+          <p class="cmd-desc">The full picture for one player: elo (shown with a League-style rank), actual in-game win/loss record (separate from betting), betting record, balance, and net gold won or lost overall — all in one embed.</p>
           <table class="params">
             <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
             <tr><td class="param-name">member</td><td class="param-type">member, optional</td><td>Whose stats to look up. Defaults to you.</td></tr>
@@ -437,6 +444,25 @@
             update the Game Record above but never touch elo. When it does update, the size of the change is
             based on the average rating on each side — beating a higher-rated team gains more than beating a
             lower-rated one.
+          </div>
+          <div class="cmd-note">
+            <strong>Elo shows an emoji rank alongside the number,</strong> the same way League does — nine
+            tiers, each spanning 250 elo, with the 1000 starting elo landing everyone in Platinum by default.
+            Iron through Diamond also break down into four divisions (IV lowest, I highest) the same way
+            League's do; Master and up just show the tier, same as League switching to raw LP once you're
+            that high:
+            <table class="params" style="margin-top:10px;">
+              <tr><th>Elo</th><th>Rank</th><th>Divisions</th></tr>
+              <tr><td class="param-name">0 – 249</td><td>⚙️ Iron</td><td>IV – I</td></tr>
+              <tr><td class="param-name">250 – 499</td><td>🥉 Bronze</td><td>IV – I</td></tr>
+              <tr><td class="param-name">500 – 749</td><td>🥈 Silver</td><td>IV – I</td></tr>
+              <tr><td class="param-name">750 – 999</td><td>🥇 Gold</td><td>IV – I</td></tr>
+              <tr><td class="param-name">1000 – 1249</td><td>🔷 Platinum</td><td>IV – I</td></tr>
+              <tr><td class="param-name">1250 – 1499</td><td>💎 Diamond</td><td>IV – I</td></tr>
+              <tr><td class="param-name">1500 – 1749</td><td>🟣 Master</td><td>—</td></tr>
+              <tr><td class="param-name">1750 – 1999</td><td>🔴 Grandmaster</td><td>—</td></tr>
+              <tr><td class="param-name">2000+</td><td>👑 Challenger</td><td>—</td></tr>
+            </table>
           </div>
         </div>
 

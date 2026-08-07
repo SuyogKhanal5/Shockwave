@@ -653,6 +653,40 @@ class ResetEconomyHelperTests(HelperTestCase):
         self.assertEqual(self.helperObj.getEconomy(other_guild_id, 901, "balance"), 777)
 
 
+class ResetEloHelperTests(HelperTestCase):
+    async def test_resets_elo_only_for_the_guild_leaving_other_stats_alone(self):
+        self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.helperObj.ensureEconomyRow(GUILD_ID, 902, "Bob")
+        self.cursor.execute(
+            "UPDATE economy SET elo=1400, balance=500, wins=3 WHERE guildId=? AND userId=?",
+            (GUILD_ID, 901),
+        )
+        self.cursor.execute(
+            "UPDATE economy SET elo=700 WHERE guildId=? AND userId=?",
+            (GUILD_ID, 902),
+        )
+        self.db.commit()
+
+        other_guild_id = GUILD_ID + 1
+        insert_guild_row(self.cursor, self.db, guild_id=other_guild_id)
+        self.helperObj.ensureEconomyRow(other_guild_id, 901, "Alice")
+        self.cursor.execute(
+            "UPDATE economy SET elo=1600 WHERE guildId=? AND userId=?",
+            (other_guild_id, 901),
+        )
+        self.db.commit()
+
+        self.helperObj.resetEloHelper(GUILD_ID)
+
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "elo"), helper_module.DEFAULT_ELO)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 902, "elo"), helper_module.DEFAULT_ELO)
+        # balance/wins are untouched — only elo resets
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "balance"), 500)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "wins"), 3)
+        # other guild's elo is untouched
+        self.assertEqual(self.helperObj.getEconomy(other_guild_id, 901, "elo"), 1600)
+
+
 class RandomRoleHelperTests(HelperTestCase):
     async def test_assigns_a_role_line_per_player(self):
         team1 = Team()
@@ -1448,7 +1482,7 @@ class StatsHelperTests(HelperTestCase):
 
         embed = ctx.response.send_message.call_args.kwargs["embed"]
         values = {f.name: f.value for f in embed.fields}
-        self.assertEqual(values["Elo"], "1000")
+        self.assertEqual(values["Elo"], "1000 (\U0001f537 Platinum IV)")
         self.assertEqual(values["Game Record"], "0W - 0L")
         self.assertEqual(values["Game Win Rate"], "N/A")
         self.assertEqual(values["Bet Win Rate"], "N/A")
@@ -1469,7 +1503,7 @@ class StatsHelperTests(HelperTestCase):
 
         embed = ctx.response.send_message.call_args.kwargs["embed"]
         values = {f.name: f.value for f in embed.fields}
-        self.assertEqual(values["Elo"], "1123")
+        self.assertEqual(values["Elo"], "1123 (\U0001f537 Platinum III)")
         self.assertEqual(values["Game Record"], "7W - 3L")
         self.assertEqual(values["Game Win Rate"], "70.0%")
         self.assertEqual(values["Bet Record"], "2W - 1L")
@@ -1490,7 +1524,42 @@ class StatsHelperTests(HelperTestCase):
         embed = ctx.response.send_message.call_args.kwargs["embed"]
         self.assertIn("Bob", embed.title)
         values = {f.name: f.value for f in embed.fields}
-        self.assertEqual(values["Elo"], "1200")
+        self.assertEqual(values["Elo"], "1200 (\U0001f537 Platinum I)")
+
+
+class EloRankLabelTests(HelperTestCase):
+    def test_maps_elo_to_the_expected_tier_and_division(self):
+        cases = [
+            (-500, "⚙️ Iron IV"),   # clamped, doesn't go negative
+            (0, "⚙️ Iron IV"),
+            (62, "⚙️ Iron IV"),
+            (63, "⚙️ Iron III"),
+            (124, "⚙️ Iron III"),
+            (125, "⚙️ Iron II"),
+            (186, "⚙️ Iron II"),
+            (188, "⚙️ Iron I"),
+            (249, "⚙️ Iron I"),
+            (250, "\U0001f949 Bronze IV"),
+            (499, "\U0001f949 Bronze I"),
+            (500, "\U0001f948 Silver IV"),
+            (749, "\U0001f948 Silver I"),
+            (750, "\U0001f947 Gold IV"),
+            (999, "\U0001f947 Gold I"),
+            (1000, "\U0001f537 Platinum IV"),
+            (1249, "\U0001f537 Platinum I"),
+            (1250, "\U0001f48e Diamond IV"),
+            (1499, "\U0001f48e Diamond I"),
+            # Master and above: no division, same as League showing raw LP
+            (1500, "\U0001f7e3 Master"),
+            (1749, "\U0001f7e3 Master"),
+            (1750, "\U0001f534 Grandmaster"),
+            (1999, "\U0001f534 Grandmaster"),
+            (2000, "\U0001f451 Challenger"),
+            (5000, "\U0001f451 Challenger"),
+        ]
+        for elo, expected in cases:
+            with self.subTest(elo=elo):
+                self.assertEqual(self.helperObj.eloRankLabel(elo), expected)
 
 
 class CancelBettingHelperTests(HelperTestCase):
@@ -1874,7 +1943,7 @@ class ClearCommandTests(BotModuleTestCase):
 
         self.assertEqual(self.bot.helperObj.get(guild_id, "channel1"), "Red")
 
-    async def test_clear_economy_wipes_player_stats_when_requested(self):
+    async def test_clear_economy_does_not_wipe_stats_until_confirmed(self):
         guild_id = 9032
         await self._insert_guild_row(guild_id)
         self.bot.helperObj.ensureEconomyRow(guild_id, 901, "Alice")
@@ -1886,9 +1955,98 @@ class ClearCommandTests(BotModuleTestCase):
 
         await self._command("clear").callback(ctx, clear_economy=True)
 
+        # "Cleared!" goes out immediately for the non-destructive parts...
+        ctx.response.send_message.assert_awaited_once_with("Cleared!")
+        # ...but the guild-wide economy wipe waits on the confirmation view.
+        self.bot.cursor.execute("SELECT COUNT(*) FROM economy WHERE guildId=?", (guild_id,))
+        self.assertEqual(self.bot.cursor.fetchone()[0], 1)
+        ctx.followup.send.assert_awaited_once()
+        self.assertIn("wipe the entire economy", ctx.followup.send.call_args.args[0])
+        self.assertIn("view", ctx.followup.send.call_args.kwargs)
+
+    async def test_confirming_clear_economy_wipes_stats(self):
+        guild_id = 9034
+        await self._insert_guild_row(guild_id)
+        self.bot.helperObj.ensureEconomyRow(guild_id, 901, "Alice")
+        self.bot.cursor.execute(
+            "UPDATE economy SET balance=1000 WHERE guildId=? AND userId=?", (guild_id, 901)
+        )
+        self.bot.mainDB.commit()
+        ctx = self._ctx(guild_id=guild_id)
+
+        await self._command("clear").callback(ctx, clear_economy=True)
+        view = ctx.followup.send.call_args.kwargs["view"]
+
+        click = self._ctx(guild_id=guild_id)
+        await view.confirm.callback(click)
+
         self.bot.cursor.execute("SELECT COUNT(*) FROM economy WHERE guildId=?", (guild_id,))
         self.assertEqual(self.bot.cursor.fetchone()[0], 0)
-        ctx.response.send_message.assert_awaited_once_with("Cleared!")
+        click.response.edit_message.assert_awaited_once()
+        self.assertIn("Economy data", click.response.edit_message.call_args.kwargs["content"])
+
+    async def test_clear_elo_resets_only_elo_after_confirmation(self):
+        guild_id = 9035
+        await self._insert_guild_row(guild_id)
+        self.bot.helperObj.ensureEconomyRow(guild_id, 901, "Alice")
+        self.bot.cursor.execute(
+            "UPDATE economy SET elo=1500, balance=250 WHERE guildId=? AND userId=?", (guild_id, 901)
+        )
+        self.bot.mainDB.commit()
+        ctx = self._ctx(guild_id=guild_id)
+
+        await self._command("clear").callback(ctx, clear_elo=True)
+
+        # the legacy servers.elo field clears immediately; real per-player
+        # elo does not, until the reset is confirmed.
+        self.assertEqual(self.bot.helperObj.get(guild_id, "elo"), "")
+        self.assertEqual(self.bot.helperObj.getEconomy(guild_id, 901, "elo"), 1500)
+
+        view = ctx.followup.send.call_args.kwargs["view"]
+        click = self._ctx(guild_id=guild_id)
+        await view.confirm.callback(click)
+
+        self.assertEqual(
+            self.bot.helperObj.getEconomy(guild_id, 901, "elo"), helper_module.DEFAULT_ELO
+        )
+        # balance is untouched — clear_elo only resets elo
+        self.assertEqual(self.bot.helperObj.getEconomy(guild_id, 901, "balance"), 250)
+
+    async def test_cancelling_clear_confirmation_leaves_data_untouched(self):
+        guild_id = 9036
+        await self._insert_guild_row(guild_id)
+        self.bot.helperObj.ensureEconomyRow(guild_id, 901, "Alice")
+        self.bot.cursor.execute(
+            "UPDATE economy SET elo=1500 WHERE guildId=? AND userId=?", (guild_id, 901)
+        )
+        self.bot.mainDB.commit()
+        ctx = self._ctx(guild_id=guild_id)
+
+        await self._command("clear").callback(ctx, clear_elo=True)
+        view = ctx.followup.send.call_args.kwargs["view"]
+
+        click = self._ctx(guild_id=guild_id)
+        await view.cancel.callback(click)
+
+        self.assertEqual(self.bot.helperObj.getEconomy(guild_id, 901, "elo"), 1500)
+        click.response.edit_message.assert_awaited_once_with(
+            content="Cancelled — nothing was reset.", view=view
+        )
+
+    async def test_clear_confirmation_view_rejects_non_invoker(self):
+        guild_id = 9037
+        await self._insert_guild_row(guild_id)
+        ctx = self._ctx(guild_id=guild_id)
+
+        await self._command("clear").callback(ctx, clear_elo=True)
+        view = ctx.followup.send.call_args.kwargs["view"]
+
+        stranger = FakeInteraction(FakeGuild(id=guild_id), FakeMember("Stranger", id=999))
+        allowed = await view.interaction_check(stranger)
+
+        self.assertFalse(allowed)
+        stranger.response.send_message.assert_awaited_once()
+        self.assertTrue(stranger.response.send_message.call_args.kwargs.get("ephemeral"))
 
     async def test_clear_economy_leaves_player_stats_alone_by_default(self):
         guild_id = 9033

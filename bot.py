@@ -454,13 +454,14 @@ async def clearAll(
     if clear_elo:
         helperObj.update(ctx.guild.id, "elo", "")
 
-    # Wipes every player's balance/wins/losses/wagered/won/lost stats for
-    # this server — opt-in and off by default, same as the other clear_*
-    # flags, since it's destructive and guild-wide.
-    if clear_economy:
-        helperObj.resetEconomyHelper(ctx.guild.id)
-
     await ctx.response.send_message("Cleared!")
+
+    # clear_elo (reset every player's elo) and clear_economy (wipe every
+    # player's whole economy row) both act on every player in the server,
+    # so neither runs immediately — a confirm/cancel view goes out as a
+    # followup and the actual reset waits for that click.
+    if clear_economy or clear_elo:
+        await helperObj.confirmDestructiveClearHelper(ctx, clear_economy)
 
 
 @tree.command(
