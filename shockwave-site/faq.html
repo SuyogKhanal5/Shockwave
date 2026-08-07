@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FAQ — Shockwave</title>
+<meta name="description" content="Frequently asked questions about the Shockwave Discord bot — including using it for games other than League of Legends.">
+<link rel="icon" type="image/png" href="assets/img/favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/styles.css">
+</head>
+<body>
+
+<div class="topbar">
+  <a class="brand" href="index.html" style="margin-bottom:0;">
+    <img class="brand-mark" src="assets/img/logo-mark.png" alt="" width="28" height="35">
+    <span class="brand-name">Shockwave</span>
+  </a>
+  <button class="menu-btn" aria-expanded="false" aria-label="Toggle navigation">Menu</button>
+</div>
+<div class="scrim"></div>
+
+<div class="shell">
+  <aside class="sidebar">
+    <a class="brand" href="index.html">
+      <img class="brand-mark" src="assets/img/logo-mark.png" alt="" width="28" height="35">
+      <span class="brand-name">Shockwave</span>
+    </a>
+    <span class="brand-tag">voice team organizer</span>
+
+    <nav>
+      <div class="nav-group">
+        <div class="nav-label">Overview</div>
+        <a class="nav-link" href="index.html#top">Introduction</a>
+        <a class="nav-link" href="index.html#quick-start">Draft-night flow</a>
+      </div>
+      <div class="nav-group">
+        <div class="nav-label">Get started</div>
+        <a class="nav-link" href="add-to-server.html">Add to your server</a>
+      </div>
+      <div class="nav-group">
+        <div class="nav-label">Commands</div>
+        <a class="nav-link" href="commands.html#team-setup">Team setup</a>
+        <a class="nav-link" href="commands.html#team-formation">Team formation</a>
+        <a class="nav-link" href="commands.html#voice-ops">Voice channel ops</a>
+        <a class="nav-link" href="commands.html#betting">Betting &amp; economy</a>
+        <a class="nav-link" href="commands.html#utility">Utility</a>
+      </div>
+      <div class="nav-group">
+        <div class="nav-label">Help</div>
+        <a class="nav-link" href="faq.html#general">FAQ</a>
+        <a class="nav-link" href="faq.html#other-games">Other games</a>
+      </div>
+      <div class="nav-group">
+        <div class="nav-label">Running your own</div>
+        <a class="nav-link" href="self-hosting.html">Self-hosting guide</a>
+      </div>
+    </nav>
+
+    <div class="sidebar-foot">v3.0 · docs</div>
+  </aside>
+
+  <main>
+    <div class="content">
+
+      <div class="page-header">
+        <div class="eyebrow">Help</div>
+        <h1>Frequently asked questions</h1>
+        <p class="lede">
+          Everything that doesn't fit neatly into a command reference — including how
+          to run Shockwave for games that aren't League of Legends.
+        </p>
+      </div>
+
+      <!-- ============ GENERAL ============ -->
+      <section class="block" id="general">
+        <h2>General</h2>
+
+        <details class="faq-item" open>
+          <summary>What does Shockwave actually do?</summary>
+          <div class="faq-body">
+            <p>It looks at who's sitting in a voice channel, splits them into two teams (random, drafted, or
+            elo-balanced), optionally hands out lane roles, moves everyone into their team's voice channel
+            with <code class="inline">/start</code>, and tracks the result — including an optional betting
+            economy and a ranked elo ladder. Everything runs through Discord slash commands; nobody has to
+            leave the app.</p>
+          </div>
+        </details>
+
+        <details class="faq-item">
+          <summary>Do I need to be a server admin to use it?</summary>
+          <div class="faq-body">
+            <p>No, for most commands — anyone in the voice channel can build teams, start a game, wager, or
+            check <code class="inline">/stats</code>. Adding the bot to a server requires the
+            <strong style="color:var(--text);">Manage Server</strong> permission (that's a Discord requirement
+            for any bot invite, not something Shockwave adds), and one command —
+            <code class="inline">/report-correct-winner</code>, which fixes a misreported result — is
+            restricted to members with <strong style="color:var(--text);">Manage Server</strong> so it can't
+            be abused to rewrite outcomes after the fact.</p>
+          </div>
+        </details>
+
+        <details class="faq-item">
+          <summary>Is the gold economy real money?</summary>
+          <div class="faq-body">
+            <p>No — it's an entirely in-server, made-up currency with no cash value or exchange. Everyone
+            gets 1000 free gold once a day with <code class="inline">/daily</code>, and it exists purely to
+            add stakes to <code class="inline">/wager</code>ing on games.</p>
+          </div>
+        </details>
+
+        <details class="faq-item">
+          <summary>Does my elo or balance carry over between servers?</summary>
+          <div class="faq-body">
+            <p>No — every stat Shockwave tracks (elo, gold balance, win/loss record, betting history) is
+            scoped per-server. Playing ranked games in one Discord server has no effect on your numbers in
+            another.</p>
+          </div>
+        </details>
+
+        <details class="faq-item">
+          <summary>What happens if the bot restarts mid-game?</summary>
+          <div class="faq-body">
+            <p>Team rosters, betting state, and the original voice channel are all persisted to disk as they
+            happen, not held only in memory — so a restart doesn't wipe an in-progress game. The one exception
+            is an open betting countdown's exact timer, which restarts fresh; if that matters, <code class="inline">/return</code>
+            cleanly ends the round and refunds any bets placed so far.</p>
+          </div>
+        </details>
+
+        <details class="faq-item">
+          <summary>Can teams be uneven, or bigger/smaller than 5v5?</summary>
+          <div class="faq-body">
+            <p>Yes. <code class="inline">/set-team-size</code> sets the expected size for display purposes,
+            but team formation itself just splits whoever's in the voice channel down the middle — odd
+            numbers land one extra player on a side. Lane roles (<code class="inline">use_roles</code> on
+            <code class="inline">/make-teams</code>, or <code class="inline">/randomize-roles</code>) are the
+            one feature that specifically needs exactly 5-a-side, since there are five named lanes to hand
+            out.</p>
+          </div>
+        </details>
+      </section>
+
+      <hr class="rule">
+
+      <!-- ============ OTHER GAMES ============ -->
+      <section class="block" id="other-games">
+        <h2>Using Shockwave for games other than League</h2>
+        <p class="muted">Almost everything about Shockwave is game-agnostic — team formation, moving voice
+          channels, betting, and ranked elo don't know or care what you're actually playing. There's exactly
+          one League-specific feature, and it's opt-in.</p>
+
+        <details class="faq-item" open>
+          <summary>What's actually League-specific?</summary>
+          <div class="faq-body">
+            <p>Only lane roles — Top / Jungle / Mid / Bottom / Support, assigned by
+            <code class="inline">use_roles</code> on <code class="inline">/make-teams</code> or by
+            <code class="inline">/randomize-roles</code>. Everything else — random or drafted team splits,
+            moving voice channels, the betting economy, ranked elo and matchmaking — has nothing to do with
+            League and works identically for any team-based game played by a voice-channel-sized group.</p>
+          </div>
+        </details>
+
+        <details class="faq-item">
+          <summary>How do I set it up for another game?</summary>
+          <div class="faq-body">
+            <p>Exactly the same as League, minus the roles: run <code class="inline">/set-team-channels</code>
+            once, then use <code class="inline">/make-teams</code>, <code class="inline">/captains</code>, or
+            <code class="inline">/ranked</code>/<code class="inline">/ranked-captains</code> without
+            <code class="inline">use_roles</code> turned on. You get two balanced (or drafted) teams, moved
+            into voice channels, with betting and elo working exactly as documented. This works for Valorant
+            5-stacks, Rocket League 3v3s, a chess club splitting into two draft brackets, or any other group
+            that needs to be divided into sides and moved somewhere.</p>
+          </div>
+        </details>
+
+        <details class="faq-item">
+          <summary>Can I get lane-style roles for a different game?</summary>
+          <div class="faq-body">
+            <p>Not out of the box — the five roles are hardcoded to League's lanes. If your game has its own
+            fixed positions (an FPS's entry/support/anchor, for example) and you're comfortable editing
+            Python, the role list lives in a small, self-contained spot in the codebase; swapping the five
+            names is the whole change. See the <a href="self-hosting.html" style="color:var(--gold);">self-hosting
+            guide</a> if you're running your own instance and want to make that kind of tweak.</p>
+          </div>
+        </details>
+
+        <details class="faq-item">
+          <summary>Does ranked elo make sense for a non-League game?</summary>
+          <div class="faq-body">
+            <p>Yes — the elo system is a standard win/loss rating (the same math chess ratings use), not
+            anything League-flavored. <code class="inline">/ranked</code> balances teams by current elo and
+            adjusts it after a reported result regardless of what game you're actually playing.</p>
+          </div>
+        </details>
+      </section>
+
+      <hr class="rule">
+
+      <!-- ============ FUN ============ -->
+      <section class="block" id="fun">
+        <h2>Just for fun</h2>
+
+        <details class="faq-item">
+          <summary>Why is it called "Shockwave"?</summary>
+          <div class="faq-body">
+            <p>It's a League of Legends reference — Orianna's ultimate, <em>Command: Shockwave</em>, pulls
+            everyone caught in it together into one place. That's more or less exactly what the bot does to a
+            voice channel full of people: gather everyone up and move them where they need to be. The name
+            stuck as the project's namesake.</p>
+          </div>
+        </details>
+      </section>
+
+      <div class="page-footer">
+        <span>Shockwave · frequently asked questions</span>
+        <span><a href="commands.html" style="color:var(--gold); text-decoration:none;">Command reference →</a></span>
+      </div>
+
+    </div>
+  </main>
+</div>
+
+<script src="assets/main.js"></script>
+</body>
+</html>
