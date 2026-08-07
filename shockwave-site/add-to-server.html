@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Add to your server — Shockwave</title>
+<meta name="description" content="How to invite the Shockwave Discord bot to your server, including required permissions and how to verify it worked.">
+<link rel="icon" type="image/png" href="assets/img/favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/styles.css">
+</head>
+<body>
+
+<div class="topbar">
+  <a class="brand" href="index.html" style="margin-bottom:0;">
+    <img class="brand-mark" src="assets/img/logo-mark.png" alt="" width="28" height="35">
+    <span class="brand-name">Shockwave</span>
+  </a>
+  <button class="menu-btn" aria-expanded="false" aria-label="Toggle navigation">Menu</button>
+</div>
+<div class="scrim"></div>
+
+<div class="shell">
+  <aside class="sidebar">
+    <a class="brand" href="index.html">
+      <img class="brand-mark" src="assets/img/logo-mark.png" alt="" width="28" height="35">
+      <span class="brand-name">Shockwave</span>
+    </a>
+    <span class="brand-tag">voice team organizer</span>
+
+    <nav>
+      <div class="nav-group">
+        <div class="nav-label">Overview</div>
+        <a class="nav-link" href="index.html#top">Introduction</a>
+        <a class="nav-link" href="index.html#quick-start">Draft-night flow</a>
+      </div>
+      <div class="nav-group">
+        <div class="nav-label">Get started</div>
+        <a class="nav-link" href="add-to-server.html">Add to your server</a>
+      </div>
+      <div class="nav-group">
+        <div class="nav-label">Commands</div>
+        <a class="nav-link" href="commands.html#team-setup">Team setup</a>
+        <a class="nav-link" href="commands.html#team-formation">Team formation</a>
+        <a class="nav-link" href="commands.html#voice-ops">Voice channel ops</a>
+        <a class="nav-link" href="commands.html#utility">Utility</a>
+      </div>
+      <div class="nav-group">
+        <div class="nav-label">Running your own</div>
+        <a class="nav-link" href="self-hosting.html">Self-hosting guide</a>
+      </div>
+    </nav>
+
+    <div class="sidebar-foot">v1.0 · docs</div>
+  </aside>
+
+  <main>
+    <div class="content">
+
+      <div class="page-header">
+        <div class="eyebrow">Get started</div>
+        <h1>Add Shockwave to your server</h1>
+        <p class="lede">
+          Inviting the bot is a standard Discord OAuth flow: generate an
+          invite link with the right scopes and permissions, open it, and
+          pick your server. This takes about two minutes.
+        </p>
+      </div>
+
+      <section class="block">
+        <h2>What you'll need</h2>
+        <div class="grid">
+          <div class="card">
+            <h3>Manage Server permission</h3>
+            <p>On your own Discord account, for the server you're adding the bot to — Discord won't let you authorize a bot invite otherwise.</p>
+          </div>
+          <div class="card">
+            <h3>The bot's Client ID</h3>
+            <p>From the Developer Portal application for the Shockwave instance you're inviting — yours if you're self-hosting, or the operator's if you're not.</p>
+          </div>
+        </div>
+      </section>
+
+      <hr class="rule">
+
+      <section class="block" id="invite-steps">
+        <h2>Generate and open the invite link</h2>
+        <div class="flow">
+          <div class="flow-step">
+            <div class="flow-num">01</div>
+            <div class="flow-body">
+              <h4>Open the Developer Portal</h4>
+              <p>Go to <a href="https://discord.com/developers/applications" style="color:var(--spark);">discord.com/developers/applications</a> and select the Shockwave application.</p>
+            </div>
+          </div>
+          <div class="flow-step">
+            <div class="flow-num">02</div>
+            <div class="flow-body">
+              <h4>Open the OAuth2 URL Generator</h4>
+              <p>In the sidebar, go to <strong style="color:var(--text);">OAuth2 → URL Generator</strong>.</p>
+            </div>
+          </div>
+          <div class="flow-step">
+            <div class="flow-num">03</div>
+            <div class="flow-body">
+              <h4>Check two scopes</h4>
+              <p>Under <strong style="color:var(--text);">Scopes</strong>, check <code class="inline">bot</code> and <code class="inline">applications.commands</code>. The second one is what makes slash commands like <code class="inline">/make-teams</code> show up at all.</p>
+            </div>
+          </div>
+          <div class="flow-step">
+            <div class="flow-num">04</div>
+            <div class="flow-body">
+              <h4>Check the bot permissions</h4>
+              <p>A <strong style="color:var(--text);">Bot Permissions</strong> panel appears below. Check the five permissions in the table further down this page — Discord builds the invite URL for you as you check boxes.</p>
+            </div>
+          </div>
+          <div class="flow-step">
+            <div class="flow-num">05</div>
+            <div class="flow-body">
+              <h4>Copy the generated URL</h4>
+              <p>Scroll down and copy the <strong style="color:var(--text);">Generated Link</strong>. It looks like this, with your own client ID in place of the placeholder:</p>
+              <pre class="codeblock" style="margin-top:10px;"><span class="c">https://discord.com/oauth2/authorize?client_id=</span><span class="v">YOUR_CLIENT_ID</span><span class="c">&permissions=</span><span class="v">17828880</span><span class="c">&scope=bot%20applications.commands</span></pre>
+            </div>
+          </div>
+          <div class="flow-step">
+            <div class="flow-num">06</div>
+            <div class="flow-body">
+              <h4>Open it and pick your server</h4>
+              <p>Paste the link into your browser, choose your server from the dropdown, and hit <strong style="color:var(--text);">Authorize</strong>. Discord will ask you to confirm the permissions before it finishes.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <hr class="rule">
+
+      <section class="block">
+        <h2>Permissions, and why each one is needed</h2>
+        <p class="muted">Shockwave asks for five permissions — nothing broader than what its commands actually do.</p>
+        <table class="params">
+          <tr><th>Permission</th><th>Needed for</th><th>Why</th></tr>
+          <tr>
+            <td class="param-name">View Channels</td>
+            <td class="param-type">All commands</td>
+            <td>The bot has to see a voice channel to know who's in it.</td>
+          </tr>
+          <tr>
+            <td class="param-name">Connect</td>
+            <td class="param-type">/make-teams, /captains</td>
+            <td>Discord only exposes voice channel membership to accounts that could join the channel.</td>
+          </tr>
+          <tr>
+            <td class="param-name">Move Members</td>
+            <td class="param-type">/move, /return</td>
+            <td>Both commands work by moving players between voice channels directly.</td>
+          </tr>
+          <tr>
+            <td class="param-name">Manage Channels</td>
+            <td class="param-type">/set-team-channels</td>
+            <td>Creates the two team voice channels automatically if they don't already exist.</td>
+          </tr>
+          <tr>
+            <td class="param-name">Send Messages</td>
+            <td class="param-type">Every command</td>
+            <td>Posts confirmations, team embeds, and error messages back into the channel.</td>
+          </tr>
+        </table>
+      </section>
+
+      <hr class="rule">
+
+      <section class="block">
+        <h2>Verify it worked</h2>
+        <div class="grid">
+          <div class="card">
+            <h3>Bot shows up in the member list</h3>
+            <p>Shockwave should appear online in your server's member sidebar right after authorizing.</p>
+          </div>
+          <div class="card">
+            <h3>Slash commands autocomplete</h3>
+            <p>Type <code class="inline">/</code> in any channel — Shockwave's commands should appear in the picker.</p>
+          </div>
+        </div>
+
+        <div class="cmd-note" style="margin-top:20px;">
+          <strong>Commands not showing up?</strong> This build syncs commands to one specific server (guild) ID, set in the bot's own code — not automatically to every server it joins. If you're inviting a shared/hosted instance, ask whoever runs it to add your server's ID. If you're running your own copy, see <a href="self-hosting.html" style="color:var(--spark);">step 6 of the self-hosting guide</a> to point it at your server.
+        </div>
+      </section>
+
+      <div class="page-footer">
+        <span>Shockwave · add to your server</span>
+        <span><a href="commands.html" style="color:var(--gold); text-decoration:none;">Command reference →</a></span>
+      </div>
+
+    </div>
+  </main>
+</div>
+
+<script src="assets/main.js"></script>
+</body>
+</html>

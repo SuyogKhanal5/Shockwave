@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Commands — Shockwave</title>
+<meta name="description" content="Full slash command reference for the Shockwave Discord bot.">
+<link rel="icon" type="image/png" href="assets/img/favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/styles.css">
+</head>
+<body>
+
+<div class="topbar">
+  <a class="brand" href="index.html" style="margin-bottom:0;">
+    <img class="brand-mark" src="assets/img/logo-mark.png" alt="" width="28" height="35">
+    <span class="brand-name">Shockwave</span>
+  </a>
+  <button class="menu-btn" aria-expanded="false" aria-label="Toggle navigation">Menu</button>
+</div>
+<div class="scrim"></div>
+
+<div class="shell">
+  <aside class="sidebar">
+    <a class="brand" href="index.html">
+      <img class="brand-mark" src="assets/img/logo-mark.png" alt="" width="28" height="35">
+      <span class="brand-name">Shockwave</span>
+    </a>
+    <span class="brand-tag">voice team organizer</span>
+
+    <nav>
+      <div class="nav-group">
+        <div class="nav-label">Overview</div>
+        <a class="nav-link" href="index.html#top">Introduction</a>
+        <a class="nav-link" href="index.html#quick-start">Draft-night flow</a>
+      </div>
+      <div class="nav-group">
+        <div class="nav-label">Get started</div>
+        <a class="nav-link" href="add-to-server.html">Add to your server</a>
+      </div>
+      <div class="nav-group">
+        <div class="nav-label">Commands</div>
+        <a class="nav-link" href="commands.html#team-setup">Team setup</a>
+        <a class="nav-link" href="commands.html#team-formation">Team formation</a>
+        <a class="nav-link" href="commands.html#voice-ops">Voice channel ops</a>
+        <a class="nav-link" href="commands.html#utility">Utility</a>
+      </div>
+      <div class="nav-group">
+        <div class="nav-label">Running your own</div>
+        <a class="nav-link" href="self-hosting.html">Self-hosting guide</a>
+      </div>
+    </nav>
+
+    <div class="sidebar-foot">v1.0 · docs</div>
+  </aside>
+
+  <main>
+    <div class="content">
+
+      <div class="page-header">
+        <div class="eyebrow">Reference</div>
+        <h1>Commands</h1>
+        <p class="lede">
+          Every slash command Shockwave registers, grouped by what part of the
+          night it handles. Parameters marked <span class="mono" style="color:var(--muted);">optional</span>
+          have a default and can be left out.
+        </p>
+      </div>
+
+      <!-- ============ TEAM SETUP ============ -->
+      <section class="block" id="team-setup">
+        <h2>Team setup</h2>
+        <p class="muted">Run these once per server, or whenever you want to reset a session.</p>
+
+        <div class="cmd-card" id="set-team-channels">
+          <div class="cmd-head">
+            <span class="cmd-name"><span class="slash">/</span>set-team-channels</span>
+            <span class="cmd-badge">setup</span>
+          </div>
+          <p class="cmd-desc">Names the two voice channels teams get moved into. Creates them if they don't already exist on the server.</p>
+          <table class="params">
+            <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+            <tr><td class="param-name">team1</td><td class="param-type">string</td><td>Name for the first team's voice channel.</td></tr>
+            <tr><td class="param-name">team2</td><td class="param-type">string</td><td>Name for the second team's voice channel.</td></tr>
+          </table>
+        </div>
+
+        <div class="cmd-card" id="set-team-size">
+          <div class="cmd-head">
+            <span class="cmd-name"><span class="slash">/</span>set-team-size</span>
+            <span class="cmd-badge">setup</span>
+          </div>
+          <p class="cmd-desc">Sets how many players make up one side. Used when notifying people how big the game is.</p>
+          <table class="params">
+            <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+            <tr><td class="param-name">sizechange</td><td class="param-type">integer</td><td>Number of players per team.</td></tr>
+          </table>
+        </div>
+
+        <div class="cmd-card" id="clear">
+          <div class="cmd-head">
+            <span class="cmd-name"><span class="slash">/</span>clear</span>
+            <span class="cmd-badge">setup</span>
+          </div>
+          <p class="cmd-desc">Wipes the current teams and draft state so you can start a fresh session. Channel names, tournament data, and elo are kept unless you explicitly clear them too.</p>
+          <table class="params">
+            <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+            <tr><td class="param-name">clear_channels</td><td class="param-type">boolean, optional</td><td>Also forget the saved team channel names.</td></tr>
+            <tr><td class="param-name">clear_tournament</td><td class="param-type">boolean, optional</td><td>Also clear tournament bracket data.</td></tr>
+            <tr><td class="param-name">clear_elo</td><td class="param-type">boolean, optional</td><td>Also reset stored elo/rating data.</td></tr>
+          </table>
+        </div>
+      </section>
+
+      <hr class="rule">
+
+      <!-- ============ TEAM FORMATION ============ -->
+      <section class="block" id="team-formation">
+        <h2>Team formation</h2>
+        <p class="muted">The three ways to actually build a roster.</p>
+
+        <div class="cmd-card" id="make-teams">
+          <div class="cmd-head">
+            <span class="cmd-name"><span class="slash">/</span>make-teams</span>
+            <span class="cmd-badge">formation</span>
+          </div>
+          <p class="cmd-desc">Randomly splits everyone in your voice channel into two even teams. Optionally assigns a lane to each player and moves everyone automatically.</p>
+          <table class="params">
+            <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+            <tr><td class="param-name">use_roles</td><td class="param-type">boolean, optional</td><td>Also hand out lane roles (Top / Jungle / Mid / Bottom / Support) — needs exactly 5 players per side.</td></tr>
+            <tr><td class="param-name">movevar</td><td class="param-type">boolean, optional</td><td>Move everyone into their team channel right away. On by default.</td></tr>
+          </table>
+          <div class="embed-stack">
+            <div class="discord-embed blue">
+              <div class="embed-title">Team 1</div>
+              <div class="embed-desc">Kestrel&#10;Bramble&#10;Onyx</div>
+            </div>
+            <div class="discord-embed red">
+              <div class="embed-title">Team 2</div>
+              <div class="embed-desc">Fennmark&#10;Dusk&#10;Corvid</div>
+            </div>
+          </div>
+          <div class="embed-caption">↑ what Shockwave posts right after the shuffle</div>
+        </div>
+
+        <div class="cmd-card" id="captains">
+          <div class="cmd-head">
+            <span class="cmd-name"><span class="slash">/</span>captains</span>
+            <span class="cmd-badge">formation</span>
+          </div>
+          <p class="cmd-desc">Starts a live captain draft. Name two captains, or let Shockwave pick two at random from the voice channel. Everyone else lands in a pool the captains pick from with <code class="inline">/choose</code>.</p>
+          <table class="params">
+            <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+            <tr><td class="param-name">captain_1</td><td class="param-type">member, optional</td><td>First captain. Required unless <code class="inline">use_random</code> is set.</td></tr>
+            <tr><td class="param-name">captain_2</td><td class="param-type">member, optional</td><td>Second captain. Required unless <code class="inline">use_random</code> is set.</td></tr>
+            <tr><td class="param-name">use_random</td><td class="param-type">boolean, optional</td><td>Pick two captains at random from the voice channel instead.</td></tr>
+          </table>
+          <div class="embed-stack">
+            <div class="discord-embed blue">
+              <div class="embed-title">Team 1</div>
+              <div class="embed-desc">Kestrel <span style="color:var(--muted-dim)">(captain)</span></div>
+            </div>
+            <div class="discord-embed red">
+              <div class="embed-title">Team 2</div>
+              <div class="embed-desc">Fennmark <span style="color:var(--muted-dim)">(captain)</span></div>
+            </div>
+            <div class="discord-embed purple">
+              <div class="embed-title">PLAYERS</div>
+              <div class="embed-desc">Bramble&#10;Onyx&#10;Dusk&#10;Corvid</div>
+            </div>
+          </div>
+          <div class="embed-caption">↑ the draft pool, posted once captains are set</div>
+        </div>
+
+        <div class="cmd-card" id="choose">
+          <div class="cmd-head">
+            <span class="cmd-name"><span class="slash">/</span>choose</span>
+            <span class="cmd-badge">formation</span>
+          </div>
+          <p class="cmd-desc">Captains only. Picks one player from the pool onto your team, then passes the turn to the other captain.</p>
+          <table class="params">
+            <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+            <tr><td class="param-name">member</td><td class="param-type">member, optional</td><td>The player to pick. Required unless <code class="inline">use_random</code> is set.</td></tr>
+            <tr><td class="param-name">use_random</td><td class="param-type">boolean, optional</td><td>Pick a random remaining player instead of naming one.</td></tr>
+          </table>
+          <div class="cmd-note">
+            <strong>Turn order is enforced.</strong> Picking out of turn, or picking as anyone other than the two captains, gets rejected with a message instead of going through.
+          </div>
+        </div>
+
+        <div class="cmd-card" id="randomize-roles">
+          <div class="cmd-head">
+            <span class="cmd-name"><span class="slash">/</span>randomize-roles</span>
+            <span class="cmd-badge">formation</span>
+          </div>
+          <p class="cmd-desc">Shuffles lane roles across the current teams — useful after a draft, when <code class="inline">/make-teams</code> wasn't run with <code class="inline">use_roles</code> on.</p>
+          <div class="embed-stack">
+            <div class="discord-embed blue">
+              <div class="embed-title">Team 1</div>
+              <div class="embed-desc">Top - Kestrel&#10;Jungle - Bramble&#10;Mid - Onyx&#10;Bottom - Wrenna&#10;Support - Tovik</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <hr class="rule">
+
+      <!-- ============ VOICE OPS ============ -->
+      <section class="block" id="voice-ops">
+        <h2>Voice channel ops</h2>
+        <p class="muted">Moving people around without dragging them by hand.</p>
+
+        <div class="cmd-card" id="move">
+          <div class="cmd-head">
+            <span class="cmd-name"><span class="slash">/</span>move</span>
+            <span class="cmd-badge">voice</span>
+          </div>
+          <p class="cmd-desc">Moves the current rosters into their team channels. Remembers the channel everyone started in, so <code class="inline">/return</code> knows where to send them back.</p>
+        </div>
+
+        <div class="cmd-card" id="return">
+          <div class="cmd-head">
+            <span class="cmd-name"><span class="slash">/</span>return</span>
+            <span class="cmd-badge">voice</span>
+          </div>
+          <p class="cmd-desc">Pulls both team channels — including anyone spectating — back into the original voice channel.</p>
+        </div>
+
+        <div class="cmd-card" id="notify">
+          <div class="cmd-head">
+            <span class="cmd-name"><span class="slash">/</span>notify</span>
+            <span class="cmd-badge">voice</span>
+          </div>
+          <p class="cmd-desc">DMs one server member a one-time invite link to your voice channel.</p>
+          <table class="params">
+            <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+            <tr><td class="param-name">member</td><td class="param-type">member</td><td>Who to invite.</td></tr>
+          </table>
+        </div>
+
+        <div class="cmd-card" id="notify-role">
+          <div class="cmd-head">
+            <span class="cmd-name"><span class="slash">/</span>notify-role</span>
+            <span class="cmd-badge">voice</span>
+          </div>
+          <p class="cmd-desc">Same as <code class="inline">/notify</code>, but DMs everyone holding a given role.</p>
+          <table class="params">
+            <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+            <tr><td class="param-name">role</td><td class="param-type">role</td><td>The role to notify.</td></tr>
+          </table>
+        </div>
+      </section>
+
+      <hr class="rule">
+
+      <!-- ============ UTILITY ============ -->
+      <section class="block" id="utility">
+        <h2>Utility</h2>
+
+        <div class="cmd-card" id="roll">
+          <div class="cmd-head">
+            <span class="cmd-name"><span class="slash">/</span>roll</span>
+            <span class="cmd-badge">utility</span>
+          </div>
+          <p class="cmd-desc">Rolls a random number between 1 and a number you give it. Handy for deciding who gets first pick.</p>
+          <table class="params">
+            <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+            <tr><td class="param-name">num</td><td class="param-type">integer</td><td>Top of the range. Must be greater than 1.</td></tr>
+          </table>
+        </div>
+
+        <div class="cmd-card" id="help">
+          <div class="cmd-head">
+            <span class="cmd-name"><span class="slash">/</span>help</span>
+            <span class="cmd-badge">utility</span>
+          </div>
+          <p class="cmd-desc">Posts a link to this command list.</p>
+        </div>
+      </section>
+
+      <div class="page-footer">
+        <span>Shockwave · command reference</span>
+        <span><a href="self-hosting.html" style="color:var(--gold); text-decoration:none;">Self-hosting guide →</a></span>
+      </div>
+
+    </div>
+  </main>
+</div>
+
+<script src="assets/main.js"></script>
+</body>
+</html>
