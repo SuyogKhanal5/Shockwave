@@ -27,15 +27,64 @@ db_already_existed = path.isfile(dbpath)
 mainDB = sqlite3.connect(dbpath)
 cursor = mainDB.cursor()
 
-helperObj = helper.helpers(cursor, mainDB)
+
+def ensure_column(table, column, coltype="", default=None):
+    # Adds a column to an existing table if it isn't already there, so
+    # installs that predate the economy/betting feature don't need a fresh
+    # database — only used for tables that existed before this feature.
+    cursor.execute(f"PRAGMA table_info({table})")
+    existing_cols = [row[1] for row in cursor.fetchall()]
+    if column not in existing_cols:
+        ddl = f"ALTER TABLE {table} ADD COLUMN {column} {coltype}"
+        if default is not None:
+            ddl += f" DEFAULT {default}"
+        cursor.execute(ddl)
+        mainDB.commit()
+
 
 if not db_already_existed:
     cursor.execute(
         "CREATE TABLE servers(guildId, serverName, original_channel, team1, team2, "
-        "players, channel1, channel2, mode, turn, team_size, tournament, elo)"
+        "players, channel1, channel2, mode, turn, team_size, tournament, elo, "
+        "result1, result2, captain1, captain2, "
+        "betting_state, betting_message_id, betting_channel_id)"
     )
     # BUG FIX: the original CREATE TABLE call was never committed.
     mainDB.commit()
+else:
+    # BUG FIX: /randomize-roles (randomRoleHelper) writes to "result1" and
+    # "result2", but these were never columns on `servers` — on any
+    # pre-existing database, that command has always crashed with
+    # "sqlite3.OperationalError: no such column: result1" the moment it ran.
+    ensure_column("servers", "result1", "TEXT")
+    ensure_column("servers", "result2", "TEXT")
+    # BUG FIX: same story for "captain1"/"captain2" — captainsHelper and
+    # chooseFunc/chooseHelper read and write these, but they were never
+    # columns either, so the entire /captains draft flow has always
+    # crashed with "no such column: captain1" on the very first call.
+    ensure_column("servers", "captain1", "TEXT")
+    ensure_column("servers", "captain2", "TEXT")
+    ensure_column("servers", "betting_state", "TEXT", "'NONE'")
+    ensure_column("servers", "betting_message_id", "INTEGER")
+    ensure_column("servers", "betting_channel_id", "INTEGER")
+
+# Per-member currency: gold balance plus win/loss and wagering stats, one
+# row per (guild, user).
+cursor.execute(
+    "CREATE TABLE IF NOT EXISTS economy("
+    "guildId, userId, username, balance, wins, losses, gold_wagered, gold_won, last_daily, "
+    "PRIMARY KEY(guildId, userId))"
+)
+# Active bets for the game currently in progress in a guild. Cleared out
+# (paid out or refunded) by the time the game resolves.
+cursor.execute(
+    "CREATE TABLE IF NOT EXISTS wagers("
+    "guildId, userId, username, team, amount, "
+    "PRIMARY KEY(guildId, userId))"
+)
+mainDB.commit()
+
+helperObj = helper.helpers(cursor, mainDB)
 
 # Hash Map
 roles = {
@@ -52,6 +101,7 @@ intents.members = True
 intents.voice_states = True
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
+helperObj.client = client
 
 
 @client.event
@@ -64,7 +114,10 @@ async def on_ready():
 @client.event
 async def on_guild_join(ctx):
     cursor.execute(
-        "INSERT INTO servers VALUES(?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)", (ctx.id, ctx.name))
+        "INSERT INTO servers VALUES(?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, "
+        "NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'NONE', NULL, NULL)",
+        (ctx.id, ctx.name)
+    )
     mainDB.commit()
 
 
@@ -72,6 +125,16 @@ async def on_guild_join(ctx):
 async def on_guild_remove(ctx):
     cursor.execute("""DELETE FROM servers WHERE guildId=?""", (ctx.id,))
     mainDB.commit()
+
+
+@client.event
+async def on_raw_reaction_add(payload):
+    # Ignore the bot's own 1️⃣/2️⃣ reactions on the winner-report message,
+    # and DM reactions (no guild).
+    if payload.member is None or payload.member.bot or payload.guild_id is None:
+        return
+
+    await helperObj.handleWinnerReaction(payload)
 
 # Commands
 # TODO: change ids when putting into production
@@ -97,11 +160,11 @@ async def setTeamChannels(ctx, *, team1: str, team2: str):
 
 
 @tree.command(
-    name="move",
-    description="Move players to their respective channels",
+    name="start",
+    description="Move players to their respective channels and open betting on the game",
     guild=discord.Object(id=526081127643873280)
 )
-async def move(ctx):
+async def start(ctx):
     # BUG FIX: movefunc() does one move_to() API call per member and used
     # to never respond to the interaction at all, which Discord shows to
     # the user as "The application did not respond" once it also risked
@@ -110,6 +173,39 @@ async def move(ctx):
     await ctx.response.defer()
     await helperObj.movefunc(ctx)
     await ctx.followup.send("Moved!")
+    await helperObj.startBettingHelper(ctx)
+
+
+@tree.command(
+    name="wager",
+    description="Wager gold on the current game",
+    guild=discord.Object(id=526081127643873280)
+)
+@app_commands.describe(amount="Amount of gold to wager", team="Which team you think will win")
+@app_commands.choices(team=[
+    app_commands.Choice(name="Team 1", value=1),
+    app_commands.Choice(name="Team 2", value=2),
+])
+async def wager(ctx, amount: int, team: app_commands.Choice[int]):
+    await helperObj.wagerHelper(ctx, amount, team.value)
+
+
+@tree.command(
+    name="daily",
+    description="Claim your daily 1000 gold",
+    guild=discord.Object(id=526081127643873280)
+)
+async def daily(ctx):
+    await helperObj.dailyHelper(ctx)
+
+
+@tree.command(
+    name="balance",
+    description="Check your gold balance and betting stats",
+    guild=discord.Object(id=526081127643873280)
+)
+async def balance(ctx):
+    await helperObj.balanceHelper(ctx)
 
 
 # TODO: update website to current shockwave website
@@ -167,43 +263,15 @@ async def fullRandom(ctx, use_roles: bool = False, movevar: bool = True):
     guild=discord.Object(id=526081127643873280)
 )
 async def returnAll(ctx):
-    og = helperObj.get(ctx.guild.id, "original_channel")
-    chan1 = helperObj.get(ctx.guild.id, "channel1")
-    chan2 = helperObj.get(ctx.guild.id, "channel2")
-
-    original_channel = discord.utils.get(ctx.guild.channels, name=og)
-    channel1 = discord.utils.get(ctx.guild.channels, name=chan1)
-    channel2 = discord.utils.get(ctx.guild.channels, name=chan2)
-
-    # BUG FIX: `original_channel == ""` never catches the "not set" case,
+    # BUG FIX: `original_channel == ""` never caught the "not set" case,
     # since discord.utils.get() returns None (not "") when nothing matches.
-    if original_channel is None:
-        await ctx.response.send_message(
-            'You have not been seperated into team voice channels! Use "/move" first.'
-        )
-        return
-
-    aggregate = []
-    if channel1 is not None:
-        aggregate.extend(channel1.members)
-    if channel2 is not None:
-        aggregate.extend(channel2.members)
-
     # BUG FIX: Discord requires the initial interaction response within 3
-    # seconds. This loop makes one API call per member to move them, and
-    # with enough people (or normal API latency) that can blow past 3
-    # seconds before send_message() ever runs — the interaction token
-    # expires and send_message() 404s with "Unknown interaction", even
-    # though every move_to() already succeeded. Deferring immediately
-    # acknowledges the interaction right away and extends the window to
-    # ~15 minutes, then we report the result via followup instead of
-    # response.
-    await ctx.response.defer()
-
-    for i in aggregate:
-        await i.move_to(original_channel)
-
-    await ctx.followup.send('Moved!')
+    # seconds, and this moves one member per API call — with enough people
+    # that can blow past 3 seconds before a response is sent, expiring the
+    # interaction token. Both fixes (and the refund-active-bets behavior)
+    # now live in helperObj.returnHelper, which /return and the automatic
+    # refund-before-payout path share.
+    await helperObj.returnHelper(ctx)
 
 
 @tree.command(
@@ -221,8 +289,18 @@ async def captains(ctx, captain_1: discord.Member = None, captain_2: discord.Mem
         return
 
     if use_random:
-        players = [player.name for player in ctx.user.voice.channel.members]
-        helperObj.update(ctx.guild.id, "players", players)
+        # BUG FIX: this used to build a plain Python list of names and pass
+        # it straight to helperObj.update(), which binds it as a sqlite3
+        # query parameter — sqlite3 can't bind a list at all (raises
+        # InterfaceError), so this path crashed on every call before ever
+        # reaching getRandomMember(). getRandomMember() also needs each
+        # player's id (to look the Member back up), not just their name.
+        # Serialize into a Team, the same convention every other "players"
+        # column write in this file uses.
+        players = Team()
+        for player in ctx.user.voice.channel.members:
+            players.add_player(Player(player.id, player.name))
+        helperObj.update(ctx.guild.id, "players", players.serializeTeam())
 
         # BUG FIX: `while captain1 is None:` on its own is fine, but the
         # captain2 loop `while captain2 is None and captain2 == captain1:`
@@ -335,4 +413,9 @@ async def randomizeRoles(ctx):
 
 # TODO: move this somewhere else??
 # or move all the setup code at the start to a main function here
-client.run(token)
+#
+# Guarded so tests.py can import this module (to exercise command callbacks
+# and event handlers directly) without connecting to Discord as a side
+# effect of the import.
+if __name__ == "__main__":
+    client.run(token)

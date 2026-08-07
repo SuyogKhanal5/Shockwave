@@ -1,7 +1,15 @@
 import discord
 from TourneyClasses import Team, Tournament, Match, Player
 import random
+import asyncio
+import datetime
 import numpy as np
+
+BETTING_DURATION_SECONDS = 60
+WINNER_REPORT_DELAY_SECONDS = 3
+DAILY_GOLD_AMOUNT = 1000
+TEAM_EMOJIS = {1: "1️⃣", 2: "2️⃣"}
+WINNER_EMOJIS = {emoji: team for team, emoji in TEAM_EMOJIS.items()}
 
 # BUG FIX: this dict used to only live in main.py. helper.py's
 # randomRoleHelper did `global roles` and expected to find it — but each
@@ -21,6 +29,15 @@ class helpers():
     def __init__(self, cursor, db) -> None:
         self.cursor = cursor
         self.db = db
+        # Set by bot.py once the discord.Client exists — needed so the
+        # background betting timer and the raw-reaction handler (neither of
+        # which run inside an Interaction) can still fetch channels/send
+        # messages.
+        self.client = None
+        # guildId -> asyncio.Task for the currently running betting timer,
+        # so a /return (or a fresh /start) mid-game can cancel it instead of
+        # letting a stale "betting closed" / winner-report message fire later.
+        self.bettingTasks = {}
 
     # SQL get template function
     def get(self, guild_id, column):
@@ -212,6 +229,21 @@ class helpers():
         self.update(ctx.guild.id, "result2", result2)
 
     async def captainsHelper(self, ctx, captain_1, captain_2):
+        # BUG FIX: this validation used to run *after* clearTeamsHelper and
+        # after already building `Player(captain_1.id, ...)` from both
+        # captains — so a None captain crashed with AttributeError on
+        # `captain_1.id` before this check ever ran, instead of showing the
+        # message below. bot.py's /captains command happens to reject None
+        # captains before calling in here today, which is the only reason
+        # this was never hit in practice; checking first makes the guard
+        # actually do something if that ever changes.
+        if captain_1 is None or captain_2 is None:
+            await ctx.response.send_message("Mention two team captains!")
+            return
+        elif captain_1 == captain_2:
+            await ctx.response.send_message("Mention two different people!")
+            return
+
         await self.clearTeamsHelper(ctx)
 
         captain1 = Player(captain_1.id, captain_1.name)
@@ -224,39 +256,32 @@ class helpers():
         original_channel = ctx.user.voice.channel
         self.update(ctx.guild.id, "original_channel", str(original_channel))
 
-        if captain_1 is None or captain_2 is None:
-            await ctx.response.send_message("Mention two team captains!")
-            return
-        elif captain_1 == captain_2:
-            await ctx.response.send_message("Mention two different people!")
-            return
-        else:
-            team1 = Team()
-            team2 = Team()
+        team1 = Team()
+        team2 = Team()
 
-            team1.add_player(captain1)
-            team2.add_player(captain2)
+        team1.add_player(captain1)
+        team2.add_player(captain2)
 
-            team1.name = "Team 1"
-            team2.name = "Team 2"
+        team1.name = "Team 1"
+        team2.name = "Team 2"
 
-            self.update(ctx.guild.id, "team1", team1.serializeTeam())
-            self.update(ctx.guild.id, "team2", team2.serializeTeam())
+        self.update(ctx.guild.id, "team1", team1.serializeTeam())
+        self.update(ctx.guild.id, "team2", team2.serializeTeam())
 
-            players = Team()
-            for player in ctx.user.voice.channel.members:
-                if player != captain_1 and player != captain_2:
-                    players.add_player(Player(player.id, player.name))
+        players = Team()
+        for player in ctx.user.voice.channel.members:
+            if player != captain_1 and player != captain_2:
+                players.add_player(Player(player.id, player.name))
 
-            self.update(ctx.guild.id, "players", players.serializeTeam())
+        self.update(ctx.guild.id, "players", players.serializeTeam())
 
-            await ctx.response.send_message("Captains selected!")
-            await self.printEmbed(ctx, team1, team2, players)
+        await ctx.response.send_message("Captains selected!")
+        await self.printEmbed(ctx, team1, team2, players)
 
-            await ctx.channel.send(
-                captain_1.mention
-                + ', use "/choose  @_____" to pick a player for your team'
-            )
+        await ctx.channel.send(
+            captain_1.mention
+            + ', use "/choose  @_____" to pick a player for your team'
+        )
 
     # function for captain to choose a specific team member
     async def chooseFunc(self, ctx, member):
@@ -398,7 +423,7 @@ class helpers():
         # complete" message never fired. Check the underlying player list.
         if len(players.get_players()) == 0:
             await ctx.channel.send(
-                'You\'ve drafted the maximum number of people for the team size! Use "/move" to move everyone to the channels!'
+                'You\'ve drafted the maximum number of people for the team size! Use "/start" to move everyone to the channels!'
             )
             return
 
@@ -452,3 +477,334 @@ class helpers():
             + str(invite_link)
         )
         await channel.send(content)
+
+    # move everyone in the team channels (+ spectators) back to the
+    # channel they started in, refunding any bets from a game that never
+    # got a recorded winner.
+    async def returnHelper(self, ctx):
+        og = self.get(ctx.guild.id, "original_channel")
+        chan1 = self.get(ctx.guild.id, "channel1")
+        chan2 = self.get(ctx.guild.id, "channel2")
+
+        original_channel = discord.utils.get(ctx.guild.channels, name=og)
+        channel1 = discord.utils.get(ctx.guild.channels, name=chan1)
+        channel2 = discord.utils.get(ctx.guild.channels, name=chan2)
+
+        if original_channel is None:
+            await ctx.response.send_message(
+                'You have not been seperated into team voice channels! Use "/start" first.'
+            )
+            return
+
+        aggregate = []
+        if channel1 is not None:
+            aggregate.extend(channel1.members)
+        if channel2 is not None:
+            aggregate.extend(channel2.members)
+
+        # See the BUG FIX note that used to live on the /return command in
+        # bot.py: move_to() is one API call per member, so defer immediately
+        # to avoid blowing the 3-second interaction window.
+        await ctx.response.defer()
+
+        for i in aggregate:
+            await i.move_to(original_channel)
+
+        await self.cancelBettingHelper(ctx.guild.id, ctx.channel)
+
+        await ctx.followup.send('Moved!')
+
+    # ---------------- Economy ----------------
+
+    def ensureEconomyRow(self, guild_id, user_id, username):
+        self.cursor.execute(
+            "INSERT OR IGNORE INTO economy"
+            "(guildId, userId, username, balance, wins, losses, gold_wagered, gold_won, last_daily) "
+            "VALUES(?, ?, ?, 0, 0, 0, 0, 0, NULL)",
+            (guild_id, user_id, username)
+        )
+        self.cursor.execute(
+            "UPDATE economy SET username=? WHERE guildId=? AND userId=?",
+            (username, guild_id, user_id)
+        )
+        self.db.commit()
+
+    def getEconomy(self, guild_id, user_id, column):
+        self.cursor.execute(
+            f"SELECT {column} FROM economy WHERE guildId=? AND userId=?",
+            (guild_id, user_id)
+        )
+        row = self.cursor.fetchone()
+        return row[0] if row is not None else None
+
+    async def dailyHelper(self, ctx):
+        guild_id = ctx.guild.id
+        user_id = ctx.user.id
+
+        self.ensureEconomyRow(guild_id, user_id, ctx.user.name)
+
+        today = datetime.date.today().isoformat()
+        last_daily = self.getEconomy(guild_id, user_id, "last_daily")
+
+        if last_daily == today:
+            await ctx.response.send_message(
+                "You've already claimed your daily gold today! Come back tomorrow."
+            )
+            return
+
+        self.cursor.execute(
+            "UPDATE economy SET balance = balance + ?, last_daily = ? WHERE guildId=? AND userId=?",
+            (DAILY_GOLD_AMOUNT, today, guild_id, user_id)
+        )
+        self.db.commit()
+
+        new_balance = self.getEconomy(guild_id, user_id, "balance")
+        await ctx.response.send_message(
+            f"You claimed your daily {DAILY_GOLD_AMOUNT} gold! Your balance is now {new_balance}."
+        )
+
+    async def balanceHelper(self, ctx):
+        guild_id = ctx.guild.id
+        user_id = ctx.user.id
+
+        self.ensureEconomyRow(guild_id, user_id, ctx.user.name)
+
+        self.cursor.execute(
+            "SELECT balance, wins, losses, gold_wagered, gold_won FROM economy "
+            "WHERE guildId=? AND userId=?",
+            (guild_id, user_id)
+        )
+        balance, wins, losses, gold_wagered, gold_won = self.cursor.fetchone()
+
+        embed = discord.Embed(
+            title=f"{ctx.user.display_name}'s Wallet", color=discord.Color.gold()
+        )
+        embed.add_field(name="Balance", value=f"{balance} gold", inline=True)
+        embed.add_field(name="Wins", value=str(wins), inline=True)
+        embed.add_field(name="Losses", value=str(losses), inline=True)
+        embed.add_field(name="Gold Wagered", value=str(gold_wagered), inline=True)
+        embed.add_field(name="Gold Won", value=str(gold_won), inline=True)
+
+        await ctx.response.send_message(embed=embed)
+
+    # ---------------- Betting ----------------
+
+    async def wagerHelper(self, ctx, amount: int, team: int):
+        guild_id = ctx.guild.id
+        user_id = ctx.user.id
+
+        if amount <= 0:
+            await ctx.response.send_message("Wager amount must be greater than 0.")
+            return
+
+        state = self.get(guild_id, "betting_state")
+        if state != "OPEN":
+            await ctx.response.send_message(
+                "Betting is not currently open. Use \"/start\" to start a game and open betting."
+            )
+            return
+
+        self.ensureEconomyRow(guild_id, user_id, ctx.user.name)
+        balance = self.getEconomy(guild_id, user_id, "balance")
+
+        if amount > balance:
+            await ctx.response.send_message(
+                f"You don't have enough gold for that! Your balance is {balance}."
+            )
+            return
+
+        self.cursor.execute(
+            "SELECT team FROM wagers WHERE guildId=? AND userId=?", (guild_id, user_id)
+        )
+        if self.cursor.fetchone() is not None:
+            await ctx.response.send_message("You've already placed a bet on this game.")
+            return
+
+        self.cursor.execute(
+            "UPDATE economy SET balance = balance - ? WHERE guildId=? AND userId=?",
+            (amount, guild_id, user_id)
+        )
+        self.cursor.execute(
+            "INSERT INTO wagers(guildId, userId, username, team, amount) VALUES(?, ?, ?, ?, ?)",
+            (guild_id, user_id, ctx.user.name, team, amount)
+        )
+        self.db.commit()
+
+        await ctx.response.send_message(f"You wagered {amount} gold on Team {team}!")
+
+    # Kicks off the betting window for the game that was just /start'd.
+    # Cancels/refunds any previous unresolved game first so a re-/start
+    # never leaves an orphaned timer or stranded bets behind.
+    async def startBettingHelper(self, ctx):
+        guild_id = ctx.guild.id
+
+        await self.cancelBettingHelper(guild_id, ctx.channel)
+
+        self.update(guild_id, "betting_state", "OPEN")
+        self.update(guild_id, "betting_message_id", None)
+        self.update(guild_id, "betting_channel_id", ctx.channel.id)
+
+        await ctx.channel.send(
+            "🎲 Betting is now open! Use `/wager <amount> <team>` to bet on this game. "
+            f"Betting closes in {BETTING_DURATION_SECONDS} seconds."
+        )
+
+        # BUG-PRONE PATTERN AVOIDED: awaiting asyncio.sleep() directly inside
+        # this command handler would still (technically) let other
+        # interactions run, since asyncio.sleep() yields control. But it
+        # would keep this command's own Interaction/task alive and blocked
+        # for a full minute, and a cancelled game (/return) would have no
+        # way to stop it from firing later. Running it as its own Task makes
+        # both of those explicit and lets cancelBettingHelper cancel it.
+        task = asyncio.create_task(self._bettingTimer(guild_id, ctx.channel))
+        self.bettingTasks[guild_id] = task
+
+    async def _bettingTimer(self, guild_id, channel):
+        try:
+            await asyncio.sleep(BETTING_DURATION_SECONDS)
+
+            self.update(guild_id, "betting_state", "CLOSED")
+            await channel.send("🔒 Betting is now closed! No more wagers will be accepted for this game.")
+
+            await asyncio.sleep(WINNER_REPORT_DELAY_SECONDS)
+
+            msg = await channel.send(
+                "Which team won? React with 1️⃣ for Team 1 or 2️⃣ for Team 2 to record the result "
+                "and pay out bets."
+            )
+            await msg.add_reaction(TEAM_EMOJIS[1])
+            await msg.add_reaction(TEAM_EMOJIS[2])
+
+            self.update(guild_id, "betting_state", "AWAITING_RESULT")
+            self.update(guild_id, "betting_message_id", msg.id)
+            self.update(guild_id, "betting_channel_id", channel.id)
+        except asyncio.CancelledError:
+            # /return (or a fresh /start) cancelled the game before betting
+            # closed or a winner was reported — cancelBettingHelper already
+            # handles the refund, nothing more to do here.
+            pass
+        finally:
+            self.bettingTasks.pop(guild_id, None)
+
+    # Called from bot.py's on_raw_reaction_add. Resolves the winner from a
+    # 1️⃣/2️⃣ reaction on the stored betting message and pays out bets.
+    async def handleWinnerReaction(self, payload):
+        guild_id = payload.guild_id
+        if guild_id is None:
+            return
+
+        emoji = str(payload.emoji)
+        winning_team = WINNER_EMOJIS.get(emoji)
+        if winning_team is None:
+            return
+
+        state = self.get(guild_id, "betting_state")
+        if state != "AWAITING_RESULT":
+            return
+
+        stored_message_id = self.get(guild_id, "betting_message_id")
+        if stored_message_id is None or int(stored_message_id) != payload.message_id:
+            return
+
+        # BUG-PRONE PATTERN AVOIDED: flip the state before doing anything
+        # async below, so a second reaction (e.g. both 1️⃣ and 2️⃣ clicked
+        # near-simultaneously) can't also pass the check above and pay out
+        # twice.
+        self.update(guild_id, "betting_state", "NONE")
+
+        channel = self.client.get_channel(payload.channel_id)
+        if channel is None:
+            channel = await self.client.fetch_channel(payload.channel_id)
+
+        await self.recordResult(guild_id, winning_team, channel)
+
+    # Pari-mutuel payout: winners split the losing side's pool proportional
+    # to their own wager, on top of getting their own wager back — so a bet
+    # on the less-backed (riskier) side pays out more than a bet on the
+    # heavily-favored side.
+    async def recordResult(self, guild_id, winning_team, channel):
+        self.cursor.execute(
+            "SELECT userId, username, team, amount FROM wagers WHERE guildId=?", (guild_id,)
+        )
+        allWagers = self.cursor.fetchall()
+
+        self.cursor.execute("DELETE FROM wagers WHERE guildId=?", (guild_id,))
+        self.update(guild_id, "betting_state", "NONE")
+        self.update(guild_id, "betting_message_id", None)
+        self.db.commit()
+
+        if not allWagers:
+            await channel.send(f"**Team {winning_team}** wins! No bets were placed on this game.")
+            return
+
+        winningBets = [w for w in allWagers if w[2] == winning_team]
+        losingBets = [w for w in allWagers if w[2] != winning_team]
+
+        winningPool = sum(w[3] for w in winningBets)
+        losingPool = sum(w[3] for w in losingBets)
+
+        lines = [f"**Team {winning_team}** wins! Paying out bets..."]
+
+        for user_id, username, _team, amount in losingBets:
+            self.ensureEconomyRow(guild_id, user_id, username)
+            self.cursor.execute(
+                "UPDATE economy SET losses = losses + 1, gold_wagered = gold_wagered + ? "
+                "WHERE guildId=? AND userId=?",
+                (amount, guild_id, user_id)
+            )
+
+        if not winningBets:
+            lines.append("Nobody bet on the winning team — all bets were lost.")
+
+        for user_id, username, _team, amount in winningBets:
+            self.ensureEconomyRow(guild_id, user_id, username)
+
+            if winningPool > 0:
+                payout = round(amount + (amount / winningPool) * losingPool)
+            else:
+                payout = amount
+            profit = payout - amount
+
+            self.cursor.execute(
+                "UPDATE economy SET balance = balance + ?, wins = wins + 1, "
+                "gold_wagered = gold_wagered + ?, gold_won = gold_won + ? "
+                "WHERE guildId=? AND userId=?",
+                (payout, amount, profit, guild_id, user_id)
+            )
+            lines.append(f"{username} won {payout} gold (bet {amount})")
+
+        self.db.commit()
+
+        await channel.send("\n".join(lines))
+
+    # Cancels the running betting timer (if any) and, if the game had an
+    # unresolved bet round (open, closed-but-unreported, or awaiting a
+    # winner reaction), refunds every active bet.
+    async def cancelBettingHelper(self, guild_id, channel):
+        state = self.get(guild_id, "betting_state")
+
+        task = self.bettingTasks.pop(guild_id, None)
+        if task is not None and not task.done():
+            task.cancel()
+
+        if state not in ("OPEN", "CLOSED", "AWAITING_RESULT"):
+            return
+
+        self.cursor.execute(
+            "SELECT userId, amount FROM wagers WHERE guildId=?", (guild_id,)
+        )
+        refunds = self.cursor.fetchall()
+
+        for user_id, amount in refunds:
+            self.cursor.execute(
+                "UPDATE economy SET balance = balance + ? WHERE guildId=? AND userId=?",
+                (amount, guild_id, user_id)
+            )
+
+        self.cursor.execute("DELETE FROM wagers WHERE guildId=?", (guild_id,))
+        self.update(guild_id, "betting_state", "NONE")
+        self.update(guild_id, "betting_message_id", None)
+        self.db.commit()
+
+        if refunds:
+            await channel.send("Bets have been refunded since the game ended before a winner was recorded.")

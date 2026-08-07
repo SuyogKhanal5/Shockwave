@@ -45,6 +45,7 @@
         <a class="nav-link" href="commands.html#team-setup">Team setup</a>
         <a class="nav-link" href="commands.html#team-formation">Team formation</a>
         <a class="nav-link" href="commands.html#voice-ops">Voice channel ops</a>
+        <a class="nav-link" href="commands.html#betting">Betting &amp; economy</a>
         <a class="nav-link" href="commands.html#utility">Utility</a>
       </div>
       <div class="nav-group">
@@ -212,12 +213,12 @@
         <h2>Voice channel ops</h2>
         <p class="muted">Moving people around without dragging them by hand.</p>
 
-        <div class="cmd-card" id="move">
+        <div class="cmd-card" id="start">
           <div class="cmd-head">
-            <span class="cmd-name"><span class="slash">/</span>move</span>
+            <span class="cmd-name"><span class="slash">/</span>start</span>
             <span class="cmd-badge">voice</span>
           </div>
-          <p class="cmd-desc">Moves the current rosters into their team channels. Remembers the channel everyone started in, so <code class="inline">/return</code> knows where to send them back.</p>
+          <p class="cmd-desc">Moves the current rosters into their team channels and kicks off the game. Remembers the channel everyone started in, so <code class="inline">/return</code> knows where to send them back. Also opens a one-minute betting window on the match — see <a href="commands.html#betting" style="color:var(--gold);">Betting &amp; economy</a> below.</p>
         </div>
 
         <div class="cmd-card" id="return">
@@ -225,7 +226,7 @@
             <span class="cmd-name"><span class="slash">/</span>return</span>
             <span class="cmd-badge">voice</span>
           </div>
-          <p class="cmd-desc">Pulls both team channels — including anyone spectating — back into the original voice channel.</p>
+          <p class="cmd-desc">Pulls both team channels — including anyone spectating — back into the original voice channel. If the game's winner hasn't been recorded yet, any open bets are automatically refunded.</p>
         </div>
 
         <div class="cmd-card" id="notify">
@@ -250,6 +251,57 @@
             <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
             <tr><td class="param-name">role</td><td class="param-type">role</td><td>The role to notify.</td></tr>
           </table>
+        </div>
+      </section>
+
+      <hr class="rule">
+
+      <!-- ============ BETTING & ECONOMY ============ -->
+      <section class="block" id="betting">
+        <h2>Betting &amp; economy</h2>
+        <p class="muted">Every server member has a gold balance. Bet it on who wins the current game.</p>
+
+        <div class="cmd-note">
+          <strong>How a betting round works.</strong> Running <code class="inline">/start</code> opens betting
+          for 60 seconds — the bot stays fully responsive to every other command during that window. Once it
+          closes, Shockwave posts a message asking which team won and reacts to it with 1️⃣ and 2️⃣ itself, so
+          reporting the result is a single click. The first valid reaction from anyone in the server records
+          the winner and pays out bets immediately. If <code class="inline">/return</code> is used before a
+          winner is reported, every bet on that round is refunded instead.
+        </div>
+
+        <div class="cmd-card" id="wager">
+          <div class="cmd-head">
+            <span class="cmd-name"><span class="slash">/</span>wager</span>
+            <span class="cmd-badge">betting</span>
+          </div>
+          <p class="cmd-desc">Bets gold on one team winning the current game. Only works while betting is open, and only one bet per player per game.</p>
+          <table class="params">
+            <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+            <tr><td class="param-name">amount</td><td class="param-type">integer</td><td>How much gold to wager. Must not exceed your balance.</td></tr>
+            <tr><td class="param-name">team</td><td class="param-type">choice</td><td>Team 1 or Team 2 — whoever you think wins.</td></tr>
+          </table>
+          <div class="cmd-note">
+            <strong>Payouts favor the underdog.</strong> Winners split the losing side's entire pool
+            proportional to their own bet, on top of getting their wager back. A bet on the team fewer people
+            backed pays out more than the same-sized bet on the heavily-favored side.
+          </div>
+        </div>
+
+        <div class="cmd-card" id="daily">
+          <div class="cmd-head">
+            <span class="cmd-name"><span class="slash">/</span>daily</span>
+            <span class="cmd-badge">betting</span>
+          </div>
+          <p class="cmd-desc">Claims 1000 free gold. Once per calendar day, per player.</p>
+        </div>
+
+        <div class="cmd-card" id="balance">
+          <div class="cmd-head">
+            <span class="cmd-name"><span class="slash">/</span>balance</span>
+            <span class="cmd-badge">betting</span>
+          </div>
+          <p class="cmd-desc">Shows your gold balance, win/loss record, total gold wagered, and total gold won.</p>
         </div>
       </section>
 

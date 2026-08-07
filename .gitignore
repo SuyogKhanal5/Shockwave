@@ -1,2 +1,5 @@
 token.txt
 *.pyc
+__pycache__/
+.vscode/
+.claude/

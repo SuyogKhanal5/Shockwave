@@ -105,7 +105,8 @@
             <div class="flow-body">
               <h4>Install dependencies</h4>
               <pre class="codeblock" style="margin-top:10px;"><span class="c"># from the project root</span>
-pip install discord.py numpy</pre>
+pip install -r requirements.txt</pre>
+              <p style="margin-top:8px;">This pulls in <code class="inline">discord.py</code> and <code class="inline">numpy</code> — the only two non-stdlib dependencies the bot needs.</p>
             </div>
           </div>
           <div class="flow-step">
@@ -161,7 +162,7 @@ pip install discord.py numpy</pre>
         <div class="cmd-note">
           <strong>"Unknown interaction" error, but the action happened anyway.</strong><br>
           Discord requires an initial response within 3 seconds. Commands that move several
-          members at once (<code class="inline">/move</code>, <code class="inline">/return</code>, <code class="inline">/make-teams</code>)
+          members at once (<code class="inline">/start</code>, <code class="inline">/return</code>, <code class="inline">/make-teams</code>)
           can outrun that window on a slow connection or a big roster. This build defers
           those commands immediately and replies via a followup message once the moves finish —
           if you're running older code without that fix, that's the mismatch you're seeing.
@@ -172,6 +173,14 @@ pip install discord.py numpy</pre>
           This means the database file existed (even empty) before the table-creation check
           ran. Delete <code class="inline">data/guildData/serverInfo/main.db</code> and restart —
           it'll be recreated correctly.
+        </div>
+
+        <div class="cmd-note">
+          <strong>Upgrading an existing database for betting/economy.</strong><br>
+          You don't need to delete <code class="inline">main.db</code> to pick up the betting feature.
+          On startup the bot checks for the columns and tables it needs (<code class="inline">economy</code>,
+          <code class="inline">wagers</code>, and a few new columns on <code class="inline">servers</code>) and
+          adds whatever's missing, leaving your existing team/tournament data alone.
         </div>
 
         <div class="cmd-note">
