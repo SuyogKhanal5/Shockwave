@@ -53,7 +53,7 @@ SERVERS_SCHEMA = (
 )
 ECONOMY_SCHEMA = (
     "CREATE TABLE economy(guildId, userId, username, balance, wins, losses, "
-    "gold_wagered, gold_won, last_daily, PRIMARY KEY(guildId, userId))"
+    "gold_wagered, gold_won, gold_lost, last_daily, PRIMARY KEY(guildId, userId))"
 )
 WAGERS_SCHEMA = (
     "CREATE TABLE wagers(guildId, userId, username, team, amount, "
@@ -155,12 +155,16 @@ class FakeInteraction:
 
 
 class FakeClient:
-    def __init__(self, channels=()):
+    def __init__(self, channels=(), guilds=()):
         self._channels = {c.id: c for c in channels}
+        self._guilds = {g.id: g for g in guilds}
         self.fetch_channel = AsyncMock()
 
     def get_channel(self, channel_id):
         return self._channels.get(channel_id)
+
+    def get_guild(self, guild_id):
+        return self._guilds.get(guild_id)
 
 
 class FakePayload:
@@ -481,6 +485,30 @@ class ChooseTests(HelperTestCase):
             "Player has already been selected or does not exist in the player list."
         )
 
+    async def test_prompts_start_once_teams_reach_team_size_even_with_spectators_left(self):
+        # regression test: chooseHelper only ever checked whether the whole
+        # draft pool was empty. A voice channel with more people than
+        # team_size * 2 is expected to leave spectators undrafted, so with
+        # 3 pool members and a team_size of 2 (1 pick needed per team),
+        # both teams fill up after 2 picks while 1 spectator is still left
+        # in the pool — the old code never prompted /start in that case.
+        captain1, captain2, pool, ctx = await self._draft_setup(
+            [(501, "Pool1"), (502, "Pool2"), (503, "Pool3")]
+        )
+        self.helperObj.update(GUILD_ID, "team_size", 2)
+
+        pick_ctx1 = FakeInteraction(self.guild, captain1)
+        await self.helperObj.chooseFunc(pick_ctx1, pool[0])  # team1 now size 2
+
+        pick_ctx2 = FakeInteraction(self.guild, captain2)
+        await self.helperObj.chooseFunc(pick_ctx2, pool[1])  # team2 now size 2
+
+        players = self.deserialize_team("players")
+        self.assertEqual(len(players.get_players()), 1)  # one spectator still unpicked
+
+        last_message = pick_ctx2.channel.send.call_args_list[-1].args[0]
+        self.assertIn("/start", last_message)
+
     async def test_choose_random_member_reports_when_pool_empty(self):
         self.helperObj.update(GUILD_ID, "players", Team().serializeTeam())
         ctx = FakeInteraction(self.guild, FakeMember("Someone"))
@@ -543,6 +571,44 @@ class RandomRoleHelperTests(HelperTestCase):
             self.assertIn(p.get_name(), result2)
         self.assertEqual(result1.count(" - "), 5)
         self.assertEqual(result2.count(" - "), 3)
+
+
+class PrintEmbedTests(HelperTestCase):
+    def _five_player_team(self, name, start_id):
+        team = Team()
+        team.name = name
+        for i in range(5):
+            team.add_player(Player(start_id + i, f"P{i}"))
+        return team
+
+    async def test_use_roles_labels_players_when_team_has_five(self):
+        team1 = self._five_player_team("Team 1", 700)
+        team2 = self._five_player_team("Team 2", 800)
+        ctx = FakeInteraction(self.guild, FakeMember("Caller"))
+
+        # regression test: printEmbed used to always call makeEmbedString()
+        # with its default useRoles=False, so /make-teams use_roles:True
+        # never actually showed role labels in the embed it posts.
+        await self.helperObj.printEmbed(ctx, team1, team2, useRoles=True)
+
+        embed1 = ctx.channel.send.call_args_list[0].kwargs["embed"]
+        embed2 = ctx.channel.send.call_args_list[1].kwargs["embed"]
+        self.assertEqual(embed1.description.count(" - "), 5)
+        self.assertEqual(embed2.description.count(" - "), 5)
+        self.assertIn("Top - P0", embed1.description)
+
+    async def test_without_use_roles_shows_plain_names(self):
+        team1 = self._five_player_team("Team 1", 700)
+        team2 = Team()
+        team2.name = "Team 2"
+        team2.add_player(Player(900, "Solo"))
+        ctx = FakeInteraction(self.guild, FakeMember("Caller"))
+
+        await self.helperObj.printEmbed(ctx, team1, team2)
+
+        embed1 = ctx.channel.send.call_args_list[0].kwargs["embed"]
+        self.assertNotIn(" - ", embed1.description)
+        self.assertIn("P0", embed1.description)
 
 
 class SetTeamHelperTests(HelperTestCase):
@@ -634,6 +700,33 @@ class ReturnHelperTests(HelperTestCase):
         ctx.followup.send.assert_awaited_once_with("Moved!")
 
 
+class MoveMembersToOriginalChannelTests(HelperTestCase):
+    async def test_moves_team_channel_members_and_returns_true(self):
+        og = FakeChannel("Lobby")
+        channel1 = FakeChannel("Team 1")
+        channel2 = FakeChannel("Team 2")
+        member1 = FakeMember("Alice", id=801)
+        member2 = FakeMember("Bob", id=802)
+        channel1.members = [member1]
+        channel2.members = [member2]
+        guild = FakeGuild(channels=[og, channel1, channel2])
+
+        self.helperObj.update(GUILD_ID, "original_channel", "Lobby")
+        self.helperObj.update(GUILD_ID, "channel1", "Team 1")
+        self.helperObj.update(GUILD_ID, "channel2", "Team 2")
+
+        moved = await self.helperObj.moveMembersToOriginalChannel(guild)
+
+        self.assertTrue(moved)
+        member1.move_to.assert_awaited_once_with(og)
+        member2.move_to.assert_awaited_once_with(og)
+
+    async def test_returns_false_when_never_started(self):
+        guild = FakeGuild()
+        moved = await self.helperObj.moveMembersToOriginalChannel(guild)
+        self.assertFalse(moved)
+
+
 # ===========================================================================
 # Economy: /daily, /balance, ensureEconomyRow
 # ===========================================================================
@@ -679,11 +772,11 @@ class EconomyTests(HelperTestCase):
             "You've already claimed your daily gold today! Come back tomorrow."
         )
 
-    async def test_balance_embed_reports_stats(self):
+    async def test_balance_embed_reports_stats_net_win_overall(self):
         self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
         self.cursor.execute(
-            "UPDATE economy SET balance=1234, wins=2, losses=1, gold_wagered=500, gold_won=300 "
-            "WHERE guildId=? AND userId=?",
+            "UPDATE economy SET balance=1234, wins=2, losses=1, gold_wagered=500, "
+            "gold_won=300, gold_lost=80 WHERE guildId=? AND userId=?",
             (GUILD_ID, 901),
         )
         self.db.commit()
@@ -698,7 +791,37 @@ class EconomyTests(HelperTestCase):
         self.assertEqual(values["Wins"], "2")
         self.assertEqual(values["Losses"], "1")
         self.assertEqual(values["Gold Wagered"], "500")
-        self.assertEqual(values["Gold Won"], "300")
+        # net = gold_won - gold_lost = 300 - 80 = 220, shown with an
+        # explicit "+" since the player is up overall
+        self.assertEqual(values["Net Gold Won/Lost"], "+220 gold")
+        # win rate = 2 / (2 + 1) = 66.7%
+        self.assertEqual(values["Win Rate"], "66.7%")
+
+    async def test_balance_embed_shows_negative_net_when_overall_down(self):
+        self.helperObj.ensureEconomyRow(GUILD_ID, 902, "Bob")
+        self.cursor.execute(
+            "UPDATE economy SET wins=1, losses=3, gold_won=50, gold_lost=200 "
+            "WHERE guildId=? AND userId=?",
+            (GUILD_ID, 902),
+        )
+        self.db.commit()
+
+        ctx = self._ctx(user_id=902, name="Bob")
+        await self.helperObj.balanceHelper(ctx)
+
+        embed = ctx.response.send_message.call_args.kwargs["embed"]
+        values = {f.name: f.value for f in embed.fields}
+        self.assertEqual(values["Net Gold Won/Lost"], "-150 gold")
+        self.assertEqual(values["Win Rate"], "25.0%")
+
+    async def test_balance_embed_win_rate_na_with_no_games_played(self):
+        ctx = self._ctx()
+        await self.helperObj.balanceHelper(ctx)
+
+        embed = ctx.response.send_message.call_args.kwargs["embed"]
+        values = {f.name: f.value for f in embed.fields}
+        self.assertEqual(values["Win Rate"], "N/A")
+        self.assertEqual(values["Net Gold Won/Lost"], "+0 gold")
 
 
 # ===========================================================================
@@ -770,6 +893,72 @@ class WagerHelperTests(HelperTestCase):
         self.assertEqual(self.cursor.fetchone(), (2, 250))
         ctx.response.send_message.assert_awaited_once_with("You wagered 250 gold on Team 2!")
 
+    async def test_rejects_wager_from_a_player_in_the_game(self):
+        team1 = Team()
+        team1.name = "Team 1"
+        team1.add_player(Player(901, "Alice"))  # the bettor is rostered on team1
+        team2 = Team()
+        team2.name = "Team 2"
+        team2.add_player(Player(902, "Bob"))
+        self.helperObj.update(GUILD_ID, "team1", team1.serializeTeam())
+        self.helperObj.update(GUILD_ID, "team2", team2.serializeTeam())
+        self.helperObj.update(GUILD_ID, "betting_state", "OPEN")
+        self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.cursor.execute(
+            "UPDATE economy SET balance=1000 WHERE guildId=? AND userId=?", (GUILD_ID, 901)
+        )
+        self.db.commit()
+
+        ctx = self._ctx()
+        await self.helperObj.wagerHelper(ctx, 100, 2)
+
+        ctx.response.send_message.assert_awaited_once_with(
+            "You can't wager on a game you're playing in!"
+        )
+        # no gold moved, no wager recorded
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "balance"), 1000)
+        self.cursor.execute("SELECT COUNT(*) FROM wagers WHERE guildId=? AND userId=?", (GUILD_ID, 901))
+        self.assertEqual(self.cursor.fetchone()[0], 0)
+
+    async def test_rejects_wager_from_a_player_on_the_other_team(self):
+        team1 = Team()
+        team1.name = "Team 1"
+        team1.add_player(Player(801, "Someone"))
+        team2 = Team()
+        team2.name = "Team 2"
+        team2.add_player(Player(901, "Alice"))  # rostered on team2 instead of team1
+        self.helperObj.update(GUILD_ID, "team1", team1.serializeTeam())
+        self.helperObj.update(GUILD_ID, "team2", team2.serializeTeam())
+        self.helperObj.update(GUILD_ID, "betting_state", "OPEN")
+
+        ctx = self._ctx()
+        await self.helperObj.wagerHelper(ctx, 100, 1)
+
+        ctx.response.send_message.assert_awaited_once_with(
+            "You can't wager on a game you're playing in!"
+        )
+
+    async def test_spectator_not_in_either_team_can_still_wager(self):
+        team1 = Team()
+        team1.name = "Team 1"
+        team1.add_player(Player(801, "Someone"))
+        team2 = Team()
+        team2.name = "Team 2"
+        team2.add_player(Player(802, "Someone Else"))
+        self.helperObj.update(GUILD_ID, "team1", team1.serializeTeam())
+        self.helperObj.update(GUILD_ID, "team2", team2.serializeTeam())
+        self.helperObj.update(GUILD_ID, "betting_state", "OPEN")
+        self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.cursor.execute(
+            "UPDATE economy SET balance=1000 WHERE guildId=? AND userId=?", (GUILD_ID, 901)
+        )
+        self.db.commit()
+
+        ctx = self._ctx()  # Alice (901) isn't rostered on either team
+        await self.helperObj.wagerHelper(ctx, 100, 1)
+
+        ctx.response.send_message.assert_awaited_once_with("You wagered 100 gold on Team 1!")
+
 
 class RecordResultTests(HelperTestCase):
     def _place_bet(self, user_id, name, team, amount, starting_balance=1000):
@@ -809,6 +998,7 @@ class RecordResultTests(HelperTestCase):
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 902, "losses"), 1)
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 902, "gold_wagered"), 300)
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 902, "gold_won"), 0)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 902, "gold_lost"), 300)
 
         self.cursor.execute("SELECT COUNT(*) FROM wagers WHERE guildId=?", (GUILD_ID,))
         self.assertEqual(self.cursor.fetchone()[0], 0)
@@ -839,6 +1029,7 @@ class RecordResultTests(HelperTestCase):
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "balance"), 900)  # never refunded
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "losses"), 1)
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "wins"), 0)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "gold_lost"), 100)
         self.assertIn("Nobody bet on the winning team", channel.send.call_args.args[0])
 
     async def test_all_bets_on_winning_side_are_refunded_with_no_profit(self):
@@ -850,6 +1041,48 @@ class RecordResultTests(HelperTestCase):
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "balance"), 1000)  # back to start
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "gold_won"), 0)
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "wins"), 1)
+
+    async def test_moves_everyone_back_when_guild_provided(self):
+        # regression test: recording a winner used to only pay out bets —
+        # players stayed in their team channels until someone separately
+        # ran /return.
+        og = FakeChannel("Lobby")
+        channel1 = FakeChannel("Team 1")
+        channel2 = FakeChannel("Team 2")
+        member1 = FakeMember("Alice", id=901)
+        member2 = FakeMember("Bob", id=902)
+        channel1.members = [member1]
+        channel2.members = [member2]
+        guild = FakeGuild(channels=[og, channel1, channel2])
+
+        self.helperObj.update(GUILD_ID, "original_channel", "Lobby")
+        self.helperObj.update(GUILD_ID, "channel1", "Team 1")
+        self.helperObj.update(GUILD_ID, "channel2", "Team 2")
+
+        channel = FakeChannel("game-chat")
+        await self.helperObj.recordResult(GUILD_ID, 1, channel, guild)
+
+        member1.move_to.assert_awaited_once_with(og)
+        member2.move_to.assert_awaited_once_with(og)
+        messages = [c.args[0] for c in channel.send.call_args_list]
+        self.assertIn("Moved everyone back to the original channel!", messages)
+
+    async def test_no_move_message_when_never_started(self):
+        guild = FakeGuild()  # original_channel was never set
+        channel = FakeChannel("game-chat")
+
+        await self.helperObj.recordResult(GUILD_ID, 1, channel, guild)
+
+        messages = [c.args[0] for c in channel.send.call_args_list]
+        self.assertFalse(any("Moved everyone back" in m for m in messages))
+
+    async def test_no_move_attempted_when_guild_omitted(self):
+        channel = FakeChannel("game-chat")
+
+        await self.helperObj.recordResult(GUILD_ID, 1, channel)  # guild defaults to None
+
+        messages = [c.args[0] for c in channel.send.call_args_list]
+        self.assertFalse(any("Moved everyone back" in m for m in messages))
 
 
 class CancelBettingHelperTests(HelperTestCase):
@@ -965,7 +1198,7 @@ class HandleWinnerReactionTests(HelperTestCase):
     def setUp(self):
         super().setUp()
         self.channel = FakeChannel("game-chat")
-        self.helperObj.client = FakeClient(channels=[self.channel])
+        self.helperObj.client = FakeClient(channels=[self.channel], guilds=[self.guild])
         self.helperObj.update(GUILD_ID, "betting_state", "AWAITING_RESULT")
         self.helperObj.update(GUILD_ID, "betting_message_id", 555)
 
@@ -993,7 +1226,9 @@ class HandleWinnerReactionTests(HelperTestCase):
             payload = FakePayload(GUILD_ID, 555, self.channel.id, "1️⃣")
             await self.helperObj.handleWinnerReaction(payload)
 
-        mock.assert_awaited_once_with(GUILD_ID, 1, self.channel)
+        # the guild gets looked up and forwarded so recordResult can move
+        # everyone back to the original channel once the winner is settled
+        mock.assert_awaited_once_with(GUILD_ID, 1, self.channel, self.guild)
         # state flips to NONE synchronously before recordResult runs, so a
         # second/concurrent reaction can't also pass the guard above
         self.assertEqual(self.helperObj.get(GUILD_ID, "betting_state"), "NONE")
@@ -1296,7 +1531,7 @@ class MakeTeamsCommandTests(BotModuleTestCase):
         self.bot.helperObj.update(guild_id, "team1", team1.serializeTeam())
         self.bot.helperObj.update(guild_id, "team2", team2.serializeTeam())
 
-    async def test_random_split_moves_and_announces(self):
+    async def test_random_split_announces_without_moving(self):
         guild_id = 907
         await self._setup_teams(guild_id)
         ctx = self._ctx(guild_id=guild_id)
@@ -1305,13 +1540,20 @@ class MakeTeamsCommandTests(BotModuleTestCase):
              patch.object(self.bot.helperObj, "both", AsyncMock()) as both_mock, \
              patch.object(self.bot.helperObj, "movefunc", AsyncMock()) as move_mock, \
              patch.object(self.bot.helperObj, "printEmbed", AsyncMock()) as embed_mock:
-            await self._command("make-teams").callback(ctx, use_roles=False, movevar=True)
+            await self._command("make-teams").callback(ctx, use_roles=False)
 
         randomize_mock.assert_awaited_once_with(ctx)
         both_mock.assert_not_awaited()
-        move_mock.assert_awaited_once_with(ctx)
+        # regression: /make-teams used to optionally move everyone itself;
+        # that's exclusively /start's job now.
+        move_mock.assert_not_awaited()
         embed_mock.assert_awaited_once()
-        ctx.followup.send.assert_awaited_once_with("Teams created!")
+        ctx.response.send_message.assert_awaited_once_with("Teams created!")
+        # regression: the /start reminder used to be folded into the very
+        # first response, which posts *before* the team embeds and is easy
+        # to miss. It's the last message sent now, after the rosters.
+        ctx.channel.send.assert_awaited_once()
+        self.assertIn("/start", ctx.channel.send.call_args.args[0])
 
     async def test_use_roles_calls_both_instead_of_randomize(self):
         guild_id = 908
@@ -1321,12 +1563,57 @@ class MakeTeamsCommandTests(BotModuleTestCase):
         with patch.object(self.bot.helperObj, "randomizeTeamHelper", AsyncMock()) as randomize_mock, \
              patch.object(self.bot.helperObj, "both", AsyncMock()) as both_mock, \
              patch.object(self.bot.helperObj, "movefunc", AsyncMock()) as move_mock, \
-             patch.object(self.bot.helperObj, "printEmbed", AsyncMock()):
-            await self._command("make-teams").callback(ctx, use_roles=True, movevar=False)
+             patch.object(self.bot.helperObj, "printEmbed", AsyncMock()) as embed_mock:
+            await self._command("make-teams").callback(ctx, use_roles=True)
 
         both_mock.assert_awaited_once_with(ctx)
         randomize_mock.assert_not_awaited()
         move_mock.assert_not_awaited()
+        # regression test: /make-teams use_roles:True used to never forward
+        # that flag to printEmbed, so roles never actually showed up.
+        embed_mock.assert_awaited_once()
+        self.assertTrue(embed_mock.call_args.kwargs.get("useRoles"))
+
+    async def test_use_roles_explains_when_a_team_is_not_five(self):
+        # _setup_teams() gives each team 1 player, so roles can't apply —
+        # continue normally (teams still get created and posted) but say
+        # why no roles showed up.
+        guild_id = 912
+        await self._setup_teams(guild_id)
+        ctx = self._ctx(guild_id=guild_id)
+
+        with patch.object(self.bot.helperObj, "both", AsyncMock()), \
+             patch.object(self.bot.helperObj, "printEmbed", AsyncMock()) as embed_mock:
+            await self._command("make-teams").callback(ctx, use_roles=True)
+
+        embed_mock.assert_awaited_once()  # teams still get announced normally
+        # explanation, then the trailing /start reminder
+        self.assertEqual(ctx.channel.send.await_count, 2)
+        explanation = ctx.channel.send.call_args_list[0].args[0]
+        self.assertIn("Team 1 (1 players)", explanation)
+        self.assertIn("Team 2 (1 players)", explanation)
+        self.assertIn("/start", ctx.channel.send.call_args_list[1].args[0])
+
+    async def test_use_roles_no_explanation_when_teams_are_five_v_five(self):
+        guild_id = 913
+        await self._insert_guild_row(guild_id)
+        team1 = Team(); team1.set_id(1); team1.name = "Team 1"
+        team2 = Team(); team2.set_id(2); team2.name = "Team 2"
+        for i in range(5):
+            team1.add_player(Player(100 + i, f"A{i}"))
+            team2.add_player(Player(200 + i, f"B{i}"))
+        self.bot.helperObj.update(guild_id, "team1", team1.serializeTeam())
+        self.bot.helperObj.update(guild_id, "team2", team2.serializeTeam())
+        ctx = self._ctx(guild_id=guild_id)
+
+        with patch.object(self.bot.helperObj, "both", AsyncMock()), \
+             patch.object(self.bot.helperObj, "printEmbed", AsyncMock()):
+            await self._command("make-teams").callback(ctx, use_roles=True)
+
+        # only the trailing /start reminder — no role explanation needed
+        ctx.channel.send.assert_awaited_once()
+        self.assertNotIn("Roles need", ctx.channel.send.call_args.args[0])
+        self.assertIn("/start", ctx.channel.send.call_args.args[0])
 
 
 class CaptainsCommandTests(BotModuleTestCase):

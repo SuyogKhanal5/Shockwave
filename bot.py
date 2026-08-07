@@ -75,6 +75,10 @@ cursor.execute(
     "guildId, userId, username, balance, wins, losses, gold_wagered, gold_won, last_daily, "
     "PRIMARY KEY(guildId, userId))"
 )
+# BUG-PRONE PATTERN AVOIDED: "CREATE TABLE IF NOT EXISTS" above is a no-op
+# on a database that already has an `economy` table from before this
+# column existed — ensure_column() is what actually adds it on those.
+ensure_column("economy", "gold_lost", "INTEGER", "0")
 # Active bets for the game currently in progress in a guild. Cleared out
 # (paid out or refunded) by the time the game resolves.
 cursor.execute(
@@ -224,26 +228,22 @@ async def help(ctx):
     description="Create teams",
     guild=discord.Object(id=526081127643873280)
 )
-async def fullRandom(ctx, use_roles: bool = False, movevar: bool = True):
+async def fullRandom(ctx, use_roles: bool = False):
     # BUG FIX: `use_roles` (renamed from `roles`, which was shadowing the
     # module-level `roles` dict above) is already a bool from the slash
     # command's type annotation. The original code compared it to the
     # *string* 'True' (`if roles == 'True':`), which is always False no
     # matter what the user picks, so the roles branch was unreachable.
     #
-    # BUG FIX: this command can end up calling movefunc(), which loops
-    # move_to() calls and can outrun the 3-second interaction response
-    # window (same root cause as /return and /move above). Defer up front
-    # so it's safe regardless of movevar.
-    await ctx.response.defer()
-
+    # This command only announces the teams — it used to optionally move
+    # everyone immediately (a `movevar` flag), but moving players and
+    # opening betting is now exclusively /start's job, so a roster can be
+    # announced and reviewed before anyone actually gets pulled into a
+    # voice channel.
     if use_roles:
         await helperObj.both(ctx)
     else:
         await helperObj.randomizeTeamHelper(ctx)
-
-    if movevar:
-        await helperObj.movefunc(ctx)
 
     team1 = helperObj.get(ctx.guild.id, "team1")
     team2 = helperObj.get(ctx.guild.id, "team2")
@@ -253,8 +253,34 @@ async def fullRandom(ctx, use_roles: bool = False, movevar: bool = True):
     team2Obj = Team()
     team2Obj.deserializeTeam(team2)
 
-    await ctx.followup.send("Teams created!")
-    await helperObj.printEmbed(ctx, team1Obj, team2Obj)
+    await ctx.response.send_message("Teams created!")
+
+    # Roles (Top/Jungle/Mid/Bottom/Support) only make sense for a 5-player
+    # team — makeEmbedString() silently falls back to a plain roster for
+    # any other size. Explain that instead of leaving people wondering
+    # where the roles went.
+    if use_roles:
+        unroled = [
+            f"{team.get_name()} ({len(team.get_players())} players)"
+            for team in (team1Obj, team2Obj)
+            if len(team.get_players()) != 5
+        ]
+        if unroled:
+            await ctx.channel.send(
+                "Roles need exactly 5 players on a team to assign, so no roles were "
+                f"assigned for: {', '.join(unroled)}. Showing the roster as normal instead."
+            )
+
+    await helperObj.printEmbed(ctx, team1Obj, team2Obj, useRoles=use_roles)
+
+    # BUG FIX: this used to be folded into the very first response message,
+    # which gets posted *before* the team embeds and is easy to scroll past
+    # once the (visually much bigger) rosters land right after it. Posting
+    # it last — after the rosters, bolded — puts it where people are
+    # actually looking once they're done reading the teams.
+    await ctx.channel.send(
+        '📣 **Ready?** Use "/start" to move everyone into their channels and open betting.'
+    )
 
 
 @tree.command(

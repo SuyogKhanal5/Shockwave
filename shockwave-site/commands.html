@@ -127,11 +127,10 @@
             <span class="cmd-name"><span class="slash">/</span>make-teams</span>
             <span class="cmd-badge">formation</span>
           </div>
-          <p class="cmd-desc">Randomly splits everyone in your voice channel into two even teams. Optionally assigns a lane to each player and moves everyone automatically.</p>
+          <p class="cmd-desc">Randomly splits everyone in your voice channel into two even teams and posts the roster. Optionally assigns a lane to each player. Doesn't move anyone — run <code class="inline">/start</code> once you're happy with the teams to move everyone and open betting.</p>
           <table class="params">
             <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
             <tr><td class="param-name">use_roles</td><td class="param-type">boolean, optional</td><td>Also hand out lane roles (Top / Jungle / Mid / Bottom / Support) — needs exactly 5 players per side.</td></tr>
-            <tr><td class="param-name">movevar</td><td class="param-type">boolean, optional</td><td>Move everyone into their team channel right away. On by default.</td></tr>
           </table>
           <div class="embed-stack">
             <div class="discord-embed blue">
@@ -275,7 +274,7 @@
             <span class="cmd-name"><span class="slash">/</span>wager</span>
             <span class="cmd-badge">betting</span>
           </div>
-          <p class="cmd-desc">Bets gold on one team winning the current game. Only works while betting is open, and only one bet per player per game.</p>
+          <p class="cmd-desc">Bets gold on one team winning the current game. Only works while betting is open, only one bet per player per game, and you can't bet on a game you're actually playing in.</p>
           <table class="params">
             <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
             <tr><td class="param-name">amount</td><td class="param-type">integer</td><td>How much gold to wager. Must not exceed your balance.</td></tr>
@@ -301,7 +300,7 @@
             <span class="cmd-name"><span class="slash">/</span>balance</span>
             <span class="cmd-badge">betting</span>
           </div>
-          <p class="cmd-desc">Shows your gold balance, win/loss record, total gold wagered, and total gold won.</p>
+          <p class="cmd-desc">Shows your gold balance, win/loss record, win rate, total gold wagered, and your net gold won or lost overall (positive if you're up, negative if you're down).</p>
         </div>
       </section>
 

@@ -143,9 +143,13 @@ class helpers():
 
     # prints teams in discord channel
     # DO NOT PASS NULL TEAMS
-    async def printEmbed(self, ctx, team1: Team, team2: Team, playersTeam=None):
-        team1_embedString = self.makeEmbedString(team1)
-        team2_embedString = self.makeEmbedString(team2)
+    async def printEmbed(self, ctx, team1: Team, team2: Team, playersTeam=None, useRoles=False):
+        # BUG FIX: this always called makeEmbedString() with its default
+        # useRoles=False, so /make-teams use_roles:True computed and stored
+        # role-shuffled results (see randomRoleHelper) that the embed it
+        # actually posts never displayed. Forward the flag through.
+        team1_embedString = self.makeEmbedString(team1, useRoles)
+        team2_embedString = self.makeEmbedString(team2, useRoles)
 
         team1_embed = discord.Embed(
             title=team1.get_name(), description=team1_embedString, color=discord.Color.blue()
@@ -421,9 +425,20 @@ class helpers():
         # BUG FIX: `players` is a Team object, never equal to the list
         # literal `[]` — this comparison was always False, so the "draft
         # complete" message never fired. Check the underlying player list.
-        if len(players.get_players()) == 0:
+        #
+        # Also prompt once both teams reach team_size, even if the pool
+        # still has people left in it — a voice channel with more people
+        # than team_size * 2 is expected to leave spectators undrafted, so
+        # waiting on the pool to fully empty would never fire at all.
+        team_size = self.get(ctx.guild.id, "team_size") or 0
+        teams_full = (
+            team_size
+            and len(team1.get_players()) >= team_size
+            and len(team2.get_players()) >= team_size
+        )
+        if len(players.get_players()) == 0 or teams_full:
             await ctx.channel.send(
-                'You\'ve drafted the maximum number of people for the team size! Use "/start" to move everyone to the channels!'
+                'Both teams are set! Use "/start" to move everyone to the channels!'
             )
             return
 
@@ -478,23 +493,25 @@ class helpers():
         )
         await channel.send(content)
 
-    # move everyone in the team channels (+ spectators) back to the
-    # channel they started in, refunding any bets from a game that never
-    # got a recorded winner.
-    async def returnHelper(self, ctx):
-        og = self.get(ctx.guild.id, "original_channel")
-        chan1 = self.get(ctx.guild.id, "channel1")
-        chan2 = self.get(ctx.guild.id, "channel2")
+    # Moves everyone currently in either team channel (+ spectators) back
+    # to the channel they started in. Takes a discord.Guild rather than an
+    # Interaction so it can run both from /return and automatically once a
+    # winner is reported (recordResult), neither of which always has a
+    # command Interaction to work with. Returns False (and moves nobody)
+    # if the server was never /start'd — there's no "original channel" on
+    # record to send anyone back to.
+    async def moveMembersToOriginalChannel(self, guild):
+        guild_id = guild.id
+        og = self.get(guild_id, "original_channel")
+        chan1 = self.get(guild_id, "channel1")
+        chan2 = self.get(guild_id, "channel2")
 
-        original_channel = discord.utils.get(ctx.guild.channels, name=og)
-        channel1 = discord.utils.get(ctx.guild.channels, name=chan1)
-        channel2 = discord.utils.get(ctx.guild.channels, name=chan2)
+        original_channel = discord.utils.get(guild.channels, name=og)
+        channel1 = discord.utils.get(guild.channels, name=chan1)
+        channel2 = discord.utils.get(guild.channels, name=chan2)
 
         if original_channel is None:
-            await ctx.response.send_message(
-                'You have not been seperated into team voice channels! Use "/start" first.'
-            )
-            return
+            return False
 
         aggregate = []
         if channel1 is not None:
@@ -502,14 +519,28 @@ class helpers():
         if channel2 is not None:
             aggregate.extend(channel2.members)
 
+        for member in aggregate:
+            await member.move_to(original_channel)
+
+        return True
+
+    # move everyone in the team channels (+ spectators) back to the
+    # channel they started in, refunding any bets from a game that never
+    # got a recorded winner.
+    async def returnHelper(self, ctx):
+        og = self.get(ctx.guild.id, "original_channel")
+        if discord.utils.get(ctx.guild.channels, name=og) is None:
+            await ctx.response.send_message(
+                'You have not been seperated into team voice channels! Use "/start" first.'
+            )
+            return
+
         # See the BUG FIX note that used to live on the /return command in
         # bot.py: move_to() is one API call per member, so defer immediately
         # to avoid blowing the 3-second interaction window.
         await ctx.response.defer()
 
-        for i in aggregate:
-            await i.move_to(original_channel)
-
+        await self.moveMembersToOriginalChannel(ctx.guild)
         await self.cancelBettingHelper(ctx.guild.id, ctx.channel)
 
         await ctx.followup.send('Moved!')
@@ -519,8 +550,8 @@ class helpers():
     def ensureEconomyRow(self, guild_id, user_id, username):
         self.cursor.execute(
             "INSERT OR IGNORE INTO economy"
-            "(guildId, userId, username, balance, wins, losses, gold_wagered, gold_won, last_daily) "
-            "VALUES(?, ?, ?, 0, 0, 0, 0, 0, NULL)",
+            "(guildId, userId, username, balance, wins, losses, gold_wagered, gold_won, gold_lost, last_daily) "
+            "VALUES(?, ?, ?, 0, 0, 0, 0, 0, 0, NULL)",
             (guild_id, user_id, username)
         )
         self.cursor.execute(
@@ -570,11 +601,15 @@ class helpers():
         self.ensureEconomyRow(guild_id, user_id, ctx.user.name)
 
         self.cursor.execute(
-            "SELECT balance, wins, losses, gold_wagered, gold_won FROM economy "
+            "SELECT balance, wins, losses, gold_wagered, gold_won, gold_lost FROM economy "
             "WHERE guildId=? AND userId=?",
             (guild_id, user_id)
         )
-        balance, wins, losses, gold_wagered, gold_won = self.cursor.fetchone()
+        balance, wins, losses, gold_wagered, gold_won, gold_lost = self.cursor.fetchone()
+
+        net_gold = gold_won - gold_lost
+        games_played = wins + losses
+        win_rate = f"{(wins / games_played) * 100:.1f}%" if games_played > 0 else "N/A"
 
         embed = discord.Embed(
             title=f"{ctx.user.display_name}'s Wallet", color=discord.Color.gold()
@@ -582,12 +617,28 @@ class helpers():
         embed.add_field(name="Balance", value=f"{balance} gold", inline=True)
         embed.add_field(name="Wins", value=str(wins), inline=True)
         embed.add_field(name="Losses", value=str(losses), inline=True)
+        embed.add_field(name="Win Rate", value=win_rate, inline=True)
         embed.add_field(name="Gold Wagered", value=str(gold_wagered), inline=True)
-        embed.add_field(name="Gold Won", value=str(gold_won), inline=True)
+        embed.add_field(name="Net Gold Won/Lost", value=f"{net_gold:+d} gold", inline=True)
 
         await ctx.response.send_message(embed=embed)
 
     # ---------------- Betting ----------------
+
+    # True if `user_id` is a rostered player (either side) in the game
+    # /start most recently moved into channels — used to stop players from
+    # betting on their own game.
+    def isPlayerInCurrentGame(self, guild_id, user_id):
+        player_ids = set()
+        for column in ("team1", "team2"):
+            serialized = self.get(guild_id, column)
+            if not serialized:
+                continue
+            team = Team()
+            team.deserializeTeam(serialized)
+            player_ids.update(p.get_id() for p in team.get_players())
+
+        return user_id in player_ids
 
     async def wagerHelper(self, ctx, amount: int, team: int):
         guild_id = ctx.guild.id
@@ -602,6 +653,10 @@ class helpers():
             await ctx.response.send_message(
                 "Betting is not currently open. Use \"/start\" to start a game and open betting."
             )
+            return
+
+        if self.isPlayerInCurrentGame(guild_id, user_id):
+            await ctx.response.send_message("You can't wager on a game you're playing in!")
             return
 
         self.ensureEconomyRow(guild_id, user_id, ctx.user.name)
@@ -716,13 +771,18 @@ class helpers():
         if channel is None:
             channel = await self.client.fetch_channel(payload.channel_id)
 
-        await self.recordResult(guild_id, winning_team, channel)
+        guild = self.client.get_guild(guild_id)
+
+        await self.recordResult(guild_id, winning_team, channel, guild)
 
     # Pari-mutuel payout: winners split the losing side's pool proportional
     # to their own wager, on top of getting their own wager back — so a bet
     # on the less-backed (riskier) side pays out more than a bet on the
-    # heavily-favored side.
-    async def recordResult(self, guild_id, winning_team, channel):
+    # heavily-favored side. Also moves everyone back to the original
+    # channel once the result is settled — reporting a winner ends the
+    # game, so no separate /return is needed. `guild` is optional only so
+    # callers/tests that don't care about the move can omit it.
+    async def recordResult(self, guild_id, winning_team, channel, guild=None):
         self.cursor.execute(
             "SELECT userId, username, team, amount FROM wagers WHERE guildId=?", (guild_id,)
         )
@@ -735,47 +795,49 @@ class helpers():
 
         if not allWagers:
             await channel.send(f"**Team {winning_team}** wins! No bets were placed on this game.")
-            return
+        else:
+            winningBets = [w for w in allWagers if w[2] == winning_team]
+            losingBets = [w for w in allWagers if w[2] != winning_team]
 
-        winningBets = [w for w in allWagers if w[2] == winning_team]
-        losingBets = [w for w in allWagers if w[2] != winning_team]
+            winningPool = sum(w[3] for w in winningBets)
+            losingPool = sum(w[3] for w in losingBets)
 
-        winningPool = sum(w[3] for w in winningBets)
-        losingPool = sum(w[3] for w in losingBets)
+            lines = [f"**Team {winning_team}** wins! Paying out bets..."]
 
-        lines = [f"**Team {winning_team}** wins! Paying out bets..."]
+            for user_id, username, _team, amount in losingBets:
+                self.ensureEconomyRow(guild_id, user_id, username)
+                self.cursor.execute(
+                    "UPDATE economy SET losses = losses + 1, gold_wagered = gold_wagered + ?, "
+                    "gold_lost = gold_lost + ? WHERE guildId=? AND userId=?",
+                    (amount, amount, guild_id, user_id)
+                )
 
-        for user_id, username, _team, amount in losingBets:
-            self.ensureEconomyRow(guild_id, user_id, username)
-            self.cursor.execute(
-                "UPDATE economy SET losses = losses + 1, gold_wagered = gold_wagered + ? "
-                "WHERE guildId=? AND userId=?",
-                (amount, guild_id, user_id)
-            )
+            if not winningBets:
+                lines.append("Nobody bet on the winning team — all bets were lost.")
 
-        if not winningBets:
-            lines.append("Nobody bet on the winning team — all bets were lost.")
+            for user_id, username, _team, amount in winningBets:
+                self.ensureEconomyRow(guild_id, user_id, username)
 
-        for user_id, username, _team, amount in winningBets:
-            self.ensureEconomyRow(guild_id, user_id, username)
+                if winningPool > 0:
+                    payout = round(amount + (amount / winningPool) * losingPool)
+                else:
+                    payout = amount
+                profit = payout - amount
 
-            if winningPool > 0:
-                payout = round(amount + (amount / winningPool) * losingPool)
-            else:
-                payout = amount
-            profit = payout - amount
+                self.cursor.execute(
+                    "UPDATE economy SET balance = balance + ?, wins = wins + 1, "
+                    "gold_wagered = gold_wagered + ?, gold_won = gold_won + ? "
+                    "WHERE guildId=? AND userId=?",
+                    (payout, amount, profit, guild_id, user_id)
+                )
+                lines.append(f"{username} won {payout} gold (bet {amount})")
 
-            self.cursor.execute(
-                "UPDATE economy SET balance = balance + ?, wins = wins + 1, "
-                "gold_wagered = gold_wagered + ?, gold_won = gold_won + ? "
-                "WHERE guildId=? AND userId=?",
-                (payout, amount, profit, guild_id, user_id)
-            )
-            lines.append(f"{username} won {payout} gold (bet {amount})")
+            self.db.commit()
 
-        self.db.commit()
+            await channel.send("\n".join(lines))
 
-        await channel.send("\n".join(lines))
+        if guild is not None and await self.moveMembersToOriginalChannel(guild):
+            await channel.send("Moved everyone back to the original channel!")
 
     # Cancels the running betting timer (if any) and, if the game had an
     # unresolved bet round (open, closed-but-unreported, or awaiting a
