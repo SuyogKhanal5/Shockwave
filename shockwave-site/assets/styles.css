@@ -614,6 +614,54 @@ table.params tr:last-child td { border-bottom: none; }
 }
 
 /* ============================================================
+   FAQ accordion
+   ============================================================ */
+.faq-item {
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-md);
+  margin-bottom: 12px;
+  scroll-margin-top: 24px;
+  overflow: hidden;
+}
+
+.faq-item summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 16px 44px 16px 20px;
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 0.98rem;
+  color: var(--text);
+  position: relative;
+}
+
+.faq-item summary::-webkit-details-marker { display: none; }
+
+.faq-item summary::after {
+  content: "+";
+  position: absolute;
+  right: 20px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--gold);
+  font-family: var(--font-mono);
+  font-size: 1.1rem;
+}
+
+.faq-item[open] summary::after { content: "\2212"; }
+
+.faq-item summary:hover { background: var(--surface-hover); }
+
+.faq-item .faq-body {
+  padding: 0 20px 18px;
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+.faq-item .faq-body p:last-child { margin-bottom: 0; }
+
+/* ============================================================
    Footer
    ============================================================ */
 .page-footer {
