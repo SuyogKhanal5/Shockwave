@@ -122,8 +122,8 @@
           <div class="flow-step">
             <div class="flow-num">03</div>
             <div class="flow-body">
-              <h4>Build the roster</h4>
-              <p>Shuffle instantly with <code class="inline">/make-teams</code>, or let two captains draft live with <code class="inline">/captains</code> and <code class="inline">/choose</code>.</p>
+              <h4>Build the roster — casual or ranked</h4>
+              <p>Shuffle instantly with <code class="inline">/make-teams</code>, or let two captains draft live with <code class="inline">/captains</code> and <code class="inline">/choose</code> — a casual game, elo untouched either way. Want it to count? <code class="inline">/ranked</code> and <code class="inline">/ranked-captains</code> run the exact same two paths, but balance teams by elo and update it when the winner's in. Full breakdown, side by side: <a href="commands.html#team-formation" style="color:var(--gold);">casual vs. ranked setup →</a></p>
             </div>
           </div>
           <div class="flow-step">
@@ -137,14 +137,14 @@
             <div class="flow-num">05</div>
             <div class="flow-body">
               <h4>Report the winner</h4>
-              <p>Shockwave asks who won and reacts with 1️⃣/2️⃣ itself — one click settles every bet and pays out the winners.</p>
+              <p>Shockwave asks who won and reacts with 1️⃣/2️⃣ itself — one click settles every bet, updates game records (and elo for ranked games), and moves both teams back to the original channel automatically.</p>
             </div>
           </div>
           <div class="flow-step">
             <div class="flow-num">06</div>
             <div class="flow-body">
-              <h4>Bring everyone back</h4>
-              <p>When the match ends, <code class="inline">/return</code> pulls both teams — plus anyone spectating — back into the original channel. Any bet that never got a reported winner is refunded automatically.</p>
+              <h4>Handle the edge cases</h4>
+              <p><code class="inline">/return</code> ends a game early and refunds any bets that never got a reported winner. Clicked the wrong reaction? <code class="inline">/report-correct-winner</code> fixes a misreported result after the fact.</p>
             </div>
           </div>
         </div>
@@ -163,7 +163,7 @@
           </div>
           <div class="card">
             <h3>Team formation</h3>
-            <p>Random split, live captain draft, or lane roles for a 5-player squad — pick whichever fits the night.</p>
+            <p>Random split, live captain draft, or lane roles for a 5-player squad — or go ranked with an elo-balanced split and tracked elo.</p>
             <a class="card-link" href="commands.html#team-formation">See formation commands →</a>
           </div>
           <div class="card">

@@ -47,7 +47,7 @@ if not db_already_existed:
         "CREATE TABLE servers(guildId, serverName, original_channel, team1, team2, "
         "players, channel1, channel2, mode, turn, team_size, tournament, elo, "
         "result1, result2, captain1, captain2, "
-        "betting_state, betting_message_id, betting_channel_id)"
+        "betting_state, betting_message_id, betting_channel_id, is_ranked)"
     )
     # BUG FIX: the original CREATE TABLE call was never committed.
     mainDB.commit()
@@ -67,6 +67,9 @@ else:
     ensure_column("servers", "betting_state", "TEXT", "'NONE'")
     ensure_column("servers", "betting_message_id", "INTEGER")
     ensure_column("servers", "betting_channel_id", "INTEGER")
+    # Whether the current team1/team2 game was formed via /ranked or
+    # /ranked-captains — gates whether recordResult touches anyone's elo.
+    ensure_column("servers", "is_ranked", "INTEGER", "0")
 
 # Per-member currency: gold balance plus win/loss and wagering stats, one
 # row per (guild, user).
@@ -76,15 +79,24 @@ cursor.execute(
     "PRIMARY KEY(guildId, userId))"
 )
 # BUG-PRONE PATTERN AVOIDED: "CREATE TABLE IF NOT EXISTS" above is a no-op
-# on a database that already has an `economy` table from before this
-# column existed — ensure_column() is what actually adds it on those.
+# on a database that already has an `economy` table from before these
+# columns existed — ensure_column() is what actually adds them on those.
 ensure_column("economy", "gold_lost", "INTEGER", "0")
+ensure_column("economy", "game_wins", "INTEGER", "0")
+ensure_column("economy", "game_losses", "INTEGER", "0")
+ensure_column("economy", "elo", "INTEGER", str(helper.DEFAULT_ELO))
 # Active bets for the game currently in progress in a guild. Cleared out
 # (paid out or refunded) by the time the game resolves.
 cursor.execute(
     "CREATE TABLE IF NOT EXISTS wagers("
     "guildId, userId, username, team, amount, "
     "PRIMARY KEY(guildId, userId))"
+)
+# Snapshot of the most recently resolved game per guild (wagers, rosters,
+# and the exact deltas applied) — lets /report-correct-winner undo a
+# misreported result precisely instead of guessing at what to reverse.
+cursor.execute(
+    "CREATE TABLE IF NOT EXISTS last_result(guildId PRIMARY KEY, data)"
 )
 mainDB.commit()
 
@@ -119,7 +131,7 @@ async def on_ready():
 async def on_guild_join(ctx):
     cursor.execute(
         "INSERT INTO servers VALUES(?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, "
-        "NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'NONE', NULL, NULL)",
+        "NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'NONE', NULL, NULL, 0)",
         (ctx.id, ctx.name)
     )
     mainDB.commit()
@@ -204,12 +216,13 @@ async def daily(ctx):
 
 
 @tree.command(
-    name="balance",
-    description="Check your gold balance and betting stats",
+    name="stats",
+    description="View your (or another player's) game record, elo, and economy stats",
     guild=discord.Object(id=526081127643873280)
 )
-async def balance(ctx):
-    await helperObj.balanceHelper(ctx)
+@app_commands.describe(member="Whose stats to look up — defaults to you")
+async def stats(ctx, member: discord.Member = None):
+    await helperObj.statsHelper(ctx, member)
 
 
 # TODO: update website to current shockwave website
@@ -284,6 +297,18 @@ async def fullRandom(ctx, use_roles: bool = False):
 
 
 @tree.command(
+    name="ranked",
+    description="Form roughly elo-balanced teams from your voice channel for a ranked game",
+    guild=discord.Object(id=526081127643873280)
+)
+async def ranked(ctx):
+    # rankedTeamHelper handles its own response + team embeds (elo averages
+    # need per-player lookups it already has to do anyway), unlike
+    # /make-teams where bot.py builds the response itself.
+    await helperObj.rankedTeamHelper(ctx)
+
+
+@tree.command(
     name="return",
     description="Return all members (including spectators) to the original channel",
     guild=discord.Object(id=526081127643873280)
@@ -301,11 +326,53 @@ async def returnAll(ctx):
 
 
 @tree.command(
+    name="report-correct-winner",
+    description="Admin: fix a misreported winner for the last game and adjust stats/payouts",
+    guild=discord.Object(id=526081127643873280)
+)
+@app_commands.describe(team="The team that actually won")
+@app_commands.choices(team=[
+    app_commands.Choice(name="Team 1", value=1),
+    app_commands.Choice(name="Team 2", value=2),
+])
+@app_commands.checks.has_permissions(manage_guild=True)
+async def reportCorrectWinner(ctx, team: app_commands.Choice[int]):
+    await helperObj.reportCorrectWinnerHelper(ctx, team.value)
+
+
+@reportCorrectWinner.error
+async def reportCorrectWinner_error(ctx, error):
+    if isinstance(error, app_commands.MissingPermissions):
+        await ctx.response.send_message(
+            "You need the Manage Server permission to correct a game result."
+        )
+    else:
+        raise error
+
+
+@tree.command(
     name="captains",
     description="Start captain draft",
     guild=discord.Object(id=526081127643873280)
 )
 async def captains(ctx, captain_1: discord.Member = None, captain_2: discord.Member = None, use_random: bool = False):
+    await startCaptainsDraft(ctx, captain_1, captain_2, use_random, ranked=False)
+
+
+@tree.command(
+    name="ranked-captains",
+    description="Draft your own ranked teams — same as /captains, but elo is tracked",
+    guild=discord.Object(id=526081127643873280)
+)
+async def rankedCaptains(ctx, captain_1: discord.Member = None, captain_2: discord.Member = None, use_random: bool = False):
+    await startCaptainsDraft(ctx, captain_1, captain_2, use_random, ranked=True)
+
+
+# Shared by /captains and /ranked-captains — identical draft flow, the only
+# difference is whether the resulting game is marked ranked (captainsHelper
+# sets is_ranked accordingly, which gates whether recordResult later
+# touches anyone's elo).
+async def startCaptainsDraft(ctx, captain_1, captain_2, use_random, ranked):
     # BUG FIX: renamed `random` param to `use_random` — it was shadowing the
     # `random` module imported at the top of this file (harmless here since
     # the module isn't used inside this function, but a landmine for future
@@ -348,7 +415,7 @@ async def captains(ctx, captain_1: discord.Member = None, captain_2: discord.Mem
         await ctx.response.send_message("Mention two team captains!")
         return
 
-    await helperObj.captainsHelper(ctx, captain1, captain2)
+    await helperObj.captainsHelper(ctx, captain1, captain2, ranked=ranked)
 
 
 @tree.command(
@@ -368,7 +435,13 @@ async def choose(ctx, member: discord.Member = None, use_random: bool = False):
     description="Clear data",
     guild=discord.Object(id=526081127643873280)
 )
-async def clearAll(ctx, clear_channels: bool = False, clear_tournament: bool = False, clear_elo: bool = False):
+async def clearAll(
+    ctx,
+    clear_channels: bool = False,
+    clear_tournament: bool = False,
+    clear_elo: bool = False,
+    clear_economy: bool = False,
+):
     await helperObj.clearTeamsHelper(ctx)
 
     if clear_channels:
@@ -380,6 +453,12 @@ async def clearAll(ctx, clear_channels: bool = False, clear_tournament: bool = F
 
     if clear_elo:
         helperObj.update(ctx.guild.id, "elo", "")
+
+    # Wipes every player's balance/wins/losses/wagered/won/lost stats for
+    # this server — opt-in and off by default, same as the other clear_*
+    # flags, since it's destructive and guild-wide.
+    if clear_economy:
+        helperObj.resetEconomyHelper(ctx.guild.id)
 
     await ctx.response.send_message("Cleared!")
 

@@ -110,7 +110,8 @@
             <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
             <tr><td class="param-name">clear_channels</td><td class="param-type">boolean, optional</td><td>Also forget the saved team channel names.</td></tr>
             <tr><td class="param-name">clear_tournament</td><td class="param-type">boolean, optional</td><td>Also clear tournament bracket data.</td></tr>
-            <tr><td class="param-name">clear_elo</td><td class="param-type">boolean, optional</td><td>Also reset stored elo/rating data.</td></tr>
+            <tr><td class="param-name">clear_elo</td><td class="param-type">boolean, optional</td><td>Legacy/unused field, kept for backwards compatibility — does not affect anyone's actual elo rating. Use <code class="inline">clear_economy</code> below to reset player elo.</td></tr>
+            <tr><td class="param-name">clear_economy</td><td class="param-type">boolean, optional</td><td>Also wipe every member's stats for this server — balance, elo, game record, betting record, and gold wagered/won/lost. This is server-wide and can't be undone.</td></tr>
           </table>
         </div>
       </section>
@@ -120,12 +121,28 @@
       <!-- ============ TEAM FORMATION ============ -->
       <section class="block" id="team-formation">
         <h2>Team formation</h2>
-        <p class="muted">The three ways to actually build a roster.</p>
+        <p class="muted">Two tracks: casual games just organize a roster, ranked games also balance and track elo.</p>
+
+        <div class="cmd-note">
+          <strong>Casual vs. ranked — the actual difference.</strong> Every game, casual or ranked, still runs
+          through <code class="inline">/start</code> to move players and open betting, and still updates each
+          player's <a href="commands.html#stats" style="color:var(--gold);">Game Record</a> (win/loss) when a
+          winner is reported. The only thing ranked adds: teams are split by current elo instead of pure
+          random/draft order, and elo itself only ever moves for games built with
+          <code class="inline">/ranked</code> or <code class="inline">/ranked-captains</code>. A casual game
+          — <code class="inline">/make-teams</code> or plain <code class="inline">/captains</code> — never
+          touches anyone's elo, win or lose. Pick the track when you build the roster; everything downstream
+          (<code class="inline">/start</code>, betting, reporting the winner, <code class="inline">/return</code>)
+          works identically either way.
+        </div>
+
+        <h3>Casual</h3>
+        <p class="muted">Organizes a roster for the night. Betting still works — elo never moves.</p>
 
         <div class="cmd-card" id="make-teams">
           <div class="cmd-head">
             <span class="cmd-name"><span class="slash">/</span>make-teams</span>
-            <span class="cmd-badge">formation</span>
+            <span class="cmd-badge">casual</span>
           </div>
           <p class="cmd-desc">Randomly splits everyone in your voice channel into two even teams and posts the roster. Optionally assigns a lane to each player. Doesn't move anyone — run <code class="inline">/start</code> once you're happy with the teams to move everyone and open betting.</p>
           <table class="params">
@@ -148,7 +165,7 @@
         <div class="cmd-card" id="captains">
           <div class="cmd-head">
             <span class="cmd-name"><span class="slash">/</span>captains</span>
-            <span class="cmd-badge">formation</span>
+            <span class="cmd-badge">casual</span>
           </div>
           <p class="cmd-desc">Starts a live captain draft. Name two captains, or let Shockwave pick two at random from the voice channel. Everyone else lands in a pool the captains pick from with <code class="inline">/choose</code>.</p>
           <table class="params">
@@ -177,9 +194,9 @@
         <div class="cmd-card" id="choose">
           <div class="cmd-head">
             <span class="cmd-name"><span class="slash">/</span>choose</span>
-            <span class="cmd-badge">formation</span>
+            <span class="cmd-badge">casual + ranked</span>
           </div>
-          <p class="cmd-desc">Captains only. Picks one player from the pool onto your team, then passes the turn to the other captain.</p>
+          <p class="cmd-desc">Captains only. Picks one player from the pool onto your team, then passes the turn to the other captain. Works the same whether the draft was started with <code class="inline">/captains</code> or <code class="inline">/ranked-captains</code>.</p>
           <table class="params">
             <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
             <tr><td class="param-name">member</td><td class="param-type">member, optional</td><td>The player to pick. Required unless <code class="inline">use_random</code> is set.</td></tr>
@@ -193,7 +210,7 @@
         <div class="cmd-card" id="randomize-roles">
           <div class="cmd-head">
             <span class="cmd-name"><span class="slash">/</span>randomize-roles</span>
-            <span class="cmd-badge">formation</span>
+            <span class="cmd-badge">casual</span>
           </div>
           <p class="cmd-desc">Shuffles lane roles across the current teams — useful after a draft, when <code class="inline">/make-teams</code> wasn't run with <code class="inline">use_roles</code> on.</p>
           <div class="embed-stack">
@@ -202,6 +219,106 @@
               <div class="embed-desc">Top - Kestrel&#10;Jungle - Bramble&#10;Mid - Onyx&#10;Bottom - Wrenna&#10;Support - Tovik</div>
             </div>
           </div>
+        </div>
+
+        <h4 style="margin:28px 0 10px; font-size:0.98rem;">Setting up a casual game</h4>
+        <div class="flow">
+          <div class="flow-step">
+            <div class="flow-num">01</div>
+            <div class="flow-body">
+              <p>Get everyone into one voice channel.</p>
+            </div>
+          </div>
+          <div class="flow-step">
+            <div class="flow-num">02</div>
+            <div class="flow-body">
+              <p>Build the roster: <code class="inline">/make-teams</code> for an instant random split, or <code class="inline">/captains</code> + <code class="inline">/choose</code> for a live draft.</p>
+            </div>
+          </div>
+          <div class="flow-step">
+            <div class="flow-num">03</div>
+            <div class="flow-body">
+              <p><code class="inline">/start</code> moves everyone into their team channels and opens betting.</p>
+            </div>
+          </div>
+          <div class="flow-step">
+            <div class="flow-num">04</div>
+            <div class="flow-body">
+              <p>React 1️⃣/2️⃣ to report the winner. Bets pay out and Game Record updates — elo is untouched.</p>
+            </div>
+          </div>
+        </div>
+
+        <hr class="rule" style="margin:40px 0;">
+
+        <h3>Ranked</h3>
+        <p class="muted">Same idea as casual, but the split is elo-aware and elo is on the line.</p>
+
+        <div class="cmd-card" id="ranked">
+          <div class="cmd-head">
+            <span class="cmd-name"><span class="slash">/</span>ranked</span>
+            <span class="cmd-badge">ranked</span>
+          </div>
+          <p class="cmd-desc">Splits your voice channel into two roughly elo-balanced teams — same "build the roster, then /start" flow as /make-teams, but the split is weighted by everyone's current elo (with some randomness so it isn't the exact same optimal matchup every time) instead of being fully random.</p>
+          <div class="cmd-note">
+            <strong>How the split works.</strong> Each player's elo gets a random nudge, then teams are drafted
+            strongest-to-weakest in a snake pattern (side A, side B, side B, side A, …) so team sizes stay even
+            and the top players don't all land on one side.
+          </div>
+        </div>
+
+        <div class="cmd-card" id="ranked-captains">
+          <div class="cmd-head">
+            <span class="cmd-name"><span class="slash">/</span>ranked-captains</span>
+            <span class="cmd-badge">ranked</span>
+          </div>
+          <p class="cmd-desc">Exactly <code class="inline">/captains</code> — same parameters, same draft with <code class="inline">/choose</code> — except the resulting game has elo tracked when the winner is reported.</p>
+          <table class="params">
+            <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+            <tr><td class="param-name">captain_1</td><td class="param-type">member, optional</td><td>First captain. Required unless <code class="inline">use_random</code> is set.</td></tr>
+            <tr><td class="param-name">captain_2</td><td class="param-type">member, optional</td><td>Second captain. Required unless <code class="inline">use_random</code> is set.</td></tr>
+            <tr><td class="param-name">use_random</td><td class="param-type">boolean, optional</td><td>Pick two captains at random from the voice channel instead.</td></tr>
+          </table>
+        </div>
+
+        <h4 style="margin:28px 0 10px; font-size:0.98rem;">Setting up a ranked game</h4>
+        <div class="flow">
+          <div class="flow-step">
+            <div class="flow-num">01</div>
+            <div class="flow-body">
+              <p>Get everyone into one voice channel. New players start at 1000 elo automatically — nothing to set up ahead of time.</p>
+            </div>
+          </div>
+          <div class="flow-step">
+            <div class="flow-num">02</div>
+            <div class="flow-body">
+              <p>Build the roster: <code class="inline">/ranked</code> for an elo-balanced instant split, or <code class="inline">/ranked-captains</code> + <code class="inline">/choose</code> for a live draft that's still marked ranked.</p>
+            </div>
+          </div>
+          <div class="flow-step">
+            <div class="flow-num">03</div>
+            <div class="flow-body">
+              <p><code class="inline">/start</code> moves everyone into their team channels and opens betting — identical to the casual flow.</p>
+            </div>
+          </div>
+          <div class="flow-step">
+            <div class="flow-num">04</div>
+            <div class="flow-body">
+              <p>React 1️⃣/2️⃣ to report the winner. Bets pay out, Game Record updates, <strong style="color:var(--text);">and elo shifts for every rostered player</strong> — more for beating a stronger team, less for beating a weaker one.</p>
+            </div>
+          </div>
+          <div class="flow-step">
+            <div class="flow-num">05</div>
+            <div class="flow-body">
+              <p>Reacted with the wrong result? <code class="inline">/report-correct-winner</code> undoes the wrong elo/payouts and re-applies them correctly — admin-only.</p>
+            </div>
+          </div>
+        </div>
+        <div class="cmd-note">
+          <strong>Ending a ranked game early.</strong> <code class="inline">/return</code> works exactly like it
+          does for a casual game — it refunds any open bets and moves everyone back. Since elo only ever changes
+          when a winner is actually reported, ending a ranked game with <code class="inline">/return</code> before
+          that happens leaves elo completely untouched, same as if the game had never been played.
         </div>
       </section>
 
@@ -265,8 +382,12 @@
           for 60 seconds — the bot stays fully responsive to every other command during that window. Once it
           closes, Shockwave posts a message asking which team won and reacts to it with 1️⃣ and 2️⃣ itself, so
           reporting the result is a single click. The first valid reaction from anyone in the server records
-          the winner and pays out bets immediately. If <code class="inline">/return</code> is used before a
-          winner is reported, every bet on that round is refunded instead.
+          the winner, pays out bets, updates everyone's game record (and elo too, for /ranked and
+          /ranked-captains games), and moves both teams back to the original channel automatically — no
+          separate <code class="inline">/return</code> needed. If
+          <code class="inline">/return</code> is used before a winner is reported, every bet on that round is
+          refunded instead. Reacted with the wrong result? <code class="inline">/report-correct-winner</code>
+          fixes it after the fact.
         </div>
 
         <div class="cmd-card" id="wager">
@@ -295,12 +416,36 @@
           <p class="cmd-desc">Claims 1000 free gold. Once per calendar day, per player.</p>
         </div>
 
-        <div class="cmd-card" id="balance">
+        <div class="cmd-card" id="stats">
           <div class="cmd-head">
-            <span class="cmd-name"><span class="slash">/</span>balance</span>
+            <span class="cmd-name"><span class="slash">/</span>stats</span>
             <span class="cmd-badge">betting</span>
           </div>
-          <p class="cmd-desc">Shows your gold balance, win/loss record, win rate, total gold wagered, and your net gold won or lost overall (positive if you're up, negative if you're down).</p>
+          <p class="cmd-desc">The full picture for one player: elo, actual in-game win/loss record (separate from betting), betting record, balance, and net gold won or lost overall — all in one embed.</p>
+          <table class="params">
+            <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+            <tr><td class="param-name">member</td><td class="param-type">member, optional</td><td>Whose stats to look up. Defaults to you.</td></tr>
+          </table>
+          <div class="cmd-note">
+            <strong>Elo is ranked-only, per-server.</strong> Every player starts at 1000. Elo only changes for
+            games formed with <code class="inline">/ranked</code> or <code class="inline">/ranked-captains</code>
+            — <code class="inline">/make-teams</code> and regular <code class="inline">/captains</code> games
+            update the Game Record above but never touch elo. When it does update, the size of the change is
+            based on the average rating on each side — beating a higher-rated team gains more than beating a
+            lower-rated one.
+          </div>
+        </div>
+
+        <div class="cmd-card" id="report-correct-winner">
+          <div class="cmd-head">
+            <span class="cmd-name"><span class="slash">/</span>report-correct-winner</span>
+            <span class="cmd-badge">admin</span>
+          </div>
+          <p class="cmd-desc">Fixes a misreported winner for the most recently resolved game — undoes the wrong payouts, win/loss records, and elo changes, then re-applies all of it for the correct team. Requires the <strong style="color:var(--text);">Manage Server</strong> permission.</p>
+          <table class="params">
+            <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+            <tr><td class="param-name">team</td><td class="param-type">choice</td><td>The team that actually won.</td></tr>
+          </table>
         </div>
       </section>
 

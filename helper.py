@@ -3,6 +3,7 @@ from TourneyClasses import Team, Tournament, Match, Player
 import random
 import asyncio
 import datetime
+import json
 import numpy as np
 
 BETTING_DURATION_SECONDS = 60
@@ -10,6 +11,12 @@ WINNER_REPORT_DELAY_SECONDS = 3
 DAILY_GOLD_AMOUNT = 1000
 TEAM_EMOJIS = {1: "1️⃣", 2: "2️⃣"}
 WINNER_EMOJIS = {emoji: team for team, emoji in TEAM_EMOJIS.items()}
+DEFAULT_ELO = 1000
+ELO_K_FACTOR = 32
+# +/- range randomly added to each player's elo before balancing ranked
+# teams — keeps matchups from being the exact same optimal split every
+# time, at the cost of the balance being only "roughly" fair.
+ELO_BALANCE_JITTER = 100
 
 # BUG FIX: this dict used to only live in main.py. helper.py's
 # randomRoleHelper did `global roles` and expected to find it — but each
@@ -129,6 +136,77 @@ class helpers():
         self.update(ctx.guild.id, "team2", serialzedTeam2)
         self.update(ctx.guild.id, "mode", "Normal")
 
+    # Splits members into two roughly elo-balanced teams. Each player's elo
+    # gets a random +/-ELO_BALANCE_JITTER nudge before sorting, so the split
+    # isn't the exact same optimal matchup every time — then a snake draft
+    # (strongest pick alternates sides each round: 1,2,2,1,1,2,2,1,...)
+    # keeps team sizes within one of each other while spreading strong and
+    # weak picks across both sides, rather than stacking every top player
+    # on one team.
+    def formBalancedTeams(self, members_with_elo):
+        jittered = [
+            (member, elo + random.uniform(-ELO_BALANCE_JITTER, ELO_BALANCE_JITTER))
+            for member, elo in members_with_elo
+        ]
+        jittered.sort(key=lambda pair: pair[1], reverse=True)
+
+        team1, team2 = [], []
+        for i, (member, _elo) in enumerate(jittered):
+            round_num, pos = divmod(i, 2)
+            first_pick_is_team1 = round_num % 2 == 0
+            goes_to_team1 = (pos == 0) == first_pick_is_team1
+            (team1 if goes_to_team1 else team2).append(member)
+
+        return team1, team2
+
+    def averageElo(self, members, elo_by_id):
+        if not members:
+            return DEFAULT_ELO
+        return round(sum(elo_by_id[m.id] for m in members) / len(members))
+
+    # Forms elo-balanced teams from the caller's voice channel and marks
+    # the game as ranked, so elo actually gets updated when the winner is
+    # eventually reported (see computeGameDeltas/recordResult). Everything
+    # else — moving players, opening betting — is still /start's job, same
+    # as /make-teams.
+    async def rankedTeamHelper(self, ctx):
+        await self.clearTeamsHelper(ctx)
+
+        guild_id = ctx.guild.id
+        channel = ctx.user.voice.channel
+
+        members_with_elo = []
+        for member in channel.members:
+            self.ensureEconomyRow(guild_id, member.id, member.name)
+            elo = self.getEconomy(guild_id, member.id, "elo")
+            members_with_elo.append((member, elo if elo is not None else DEFAULT_ELO))
+
+        team1_members, team2_members = self.formBalancedTeams(members_with_elo)
+        elo_by_id = {member.id: elo for member, elo in members_with_elo}
+
+        team1 = Team()
+        team1.name = "Team 1"
+        for member in team1_members:
+            team1.add_player(Player(member.id, member.name))
+        team2 = Team()
+        team2.name = "Team 2"
+        for member in team2_members:
+            team2.add_player(Player(member.id, member.name))
+
+        self.update(guild_id, "team1", team1.serializeTeam())
+        self.update(guild_id, "team2", team2.serializeTeam())
+        self.update(guild_id, "mode", "Ranked")
+        self.update(guild_id, "is_ranked", 1)
+
+        team1_avg = self.averageElo(team1_members, elo_by_id)
+        team2_avg = self.averageElo(team2_members, elo_by_id)
+
+        await ctx.response.send_message(
+            f"Ranked teams created! Team 1 avg elo **{team1_avg}**, Team 2 avg elo **{team2_avg}**. "
+            'Use "/start" when you\'re ready to move everyone and open betting.'
+        )
+        await self.printEmbed(ctx, team1, team2)
+
     def makeEmbedString(self, team: Team, useRoles=False):
         teamString = ""
 
@@ -232,7 +310,7 @@ class helpers():
         self.update(ctx.guild.id, "result1", result1)
         self.update(ctx.guild.id, "result2", result2)
 
-    async def captainsHelper(self, ctx, captain_1, captain_2):
+    async def captainsHelper(self, ctx, captain_1, captain_2, ranked=False):
         # BUG FIX: this validation used to run *after* clearTeamsHelper and
         # after already building `Player(captain_1.id, ...)` from both
         # captains — so a None captain crashed with AttributeError on
@@ -248,14 +326,16 @@ class helpers():
             await ctx.response.send_message("Mention two different people!")
             return
 
-        await self.clearTeamsHelper(ctx)
+        await self.clearTeamsHelper(ctx)  # also resets is_ranked to 0
 
         captain1 = Player(captain_1.id, captain_1.name)
         captain2 = Player(captain_2.id, captain_2.name)
 
         self.update(ctx.guild.id, "captain1", captain1.serializePlayer())
         self.update(ctx.guild.id, "captain2", captain2.serializePlayer())
-        self.update(ctx.guild.id, "mode", "Captains")
+        self.update(ctx.guild.id, "mode", "Ranked Captains" if ranked else "Captains")
+        if ranked:
+            self.update(ctx.guild.id, "is_ranked", 1)
 
         original_channel = ctx.user.voice.channel
         self.update(ctx.guild.id, "original_channel", str(original_channel))
@@ -279,7 +359,10 @@ class helpers():
 
         self.update(ctx.guild.id, "players", players.serializeTeam())
 
-        await ctx.response.send_message("Captains selected!")
+        await ctx.response.send_message(
+            "Ranked captains selected! Elo will be updated when the winner is reported."
+            if ranked else "Captains selected!"
+        )
         await self.printEmbed(ctx, team1, team2, players)
 
         await ctx.channel.send(
@@ -478,6 +561,12 @@ class helpers():
         self.update(guild_id, "team_size", 5)
         self.update(guild_id, "mode", "Normal")
         self.update(guild_id, "turn", 1)
+        # Every team-formation path (/make-teams, /captains, /ranked,
+        # /ranked-captains) runs through here first — resetting is_ranked
+        # to 0 by default means only the ranked-specific helpers, which
+        # explicitly set it back to 1 afterward, cause elo to be touched
+        # when the winner is eventually reported.
+        self.update(guild_id, "is_ranked", 0)
 
     async def notifyHelper(self, ctx, member: discord.Member):
         team_size = self.get(ctx.guild.id, "team_size")
@@ -550,14 +639,23 @@ class helpers():
     def ensureEconomyRow(self, guild_id, user_id, username):
         self.cursor.execute(
             "INSERT OR IGNORE INTO economy"
-            "(guildId, userId, username, balance, wins, losses, gold_wagered, gold_won, gold_lost, last_daily) "
-            "VALUES(?, ?, ?, 0, 0, 0, 0, 0, 0, NULL)",
-            (guild_id, user_id, username)
+            "(guildId, userId, username, balance, wins, losses, gold_wagered, gold_won, gold_lost, "
+            "game_wins, game_losses, elo, last_daily) "
+            "VALUES(?, ?, ?, 0, 0, 0, 0, 0, 0, 0, 0, ?, NULL)",
+            (guild_id, user_id, username, DEFAULT_ELO)
         )
         self.cursor.execute(
             "UPDATE economy SET username=? WHERE guildId=? AND userId=?",
             (username, guild_id, user_id)
         )
+        self.db.commit()
+
+    # Wipes every player's currency stats (balance, wins/losses, wagered/won/
+    # lost gold, daily-claim cooldown) for a guild. Rows get recreated with
+    # fresh defaults the next time each player touches the economy (daily,
+    # wager, balance) via ensureEconomyRow.
+    def resetEconomyHelper(self, guild_id):
+        self.cursor.execute("DELETE FROM economy WHERE guildId=?", (guild_id,))
         self.db.commit()
 
     def getEconomy(self, guild_id, user_id, column):
@@ -594,51 +692,35 @@ class helpers():
             f"You claimed your daily {DAILY_GOLD_AMOUNT} gold! Your balance is now {new_balance}."
         )
 
-    async def balanceHelper(self, ctx):
-        guild_id = ctx.guild.id
-        user_id = ctx.user.id
-
-        self.ensureEconomyRow(guild_id, user_id, ctx.user.name)
-
-        self.cursor.execute(
-            "SELECT balance, wins, losses, gold_wagered, gold_won, gold_lost FROM economy "
-            "WHERE guildId=? AND userId=?",
-            (guild_id, user_id)
-        )
-        balance, wins, losses, gold_wagered, gold_won, gold_lost = self.cursor.fetchone()
-
-        net_gold = gold_won - gold_lost
-        games_played = wins + losses
-        win_rate = f"{(wins / games_played) * 100:.1f}%" if games_played > 0 else "N/A"
-
-        embed = discord.Embed(
-            title=f"{ctx.user.display_name}'s Wallet", color=discord.Color.gold()
-        )
-        embed.add_field(name="Balance", value=f"{balance} gold", inline=True)
-        embed.add_field(name="Wins", value=str(wins), inline=True)
-        embed.add_field(name="Losses", value=str(losses), inline=True)
-        embed.add_field(name="Win Rate", value=win_rate, inline=True)
-        embed.add_field(name="Gold Wagered", value=str(gold_wagered), inline=True)
-        embed.add_field(name="Net Gold Won/Lost", value=f"{net_gold:+d} gold", inline=True)
-
-        await ctx.response.send_message(embed=embed)
-
     # ---------------- Betting ----------------
+
+    # Returns [(user_id, name), ...] for a team column ("team1"/"team2"), or
+    # [] if that side hasn't been set up — never crashes on an unset column,
+    # unlike Team().deserializeTeam(None/"").
+    def getRosterPlayers(self, guild_id, column):
+        serialized = self.get(guild_id, column)
+        if not serialized:
+            return []
+        team = Team()
+        team.deserializeTeam(serialized)
+        return [(p.get_id(), p.get_name()) for p in team.get_players()]
 
     # True if `user_id` is a rostered player (either side) in the game
     # /start most recently moved into channels — used to stop players from
     # betting on their own game.
     def isPlayerInCurrentGame(self, guild_id, user_id):
-        player_ids = set()
-        for column in ("team1", "team2"):
-            serialized = self.get(guild_id, column)
-            if not serialized:
-                continue
-            team = Team()
-            team.deserializeTeam(serialized)
-            player_ids.update(p.get_id() for p in team.get_players())
-
+        player_ids = {uid for uid, _name in self.getRosterPlayers(guild_id, "team1")}
+        player_ids |= {uid for uid, _name in self.getRosterPlayers(guild_id, "team2")}
         return user_id in player_ids
+
+    # Current elo for each (user_id, name) in `roster`, defaulting to
+    # DEFAULT_ELO for anyone without an economy row yet.
+    def getEloLookup(self, guild_id, roster):
+        lookup = {}
+        for user_id, _name in roster:
+            elo = self.getEconomy(guild_id, user_id, "elo")
+            lookup[user_id] = elo if elo is not None else DEFAULT_ELO
+        return lookup
 
     async def wagerHelper(self, ctx, amount: int, team: int):
         guild_id = ctx.guild.id
@@ -793,51 +875,257 @@ class helpers():
         self.update(guild_id, "betting_message_id", None)
         self.db.commit()
 
-        if not allWagers:
-            await channel.send(f"**Team {winning_team}** wins! No bets were placed on this game.")
-        else:
-            winningBets = [w for w in allWagers if w[2] == winning_team]
-            losingBets = [w for w in allWagers if w[2] != winning_team]
+        team1_roster = self.getRosterPlayers(guild_id, "team1")
+        team2_roster = self.getRosterPlayers(guild_id, "team2")
+        elo_lookup = self.getEloLookup(guild_id, team1_roster + team2_roster)
+        is_ranked = bool(self.get(guild_id, "is_ranked"))
 
-            winningPool = sum(w[3] for w in winningBets)
-            losingPool = sum(w[3] for w in losingBets)
+        deltas, summary = self.computeGameDeltas(
+            allWagers, team1_roster, team2_roster, elo_lookup, winning_team, is_ranked
+        )
+        self.applyGameDeltas(guild_id, deltas)
+        self.saveLastResult(
+            guild_id, winning_team, allWagers, team1_roster, team2_roster, deltas, is_ranked
+        )
 
-            lines = [f"**Team {winning_team}** wins! Paying out bets..."]
-
-            for user_id, username, _team, amount in losingBets:
-                self.ensureEconomyRow(guild_id, user_id, username)
-                self.cursor.execute(
-                    "UPDATE economy SET losses = losses + 1, gold_wagered = gold_wagered + ?, "
-                    "gold_lost = gold_lost + ? WHERE guildId=? AND userId=?",
-                    (amount, amount, guild_id, user_id)
-                )
-
-            if not winningBets:
-                lines.append("Nobody bet on the winning team — all bets were lost.")
-
-            for user_id, username, _team, amount in winningBets:
-                self.ensureEconomyRow(guild_id, user_id, username)
-
-                if winningPool > 0:
-                    payout = round(amount + (amount / winningPool) * losingPool)
-                else:
-                    payout = amount
-                profit = payout - amount
-
-                self.cursor.execute(
-                    "UPDATE economy SET balance = balance + ?, wins = wins + 1, "
-                    "gold_wagered = gold_wagered + ?, gold_won = gold_won + ? "
-                    "WHERE guildId=? AND userId=?",
-                    (payout, amount, profit, guild_id, user_id)
-                )
-                lines.append(f"{username} won {payout} gold (bet {amount})")
-
-            self.db.commit()
-
-            await channel.send("\n".join(lines))
+        await channel.send(self.formatResultMessage(winning_team, summary))
 
         if guild is not None and await self.moveMembersToOriginalChannel(guild):
             await channel.send("Moved everyone back to the original channel!")
+
+    # Pari-mutuel betting payouts (winners split the losing side's pool
+    # proportional to their own wager, on top of getting their own wager
+    # back) plus a simple team-average elo update for whoever was actually
+    # rostered on team1/team2. Pure computation — no DB writes — so the
+    # exact same result can be applied once by recordResult and later
+    # reversed/reapplied by reportCorrectWinnerHelper without re-deriving
+    # the math (which would go wrong once elo ratings have moved on).
+    #
+    # Returns (deltas, summary):
+    #   deltas: user_id -> {username, balance, wins, losses, gold_wagered,
+    #           gold_won, gold_lost, game_wins, game_losses, elo} — all
+    #           values are deltas to ADD to that user's economy row.
+    #   summary: display-only info for formatResultMessage().
+    def computeGameDeltas(self, wagers, team1_roster, team2_roster, elo_lookup, winning_team, is_ranked=False):
+        deltas = {}
+
+        def bump(user_id, username, **kwargs):
+            entry = deltas.setdefault(user_id, {
+                "username": username, "balance": 0, "wins": 0, "losses": 0,
+                "gold_wagered": 0, "gold_won": 0, "gold_lost": 0,
+                "game_wins": 0, "game_losses": 0, "elo": 0,
+            })
+            for key, value in kwargs.items():
+                entry[key] += value
+
+        winningBets = [w for w in wagers if w[2] == winning_team]
+        losingBets = [w for w in wagers if w[2] != winning_team]
+        winningPool = sum(w[3] for w in winningBets)
+        losingPool = sum(w[3] for w in losingBets)
+
+        for user_id, username, _team, amount in losingBets:
+            bump(user_id, username, losses=1, gold_wagered=amount, gold_lost=amount)
+
+        winning_bettors = []
+        for user_id, username, _team, amount in winningBets:
+            payout = round(amount + (amount / winningPool) * losingPool) if winningPool > 0 else amount
+            bump(user_id, username, balance=payout, wins=1, gold_wagered=amount, gold_won=payout - amount)
+            winning_bettors.append((username, payout, amount))
+
+        # Game record (game_wins/game_losses) is tracked for every reported
+        # game regardless of ranked status. Elo is not — it's exclusive to
+        # games started via /ranked or /ranked-captains (is_ranked=True),
+        # so a casual /make-teams or /captains game never moves anyone's
+        # rating.
+        elo_changes = []
+        if team1_roster or team2_roster:
+            elo_delta1 = elo_delta2 = 0
+            if is_ranked:
+                team1_elos = [elo_lookup.get(uid, DEFAULT_ELO) for uid, _name in team1_roster]
+                team2_elos = [elo_lookup.get(uid, DEFAULT_ELO) for uid, _name in team2_roster]
+                team1_avg = sum(team1_elos) / len(team1_elos) if team1_elos else DEFAULT_ELO
+                team2_avg = sum(team2_elos) / len(team2_elos) if team2_elos else DEFAULT_ELO
+
+                expected1 = 1 / (1 + 10 ** ((team2_avg - team1_avg) / 400))
+                actual1 = 1 if winning_team == 1 else 0
+                elo_delta1 = round(ELO_K_FACTOR * (actual1 - expected1))
+                elo_delta2 = round(ELO_K_FACTOR * ((1 - actual1) - (1 - expected1)))
+
+            for user_id, username in team1_roster:
+                bump(
+                    user_id, username, elo=elo_delta1,
+                    game_wins=1 if winning_team == 1 else 0,
+                    game_losses=0 if winning_team == 1 else 1,
+                )
+            for user_id, username in team2_roster:
+                bump(
+                    user_id, username, elo=elo_delta2,
+                    game_wins=1 if winning_team == 2 else 0,
+                    game_losses=0 if winning_team == 2 else 1,
+                )
+
+            if is_ranked:
+                if team1_roster:
+                    elo_changes.append(("Team 1", elo_delta1))
+                if team2_roster:
+                    elo_changes.append(("Team 2", elo_delta2))
+
+        summary = {
+            "no_bets": not wagers,
+            "no_winning_bets": bool(wagers) and not winning_bettors,
+            "winning_bettors": winning_bettors,
+            "elo_changes": elo_changes,
+        }
+        return deltas, summary
+
+    # Applies (sign=1) or reverses (sign=-1) a deltas dict from
+    # computeGameDeltas() against every affected player's economy row.
+    def applyGameDeltas(self, guild_id, deltas, sign=1):
+        for user_id, d in deltas.items():
+            self.ensureEconomyRow(guild_id, user_id, d["username"])
+            self.cursor.execute(
+                "UPDATE economy SET balance = balance + ?, wins = wins + ?, losses = losses + ?, "
+                "gold_wagered = gold_wagered + ?, gold_won = gold_won + ?, gold_lost = gold_lost + ?, "
+                "game_wins = game_wins + ?, game_losses = game_losses + ?, elo = elo + ? "
+                "WHERE guildId=? AND userId=?",
+                (
+                    sign * d["balance"], sign * d["wins"], sign * d["losses"],
+                    sign * d["gold_wagered"], sign * d["gold_won"], sign * d["gold_lost"],
+                    sign * d["game_wins"], sign * d["game_losses"], sign * d["elo"],
+                    guild_id, user_id,
+                )
+            )
+        self.db.commit()
+
+    def formatResultMessage(self, winning_team, summary):
+        lines = [f"**Team {winning_team}** wins!"]
+
+        if summary["no_bets"]:
+            lines.append("No bets were placed on this game.")
+        elif summary["no_winning_bets"]:
+            lines.append("Nobody bet on the winning team — all bets were lost.")
+        else:
+            lines.append("Paying out bets...")
+            for username, payout, amount in summary["winning_bettors"]:
+                lines.append(f"{username} won {payout} gold (bet {amount})")
+
+        if summary["elo_changes"]:
+            lines.append(
+                "Elo: " + ", ".join(f"{name} {delta:+d}" for name, delta in summary["elo_changes"])
+            )
+
+        return "\n".join(lines)
+
+    # Snapshots exactly what was applied for a resolved game — the wagers,
+    # both rosters, and the deltas computeGameDeltas() produced — so
+    # reportCorrectWinnerHelper can reverse it precisely later. One row per
+    # guild; a new result overwrites the previous snapshot.
+    def saveLastResult(self, guild_id, winning_team, wagers, team1_roster, team2_roster, deltas, is_ranked=False):
+        payload = {
+            "winning_team": winning_team,
+            "wagers": [list(w) for w in wagers],
+            "team1_roster": [list(p) for p in team1_roster],
+            "team2_roster": [list(p) for p in team2_roster],
+            "deltas": {str(uid): d for uid, d in deltas.items()},
+            "is_ranked": is_ranked,
+        }
+        self.cursor.execute(
+            "INSERT OR REPLACE INTO last_result(guildId, data) VALUES(?, ?)",
+            (guild_id, json.dumps(payload))
+        )
+        self.db.commit()
+
+    def getLastResult(self, guild_id):
+        self.cursor.execute("SELECT data FROM last_result WHERE guildId=?", (guild_id,))
+        row = self.cursor.fetchone()
+        if row is None:
+            return None
+
+        payload = json.loads(row[0])
+        payload["wagers"] = [tuple(w) for w in payload["wagers"]]
+        payload["team1_roster"] = [tuple(p) for p in payload["team1_roster"]]
+        payload["team2_roster"] = [tuple(p) for p in payload["team2_roster"]]
+        payload["deltas"] = {int(uid): d for uid, d in payload["deltas"].items()}
+        payload.setdefault("is_ranked", False)
+        return payload
+
+    # Admin correction for a misreported /start winner: undoes exactly what
+    # was applied for the last resolved game in this guild (bet payouts,
+    # win/loss records, elo) and re-applies the same wagers/rosters against
+    # the corrected winner. Elo is recomputed rather than reused, since
+    # after undoing the wrong result each player's rating is back to its
+    # pre-match value — recomputing against that gives the correct
+    # alternate-history rating, not a stale or double-applied one.
+    async def reportCorrectWinnerHelper(self, ctx, correct_team):
+        guild_id = ctx.guild.id
+        last = self.getLastResult(guild_id)
+
+        if last is None:
+            await ctx.response.send_message("There's no recent game result to correct.")
+            return
+
+        if last["winning_team"] == correct_team:
+            await ctx.response.send_message(
+                f"Team {correct_team} is already the recorded winner — nothing to correct."
+            )
+            return
+
+        self.applyGameDeltas(guild_id, last["deltas"], sign=-1)
+
+        team1_roster = last["team1_roster"]
+        team2_roster = last["team2_roster"]
+        is_ranked = last["is_ranked"]
+        elo_lookup = self.getEloLookup(guild_id, team1_roster + team2_roster)
+        new_deltas, summary = self.computeGameDeltas(
+            last["wagers"], team1_roster, team2_roster, elo_lookup, correct_team, is_ranked
+        )
+        self.applyGameDeltas(guild_id, new_deltas)
+        self.saveLastResult(
+            guild_id, correct_team, last["wagers"], team1_roster, team2_roster, new_deltas, is_ranked
+        )
+
+        await ctx.response.send_message(
+            f"Correction recorded: **Team {correct_team}** actually won (previously recorded as "
+            f"Team {last['winning_team']}). Balances, records, and elo have been adjusted."
+        )
+        await ctx.channel.send(self.formatResultMessage(correct_team, summary))
+
+    async def statsHelper(self, ctx, member=None):
+        target = member if member is not None else ctx.user
+        guild_id = ctx.guild.id
+        user_id = target.id
+
+        self.ensureEconomyRow(guild_id, user_id, target.name)
+
+        self.cursor.execute(
+            "SELECT balance, wins, losses, gold_wagered, gold_won, gold_lost, "
+            "game_wins, game_losses, elo FROM economy WHERE guildId=? AND userId=?",
+            (guild_id, user_id)
+        )
+        balance, bet_wins, bet_losses, gold_wagered, gold_won, gold_lost, game_wins, game_losses, elo = \
+            self.cursor.fetchone()
+
+        net_gold = gold_won - gold_lost
+
+        bet_games = bet_wins + bet_losses
+        bet_win_rate = f"{(bet_wins / bet_games) * 100:.1f}%" if bet_games > 0 else "N/A"
+
+        games_played = game_wins + game_losses
+        game_win_rate = f"{(game_wins / games_played) * 100:.1f}%" if games_played > 0 else "N/A"
+
+        embed = discord.Embed(
+            title=f"{target.display_name}'s Stats", color=discord.Color.gold()
+        )
+        embed.add_field(name="Elo", value=str(elo), inline=True)
+        embed.add_field(name="Game Record", value=f"{game_wins}W - {game_losses}L", inline=True)
+        embed.add_field(name="Game Win Rate", value=game_win_rate, inline=True)
+        embed.add_field(name="Balance", value=f"{balance} gold", inline=True)
+        embed.add_field(name="Bet Record", value=f"{bet_wins}W - {bet_losses}L", inline=True)
+        embed.add_field(name="Bet Win Rate", value=bet_win_rate, inline=True)
+        embed.add_field(name="Net Gold Won/Lost", value=f"{net_gold:+d} gold", inline=True)
+        embed.add_field(name="Gold Wagered", value=str(gold_wagered), inline=True)
+
+        await ctx.response.send_message(embed=embed)
 
     # Cancels the running betting timer (if any) and, if the game had an
     # unresolved bet round (open, closed-but-unreported, or awaiting a

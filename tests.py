@@ -49,16 +49,18 @@ SERVERS_SCHEMA = (
     "CREATE TABLE servers(guildId, serverName, original_channel, team1, team2, "
     "players, channel1, channel2, mode, turn, team_size, tournament, elo, "
     "result1, result2, captain1, captain2, "
-    "betting_state, betting_message_id, betting_channel_id)"
+    "betting_state, betting_message_id, betting_channel_id, is_ranked)"
 )
 ECONOMY_SCHEMA = (
     "CREATE TABLE economy(guildId, userId, username, balance, wins, losses, "
-    "gold_wagered, gold_won, gold_lost, last_daily, PRIMARY KEY(guildId, userId))"
+    "gold_wagered, gold_won, gold_lost, game_wins, game_losses, elo, last_daily, "
+    "PRIMARY KEY(guildId, userId))"
 )
 WAGERS_SCHEMA = (
     "CREATE TABLE wagers(guildId, userId, username, team, amount, "
     "PRIMARY KEY(guildId, userId))"
 )
+LAST_RESULT_SCHEMA = "CREATE TABLE last_result(guildId PRIMARY KEY, data)"
 
 
 def make_db():
@@ -67,6 +69,7 @@ def make_db():
     cursor.execute(SERVERS_SCHEMA)
     cursor.execute(ECONOMY_SCHEMA)
     cursor.execute(WAGERS_SCHEMA)
+    cursor.execute(LAST_RESULT_SCHEMA)
     db.commit()
     return db, cursor
 
@@ -74,7 +77,7 @@ def make_db():
 def insert_guild_row(cursor, db, guild_id=GUILD_ID, name="Test Guild"):
     cursor.execute(
         "INSERT INTO servers VALUES(?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, "
-        "NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'NONE', NULL, NULL)",
+        "NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'NONE', NULL, NULL, 0)",
         (guild_id, name),
     )
     db.commit()
@@ -357,6 +360,74 @@ class RandomizeTeamHelperTests(HelperTestCase):
         self.assertEqual(self.helperObj.get(GUILD_ID, "mode"), "Normal")
 
 
+class FormBalancedTeamsTests(HelperTestCase):
+    def test_snake_draft_alternates_sides_without_jitter(self):
+        members_with_elo = [
+            (FakeMember(f"P{i}", id=i), elo)
+            for i, elo in enumerate([1000, 900, 800, 700, 600, 500, 400, 300])
+        ]
+
+        with patch("random.uniform", return_value=0):
+            team1, team2 = self.helperObj.formBalancedTeams(members_with_elo)
+
+        # descending elo: 1000,900,800,700,600,500,400,300 (P0..P7).
+        # snake pattern 1,2,2,1,1,2,2,1 -> team1 = ranks 1,4,5,8; team2 = ranks 2,3,6,7
+        self.assertEqual([m.name for m in team1], ["P0", "P3", "P4", "P7"])
+        self.assertEqual([m.name for m in team2], ["P1", "P2", "P5", "P6"])
+
+    def test_every_member_assigned_exactly_once_odd_count(self):
+        members_with_elo = [(FakeMember(f"P{i}", id=i), 1000 + i * 37) for i in range(9)]
+
+        team1, team2 = self.helperObj.formBalancedTeams(members_with_elo)
+
+        self.assertEqual(len(team1) + len(team2), 9)
+        self.assertEqual(len({m.id for m in team1} | {m.id for m in team2}), 9)
+        self.assertLessEqual(abs(len(team1) - len(team2)), 1)
+
+    def test_average_elo(self):
+        elo_by_id = {1: 1000, 2: 1200}
+        members = [FakeMember("A", id=1), FakeMember("B", id=2)]
+
+        self.assertEqual(self.helperObj.averageElo(members, elo_by_id), 1100)
+        self.assertEqual(self.helperObj.averageElo([], elo_by_id), helper_module.DEFAULT_ELO)
+
+
+class RankedTeamHelperTests(HelperTestCase):
+    async def test_forms_balanced_teams_and_marks_game_ranked(self):
+        members = [FakeMember(f"P{i}", id=300 + i) for i in range(6)]
+        voice_channel = FakeChannel("Lobby", members=members)
+        user = FakeMember("Caller")
+        user.voice = FakeVoiceState(voice_channel)
+        ctx = FakeInteraction(self.guild, user)
+
+        await self.helperObj.rankedTeamHelper(ctx)
+
+        team1 = self.deserialize_team("team1")
+        team2 = self.deserialize_team("team2")
+        all_ids = {p.get_id() for p in team1.get_players()} | {p.get_id() for p in team2.get_players()}
+        self.assertEqual(all_ids, {m.id for m in members})
+        self.assertLessEqual(abs(len(team1.get_players()) - len(team2.get_players())), 1)
+        self.assertEqual(self.helperObj.get(GUILD_ID, "is_ranked"), 1)
+        self.assertEqual(self.helperObj.get(GUILD_ID, "mode"), "Ranked")
+
+        ctx.response.send_message.assert_awaited_once()
+        message = ctx.response.send_message.call_args.args[0]
+        self.assertIn("avg elo", message)
+        self.assertIn("/start", message)
+
+    async def test_creates_economy_rows_at_default_elo_for_new_players(self):
+        members = [FakeMember("New1", id=401), FakeMember("New2", id=402)]
+        voice_channel = FakeChannel("Lobby", members=members)
+        user = FakeMember("Caller")
+        user.voice = FakeVoiceState(voice_channel)
+        ctx = FakeInteraction(self.guild, user)
+
+        await self.helperObj.rankedTeamHelper(ctx)
+
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 401, "elo"), helper_module.DEFAULT_ELO)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 402, "elo"), helper_module.DEFAULT_ELO)
+
+
 class CaptainsHelperTests(HelperTestCase):
     def _ctx(self, captain1, captain2, pool_members):
         voice_channel = FakeChannel("Lobby", members=[captain1, captain2] + pool_members)
@@ -545,6 +616,43 @@ class ClearTeamsHelperTests(HelperTestCase):
         self.assertEqual(self.helperObj.get(GUILD_ID, "turn"), 1)
 
 
+class ResetEconomyHelperTests(HelperTestCase):
+    async def test_wipes_every_players_stats_for_the_guild(self):
+        self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.helperObj.ensureEconomyRow(GUILD_ID, 902, "Bob")
+        self.cursor.execute(
+            "UPDATE economy SET balance=500, wins=3, losses=1, gold_wagered=200, "
+            "gold_won=100, gold_lost=50, last_daily='2026-01-01' "
+            "WHERE guildId=? AND userId=?",
+            (GUILD_ID, 901),
+        )
+        self.db.commit()
+
+        # a row in a different guild should be untouched
+        other_guild_id = GUILD_ID + 1
+        insert_guild_row(self.cursor, self.db, guild_id=other_guild_id)
+        self.helperObj.ensureEconomyRow(other_guild_id, 901, "Alice")
+        self.cursor.execute(
+            "UPDATE economy SET balance=777 WHERE guildId=? AND userId=?",
+            (other_guild_id, 901),
+        )
+        self.db.commit()
+
+        self.helperObj.resetEconomyHelper(GUILD_ID)
+
+        self.cursor.execute("SELECT COUNT(*) FROM economy WHERE guildId=?", (GUILD_ID,))
+        self.assertEqual(self.cursor.fetchone()[0], 0)
+
+        # stats are back to defaults the next time the player is touched
+        self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "balance"), 0)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "wins"), 0)
+        self.assertIsNone(self.helperObj.getEconomy(GUILD_ID, 901, "last_daily"))
+
+        # other guild's economy rows are untouched
+        self.assertEqual(self.helperObj.getEconomy(other_guild_id, 901, "balance"), 777)
+
+
 class RandomRoleHelperTests(HelperTestCase):
     async def test_assigns_a_role_line_per_player(self):
         team1 = Team()
@@ -699,6 +807,45 @@ class ReturnHelperTests(HelperTestCase):
         self.assertEqual(self.cursor.fetchone()[0], 0)
         ctx.followup.send.assert_awaited_once_with("Moved!")
 
+    async def test_return_on_ranked_game_refunds_bets_without_touching_elo(self):
+        # /return ending a ranked game early behaves exactly like ending a
+        # regular game early: bets get refunded, and — since recordResult
+        # (the only place elo/game record ever change) never runs — elo
+        # and game record are left completely untouched, not just "reset".
+        team1 = Team(); team1.name = "Team 1"
+        team1.add_player(Player(701, "P1"))
+        team2 = Team(); team2.name = "Team 2"
+        team2.add_player(Player(702, "P2"))
+        self.helperObj.update(GUILD_ID, "team1", team1.serializeTeam())
+        self.helperObj.update(GUILD_ID, "team2", team2.serializeTeam())
+        self.helperObj.update(GUILD_ID, "is_ranked", 1)
+        self.helperObj.update(GUILD_ID, "original_channel", "Lobby")
+        self.helperObj.update(GUILD_ID, "betting_state", "OPEN")
+
+        og = FakeChannel("Lobby")
+        guild = FakeGuild(channels=[og])
+        ctx = FakeInteraction(guild, FakeMember("Caller"))
+
+        self.helperObj.ensureEconomyRow(GUILD_ID, 801, "Bettor")
+        self.cursor.execute(
+            "UPDATE economy SET balance=500 WHERE guildId=? AND userId=?", (GUILD_ID, 801)
+        )
+        self.cursor.execute(
+            "INSERT INTO wagers(guildId, userId, username, team, amount) VALUES(?, ?, ?, ?, ?)",
+            (GUILD_ID, 801, "Bettor", 1, 200),
+        )
+        self.db.commit()
+
+        await self.helperObj.returnHelper(ctx)
+
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 801, "balance"), 700)  # bet refunded
+        self.cursor.execute("SELECT COUNT(*) FROM wagers WHERE guildId=?", (GUILD_ID,))
+        self.assertEqual(self.cursor.fetchone()[0], 0)
+
+        # rostered players never touched at all — no economy row even exists
+        self.assertIsNone(self.helperObj.getEconomy(GUILD_ID, 701, "elo"))
+        self.assertIsNone(self.helperObj.getEconomy(GUILD_ID, 702, "elo"))
+
 
 class MoveMembersToOriginalChannelTests(HelperTestCase):
     async def test_moves_team_channel_members_and_returns_true(self):
@@ -728,7 +875,8 @@ class MoveMembersToOriginalChannelTests(HelperTestCase):
 
 
 # ===========================================================================
-# Economy: /daily, /balance, ensureEconomyRow
+# Economy: /daily, ensureEconomyRow (see StatsHelperTests for /stats, which
+# now covers what /balance used to)
 # ===========================================================================
 
 class EconomyTests(HelperTestCase):
@@ -771,57 +919,6 @@ class EconomyTests(HelperTestCase):
         ctx2.response.send_message.assert_awaited_once_with(
             "You've already claimed your daily gold today! Come back tomorrow."
         )
-
-    async def test_balance_embed_reports_stats_net_win_overall(self):
-        self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
-        self.cursor.execute(
-            "UPDATE economy SET balance=1234, wins=2, losses=1, gold_wagered=500, "
-            "gold_won=300, gold_lost=80 WHERE guildId=? AND userId=?",
-            (GUILD_ID, 901),
-        )
-        self.db.commit()
-
-        ctx = self._ctx()
-        await self.helperObj.balanceHelper(ctx)
-
-        ctx.response.send_message.assert_awaited_once()
-        embed = ctx.response.send_message.call_args.kwargs["embed"]
-        values = {f.name: f.value for f in embed.fields}
-        self.assertEqual(values["Balance"], "1234 gold")
-        self.assertEqual(values["Wins"], "2")
-        self.assertEqual(values["Losses"], "1")
-        self.assertEqual(values["Gold Wagered"], "500")
-        # net = gold_won - gold_lost = 300 - 80 = 220, shown with an
-        # explicit "+" since the player is up overall
-        self.assertEqual(values["Net Gold Won/Lost"], "+220 gold")
-        # win rate = 2 / (2 + 1) = 66.7%
-        self.assertEqual(values["Win Rate"], "66.7%")
-
-    async def test_balance_embed_shows_negative_net_when_overall_down(self):
-        self.helperObj.ensureEconomyRow(GUILD_ID, 902, "Bob")
-        self.cursor.execute(
-            "UPDATE economy SET wins=1, losses=3, gold_won=50, gold_lost=200 "
-            "WHERE guildId=? AND userId=?",
-            (GUILD_ID, 902),
-        )
-        self.db.commit()
-
-        ctx = self._ctx(user_id=902, name="Bob")
-        await self.helperObj.balanceHelper(ctx)
-
-        embed = ctx.response.send_message.call_args.kwargs["embed"]
-        values = {f.name: f.value for f in embed.fields}
-        self.assertEqual(values["Net Gold Won/Lost"], "-150 gold")
-        self.assertEqual(values["Win Rate"], "25.0%")
-
-    async def test_balance_embed_win_rate_na_with_no_games_played(self):
-        ctx = self._ctx()
-        await self.helperObj.balanceHelper(ctx)
-
-        embed = ctx.response.send_message.call_args.kwargs["embed"]
-        values = {f.name: f.value for f in embed.fields}
-        self.assertEqual(values["Win Rate"], "N/A")
-        self.assertEqual(values["Net Gold Won/Lost"], "+0 gold")
 
 
 # ===========================================================================
@@ -1084,6 +1181,317 @@ class RecordResultTests(HelperTestCase):
         messages = [c.args[0] for c in channel.send.call_args_list]
         self.assertFalse(any("Moved everyone back" in m for m in messages))
 
+    async def test_updates_game_record_and_elo_for_rostered_players(self):
+        team1 = Team(); team1.name = "Team 1"
+        team1.add_player(Player(701, "P1"))
+        team2 = Team(); team2.name = "Team 2"
+        team2.add_player(Player(702, "P2"))
+        self.helperObj.update(GUILD_ID, "team1", team1.serializeTeam())
+        self.helperObj.update(GUILD_ID, "team2", team2.serializeTeam())
+        self.helperObj.update(GUILD_ID, "is_ranked", 1)
+
+        channel = FakeChannel("game-chat")
+        await self.helperObj.recordResult(GUILD_ID, 1, channel)
+
+        # equal starting elo (1000 each) -> a 50/50 upset, K=32 -> +/-16
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 701, "game_wins"), 1)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 701, "game_losses"), 0)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 701, "elo"), 1016)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 702, "game_wins"), 0)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 702, "game_losses"), 1)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 702, "elo"), 984)
+
+        message = channel.send.call_args.args[0]
+        self.assertIn("Elo:", message)
+
+    async def test_underdog_win_gains_more_elo_than_favorite_win(self):
+        team1 = Team(); team1.name = "Team 1"
+        team1.add_player(Player(701, "Underdog"))
+        team2 = Team(); team2.name = "Team 2"
+        team2.add_player(Player(702, "Favorite"))
+        self.helperObj.update(GUILD_ID, "team1", team1.serializeTeam())
+        self.helperObj.update(GUILD_ID, "team2", team2.serializeTeam())
+        self.helperObj.update(GUILD_ID, "is_ranked", 1)
+        self.helperObj.ensureEconomyRow(GUILD_ID, 701, "Underdog")
+        self.helperObj.ensureEconomyRow(GUILD_ID, 702, "Favorite")
+        self.cursor.execute(
+            "UPDATE economy SET elo=800 WHERE guildId=? AND userId=?", (GUILD_ID, 701)
+        )
+        self.cursor.execute(
+            "UPDATE economy SET elo=1200 WHERE guildId=? AND userId=?", (GUILD_ID, 702)
+        )
+        self.db.commit()
+
+        channel = FakeChannel("game-chat")
+        await self.helperObj.recordResult(GUILD_ID, 1, channel)  # the 800-elo side wins
+
+        underdog_gain = self.helperObj.getEconomy(GUILD_ID, 701, "elo") - 800
+        self.assertGreater(underdog_gain, 16)  # more than the equal-elo baseline gain
+
+    async def test_no_roster_no_elo_line_in_message(self):
+        channel = FakeChannel("game-chat")
+        await self.helperObj.recordResult(GUILD_ID, 1, channel)  # team1/team2 never set
+
+        message = channel.send.call_args.args[0]
+        self.assertNotIn("Elo:", message)
+
+    async def test_casual_game_with_roster_does_not_touch_elo(self):
+        # regression test: /make-teams and /captains form rosters just like
+        # /ranked does, but is_ranked defaults to 0 for them — elo must stay
+        # untouched even though game_wins/game_losses still update.
+        team1 = Team(); team1.name = "Team 1"
+        team1.add_player(Player(701, "P1"))
+        team2 = Team(); team2.name = "Team 2"
+        team2.add_player(Player(702, "P2"))
+        self.helperObj.update(GUILD_ID, "team1", team1.serializeTeam())
+        self.helperObj.update(GUILD_ID, "team2", team2.serializeTeam())
+        # is_ranked left at its default (0/unset)
+
+        channel = FakeChannel("game-chat")
+        await self.helperObj.recordResult(GUILD_ID, 1, channel)
+
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 701, "elo"), helper_module.DEFAULT_ELO)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 702, "elo"), helper_module.DEFAULT_ELO)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 701, "game_wins"), 1)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 702, "game_losses"), 1)
+        self.assertNotIn("Elo:", channel.send.call_args.args[0])
+
+
+class ComputeGameDeltasTests(HelperTestCase):
+    def test_equal_elo_teams_split_evenly(self):
+        deltas, summary = self.helperObj.computeGameDeltas(
+            wagers=[], team1_roster=[(1, "A")], team2_roster=[(2, "B")],
+            elo_lookup={1: 1000, 2: 1000}, winning_team=1, is_ranked=True,
+        )
+        self.assertEqual(deltas[1]["elo"], 16)
+        self.assertEqual(deltas[2]["elo"], -16)
+        self.assertEqual(deltas[1]["game_wins"], 1)
+        self.assertEqual(deltas[2]["game_losses"], 1)
+        self.assertEqual(summary["elo_changes"], [("Team 1", 16), ("Team 2", -16)])
+
+    def test_unranked_games_never_touch_elo(self):
+        deltas, summary = self.helperObj.computeGameDeltas(
+            wagers=[], team1_roster=[(1, "A")], team2_roster=[(2, "B")],
+            elo_lookup={1: 800, 2: 1200}, winning_team=1, is_ranked=False,
+        )
+        self.assertEqual(deltas[1]["elo"], 0)
+        self.assertEqual(deltas[2]["elo"], 0)
+        # game record still tracked even for a casual game
+        self.assertEqual(deltas[1]["game_wins"], 1)
+        self.assertEqual(deltas[2]["game_losses"], 1)
+        self.assertEqual(summary["elo_changes"], [])
+
+    def test_applying_then_reversing_deltas_is_a_no_op(self):
+        # this is exactly what /report-correct-winner relies on: reversing
+        # a previously-applied result must land back on the exact starting
+        # values, not an approximation.
+        wagers = [(901, "Alice", 1, 100), (902, "Bob", 2, 300)]
+        team1_roster = [(701, "P1")]
+        team2_roster = [(702, "P2")]
+        elo_lookup = {701: 1050, 702: 950}
+
+        for user_id, name in [(901, "Alice"), (902, "Bob"), (701, "P1"), (702, "P2")]:
+            self.helperObj.ensureEconomyRow(GUILD_ID, user_id, name)
+        self.cursor.execute("UPDATE economy SET balance=1000 WHERE guildId=? AND userId=?", (GUILD_ID, 901))
+        self.cursor.execute("UPDATE economy SET balance=1000 WHERE guildId=? AND userId=?", (GUILD_ID, 902))
+        self.cursor.execute("UPDATE economy SET elo=1050 WHERE guildId=? AND userId=?", (GUILD_ID, 701))
+        self.cursor.execute("UPDATE economy SET elo=950 WHERE guildId=? AND userId=?", (GUILD_ID, 702))
+        self.db.commit()
+
+        def snapshot():
+            self.cursor.execute(
+                "SELECT userId, balance, wins, losses, gold_wagered, gold_won, gold_lost, "
+                "game_wins, game_losses, elo FROM economy WHERE guildId=? ORDER BY userId",
+                (GUILD_ID,),
+            )
+            return self.cursor.fetchall()
+
+        before = snapshot()
+
+        deltas, _summary = self.helperObj.computeGameDeltas(
+            wagers, team1_roster, team2_roster, elo_lookup, winning_team=1, is_ranked=True
+        )
+        self.helperObj.applyGameDeltas(GUILD_ID, deltas, sign=1)
+        self.assertNotEqual(snapshot(), before)  # sanity: something actually changed
+
+        self.helperObj.applyGameDeltas(GUILD_ID, deltas, sign=-1)
+        self.assertEqual(snapshot(), before)
+
+
+class SaveGetLastResultTests(HelperTestCase):
+    def test_round_trips_through_json_storage(self):
+        deltas = {
+            901: {"username": "Alice", "balance": 400, "wins": 1, "losses": 0,
+                  "gold_wagered": 100, "gold_won": 300, "gold_lost": 0,
+                  "game_wins": 0, "game_losses": 0, "elo": 0},
+        }
+        self.helperObj.saveLastResult(
+            GUILD_ID, winning_team=1,
+            wagers=[(901, "Alice", 1, 100)],
+            team1_roster=[(701, "P1")],
+            team2_roster=[(702, "P2")],
+            deltas=deltas,
+        )
+
+        loaded = self.helperObj.getLastResult(GUILD_ID)
+
+        self.assertEqual(loaded["winning_team"], 1)
+        self.assertEqual(loaded["wagers"], [(901, "Alice", 1, 100)])
+        self.assertEqual(loaded["team1_roster"], [(701, "P1")])
+        self.assertEqual(loaded["team2_roster"], [(702, "P2")])
+        self.assertEqual(loaded["deltas"], deltas)
+        self.assertIsInstance(next(iter(loaded["deltas"].keys())), int)
+
+    def test_returns_none_when_nothing_recorded(self):
+        self.assertIsNone(self.helperObj.getLastResult(GUILD_ID))
+
+    def test_saving_again_overwrites_the_previous_snapshot(self):
+        self.helperObj.saveLastResult(GUILD_ID, 1, [], [], [], {})
+        self.helperObj.saveLastResult(GUILD_ID, 2, [], [], [], {})
+
+        self.assertEqual(self.helperObj.getLastResult(GUILD_ID)["winning_team"], 2)
+
+
+class ReportCorrectWinnerHelperTests(HelperTestCase):
+    async def test_no_recent_result_to_correct(self):
+        ctx = FakeInteraction(self.guild, FakeMember("Admin"))
+        await self.helperObj.reportCorrectWinnerHelper(ctx, 2)
+        ctx.response.send_message.assert_awaited_once_with(
+            "There's no recent game result to correct."
+        )
+
+    async def test_already_recorded_winner_is_a_noop(self):
+        self.helperObj.saveLastResult(GUILD_ID, winning_team=1, wagers=[], team1_roster=[], team2_roster=[], deltas={})
+        ctx = FakeInteraction(self.guild, FakeMember("Admin"))
+
+        await self.helperObj.reportCorrectWinnerHelper(ctx, 1)
+
+        ctx.response.send_message.assert_awaited_once_with(
+            "Team 1 is already the recorded winner — nothing to correct."
+        )
+
+    async def test_corrects_bettor_payouts_when_winner_flips(self):
+        # No rosters — isolates the betting-correction math. Alice bet on
+        # team1 (wrongly reported as the winner), Bob bet on team2 (the
+        # actual winner).
+        self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.helperObj.ensureEconomyRow(GUILD_ID, 902, "Bob")
+        self.cursor.execute("UPDATE economy SET balance=1000 WHERE guildId=? AND userId=?", (GUILD_ID, 901))
+        self.cursor.execute("UPDATE economy SET balance=1000 WHERE guildId=? AND userId=?", (GUILD_ID, 902))
+        self.db.commit()
+
+        self.helperObj.update(GUILD_ID, "betting_state", "OPEN")
+        await self.helperObj.wagerHelper(FakeInteraction(self.guild, FakeMember("Alice", id=901)), 100, 1)
+        await self.helperObj.wagerHelper(FakeInteraction(self.guild, FakeMember("Bob", id=902)), 300, 2)
+
+        channel = FakeChannel("game-chat")
+        await self.helperObj.recordResult(GUILD_ID, 1, channel)  # misreported: team1 "wins"
+
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "balance"), 1300)  # Alice paid out
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 902, "balance"), 700)  # Bob lost his bet
+
+        ctx = FakeInteraction(self.guild, FakeMember("Admin"))
+        await self.helperObj.reportCorrectWinnerHelper(ctx, 2)  # team2 actually won
+
+        # money is conserved (2000 total) and now sits with the real winner
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "balance"), 900)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "wins"), 0)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "losses"), 1)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "gold_won"), 0)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "gold_lost"), 100)
+
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 902, "balance"), 1100)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 902, "wins"), 1)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 902, "losses"), 0)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 902, "gold_won"), 100)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 902, "gold_lost"), 0)
+
+        ctx.response.send_message.assert_awaited_once()
+        self.assertIn("Team 2", ctx.response.send_message.call_args.args[0])
+        self.assertIn("previously recorded as Team 1", ctx.response.send_message.call_args.args[0])
+
+        # a further correction is possible from the new baseline
+        self.assertEqual(self.helperObj.getLastResult(GUILD_ID)["winning_team"], 2)
+
+    async def test_corrects_elo_and_game_record_when_teams_started_equal(self):
+        team1 = Team(); team1.name = "Team 1"
+        team1.add_player(Player(701, "P1"))
+        team2 = Team(); team2.name = "Team 2"
+        team2.add_player(Player(702, "P2"))
+        self.helperObj.update(GUILD_ID, "team1", team1.serializeTeam())
+        self.helperObj.update(GUILD_ID, "team2", team2.serializeTeam())
+        self.helperObj.update(GUILD_ID, "is_ranked", 1)
+
+        channel = FakeChannel("game-chat")
+        await self.helperObj.recordResult(GUILD_ID, 1, channel)  # misreported: team1 "wins"
+
+        ctx = FakeInteraction(self.guild, FakeMember("Admin"))
+        await self.helperObj.reportCorrectWinnerHelper(ctx, 2)  # team2 actually won
+
+        # teams started at equal elo, so correcting the winner should land
+        # on the exact mirror image of the original (wrong) result
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 701, "elo"), 984)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 701, "game_wins"), 0)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 701, "game_losses"), 1)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 702, "elo"), 1016)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 702, "game_wins"), 1)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 702, "game_losses"), 0)
+
+
+class StatsHelperTests(HelperTestCase):
+    def _ctx(self, user_id=901, name="Alice"):
+        return FakeInteraction(self.guild, FakeMember(name, id=user_id))
+
+    async def test_defaults_for_a_brand_new_player(self):
+        ctx = self._ctx()
+        await self.helperObj.statsHelper(ctx)
+
+        embed = ctx.response.send_message.call_args.kwargs["embed"]
+        values = {f.name: f.value for f in embed.fields}
+        self.assertEqual(values["Elo"], "1000")
+        self.assertEqual(values["Game Record"], "0W - 0L")
+        self.assertEqual(values["Game Win Rate"], "N/A")
+        self.assertEqual(values["Bet Win Rate"], "N/A")
+        self.assertEqual(values["Balance"], "0 gold")
+
+    async def test_reports_populated_stats(self):
+        self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.cursor.execute(
+            "UPDATE economy SET balance=500, wins=2, losses=1, gold_wagered=300, "
+            "gold_won=150, gold_lost=50, game_wins=7, game_losses=3, elo=1123 "
+            "WHERE guildId=? AND userId=?",
+            (GUILD_ID, 901),
+        )
+        self.db.commit()
+
+        ctx = self._ctx()
+        await self.helperObj.statsHelper(ctx)
+
+        embed = ctx.response.send_message.call_args.kwargs["embed"]
+        values = {f.name: f.value for f in embed.fields}
+        self.assertEqual(values["Elo"], "1123")
+        self.assertEqual(values["Game Record"], "7W - 3L")
+        self.assertEqual(values["Game Win Rate"], "70.0%")
+        self.assertEqual(values["Bet Record"], "2W - 1L")
+        self.assertEqual(values["Bet Win Rate"], "66.7%")
+        self.assertEqual(values["Net Gold Won/Lost"], "+100 gold")
+
+    async def test_looks_up_another_members_stats(self):
+        other = FakeMember("Bob", id=902)
+        self.helperObj.ensureEconomyRow(GUILD_ID, 902, "Bob")
+        self.cursor.execute(
+            "UPDATE economy SET elo=1200 WHERE guildId=? AND userId=?", (GUILD_ID, 902)
+        )
+        self.db.commit()
+
+        ctx = self._ctx()  # caller is Alice (901)
+        await self.helperObj.statsHelper(ctx, other)
+
+        embed = ctx.response.send_message.call_args.kwargs["embed"]
+        self.assertIn("Bob", embed.title)
+        values = {f.name: f.value for f in embed.fields}
+        self.assertEqual(values["Elo"], "1200")
+
 
 class CancelBettingHelperTests(HelperTestCase):
     async def test_noop_when_no_active_round(self):
@@ -1293,8 +1701,9 @@ class CommandRegistrationTests(BotModuleTestCase):
         names = {c.name for c in self.bot.tree.get_commands(guild=discord.Object(id=COMMAND_GUILD_ID))}
         expected = {
             "set-team-size", "set-team-channels", "start", "wager", "daily",
-            "balance", "help", "make-teams", "return", "captains", "choose",
-            "clear", "notify", "notify-role", "roll", "randomize-roles",
+            "stats", "help", "make-teams", "ranked", "return", "report-correct-winner",
+            "captains", "ranked-captains", "choose", "clear", "notify", "notify-role",
+            "roll", "randomize-roles",
         }
         self.assertEqual(names, expected)
 
@@ -1371,13 +1780,6 @@ class CommandDelegationTests(BotModuleTestCase):
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "dailyHelper", mock):
             await self._command("daily").callback(ctx)
-        mock.assert_awaited_once_with(ctx)
-
-    async def test_balance_delegates(self):
-        ctx = self._ctx()
-        mock = AsyncMock()
-        with patch.object(self.bot.helperObj, "balanceHelper", mock):
-            await self._command("balance").callback(ctx)
         mock.assert_awaited_once_with(ctx)
 
     async def test_return_delegates(self):
@@ -1471,6 +1873,36 @@ class ClearCommandTests(BotModuleTestCase):
         await self._command("clear").callback(ctx)
 
         self.assertEqual(self.bot.helperObj.get(guild_id, "channel1"), "Red")
+
+    async def test_clear_economy_wipes_player_stats_when_requested(self):
+        guild_id = 9032
+        await self._insert_guild_row(guild_id)
+        self.bot.helperObj.ensureEconomyRow(guild_id, 901, "Alice")
+        self.bot.cursor.execute(
+            "UPDATE economy SET balance=1000 WHERE guildId=? AND userId=?", (guild_id, 901)
+        )
+        self.bot.mainDB.commit()
+        ctx = self._ctx(guild_id=guild_id)
+
+        await self._command("clear").callback(ctx, clear_economy=True)
+
+        self.bot.cursor.execute("SELECT COUNT(*) FROM economy WHERE guildId=?", (guild_id,))
+        self.assertEqual(self.bot.cursor.fetchone()[0], 0)
+        ctx.response.send_message.assert_awaited_once_with("Cleared!")
+
+    async def test_clear_economy_leaves_player_stats_alone_by_default(self):
+        guild_id = 9033
+        await self._insert_guild_row(guild_id)
+        self.bot.helperObj.ensureEconomyRow(guild_id, 901, "Alice")
+        self.bot.cursor.execute(
+            "UPDATE economy SET balance=1000 WHERE guildId=? AND userId=?", (guild_id, 901)
+        )
+        self.bot.mainDB.commit()
+        ctx = self._ctx(guild_id=guild_id)
+
+        await self._command("clear").callback(ctx)
+
+        self.assertEqual(self.bot.helperObj.getEconomy(guild_id, 901, "balance"), 1000)
 
 
 class NotifyCommandTests(BotModuleTestCase):
@@ -1616,6 +2048,15 @@ class MakeTeamsCommandTests(BotModuleTestCase):
         self.assertIn("/start", ctx.channel.send.call_args.args[0])
 
 
+class RankedCommandTests(BotModuleTestCase):
+    async def test_delegates_to_ranked_team_helper(self):
+        ctx = self._ctx()
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "rankedTeamHelper", mock):
+            await self._command("ranked").callback(ctx)
+        mock.assert_awaited_once_with(ctx)
+
+
 class CaptainsCommandTests(BotModuleTestCase):
     async def test_requires_at_least_two_in_voice_channel(self):
         ctx = self._ctx()
@@ -1645,7 +2086,25 @@ class CaptainsCommandTests(BotModuleTestCase):
                 ctx, captain_1=cap1, captain_2=cap2, use_random=False
             )
 
-        mock.assert_awaited_once_with(ctx, cap1, cap2)
+        mock.assert_awaited_once_with(ctx, cap1, cap2, ranked=False)
+
+    async def test_ranked_captains_delegates_with_ranked_flag(self):
+        guild_id = 9091
+        await self._insert_guild_row(guild_id)
+        cap1 = FakeMember("Cap1", id=1)
+        cap2 = FakeMember("Cap2", id=2)
+        voice_channel = FakeChannel("Lobby", members=[cap1, cap2])
+        user = FakeMember("Caller", id=3)
+        user.voice = FakeVoiceState(voice_channel)
+        ctx = FakeInteraction(FakeGuild(id=guild_id), user)
+
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "captainsHelper", mock):
+            await self._command("ranked-captains").callback(
+                ctx, captain_1=cap1, captain_2=cap2, use_random=False
+            )
+
+        mock.assert_awaited_once_with(ctx, cap1, cap2, ranked=True)
 
     async def test_use_random_picks_two_distinct_captains_from_voice_channel(self):
         # Regression test: this path used to store a plain Python list as
@@ -1663,7 +2122,7 @@ class CaptainsCommandTests(BotModuleTestCase):
 
         captured = {}
 
-        async def fake_captains_helper(c, captain1, captain2):
+        async def fake_captains_helper(c, captain1, captain2, ranked=False):
             captured["captain1"] = captain1
             captured["captain2"] = captain2
 
@@ -1677,6 +2136,64 @@ class CaptainsCommandTests(BotModuleTestCase):
         self.assertNotEqual(captured["captain1"].id, captured["captain2"].id)
         self.assertIn(captured["captain1"].id, {m.id for m in members})
         self.assertIn(captured["captain2"].id, {m.id for m in members})
+
+
+class StatsCommandTests(BotModuleTestCase):
+    async def test_defaults_to_the_caller(self):
+        ctx = self._ctx()
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "statsHelper", mock):
+            await self._command("stats").callback(ctx, member=None)
+        mock.assert_awaited_once_with(ctx, None)
+
+    async def test_looks_up_another_member(self):
+        ctx = self._ctx()
+        target = FakeMember("Target")
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "statsHelper", mock):
+            await self._command("stats").callback(ctx, member=target)
+        mock.assert_awaited_once_with(ctx, target)
+
+
+class ReportCorrectWinnerCommandTests(BotModuleTestCase):
+    async def test_delegates_with_resolved_team_value(self):
+        ctx = self._ctx()
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "reportCorrectWinnerHelper", mock):
+            choice = app_commands.Choice(name="Team 2", value=2)
+            await self._command("report-correct-winner").callback(ctx, choice)
+        mock.assert_awaited_once_with(ctx, 2)
+
+    def test_requires_manage_guild_permission(self):
+        cmd = self._command("report-correct-winner")
+        denied = SimpleNamespace(permissions=discord.Permissions.none())
+
+        with self.assertRaises(app_commands.MissingPermissions):
+            for check in cmd.checks:
+                check(denied)
+
+    def test_manage_guild_permission_is_sufficient(self):
+        cmd = self._command("report-correct-winner")
+        allowed = SimpleNamespace(permissions=discord.Permissions(manage_guild=True))
+
+        for check in cmd.checks:
+            self.assertTrue(check(allowed))
+
+    async def test_error_handler_gives_a_friendly_denial_message(self):
+        cmd = self._command("report-correct-winner")
+        ctx = self._ctx()
+
+        await cmd.on_error(ctx, app_commands.MissingPermissions(["manage_guild"]))
+
+        ctx.response.send_message.assert_awaited_once()
+        self.assertIn("Manage Server", ctx.response.send_message.call_args.args[0])
+
+    async def test_error_handler_reraises_unrelated_errors(self):
+        cmd = self._command("report-correct-winner")
+        ctx = self._ctx()
+
+        with self.assertRaises(RuntimeError):
+            await cmd.on_error(ctx, RuntimeError("boom"))
 
 
 if __name__ == "__main__":
