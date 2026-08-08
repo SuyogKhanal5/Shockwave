@@ -35,6 +35,7 @@
         <div class="nav-label">Overview</div>
         <a class="nav-link" href="index.html#top">Introduction</a>
         <a class="nav-link" href="index.html#quick-start">Draft-night flow</a>
+        <a class="nav-link" href="index.html#tournament-flow">Tournament flow</a>
       </div>
       <div class="nav-group">
         <div class="nav-label">Get started</div>
@@ -133,7 +134,7 @@
         <details class="faq-item">
           <summary>Can teams be uneven, or bigger/smaller than 5v5?</summary>
           <div class="faq-body">
-            <p>Yes. <code class="inline">/set-team-size</code> sets the expected size for display purposes,
+            <p>Yes. <code class="inline">/team-set-size</code> sets the expected size for display purposes,
             but team formation itself just splits whoever's in the voice channel down the middle — odd
             numbers land one extra player on a side. Lane roles (<code class="inline">use_roles</code> on
             <code class="inline">/make-teams</code>, or <code class="inline">/randomize-roles</code>) are the
@@ -166,7 +167,7 @@
         <details class="faq-item">
           <summary>How do I set it up for another game?</summary>
           <div class="faq-body">
-            <p>Exactly the same as League, minus the roles: run <code class="inline">/set-team-channels</code>
+            <p>Exactly the same as League, minus the roles: run <code class="inline">/team-set-channels</code>
             once, then use <code class="inline">/make-teams</code>, <code class="inline">/captains</code>, or
             <code class="inline">/ranked</code>/<code class="inline">/ranked-captains</code> without
             <code class="inline">use_roles</code> turned on. You get two balanced (or drafted) teams, moved

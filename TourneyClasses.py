@@ -48,6 +48,11 @@ class Team:
         self.captain = None
         self.wins = 0
         self.losses = 0
+        # Target roster size for a persistent team (set via /team-create) —
+        # distinct from `size`, which just mirrors len(players). Ephemeral
+        # game-formation teams (/make-teams, /captains, /ranked, ...) never
+        # set this and leave it None.
+        self.team_size = None
 
     def add_player(self, player: Player) -> None:
         self.players.append(player)
@@ -110,6 +115,12 @@ class Team:
     def get_size(self) -> int:
         return self.size
 
+    def get_team_size(self) -> int:
+        return self.team_size
+
+    def set_team_size(self, team_size: int) -> None:
+        self.team_size = team_size
+
     def serializeTeam(self) -> str:
         playerString = ''
         captain = ''
@@ -121,16 +132,19 @@ class Team:
         if self.captain is not None and isinstance(self.captain, Player):
             captain = self.captain.serializePlayer()
 
-        return '[{}, {}, {}, {}, {}, {}, {}, {}]'.format(
+        return '[{}, {}, {}, {}, {}, {}, {}, {}, {}]'.format(
             self.id, self.name, playerString, self.size,
-            self.voice_channel, captain, self.wins, self.losses
+            self.voice_channel, captain, self.wins, self.losses, self.team_size
         )
 
     def deserializeTeam(self, serialized: str) -> None:
         serializedCut = serialized[1:-1]
         serializedArr = serializedCut.split(', ')
 
-        self.id = serializedArr[0]
+        # BUG FIX: this was never cast to int, so get_id() returned a
+        # string after every roundtrip through the database — silently
+        # breaking any `team.get_id() == some_int` comparison.
+        self.id = int(serializedArr[0]) if serializedArr[0] not in ('', 'None') else None
         self.name = serializedArr[1]
 
         playerString = serializedArr[2]
@@ -168,9 +182,30 @@ class Team:
         # rather than the actual fields.
         self.size = int(serializedArr[3]) if serializedArr[3] not in ('', 'None') else len(newPlayerList)
         self.voice_channel = serializedArr[4]
-        self.captain = serializedArr[5]
+
+        # BUG FIX: this stored the raw "(id,name)" captain string as-is
+        # instead of parsing it back into a Player, so get_captain() never
+        # actually returned something with a usable .get_id() after a
+        # roundtrip through the database — every "is this player the
+        # captain" check downstream was comparing against a string.
+        captainStr = serializedArr[5]
+        if captainStr:
+            captain = Player()
+            captain.deserializePlayer(captainStr)
+            self.captain = captain
+        else:
+            self.captain = None
+
         self.wins = int(serializedArr[6]) if serializedArr[6] not in ('', 'None') else 0
         self.losses = int(serializedArr[7]) if serializedArr[7] not in ('', 'None') else 0
+
+        # team_size was added after this format was already in use — older
+        # serialized teams won't have a 9th field, so index defensively
+        # instead of assuming it's there.
+        if len(serializedArr) > 8 and serializedArr[8] not in ('', 'None'):
+            self.team_size = int(serializedArr[8])
+        else:
+            self.team_size = None
 
 
 class Match:
@@ -181,6 +216,115 @@ class Match:
         self.winner = None
 
 
-class Tournament():
-    def __init__(self) -> None:
-        pass
+class Tournament:
+    def __init__(self, name=None, team_size=None, num_teams=None, double_elimination=False) -> None:
+        self.name = name
+        self.team_size = team_size
+        # Also doubles as the bracket size — how many team slots the
+        # bracket is built for.
+        self.num_teams = num_teams
+        self.double_elimination = double_elimination
+        self.teams = []    # Team objects registered for this tournament
+        self.bracket = []  # rounds of matches, populated once the bracket is seeded
+
+    def get_name(self) -> str:
+        return self.name
+
+    def set_name(self, name: str) -> None:
+        self.name = name
+
+    def get_team_size(self) -> int:
+        return self.team_size
+
+    def set_team_size(self, team_size: int) -> None:
+        self.team_size = team_size
+
+    def get_num_teams(self) -> int:
+        return self.num_teams
+
+    def set_num_teams(self, num_teams: int) -> None:
+        self.num_teams = num_teams
+
+    def is_double_elimination(self) -> bool:
+        return self.double_elimination
+
+    def set_double_elimination(self, double_elimination: bool) -> None:
+        self.double_elimination = double_elimination
+
+    def get_teams(self) -> list:
+        return self.teams
+
+    def get_bracket(self) -> list:
+        return self.bracket
+
+    def set_bracket(self, bracket: list) -> None:
+        self.bracket = bracket
+
+    # Adds `team` to this tournament's registered teams. A player can sit
+    # on multiple teams in the server's teams table, but not on two
+    # different teams entered into the SAME tournament — raises if `team`
+    # shares a player with a team already registered here.
+    def register_team(self, team: Team) -> None:
+        registered_ids = {
+            player.get_id() for existing in self.teams for player in existing.get_players()
+        }
+        for player in team.get_players():
+            if player.get_id() in registered_ids:
+                raise ValueError(
+                    f"{player.get_name()} is already on a team registered for this tournament"
+                )
+        self.teams.append(team)
+
+
+# One slot in a bracket. Each pair of sibling nodes (linked to each other
+# via `opponent`) shares a single `next` node — the empty slot ahead of
+# them that the winner of their match replaces, same as a real bracket
+# printout. `previous` is one of the two nodes that fed into this one
+# (the other is reachable via `previous.opponent`) — None for round-one
+# nodes, since they start with an actual team rather than a TBD winner.
+# `next` is None only for the finals node, since there's no round after it.
+class BracketNode:
+    def __init__(self, team=None) -> None:
+        self.team = team
+        self.opponent = None
+        self.next = None
+        self.previous = None
+
+
+# Bracket persistence: a flat list of BracketNode is a graph (nodes point
+# at each other), not something json.dumps can handle directly, so these
+# convert to/from a list of plain dicts referencing each other by index
+# into that same list.
+def serialize_bracket(nodes: list) -> list:
+    index_of = {id(node): i for i, node in enumerate(nodes)}
+
+    def index_or_none(node):
+        return index_of[id(node)] if node is not None else None
+
+    return [
+        {
+            "team": node.team.serializeTeam() if node.team is not None else None,
+            "opponent": index_or_none(node.opponent),
+            "next": index_or_none(node.next),
+            "previous": index_or_none(node.previous),
+        }
+        for node in nodes
+    ]
+
+
+def deserialize_bracket(data: list) -> list:
+    nodes = []
+    for entry in data:
+        node = BracketNode()
+        if entry["team"] is not None:
+            team = Team()
+            team.deserializeTeam(entry["team"])
+            node.team = team
+        nodes.append(node)
+
+    for node, entry in zip(nodes, data):
+        node.opponent = nodes[entry["opponent"]] if entry["opponent"] is not None else None
+        node.next = nodes[entry["next"]] if entry["next"] is not None else None
+        node.previous = nodes[entry["previous"]] if entry["previous"] is not None else None
+
+    return nodes

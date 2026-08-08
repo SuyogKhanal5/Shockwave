@@ -1,5 +1,7 @@
 import discord
-from TourneyClasses import Team, Tournament, Match, Player
+from TourneyClasses import (
+    Team, Tournament, Match, Player, BracketNode, serialize_bracket, deserialize_bracket,
+)
 import random
 import asyncio
 import datetime
@@ -20,6 +22,18 @@ ELO_BALANCE_JITTER = 100
 # How long the /clear confirmation buttons stay clickable before the
 # reset is abandoned on its own.
 CLEAR_CONFIRM_TIMEOUT_SECONDS = 30
+# Same idea for /tournament-create's overwrite confirmation.
+TOURNAMENT_CONFIRM_TIMEOUT_SECONDS = 30
+# ...and for /team-set-voice-channel's already-in-use confirmation.
+TEAM_CONFIRM_TIMEOUT_SECONDS = 30
+# /team-invite: react to accept, same idea as duel/team-game acceptance.
+TEAM_INVITE_ACCEPT_EMOJI = "✅"
+
+# /tournament-start (sequential mode): react to mark a queued match ready
+# to begin. Simultaneous-mode match results reuse TEAM_EMOJIS/WINNER_EMOJIS
+# above — same 1️⃣/2️⃣ reporting as a normal game, just scoped to a specific
+# tournament_matches row instead of the guild's single betting_message_id.
+TOURNAMENT_READY_EMOJI = "✅"
 
 # League-style rank tiers for /stats. Each tier spans 250 elo, with
 # DEFAULT_ELO (1000) landing every new player in the middle at Platinum —
@@ -146,6 +160,111 @@ class ConfirmResetView(discord.ui.View):
             await self.message.edit(view=self)
 
 
+# Confirm/cancel buttons for /tournament-create when a tournament already
+# exists for the server — creating one is destructive (it replaces the
+# only tournament a server can have), so it doesn't happen until whoever
+# ran the command clicks "Overwrite tournament" here.
+class ConfirmTournamentOverwriteView(discord.ui.View):
+    def __init__(self, helperObj, guild_id, invoker_id, name, team_size, num_teams, double_elimination):
+        super().__init__(timeout=TOURNAMENT_CONFIRM_TIMEOUT_SECONDS)
+        self.helperObj = helperObj
+        self.guild_id = guild_id
+        self.invoker_id = invoker_id
+        self.name = name
+        self.team_size = team_size
+        self.num_teams = num_teams
+        self.double_elimination = double_elimination
+        self.message = None
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.invoker_id:
+            await interaction.response.send_message(
+                "Only the person who ran /tournament-create can confirm this.", ephemeral=True
+            )
+            return False
+        return True
+
+    def _disable_buttons(self):
+        for item in self.children:
+            item.disabled = True
+
+    @discord.ui.button(label="Overwrite tournament", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction, button):
+        tournament = Tournament(self.name, self.team_size, self.num_teams, self.double_elimination)
+        self.helperObj.saveTournament(self.guild_id, tournament)
+        self._disable_buttons()
+        self.stop()
+        await interaction.response.edit_message(
+            content=f"Tournament **{self.name}** created, replacing the previous one.", view=self
+        )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction, button):
+        self._disable_buttons()
+        self.stop()
+        await interaction.response.edit_message(
+            content="Cancelled — the existing tournament was kept.", view=self
+        )
+
+    async def on_timeout(self):
+        self._disable_buttons()
+        if self.message is not None:
+            await self.message.edit(view=self)
+
+
+# Confirm/cancel buttons for /team-set-voice-channel when the requested
+# channel is already another team's. "Yes" assigns it to this team anyway
+# (the other team's own assignment is left alone — this doesn't enforce
+# exclusivity, just warns); "No" leaves everything as it was and tells the
+# invoker to run the command again with a different channel.
+class ConfirmVoiceChannelOverwriteView(discord.ui.View):
+    def __init__(self, helperObj, guild_id, invoker_id, team_id, team_name, channel):
+        super().__init__(timeout=TEAM_CONFIRM_TIMEOUT_SECONDS)
+        self.helperObj = helperObj
+        self.guild_id = guild_id
+        self.invoker_id = invoker_id
+        self.team_id = team_id
+        self.team_name = team_name
+        self.channel = channel
+        self.message = None
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.invoker_id:
+            await interaction.response.send_message(
+                "Only the person who ran /team-set-voice-channel can confirm this.", ephemeral=True
+            )
+            return False
+        return True
+
+    def _disable_buttons(self):
+        for item in self.children:
+            item.disabled = True
+
+    @discord.ui.button(label="Yes, use it anyway", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction, button):
+        team = self.helperObj.getTeamById(self.guild_id, self.team_id)
+        team.set_voice_channel(self.channel)
+        self.helperObj.updateTeamData(self.team_id, team)
+        self._disable_buttons()
+        self.stop()
+        await interaction.response.edit_message(
+            content=f"**{self.team_name}**'s voice channel is now {self.channel.mention}.", view=self
+        )
+
+    @discord.ui.button(label="No", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction, button):
+        self._disable_buttons()
+        self.stop()
+        await interaction.response.edit_message(
+            content="Cancelled — run `/team-set-voice-channel` again with a different channel.", view=self
+        )
+
+    async def on_timeout(self):
+        self._disable_buttons()
+        if self.message is not None:
+            await self.message.edit(view=self)
+
+
 class helpers():
     def __init__(self, cursor, db) -> None:
         self.cursor = cursor
@@ -214,7 +333,7 @@ class helpers():
                 if member is not None:
                     await member.move_to(channel2)
         else:
-            await ctx.channel.send('Team Channels Not Set! Use "/set-team-channels" to set teams.')
+            await ctx.channel.send('Team Channels Not Set! Use "/team-set-channels" to set teams.')
 
     async def randomizeTeamHelper(self, ctx):
         await self.clearTeamsHelper(ctx)
@@ -410,6 +529,21 @@ class helpers():
         self.update(guild.id, "channel2", str(team2))
 
         await ctx.response.send_message("Channels set!")
+
+    # Points every future betting posting (open/closed/winner-report — see
+    # _openBetting) at a specific text channel instead of wherever /start
+    # or a tournament match happens to run. Creates the channel if a text
+    # channel with that name doesn't already exist.
+    async def setWagerChannelHelper(self, ctx, channel_name):
+        guild = ctx.guild
+
+        channel = discord.utils.get(guild.text_channels, name=channel_name)
+        if channel is None:
+            channel = await guild.create_text_channel(channel_name)
+
+        self.update(guild.id, "wager_channel", channel.name)
+
+        await ctx.response.send_message(f"All wager postings will now go to {channel.mention}.")
 
     async def both(self, ctx):
         await self.randomizeTeamHelper(ctx)
@@ -824,6 +958,933 @@ class helpers():
         view = ConfirmResetView(self, ctx.guild.id, ctx.guild.name, ctx.user.id, clear_economy)
         view.message = await ctx.followup.send(warning, view=view)
 
+    # ---------------- Tournaments ----------------
+
+    # Writes `tournament` to the guild's row in `tournaments`, replacing
+    # whatever tournament (if any) was there before — a server only ever
+    # has one. `teams`/`bracket` are JSON since they're variable-length
+    # nested data; everything else is a direct column, one per Tournament
+    # attribute.
+    def saveTournament(self, guild_id, tournament):
+        self.cursor.execute(
+            "INSERT OR REPLACE INTO tournaments"
+            "(guildId, name, team_size, num_teams, double_elimination, teams, bracket) "
+            "VALUES(?, ?, ?, ?, ?, ?, ?)",
+            (
+                guild_id,
+                tournament.get_name(),
+                tournament.get_team_size(),
+                tournament.get_num_teams(),
+                int(tournament.is_double_elimination()),
+                json.dumps([team.serializeTeam() for team in tournament.get_teams()]),
+                json.dumps(serialize_bracket(tournament.get_bracket())),
+            )
+        )
+        self.db.commit()
+
+    # Returns the guild's Tournament, or None if it's never created one.
+    def getTournament(self, guild_id):
+        self.cursor.execute(
+            "SELECT name, team_size, num_teams, double_elimination, teams, bracket "
+            "FROM tournaments WHERE guildId=?",
+            (guild_id,)
+        )
+        row = self.cursor.fetchone()
+        if row is None:
+            return None
+
+        name, team_size, num_teams, double_elimination, teams_json, bracket_json = row
+        tournament = Tournament(name, team_size, num_teams, bool(double_elimination))
+        for serialized in json.loads(teams_json):
+            team = Team()
+            team.deserializeTeam(serialized)
+            tournament.get_teams().append(team)
+        tournament.set_bracket(deserialize_bracket(json.loads(bracket_json)))
+        return tournament
+
+    # Creates a new (empty — no teams registered yet) tournament for the
+    # guild. Only one tournament can exist per server at a time, so if one
+    # is already there this doesn't overwrite it immediately — it posts a
+    # confirm/cancel view and waits for the invoker to confirm the
+    # replacement instead.
+    async def createTournamentHelper(self, ctx, name, team_size, num_teams, double_elimination):
+        guild_id = ctx.guild.id
+
+        if team_size <= 0:
+            await ctx.response.send_message("Team size must be greater than 0.")
+            return
+
+        if num_teams <= 1:
+            await ctx.response.send_message("A tournament needs at least 2 teams.")
+            return
+
+        existing = self.getTournament(guild_id)
+        if existing is not None:
+            if not ctx.user.guild_permissions.manage_guild:
+                await ctx.response.send_message(
+                    "Only a member with the Manage Server permission can overwrite an existing tournament."
+                )
+                return
+
+            view = ConfirmTournamentOverwriteView(
+                self, guild_id, ctx.user.id, name, team_size, num_teams, double_elimination
+            )
+            await ctx.response.send_message(
+                f"Tournament **{existing.get_name()}** is already set up for this server. "
+                f"Creating **{name}** will overwrite it — are you sure?",
+                view=view
+            )
+            view.message = await ctx.original_response()
+            return
+
+        tournament = Tournament(name, team_size, num_teams, double_elimination)
+        self.saveTournament(guild_id, tournament)
+
+        elim_style = "double" if double_elimination else "single"
+        await ctx.response.send_message(
+            f"Tournament **{name}** created! {num_teams} teams of {team_size}, {elim_style} elimination."
+        )
+
+    # Registers `team_name`'s team for this guild's tournament. The
+    # captain-only, correct-size, not-already-registered, bracket-not-full
+    # checks all happen here; register_team on Tournament itself only
+    # enforces the "no shared players across registered teams" rule.
+    async def registerTeamHelper(self, ctx, team_name):
+        guild_id = ctx.guild.id
+
+        tournament = self.getTournament(guild_id)
+        if tournament is None:
+            await ctx.response.send_message(
+                "No tournament set up for this server — use /tournament-create first."
+            )
+            return
+
+        result = self.getTeamRow(guild_id, team_name)
+        if result is None:
+            await ctx.response.send_message(f"No team named **{team_name}** in this server.")
+            return
+        _, team = result
+
+        if not self.isTeamCaptain(team, ctx.user.id):
+            await ctx.response.send_message(
+                f"Only **{team_name}**'s captain can register it for the tournament."
+            )
+            return
+
+        if team.get_size() != tournament.get_team_size():
+            await ctx.response.send_message(
+                f"**{team_name}** has {team.get_size()} player(s), but this tournament needs teams of "
+                f"exactly {tournament.get_team_size()}."
+            )
+            return
+
+        if any(existing.get_id() == team.get_id() for existing in tournament.get_teams()):
+            await ctx.response.send_message(f"**{team_name}** is already registered for this tournament.")
+            return
+
+        if len(tournament.get_teams()) >= tournament.get_num_teams():
+            await ctx.response.send_message("This tournament's bracket is already full.")
+            return
+
+        try:
+            tournament.register_team(team)
+        except ValueError as error:
+            await ctx.response.send_message(str(error))
+            return
+
+        self.saveTournament(guild_id, tournament)
+        await ctx.response.send_message(
+            f"**{team_name}** registered for **{tournament.get_name()}**! "
+            f"({len(tournament.get_teams())}/{tournament.get_num_teams()} teams)"
+        )
+
+    def _nextPowerOfTwo(self, n):
+        power = 1
+        while power < n:
+            power *= 2
+        return power
+
+    # Builds a fresh single-elimination bracket tree from `teams`
+    # (shuffled for random seeding) — paired nodes share a `next` (the
+    # empty node their winner advances into, same as a real bracket), and
+    # that node's `previous` is one of the pair (`previous.opponent` gives
+    # the other). Slots beyond len(teams), if the count isn't a power of
+    # two, are byes (team=None). Returns the flat list of every node
+    # across every round; doesn't touch the database.
+    def buildBracket(self, teams):
+        shuffled = list(teams)
+        random.shuffle(shuffled)
+
+        size = self._nextPowerOfTwo(len(shuffled))
+        current_round = [
+            BracketNode(shuffled[i] if i < len(shuffled) else None) for i in range(size)
+        ]
+        all_nodes = list(current_round)
+
+        while len(current_round) > 1:
+            next_round = []
+            for i in range(0, len(current_round), 2):
+                node_a = current_round[i]
+                node_b = current_round[i + 1]
+                parent = BracketNode()
+                node_a.opponent = node_b
+                node_b.opponent = node_a
+                node_a.next = parent
+                node_b.next = parent
+                parent.previous = node_a
+                next_round.append(parent)
+            all_nodes.extend(next_round)
+            current_round = next_round
+
+        return all_nodes
+
+    # Builds (or rebuilds — calling this again is an explicit reroll) the
+    # tournament's bracket from whichever teams are currently registered.
+    # Only wires up the single-elimination winners' tree described by
+    # buildBracket; double_elimination is recorded on the tournament but
+    # doesn't currently add a separate losers' bracket.
+    async def createBracketHelper(self, ctx, double_elimination):
+        guild_id = ctx.guild.id
+
+        tournament = self.getTournament(guild_id)
+        if tournament is None:
+            await ctx.response.send_message(
+                "No tournament set up for this server — use /tournament-create first."
+            )
+            return
+
+        teams = tournament.get_teams()
+        if len(teams) < 2:
+            await ctx.response.send_message("Need at least 2 registered teams to build a bracket.")
+            return
+
+        tournament.set_double_elimination(double_elimination)
+        tournament.set_bracket(self.buildBracket(teams))
+        self.saveTournament(guild_id, tournament)
+
+        elim_style = "double" if double_elimination else "single"
+        await ctx.response.send_message(
+            f"Bracket created for **{tournament.get_name()}** — {len(teams)} teams, {elim_style} elimination."
+        )
+        await ctx.channel.send(self.renderBracketText(tournament))
+
+    # ---------------- Tournament matches (/tournament-start) ----------------
+
+    # Splits a flat bracket node list (leaves first, as buildBracket returns
+    # it) back into per-round lists. Round sizes are always size, size/2,
+    # ..., 1 for a size-leaf bracket, and len(nodes) == 2*size - 1, so the
+    # leaf count is recoverable from the total without storing it separately.
+    def _bracketRounds(self, nodes):
+        if not nodes:
+            return []
+        round_size = (len(nodes) + 1) // 2
+        rounds = []
+        start = 0
+        while round_size >= 1:
+            rounds.append(nodes[start:start + round_size])
+            start += round_size
+            round_size //= 2
+        return rounds
+
+    # A short description of who is (or could be) in `node` — the real
+    # team name once it's known, otherwise "Winner of (X vs Y)" using the
+    # pairing that feeds this node. Only expands one level (via
+    # previous/previous.opponent, not further back), so it stays a single
+    # short line even deep in the bracket instead of growing exponentially.
+    def _nodeLabel(self, node):
+        if node.team is not None:
+            return node.team.get_name()
+        if node.previous is not None:
+            left, right = node.previous, node.previous.opponent
+            left_name = left.team.get_name() if left.team is not None else "TBD"
+            right_name = right.team.get_name() if right.team is not None else "TBD"
+            return f"Winner of ({left_name} vs {right_name})"
+        return "TBD"
+
+    # Text visualization of the whole bracket: real matchups for round 1,
+    # "who could possibly play who" for the round after that (via
+    # _nodeLabel), and a champion line. Posted by /tournament-print-bracket, and
+    # automatically by createBracketHelper right after building one.
+    def renderBracketText(self, tournament):
+        rounds = self._bracketRounds(tournament.get_bracket())
+        if not rounds:
+            return "No bracket has been created yet."
+
+        lines = [f"**\U0001f3c6 {tournament.get_name()} — Bracket**"]
+        for round_index, round_nodes in enumerate(rounds[:-1]):
+            lines.append(f"\n__Round {round_index + 1}__")
+            for i in range(0, len(round_nodes), 2):
+                a, b = round_nodes[i], round_nodes[i + 1]
+                lines.append(f"{self._nodeLabel(a)}  vs  {self._nodeLabel(b)}")
+
+        champion = rounds[-1][0]
+        lines.append(f"\n\U0001f3c6 **Champion:** {self._nodeLabel(champion)}")
+
+        return "\n".join(lines)
+
+    async def printBracketHelper(self, ctx):
+        tournament = self.getTournament(ctx.guild.id)
+        if tournament is None:
+            await ctx.response.send_message(
+                "No tournament set up for this server — use /tournament-create first."
+            )
+            return
+        await ctx.response.send_message(self.renderBracketText(tournament))
+
+    # Posts the "react when ready" prompt for a QUEUED sequential match.
+    async def _postReadyCheck(self, match_id, channel):
+        self.cursor.execute("SELECT team1, team2 FROM tournament_matches WHERE id=?", (match_id,))
+        team1_ser, team2_ser = self.cursor.fetchone()
+        team1, team2 = Team(), Team()
+        team1.deserializeTeam(team1_ser)
+        team2.deserializeTeam(team2_ser)
+
+        msg = await channel.send(
+            f"**Match #{match_id}:** {team1.get_name()} vs {team2.get_name()} — react with "
+            f"{TOURNAMENT_READY_EMOJI} when ready to play (either captain)!"
+        )
+        await msg.add_reaction(TOURNAMENT_READY_EMOJI)
+
+        self.cursor.execute(
+            "UPDATE tournament_matches SET state='PENDING_READY', messageId=? WHERE id=?", (msg.id, match_id)
+        )
+        self.db.commit()
+
+    # Posts the "who won" prompt for a simultaneous-mode match — no ready
+    # check, no betting, just a direct 1️⃣/2️⃣ report same as a normal game.
+    async def _postMatchReport(self, match_id, channel):
+        self.cursor.execute("SELECT team1, team2 FROM tournament_matches WHERE id=?", (match_id,))
+        team1_ser, team2_ser = self.cursor.fetchone()
+        team1, team2 = Team(), Team()
+        team1.deserializeTeam(team1_ser)
+        team2.deserializeTeam(team2_ser)
+
+        msg = await channel.send(
+            f"**Match #{match_id}:** {team1.get_name()} vs {team2.get_name()} — react with "
+            f"{TEAM_EMOJIS[1]} if {team1.get_name()} won, or {TEAM_EMOJIS[2]} if {team2.get_name()} won."
+        )
+        await msg.add_reaction(TEAM_EMOJIS[1])
+        await msg.add_reaction(TEAM_EMOJIS[2])
+
+        self.cursor.execute(
+            "UPDATE tournament_matches SET state='AWAITING_RESULT', messageId=? WHERE id=?", (msg.id, match_id)
+        )
+        self.db.commit()
+
+    # Queues every real pairing in `round_index` as a tournament_matches
+    # row (byes — a pairing where only one side has a team — auto-advance
+    # immediately with no match at all) and kicks the round off: the first
+    # match's ready-check for sequential, or every match's report prompt
+    # at once for simultaneous. Recurses forward through bye-only rounds
+    # and announces the champion once there's nothing left to play.
+    async def _startRound(self, guild_id, tournament, round_index, mode, channel):
+        rounds = self._bracketRounds(tournament.get_bracket())
+
+        if round_index >= len(rounds) - 1:
+            champion = rounds[-1][0]
+            name = champion.team.get_name() if champion.team is not None else "Unknown"
+            await channel.send(f"\U0001f3c6 **{tournament.get_name()}** is complete! Champion: **{name}**")
+            return
+
+        round_nodes = rounds[round_index]
+        real_pairs = []
+        for i in range(0, len(round_nodes), 2):
+            a, b = round_nodes[i], round_nodes[i + 1]
+            if a.team is not None and b.team is not None:
+                real_pairs.append((a, b))
+            elif a.team is not None or b.team is not None:
+                winner_node = a if a.team is not None else b
+                if winner_node.next is not None:
+                    winner_node.next.team = winner_node.team
+
+        self.saveTournament(guild_id, tournament)
+
+        if not real_pairs:
+            await self._startRound(guild_id, tournament, round_index + 1, mode, channel)
+            return
+
+        bracket = tournament.get_bracket()
+        match_ids = []
+        for a, b in real_pairs:
+            node_index = bracket.index(a)
+            self.cursor.execute(
+                "INSERT INTO tournament_matches"
+                "(guildId, roundIndex, nodeIndex, team1, team2, state, mode, messageId, channelId, winner) "
+                "VALUES(?, ?, ?, ?, ?, 'QUEUED', ?, NULL, ?, NULL)",
+                (guild_id, round_index, node_index, a.team.serializeTeam(), b.team.serializeTeam(),
+                 mode, channel.id)
+            )
+            self.db.commit()
+            match_ids.append(self.cursor.lastrowid)
+
+        plural = "es" if len(match_ids) != 1 else ""
+        await channel.send(f"__Round {round_index + 1}__ — {len(match_ids)} match{plural} to play.")
+
+        if mode == "sequential":
+            await self._postReadyCheck(match_ids[0], channel)
+        else:
+            for match_id in match_ids:
+                await self._postMatchReport(match_id, channel)
+
+    # Starts (or restarts, if the whole tournament is idle) the current
+    # round. Refuses to run while a round is already in progress, or once
+    # a champion has already been decided.
+    async def startTournamentHelper(self, ctx, mode):
+        guild_id = ctx.guild.id
+
+        tournament = self.getTournament(guild_id)
+        if tournament is None:
+            await ctx.response.send_message(
+                "No tournament set up for this server — use /tournament-create first."
+            )
+            return
+
+        bracket = tournament.get_bracket()
+        if not bracket:
+            await ctx.response.send_message("No bracket has been created yet — use /tournament-create-bracket first.")
+            return
+
+        rounds = self._bracketRounds(bracket)
+        champion = rounds[-1][0]
+        if champion.team is not None:
+            await ctx.response.send_message(
+                f"**{tournament.get_name()}** is already finished — **{champion.team.get_name()}** is the champion!"
+            )
+            return
+
+        self.cursor.execute(
+            "SELECT COUNT(*) FROM tournament_matches WHERE guildId=? AND state != 'RESOLVED'", (guild_id,)
+        )
+        if self.cursor.fetchone()[0] > 0:
+            await ctx.response.send_message("This tournament's current round is already in progress.")
+            return
+
+        await ctx.response.send_message(
+            f"Starting **{tournament.get_name()}** — {mode} mode."
+        )
+        await self._startRound(guild_id, tournament, 0, mode, ctx.channel)
+
+    async def _handleReadyReaction(self, payload):
+        guild_id = payload.guild_id
+        self.cursor.execute(
+            "SELECT id, team1, team2 FROM tournament_matches "
+            "WHERE guildId=? AND messageId=? AND state='PENDING_READY'",
+            (guild_id, payload.message_id)
+        )
+        row = self.cursor.fetchone()
+        if row is None:
+            return
+        match_id, team1_ser, team2_ser = row
+        team1, team2 = Team(), Team()
+        team1.deserializeTeam(team1_ser)
+        team2.deserializeTeam(team2_ser)
+
+        if not (self.isTeamCaptain(team1, payload.user_id) or self.isTeamCaptain(team2, payload.user_id)):
+            return
+
+        # BUG-PRONE PATTERN AVOIDED: flip state before anything async below,
+        # so a double-react can't begin the same match twice.
+        self.cursor.execute("UPDATE tournament_matches SET state='AWAITING_RESULT' WHERE id=?", (match_id,))
+        self.db.commit()
+
+        channel = self.client.get_channel(payload.channel_id)
+        if channel is None:
+            channel = await self.client.fetch_channel(payload.channel_id)
+
+        # Route through the exact same team-game cycle a casual/ranked
+        # game uses: team1/team2 + betting + the 1️⃣/2️⃣ report message.
+        # active_tournament_match_id is what tells recordResult (once that
+        # cycle resolves) to come back here and advance the bracket.
+        team1.set_id(1)
+        team2.set_id(2)
+        self.update(guild_id, "team1", team1.serializeTeam())
+        self.update(guild_id, "team2", team2.serializeTeam())
+        self.update(guild_id, "original_channel", "")
+        self.update(guild_id, "is_ranked", 0)
+        self.update(guild_id, "active_tournament_match_id", match_id)
+
+        await channel.send(f"**Match #{match_id}:** {team1.get_name()} vs {team2.get_name()} is starting!")
+        await self._openBetting(guild_id, channel)
+
+    async def _handleSimultaneousResultReaction(self, payload, winning_team):
+        guild_id = payload.guild_id
+        self.cursor.execute(
+            "SELECT id FROM tournament_matches WHERE guildId=? AND messageId=? "
+            "AND state='AWAITING_RESULT' AND mode='simultaneous'",
+            (guild_id, payload.message_id)
+        )
+        row = self.cursor.fetchone()
+        if row is None:
+            return
+        await self._resolveTournamentMatch(guild_id, row[0], winning_team, payload.channel_id)
+
+    # Called from bot.py's on_raw_reaction_add. Dispatches ready-checks
+    # (sequential mode) and direct result reports (simultaneous mode only
+    # — sequential results resolve through handleWinnerReaction/recordResult
+    # instead, same as any other game).
+    async def handleTournamentReaction(self, payload):
+        guild_id = payload.guild_id
+        if guild_id is None:
+            return
+
+        emoji = str(payload.emoji)
+
+        if emoji == TOURNAMENT_READY_EMOJI:
+            await self._handleReadyReaction(payload)
+            return
+
+        winning_team = WINNER_EMOJIS.get(emoji)
+        if winning_team is None:
+            return
+        await self._handleSimultaneousResultReaction(payload, winning_team)
+
+    # Records the winner, advances the bracket (propagating the winning
+    # team into the shared "next" node), prints the updated bracket, and
+    # either starts the next queued match (sequential, round not done),
+    # or moves on to the next round once every match in this one has
+    # resolved. Shared by both modes — reached via recordResult's hook for
+    # sequential, or directly from a result reaction for simultaneous.
+    async def _resolveTournamentMatch(self, guild_id, match_id, winning_team, channel_id):
+        self.cursor.execute(
+            "SELECT roundIndex, nodeIndex, mode, state FROM tournament_matches WHERE id=?", (match_id,)
+        )
+        row = self.cursor.fetchone()
+        if row is None or row[3] == "RESOLVED":
+            return
+        round_index, node_index, mode, _ = row
+
+        # BUG-PRONE PATTERN AVOIDED: flip to RESOLVED before anything async
+        # below, so a concurrent/duplicate call can't process this twice.
+        self.cursor.execute(
+            "UPDATE tournament_matches SET state='RESOLVED', winner=? WHERE id=?", (winning_team, match_id)
+        )
+        self.db.commit()
+
+        channel = self.client.get_channel(channel_id)
+        if channel is None:
+            channel = await self.client.fetch_channel(channel_id)
+
+        tournament = self.getTournament(guild_id)
+        if tournament is None:
+            return
+
+        bracket = tournament.get_bracket()
+        node_a = bracket[node_index]
+        node_b = node_a.opponent
+        winner_node = node_a if winning_team == 1 else node_b
+        if node_a.next is not None:
+            node_a.next.team = winner_node.team
+        self.saveTournament(guild_id, tournament)
+
+        await channel.send(f"**Match #{match_id} result:** {winner_node.team.get_name()} wins!")
+        await channel.send(self.renderBracketText(tournament))
+
+        self.cursor.execute(
+            "SELECT COUNT(*) FROM tournament_matches WHERE guildId=? AND roundIndex=? AND state != 'RESOLVED'",
+            (guild_id, round_index)
+        )
+        if self.cursor.fetchone()[0] > 0:
+            if mode == "sequential":
+                self.cursor.execute(
+                    "SELECT id FROM tournament_matches WHERE guildId=? AND roundIndex=? AND state='QUEUED' "
+                    "ORDER BY id LIMIT 1",
+                    (guild_id, round_index)
+                )
+                next_row = self.cursor.fetchone()
+                if next_row is not None:
+                    await self._postReadyCheck(next_row[0], channel)
+            return
+
+        # Every match in this round is in — announce the round ending and
+        # show the freshly-updated bracket before moving on. _startRound
+        # (below) is what actually announces the champion once there's no
+        # round left to start — this is purely the "round N is over"
+        # transition message, distinct from the per-match update above.
+        # No sleeps/blocking waits anywhere in this chain — reactions are
+        # handled by discord.py as their own tasks, so a round transition
+        # (even one that recurses through several bye rounds) never blocks
+        # other users from placing bets or running other commands meanwhile.
+        await channel.send(f"\U0001f3c1 **Round {round_index + 1} has ended!**")
+        await channel.send(self.renderBracketText(tournament))
+
+        await self._startRound(guild_id, tournament, round_index + 1, mode, channel)
+
+    # /report-correct-winner's match_id path: fixes a specific tournament
+    # match's recorded winner and re-propagates the bracket, independent
+    # of the guild-wide last_result correction (which only ever covers the
+    # single most-recently-resolved team game). Refuses once the next
+    # round has already started, rather than risk silently corrupting a
+    # bracket that's already moved on.
+    async def _correctTournamentMatchHelper(self, ctx, match_id, correct_team):
+        guild_id = ctx.guild.id
+
+        self.cursor.execute(
+            "SELECT roundIndex, nodeIndex, state, winner FROM tournament_matches WHERE guildId=? AND id=?",
+            (guild_id, match_id)
+        )
+        row = self.cursor.fetchone()
+        if row is None:
+            await ctx.response.send_message(f"No tournament match with id {match_id} in this server.")
+            return
+        round_index, node_index, state, winner = row
+
+        if state != "RESOLVED":
+            await ctx.response.send_message(f"Match #{match_id} hasn't been resolved yet.")
+            return
+
+        if winner == correct_team:
+            await ctx.response.send_message(f"Match #{match_id} is already recorded as Team {correct_team}.")
+            return
+
+        self.cursor.execute(
+            "SELECT COUNT(*) FROM tournament_matches WHERE guildId=? AND roundIndex=?",
+            (guild_id, round_index + 1)
+        )
+        if self.cursor.fetchone()[0] > 0:
+            await ctx.response.send_message(
+                f"Can't correct Match #{match_id} — the next round has already started."
+            )
+            return
+
+        tournament = self.getTournament(guild_id)
+        if tournament is None:
+            await ctx.response.send_message("This server's tournament no longer exists.")
+            return
+
+        bracket = tournament.get_bracket()
+        node_a = bracket[node_index]
+        node_b = node_a.opponent
+        correct_winner_node = node_a if correct_team == 1 else node_b
+        if node_a.next is not None:
+            node_a.next.team = correct_winner_node.team
+        self.saveTournament(guild_id, tournament)
+
+        self.cursor.execute("UPDATE tournament_matches SET winner=? WHERE id=?", (correct_team, match_id))
+        self.db.commit()
+
+        await ctx.response.send_message(
+            f"Match #{match_id} corrected: **{correct_winner_node.team.get_name()}** actually won."
+        )
+        await ctx.channel.send(self.renderBracketText(tournament))
+
+    # ---------------- Persistent teams ----------------
+
+    # (team_id, Team) for the named team in this guild, or None. Team names
+    # are unique per guild — enforced by createTeamHelper — so this is
+    # always at most one row.
+    def getTeamRow(self, guild_id, name):
+        self.cursor.execute(
+            "SELECT id, data FROM teams WHERE guildId=? AND name=?", (guild_id, name)
+        )
+        row = self.cursor.fetchone()
+        if row is None:
+            return None
+        team_id, data = row
+        team = Team()
+        team.deserializeTeam(data)
+        return team_id, team
+
+    def getTeamById(self, guild_id, team_id):
+        self.cursor.execute(
+            "SELECT data FROM teams WHERE guildId=? AND id=?", (guild_id, team_id)
+        )
+        row = self.cursor.fetchone()
+        if row is None:
+            return None
+        team = Team()
+        team.deserializeTeam(row[0])
+        return team
+
+    def getTeamsForGuild(self, guild_id):
+        self.cursor.execute("SELECT id, data FROM teams WHERE guildId=?", (guild_id,))
+        teams = []
+        for team_id, data in self.cursor.fetchall():
+            team = Team()
+            team.deserializeTeam(data)
+            teams.append((team_id, team))
+        return teams
+
+    def updateTeamData(self, team_id, team):
+        self.cursor.execute("UPDATE teams SET data=? WHERE id=?", (team.serializeTeam(), team_id))
+        self.db.commit()
+
+    def isTeamCaptain(self, team, user_id):
+        captain = team.get_captain()
+        return isinstance(captain, Player) and captain.get_id() == user_id
+
+    # Inserts `team`, then stamps the row's own autoincrement id back onto
+    # the Team object and re-saves it — the DB row IS the team's id, so it
+    # can't be known until after the INSERT.
+    def _saveNewTeam(self, guild_id, team):
+        self.cursor.execute(
+            "INSERT INTO teams(guildId, name, data) VALUES(?, ?, ?)",
+            (guild_id, team.get_name(), team.serializeTeam())
+        )
+        self.db.commit()
+        team_id = self.cursor.lastrowid
+        team.set_id(team_id)
+        self.updateTeamData(team_id, team)
+        return team_id
+
+    # Creates a new persistent team with the caller as its captain. Unlike
+    # the ephemeral team1/team2 a game gets, this one sticks around across
+    # sessions and is what /tournament-create's roster registration and
+    # /team-invite work against.
+    async def createTeamHelper(self, ctx, name, team_size):
+        guild_id = ctx.guild.id
+
+        if team_size <= 0:
+            await ctx.response.send_message("Team size must be greater than 0.")
+            return
+
+        if self.getTeamRow(guild_id, name) is not None:
+            await ctx.response.send_message(f"A team named **{name}** already exists in this server.")
+            return
+
+        team = Team()
+        team.set_name(name)
+        team.set_team_size(team_size)
+        captain = Player(ctx.user.id, ctx.user.name)
+        team.add_player(captain)
+        team.set_captain(captain)
+
+        self._saveNewTeam(guild_id, team)
+
+        await ctx.response.send_message(
+            f"Team **{name}** created! {ctx.user.mention} is the captain — looking for {team_size} player"
+            f"{'s' if team_size != 1 else ''} total."
+        )
+
+    # Finds whichever OTHER team (if any) already has `channel_name` set as
+    # its voice channel.
+    def _findTeamUsingChannel(self, guild_id, channel_name, exclude_team_id):
+        for team_id, team in self.getTeamsForGuild(guild_id):
+            if team_id != exclude_team_id and team.get_voice_channel() == channel_name:
+                return team
+        return None
+
+    # Sets (or creates) a team's voice channel. Only the team's captain can
+    # do this. Passing no channel creates a brand new one named after the
+    # team; passing one that's already assigned to a different team asks
+    # for confirmation before reusing it, rather than silently doing it.
+    async def setTeamVoiceChannelHelper(self, ctx, team_name, channel):
+        guild_id = ctx.guild.id
+
+        result = self.getTeamRow(guild_id, team_name)
+        if result is None:
+            await ctx.response.send_message(f"No team named **{team_name}** in this server.")
+            return
+        team_id, team = result
+
+        if not self.isTeamCaptain(team, ctx.user.id):
+            await ctx.response.send_message(f"Only **{team_name}**'s captain can set its voice channel.")
+            return
+
+        if channel is None:
+            new_channel = await ctx.guild.create_voice_channel(team.get_name())
+            team.set_voice_channel(new_channel)
+            self.updateTeamData(team_id, team)
+            await ctx.response.send_message(
+                f"Created {new_channel.mention} and set it as **{team_name}**'s voice channel."
+            )
+            return
+
+        conflicting = self._findTeamUsingChannel(guild_id, str(channel), team_id)
+        if conflicting is not None:
+            view = ConfirmVoiceChannelOverwriteView(self, guild_id, ctx.user.id, team_id, team_name, channel)
+            await ctx.response.send_message(
+                f"**{channel.name}** is already **{conflicting.get_name()}**'s voice channel. "
+                f"Set it as **{team_name}**'s too?",
+                view=view
+            )
+            view.message = await ctx.original_response()
+            return
+
+        team.set_voice_channel(channel)
+        self.updateTeamData(team_id, team)
+        await ctx.response.send_message(f"**{team_name}**'s voice channel is now {channel.mention}.")
+
+    # Invites `member` to a team the caller captains — posts a message
+    # mentioning them and reacts with TEAM_INVITE_ACCEPT_EMOJI; the member
+    # only actually joins once they react themselves (handleTeamInviteReaction).
+    async def teamInviteHelper(self, ctx, team_name, member):
+        guild_id = ctx.guild.id
+
+        result = self.getTeamRow(guild_id, team_name)
+        if result is None:
+            await ctx.response.send_message(f"No team named **{team_name}** in this server.")
+            return
+        team_id, team = result
+
+        if not self.isTeamCaptain(team, ctx.user.id):
+            await ctx.response.send_message(f"Only **{team_name}**'s captain can invite players.")
+            return
+
+        if member.bot:
+            await ctx.response.send_message("You can't invite a bot to a team.")
+            return
+
+        if any(player.get_id() == member.id for player in team.get_players()):
+            await ctx.response.send_message(f"{member.display_name} is already on **{team_name}**.")
+            return
+
+        self.cursor.execute(
+            "INSERT INTO team_invites"
+            "(guildId, channelId, messageId, teamId, teamName, inviterId, targetId, targetName) "
+            "VALUES(?, ?, NULL, ?, ?, ?, ?, ?)",
+            (guild_id, ctx.channel.id, team_id, team_name, ctx.user.id, member.id, member.name)
+        )
+        self.db.commit()
+        invite_id = self.cursor.lastrowid
+
+        await ctx.response.send_message(
+            f"{member.mention}, {ctx.user.mention} invited you to join **{team_name}**! "
+            f"React with {TEAM_INVITE_ACCEPT_EMOJI} to accept."
+        )
+        msg = await ctx.original_response()
+        await msg.add_reaction(TEAM_INVITE_ACCEPT_EMOJI)
+
+        self.cursor.execute("UPDATE team_invites SET messageId=? WHERE id=?", (msg.id, invite_id))
+        self.db.commit()
+
+    # Called from bot.py's on_raw_reaction_add — no-ops unless the emoji/
+    # message match a pending invite and the reactor is the invited player.
+    async def handleTeamInviteReaction(self, payload):
+        guild_id = payload.guild_id
+        if guild_id is None:
+            return
+
+        if str(payload.emoji) != TEAM_INVITE_ACCEPT_EMOJI:
+            return
+
+        self.cursor.execute(
+            "SELECT id, channelId, teamId, teamName, targetId, targetName "
+            "FROM team_invites WHERE guildId=? AND messageId=?",
+            (guild_id, payload.message_id)
+        )
+        row = self.cursor.fetchone()
+        if row is None:
+            return
+        invite_id, channel_id, team_id, team_name, target_id, target_name = row
+
+        if payload.user_id != target_id:
+            return
+
+        # BUG-PRONE PATTERN AVOIDED: delete the invite before anything
+        # async below, so a double-click can't add the player twice.
+        self.cursor.execute("DELETE FROM team_invites WHERE id=?", (invite_id,))
+        self.db.commit()
+
+        team = self.getTeamById(guild_id, team_id)
+        if team is None:
+            return
+
+        team.add_player(Player(target_id, target_name))
+        self.updateTeamData(team_id, team)
+
+        channel = self.client.get_channel(channel_id)
+        if channel is None:
+            channel = await self.client.fetch_channel(channel_id)
+        await channel.send(f"**{target_name}** has joined **{team_name}**!")
+
+    async def teamStatsHelper(self, ctx, team_name):
+        result = self.getTeamRow(ctx.guild.id, team_name)
+        if result is None:
+            await ctx.response.send_message(f"No team named **{team_name}** in this server.")
+            return
+        _, team = result
+
+        games = team.wins + team.losses
+        win_rate = f"{(team.wins / games) * 100:.1f}%" if games > 0 else "N/A"
+        captain = team.get_captain()
+        captain_name = captain.get_name() if isinstance(captain, Player) else "None"
+        roster = ", ".join(player.get_name() for player in team.get_players()) or "No players yet"
+        target_size = team.get_team_size()
+        roster_size = f"{team.get_size()}/{target_size}" if target_size is not None else str(team.get_size())
+
+        embed = discord.Embed(title=f"{team.get_name()} Stats", color=discord.Color.gold())
+        embed.add_field(name="Captain", value=captain_name, inline=True)
+        embed.add_field(name="Roster Size", value=roster_size, inline=True)
+        embed.add_field(name="Record", value=f"{team.wins}W - {team.losses}L", inline=True)
+        embed.add_field(name="Win Rate", value=win_rate, inline=True)
+        embed.add_field(name="Voice Channel", value=team.get_voice_channel() or "Not set", inline=True)
+        embed.add_field(name="Roster", value=roster, inline=False)
+
+        await ctx.response.send_message(embed=embed)
+
+    # Ranks every team in the guild by win rate (teams with no recorded
+    # games sink to the bottom rather than looking like a 0% win rate),
+    # then by total wins. Single embed, no paging — server team counts are
+    # small enough that this doesn't need /leaderboard's page reactions.
+    async def teamLeaderboardHelper(self, ctx):
+        teams = self.getTeamsForGuild(ctx.guild.id)
+        if not teams:
+            await ctx.response.send_message("No teams have been created in this server yet!")
+            return
+
+        def sort_key(entry):
+            _, team = entry
+            games = team.wins + team.losses
+            win_rate = (team.wins / games) if games > 0 else -1
+            return (-win_rate, -team.wins)
+
+        ranked = sorted(teams, key=sort_key)
+
+        lines = []
+        for i, (_, team) in enumerate(ranked, start=1):
+            games = team.wins + team.losses
+            win_rate = f"{(team.wins / games) * 100:.1f}%" if games > 0 else "N/A"
+            lines.append(f"**#{i}.** {team.get_name()} — {team.wins}W-{team.losses}L ({win_rate})")
+
+        embed = discord.Embed(
+            title=f"\U0001f3c6 {ctx.guild.name} Team Leaderboard",
+            description="\n".join(lines),
+            color=discord.Color.gold(),
+        )
+        await ctx.response.send_message(embed=embed)
+
+    # Loads two persistent teams straight into team1/team2 for a casual or
+    # ranked game — the "quickly reuse a tournament team" path, skipping
+    # /make-teams'/`/ranked`'s random-split-or-draft entirely. Same
+    # "build the roster, then /start" contract as those commands: nobody
+    # is moved and no elo/betting starts until /start is run.
+    async def useTeamsHelper(self, ctx, team1_name, team2_name, ranked):
+        guild_id = ctx.guild.id
+
+        if team1_name == team2_name:
+            await ctx.response.send_message("Pick two different teams.")
+            return
+
+        result1 = self.getTeamRow(guild_id, team1_name)
+        if result1 is None:
+            await ctx.response.send_message(f"No team named **{team1_name}** in this server.")
+            return
+
+        result2 = self.getTeamRow(guild_id, team2_name)
+        if result2 is None:
+            await ctx.response.send_message(f"No team named **{team2_name}** in this server.")
+            return
+
+        _, team1 = result1
+        _, team2 = result2
+        team1.set_id(1)
+        team2.set_id(2)
+
+        await self.clearTeamsHelper(ctx)
+
+        self.update(guild_id, "team1", team1.serializeTeam())
+        self.update(guild_id, "team2", team2.serializeTeam())
+        self.update(guild_id, "mode", "Ranked" if ranked else "Normal")
+        if ranked:
+            self.update(guild_id, "is_ranked", 1)
+
+        ranked_note = " (ranked — elo will update when the winner is reported)" if ranked else ""
+        await ctx.response.send_message(
+            f"**{team1_name}** vs **{team2_name}** loaded{ranked_note}. "
+            'Use "/start" when you\'re ready to move everyone and open betting.'
+        )
+        await self.printEmbed(ctx, team1, team2)
+
     def getEconomy(self, guild_id, user_id, column):
         self.cursor.execute(
             f"SELECT {column} FROM economy WHERE guildId=? AND userId=?",
@@ -936,18 +1997,35 @@ class helpers():
         await ctx.response.send_message(f"You wagered {amount} gold on Team {team}!")
 
     # Kicks off the betting window for the game that was just /start'd.
-    # Cancels/refunds any previous unresolved game first so a re-/start
-    # never leaves an orphaned timer or stranded bets behind.
     async def startBettingHelper(self, ctx):
-        guild_id = ctx.guild.id
+        await self._openBetting(ctx.guild.id, ctx.channel)
 
-        await self.cancelBettingHelper(guild_id, ctx.channel)
+    # Core of the above, taking guild_id/channel directly rather than a
+    # full Interaction — /tournament-start's sequential mode calls this
+    # too, from a reaction handler that has no ctx to hand it. Cancels/
+    # refunds any previous unresolved game first so re-opening never
+    # leaves an orphaned timer or stranded bets behind.
+    async def _openBetting(self, guild_id, channel):
+        # /wager-set-channel redirects the whole cycle (open/closed/report)
+        # there instead of wherever /start (or a tournament match) ran —
+        # once betting_channel_id below points at it, everything
+        # downstream (the timer, the winner report, recordResult) just
+        # follows the same channel through naturally.
+        wager_channel_name = self.get(guild_id, "wager_channel")
+        if wager_channel_name:
+            guild = self.client.get_guild(guild_id) if self.client is not None else None
+            if guild is not None:
+                resolved = discord.utils.get(guild.channels, name=wager_channel_name)
+                if resolved is not None:
+                    channel = resolved
+
+        await self.cancelBettingHelper(guild_id, channel)
 
         self.update(guild_id, "betting_state", "OPEN")
         self.update(guild_id, "betting_message_id", None)
-        self.update(guild_id, "betting_channel_id", ctx.channel.id)
+        self.update(guild_id, "betting_channel_id", channel.id)
 
-        await ctx.channel.send(
+        await channel.send(
             "🎲 Betting is now open! Use `/wager <amount> <team>` to bet on this game. "
             f"Betting closes in {BETTING_DURATION_SECONDS} seconds."
         )
@@ -959,7 +2037,7 @@ class helpers():
         # for a full minute, and a cancelled game (/return) would have no
         # way to stop it from firing later. Running it as its own Task makes
         # both of those explicit and lets cancelBettingHelper cancel it.
-        task = asyncio.create_task(self._bettingTimer(guild_id, ctx.channel))
+        task = asyncio.create_task(self._bettingTimer(guild_id, channel))
         self.bettingTasks[guild_id] = task
 
     async def _bettingTimer(self, guild_id, channel):
@@ -1058,6 +2136,17 @@ class helpers():
 
         if guild is not None and await self.moveMembersToOriginalChannel(guild):
             await channel.send("Moved everyone back to the original channel!")
+
+        # /tournament-start (sequential mode) routes its matches through
+        # this exact same betting/report cycle by temporarily setting
+        # team1/team2 to the match's two teams — active_tournament_match_id
+        # is how this function knows the game it just resolved was one of
+        # those, so it can also advance the bracket once the normal
+        # payout/elo handling above is done.
+        active_match_id = self.get(guild_id, "active_tournament_match_id")
+        if active_match_id is not None:
+            self.update(guild_id, "active_tournament_match_id", None)
+            await self._resolveTournamentMatch(guild_id, active_match_id, winning_team, channel.id)
 
     # ---------------- Duels (/wager-against) ----------------
 
@@ -1401,7 +2490,16 @@ class helpers():
     # after undoing the wrong result each player's rating is back to its
     # pre-match value — recomputing against that gives the correct
     # alternate-history rating, not a stale or double-applied one.
-    async def reportCorrectWinnerHelper(self, ctx, correct_team):
+    #
+    # match_id, when given, corrects a specific tournament match instead —
+    # a separate, narrower path (see _correctTournamentMatchHelper) that
+    # only touches that match's bracket node, not the guild-wide economy
+    # snapshot below.
+    async def reportCorrectWinnerHelper(self, ctx, correct_team, match_id=None):
+        if match_id is not None:
+            await self._correctTournamentMatchHelper(ctx, match_id, correct_team)
+            return
+
         guild_id = ctx.guild.id
         last = self.getLastResult(guild_id)
 

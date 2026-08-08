@@ -21,6 +21,7 @@ Layout:
 """
 
 import asyncio
+import contextlib
 import itertools
 import sqlite3
 import sys
@@ -31,7 +32,9 @@ from unittest.mock import AsyncMock, mock_open, patch
 import discord
 from discord import app_commands
 
-from TourneyClasses import Player, Team
+from TourneyClasses import (
+    Player, Team, Tournament, BracketNode, serialize_bracket, deserialize_bracket,
+)
 import helper as helper_module
 from helper import helpers as Helpers
 
@@ -49,7 +52,8 @@ SERVERS_SCHEMA = (
     "CREATE TABLE servers(guildId, serverName, original_channel, team1, team2, "
     "players, channel1, channel2, mode, turn, team_size, tournament, elo, "
     "result1, result2, captain1, captain2, "
-    "betting_state, betting_message_id, betting_channel_id, is_ranked)"
+    "betting_state, betting_message_id, betting_channel_id, is_ranked, "
+    "active_tournament_match_id, wager_channel)"
 )
 ECONOMY_SCHEMA = (
     "CREATE TABLE economy(guildId, userId, username, balance, wins, losses, "
@@ -69,6 +73,19 @@ LEADERBOARDS_SCHEMA = (
     "CREATE TABLE leaderboards(messageId INTEGER PRIMARY KEY, guildId, channelId, "
     "filter, sort_order, page)"
 )
+TEAMS_SCHEMA = "CREATE TABLE teams(id INTEGER PRIMARY KEY AUTOINCREMENT, guildId, name, data)"
+TOURNAMENTS_SCHEMA = (
+    "CREATE TABLE tournaments(guildId PRIMARY KEY, name, team_size, num_teams, "
+    "double_elimination, teams, bracket)"
+)
+TEAM_INVITES_SCHEMA = (
+    "CREATE TABLE team_invites(id INTEGER PRIMARY KEY AUTOINCREMENT, guildId, channelId, "
+    "messageId, teamId, teamName, inviterId, targetId, targetName)"
+)
+TOURNAMENT_MATCHES_SCHEMA = (
+    "CREATE TABLE tournament_matches(id INTEGER PRIMARY KEY AUTOINCREMENT, guildId, roundIndex, "
+    "nodeIndex, team1, team2, state, mode, messageId, channelId, winner)"
+)
 
 
 def make_db():
@@ -80,6 +97,10 @@ def make_db():
     cursor.execute(LAST_RESULT_SCHEMA)
     cursor.execute(DUELS_SCHEMA)
     cursor.execute(LEADERBOARDS_SCHEMA)
+    cursor.execute(TEAMS_SCHEMA)
+    cursor.execute(TOURNAMENTS_SCHEMA)
+    cursor.execute(TEAM_INVITES_SCHEMA)
+    cursor.execute(TOURNAMENT_MATCHES_SCHEMA)
     db.commit()
     return db, cursor
 
@@ -87,7 +108,7 @@ def make_db():
 def insert_guild_row(cursor, db, guild_id=GUILD_ID, name="Test Guild"):
     cursor.execute(
         "INSERT INTO servers VALUES(?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, "
-        "NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'NONE', NULL, NULL, 0)",
+        "NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'NONE', NULL, NULL, 0, NULL, NULL)",
         (guild_id, name),
     )
     db.commit()
@@ -115,7 +136,7 @@ class FakeDMChannel:
 
 
 class FakeMember:
-    def __init__(self, name, id=None, bot=False):
+    def __init__(self, name, id=None, bot=False, manage_guild=True):
         self.id = id if id is not None else next_id()
         self.name = name
         self.global_name = name
@@ -125,6 +146,10 @@ class FakeMember:
         self.mention = f"<@{self.id}>"
         self.move_to = AsyncMock()
         self.create_dm = AsyncMock(return_value=FakeDMChannel())
+        # Defaults to True so existing tests that don't care about
+        # permissions aren't affected — pass manage_guild=False to test
+        # the insufficient-permission path.
+        self.guild_permissions = SimpleNamespace(manage_guild=manage_guild)
 
 
 class FakeMessage:
@@ -135,10 +160,12 @@ class FakeMessage:
 
 
 class FakeChannel:
-    def __init__(self, name, id=None, members=None):
+    def __init__(self, name, id=None, members=None, kind="voice"):
         self.name = name
         self.id = id if id is not None else next_id()
         self.members = members if members is not None else []
+        self.mention = f"<#{self.id}>"
+        self.kind = kind
         self.send = AsyncMock()
         self.create_invite = AsyncMock(return_value="https://discord.gg/fake-invite")
         self.fetch_message = AsyncMock(return_value=FakeMessage())
@@ -154,8 +181,17 @@ class FakeGuild:
         self.channels = channels if channels is not None else []
         self.members = members if members is not None else []
 
+    @property
+    def text_channels(self):
+        return [c for c in self.channels if getattr(c, "kind", "voice") == "text"]
+
     async def create_voice_channel(self, name):
-        channel = FakeChannel(name)
+        channel = FakeChannel(name, kind="voice")
+        self.channels.append(channel)
+        return channel
+
+    async def create_text_channel(self, name):
+        channel = FakeChannel(name, kind="text")
         self.channels.append(channel)
         return channel
 
@@ -273,6 +309,136 @@ class TeamTests(unittest.TestCase):
         outsider = Player(1, "Outsider")
         with self.assertRaises(ValueError):
             team.set_captain(outsider)
+
+    def test_serialize_deserialize_roundtrips_captain_as_a_real_player(self):
+        team = Team()
+        team.set_id(1)
+        team.set_name("Team 1")
+        captain = Player(1, "Alice")
+        team.add_player(captain)
+        team.add_player(Player(2, "Bob"))
+        team.set_captain(captain)
+
+        restored = Team()
+        restored.deserializeTeam(team.serializeTeam())
+
+        self.assertIsInstance(restored.get_captain(), Player)
+        self.assertEqual(restored.get_captain().get_id(), 1)
+        self.assertEqual(restored.get_captain().get_name(), "Alice")
+
+    def test_deserialize_with_no_captain_leaves_it_none(self):
+        team = Team()
+        team.set_id(1)
+        team.set_name("No Captain")
+        team.add_player(Player(1, "Alice"))
+
+        restored = Team()
+        restored.deserializeTeam(team.serializeTeam())
+
+        self.assertIsNone(restored.get_captain())
+
+    def test_serialize_deserialize_roundtrips_team_size(self):
+        team = Team()
+        team.set_id(1)
+        team.set_name("Team 1")
+        team.set_team_size(5)
+
+        restored = Team()
+        restored.deserializeTeam(team.serializeTeam())
+
+        self.assertEqual(restored.get_team_size(), 5)
+
+    def test_deserialize_tolerates_data_from_before_team_size_existed(self):
+        # Simulates a team serialized by older code, before the team_size
+        # field was appended to the format.
+        old_format = "[1, Legacy Team, , 0, , , 0, 0]"
+
+        restored = Team()
+        restored.deserializeTeam(old_format)
+
+        self.assertIsNone(restored.get_team_size())
+        self.assertEqual(restored.get_name(), "Legacy Team")
+
+
+class TournamentTests(unittest.TestCase):
+    def _team(self, name, *players):
+        team = Team()
+        team.set_name(name)
+        for player_id, player_name in players:
+            team.add_player(Player(player_id, player_name))
+        return team
+
+    def test_defaults(self):
+        tournament = Tournament("Spring Cup", 5, 8, True)
+        self.assertEqual(tournament.get_name(), "Spring Cup")
+        self.assertEqual(tournament.get_team_size(), 5)
+        self.assertEqual(tournament.get_num_teams(), 8)
+        self.assertTrue(tournament.is_double_elimination())
+        self.assertEqual(tournament.get_teams(), [])
+        self.assertEqual(tournament.get_bracket(), [])
+
+    def test_register_team_adds_to_roster(self):
+        tournament = Tournament("Cup", 2, 4)
+        team = self._team("Red", (1, "Alice"), (2, "Bob"))
+        tournament.register_team(team)
+        self.assertEqual(tournament.get_teams(), [team])
+
+    def test_register_team_rejects_player_already_on_another_registered_team(self):
+        tournament = Tournament("Cup", 2, 4)
+        tournament.register_team(self._team("Red", (1, "Alice"), (2, "Bob")))
+
+        with self.assertRaises(ValueError):
+            tournament.register_team(self._team("Blue", (2, "Bob"), (3, "Cleo")))
+
+        # the rejected team never got added
+        self.assertEqual(len(tournament.get_teams()), 1)
+
+    def test_register_team_allows_disjoint_rosters(self):
+        tournament = Tournament("Cup", 2, 4)
+        tournament.register_team(self._team("Red", (1, "Alice"), (2, "Bob")))
+        tournament.register_team(self._team("Blue", (3, "Cleo"), (4, "Dan")))
+        self.assertEqual(len(tournament.get_teams()), 2)
+
+
+class BracketSerializationTests(unittest.TestCase):
+    def _team(self, name):
+        team = Team()
+        team.set_name(name)
+        return team
+
+    def test_roundtrips_a_single_pairing_with_pointers_intact(self):
+        leaf_a = BracketNode(self._team("Red"))
+        leaf_b = BracketNode(self._team("Blue"))
+        final = BracketNode()
+        leaf_a.opponent = leaf_b
+        leaf_b.opponent = leaf_a
+        leaf_a.next = final
+        leaf_b.next = final
+        final.previous = leaf_a
+        nodes = [leaf_a, leaf_b, final]
+
+        restored = deserialize_bracket(serialize_bracket(nodes))
+
+        r_leaf_a, r_leaf_b, r_final = restored
+        self.assertEqual(r_leaf_a.team.get_name(), "Red")
+        self.assertEqual(r_leaf_b.team.get_name(), "Blue")
+        self.assertIsNone(r_final.team)
+
+        # pointer identity is preserved (same restored objects, not copies)
+        self.assertIs(r_leaf_a.opponent, r_leaf_b)
+        self.assertIs(r_leaf_b.opponent, r_leaf_a)
+        self.assertIs(r_leaf_a.next, r_final)
+        self.assertIs(r_leaf_b.next, r_final)
+        self.assertIs(r_final.previous, r_leaf_a)
+
+        # bracket-shape invariants from the spec
+        self.assertIsNone(r_leaf_a.previous)  # round-one node
+        self.assertIsNone(r_final.next)       # finals node
+        # the other half of final's feeder pair is reachable via .opponent
+        self.assertIs(r_final.previous.opponent, r_leaf_b)
+
+    def test_empty_bracket_roundtrips_to_empty(self):
+        self.assertEqual(deserialize_bracket(serialize_bracket([])), [])
 
 
 # ===========================================================================
@@ -701,6 +867,1304 @@ class ResetEloHelperTests(HelperTestCase):
         self.assertEqual(self.helperObj.getEconomy(other_guild_id, 901, "elo"), 1600)
 
 
+class SaveGetTournamentTests(HelperTestCase):
+    def test_get_tournament_returns_none_when_unset(self):
+        self.assertIsNone(self.helperObj.getTournament(GUILD_ID))
+
+    def test_roundtrips_a_tournament_with_no_teams(self):
+        tournament = Tournament("Spring Cup", 5, 8, True)
+        self.helperObj.saveTournament(GUILD_ID, tournament)
+
+        restored = self.helperObj.getTournament(GUILD_ID)
+        self.assertEqual(restored.get_name(), "Spring Cup")
+        self.assertEqual(restored.get_team_size(), 5)
+        self.assertEqual(restored.get_num_teams(), 8)
+        self.assertTrue(restored.is_double_elimination())
+        self.assertEqual(restored.get_teams(), [])
+        self.assertEqual(restored.get_bracket(), [])
+
+    def test_roundtrips_registered_teams(self):
+        tournament = Tournament("Cup", 2, 4, False)
+        team = Team()
+        team.set_name("Red")
+        team.add_player(Player(1, "Alice"))
+        team.add_player(Player(2, "Bob"))
+        tournament.register_team(team)
+        self.helperObj.saveTournament(GUILD_ID, tournament)
+
+        restored = self.helperObj.getTournament(GUILD_ID)
+        self.assertEqual(len(restored.get_teams()), 1)
+        restored_team = restored.get_teams()[0]
+        self.assertEqual(restored_team.get_name(), "Red")
+        self.assertEqual({p.get_id() for p in restored_team.get_players()}, {1, 2})
+
+    def test_save_replaces_the_existing_tournament(self):
+        self.helperObj.saveTournament(GUILD_ID, Tournament("First", 5, 8))
+        self.helperObj.saveTournament(GUILD_ID, Tournament("Second", 3, 4))
+
+        restored = self.helperObj.getTournament(GUILD_ID)
+        self.assertEqual(restored.get_name(), "Second")
+        self.cursor.execute("SELECT COUNT(*) FROM tournaments WHERE guildId=?", (GUILD_ID,))
+        self.assertEqual(self.cursor.fetchone()[0], 1)
+
+
+class CreateTournamentHelperTests(HelperTestCase):
+    def _ctx(self, user_id=901, name="Alice"):
+        return FakeInteraction(self.guild, FakeMember(name, id=user_id))
+
+    async def test_rejects_non_positive_team_size(self):
+        ctx = self._ctx()
+        await self.helperObj.createTournamentHelper(ctx, "Cup", 0, 8, False)
+        ctx.response.send_message.assert_awaited_once_with("Team size must be greater than 0.")
+        self.assertIsNone(self.helperObj.getTournament(GUILD_ID))
+
+    async def test_rejects_too_few_teams(self):
+        ctx = self._ctx()
+        await self.helperObj.createTournamentHelper(ctx, "Cup", 5, 1, False)
+        ctx.response.send_message.assert_awaited_once_with("A tournament needs at least 2 teams.")
+        self.assertIsNone(self.helperObj.getTournament(GUILD_ID))
+
+    async def test_creates_immediately_when_none_exists(self):
+        ctx = self._ctx()
+        await self.helperObj.createTournamentHelper(ctx, "Spring Cup", 5, 8, True)
+
+        ctx.response.send_message.assert_awaited_once_with(
+            "Tournament **Spring Cup** created! 8 teams of 5, double elimination."
+        )
+        tournament = self.helperObj.getTournament(GUILD_ID)
+        self.assertEqual(tournament.get_name(), "Spring Cup")
+        self.assertTrue(tournament.is_double_elimination())
+
+    async def test_overwriting_without_manage_guild_permission_is_rejected(self):
+        self.helperObj.saveTournament(GUILD_ID, Tournament("Old Cup", 5, 8))
+        ctx = FakeInteraction(self.guild, FakeMember("Alice", id=901, manage_guild=False))
+
+        await self.helperObj.createTournamentHelper(ctx, "New Cup", 3, 4, False)
+
+        ctx.response.send_message.assert_awaited_once_with(
+            "Only a member with the Manage Server permission can overwrite an existing tournament."
+        )
+        # nothing changed — the old tournament is still there untouched
+        self.assertEqual(self.helperObj.getTournament(GUILD_ID).get_name(), "Old Cup")
+
+    async def test_creating_fresh_does_not_require_manage_guild_permission(self):
+        ctx = FakeInteraction(self.guild, FakeMember("Alice", id=901, manage_guild=False))
+
+        await self.helperObj.createTournamentHelper(ctx, "New Cup", 3, 4, False)
+
+        self.assertEqual(self.helperObj.getTournament(GUILD_ID).get_name(), "New Cup")
+
+    async def test_existing_tournament_requires_confirmation_before_overwriting(self):
+        self.helperObj.saveTournament(GUILD_ID, Tournament("Old Cup", 5, 8))
+        ctx = self._ctx()
+        posted_message = FakeMessage(id=321)
+        ctx.original_response.return_value = posted_message
+
+        await self.helperObj.createTournamentHelper(ctx, "New Cup", 3, 4, False)
+
+        ctx.response.send_message.assert_awaited_once()
+        text = ctx.response.send_message.call_args.args[0]
+        self.assertIn("Old Cup", text)
+        self.assertIn("New Cup", text)
+        view = ctx.response.send_message.call_args.kwargs["view"]
+        self.assertIs(view.message, posted_message)
+
+        # the existing tournament is untouched until confirmed
+        still_there = self.helperObj.getTournament(GUILD_ID)
+        self.assertEqual(still_there.get_name(), "Old Cup")
+
+    async def test_confirming_overwrite_replaces_the_tournament(self):
+        self.helperObj.saveTournament(GUILD_ID, Tournament("Old Cup", 5, 8))
+        ctx = self._ctx()
+        await self.helperObj.createTournamentHelper(ctx, "New Cup", 3, 4, False)
+        view = ctx.response.send_message.call_args.kwargs["view"]
+
+        click = self._ctx()
+        await view.confirm.callback(click)
+
+        tournament = self.helperObj.getTournament(GUILD_ID)
+        self.assertEqual(tournament.get_name(), "New Cup")
+        self.assertEqual(tournament.get_team_size(), 3)
+        click.response.edit_message.assert_awaited_once()
+        self.assertIn("New Cup", click.response.edit_message.call_args.kwargs["content"])
+
+    async def test_cancelling_overwrite_keeps_the_existing_tournament(self):
+        self.helperObj.saveTournament(GUILD_ID, Tournament("Old Cup", 5, 8))
+        ctx = self._ctx()
+        await self.helperObj.createTournamentHelper(ctx, "New Cup", 3, 4, False)
+        view = ctx.response.send_message.call_args.kwargs["view"]
+
+        click = self._ctx()
+        await view.cancel.callback(click)
+
+        tournament = self.helperObj.getTournament(GUILD_ID)
+        self.assertEqual(tournament.get_name(), "Old Cup")
+
+    async def test_overwrite_confirmation_rejects_non_invoker(self):
+        self.helperObj.saveTournament(GUILD_ID, Tournament("Old Cup", 5, 8))
+        ctx = self._ctx()
+        await self.helperObj.createTournamentHelper(ctx, "New Cup", 3, 4, False)
+        view = ctx.response.send_message.call_args.kwargs["view"]
+
+        stranger = FakeInteraction(self.guild, FakeMember("Stranger", id=999))
+        allowed = await view.interaction_check(stranger)
+
+        self.assertFalse(allowed)
+        stranger.response.send_message.assert_awaited_once()
+        self.assertTrue(stranger.response.send_message.call_args.kwargs.get("ephemeral"))
+
+
+class CreateTeamHelperTests(HelperTestCase):
+    def _ctx(self, user_id=901, name="Alice"):
+        return FakeInteraction(self.guild, FakeMember(name, id=user_id))
+
+    async def test_rejects_non_positive_team_size(self):
+        ctx = self._ctx()
+        await self.helperObj.createTeamHelper(ctx, "Red", 0)
+        ctx.response.send_message.assert_awaited_once_with("Team size must be greater than 0.")
+        self.assertIsNone(self.helperObj.getTeamRow(GUILD_ID, "Red"))
+
+    async def test_rejects_duplicate_team_name(self):
+        ctx1 = self._ctx()
+        await self.helperObj.createTeamHelper(ctx1, "Red", 5)
+        ctx2 = self._ctx(user_id=902, name="Bob")
+        await self.helperObj.createTeamHelper(ctx2, "Red", 5)
+        ctx2.response.send_message.assert_awaited_once_with(
+            "A team named **Red** already exists in this server."
+        )
+
+    async def test_creates_team_with_caller_as_captain(self):
+        ctx = self._ctx()
+        await self.helperObj.createTeamHelper(ctx, "Red", 5)
+
+        ctx.response.send_message.assert_awaited_once()
+        text = ctx.response.send_message.call_args.args[0]
+        self.assertIn("Red", text)
+        self.assertIn(ctx.user.mention, text)
+
+        result = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        self.assertIsNotNone(result)
+        team_id, team = result
+        self.assertEqual(team.get_name(), "Red")
+        self.assertEqual(team.get_team_size(), 5)
+        self.assertEqual(team.get_id(), team_id)
+        self.assertTrue(self.helperObj.isTeamCaptain(team, 901))
+        self.assertEqual([p.get_id() for p in team.get_players()], [901])
+
+    async def test_team_ids_are_assigned_automatically_and_unique(self):
+        ctx1 = self._ctx()
+        await self.helperObj.createTeamHelper(ctx1, "Red", 5)
+        ctx2 = self._ctx(user_id=902, name="Bob")
+        await self.helperObj.createTeamHelper(ctx2, "Blue", 5)
+
+        _, red = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        _, blue = self.helperObj.getTeamRow(GUILD_ID, "Blue")
+        self.assertNotEqual(red.get_id(), blue.get_id())
+
+
+class SetTeamVoiceChannelHelperTests(HelperTestCase):
+    def _ctx(self, user_id=901, name="Alice"):
+        return FakeInteraction(self.guild, FakeMember(name, id=user_id))
+
+    async def _make_team(self, name="Red", captain_id=901, captain_name="Alice"):
+        ctx = self._ctx(user_id=captain_id, name=captain_name)
+        await self.helperObj.createTeamHelper(ctx, name, 5)
+        return self.helperObj.getTeamRow(GUILD_ID, name)
+
+    async def test_rejects_unknown_team(self):
+        ctx = self._ctx()
+        await self.helperObj.setTeamVoiceChannelHelper(ctx, "Nonexistent", None)
+        ctx.response.send_message.assert_awaited_once_with("No team named **Nonexistent** in this server.")
+
+    async def test_rejects_non_captain(self):
+        await self._make_team()
+        ctx = self._ctx(user_id=902, name="Bob")
+        await self.helperObj.setTeamVoiceChannelHelper(ctx, "Red", None)
+        ctx.response.send_message.assert_awaited_once_with(
+            "Only **Red**'s captain can set its voice channel."
+        )
+
+    async def test_no_channel_creates_a_new_one_named_after_the_team(self):
+        await self._make_team()
+        ctx = self._ctx()
+        await self.helperObj.setTeamVoiceChannelHelper(ctx, "Red", None)
+
+        self.assertEqual(len(self.guild.channels), 1)
+        created = self.guild.channels[0]
+        self.assertEqual(created.name, "Red")
+        _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        self.assertEqual(team.get_voice_channel(), "Red")
+        ctx.response.send_message.assert_awaited_once()
+        self.assertIn(created.mention, ctx.response.send_message.call_args.args[0])
+
+    async def test_unused_channel_is_set_directly(self):
+        await self._make_team()
+        ctx = self._ctx()
+        channel = FakeChannel("general-voice")
+
+        await self.helperObj.setTeamVoiceChannelHelper(ctx, "Red", channel)
+
+        _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        self.assertEqual(team.get_voice_channel(), "general-voice")
+        ctx.response.send_message.assert_awaited_once_with(
+            f"**Red**'s voice channel is now {channel.mention}."
+        )
+
+    async def test_channel_already_used_by_another_team_requires_confirmation(self):
+        await self._make_team("Red", 901, "Alice")
+        await self._make_team("Blue", 902, "Bob")
+        shared_channel = FakeChannel("Arena")
+
+        blue_ctx = self._ctx(user_id=902, name="Bob")
+        await self.helperObj.setTeamVoiceChannelHelper(blue_ctx, "Blue", shared_channel)
+
+        red_ctx = self._ctx()
+        posted_message = FakeMessage(id=555)
+        red_ctx.original_response.return_value = posted_message
+        await self.helperObj.setTeamVoiceChannelHelper(red_ctx, "Red", shared_channel)
+
+        red_ctx.response.send_message.assert_awaited_once()
+        text = red_ctx.response.send_message.call_args.args[0]
+        self.assertIn("Blue", text)
+        self.assertIn("Arena", text)
+        view = red_ctx.response.send_message.call_args.kwargs["view"]
+        self.assertIs(view.message, posted_message)
+
+        # Red is untouched until confirmed
+        _, red_team = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        self.assertEqual(red_team.get_voice_channel(), "")
+
+    async def test_confirming_channel_overwrite_sets_it(self):
+        await self._make_team("Red", 901, "Alice")
+        await self._make_team("Blue", 902, "Bob")
+        shared_channel = FakeChannel("Arena")
+        blue_ctx = self._ctx(user_id=902, name="Bob")
+        await self.helperObj.setTeamVoiceChannelHelper(blue_ctx, "Blue", shared_channel)
+
+        red_ctx = self._ctx()
+        await self.helperObj.setTeamVoiceChannelHelper(red_ctx, "Red", shared_channel)
+        view = red_ctx.response.send_message.call_args.kwargs["view"]
+
+        click = self._ctx()
+        await view.confirm.callback(click)
+
+        _, red_team = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        self.assertEqual(red_team.get_voice_channel(), "Arena")
+        click.response.edit_message.assert_awaited_once()
+
+    async def test_cancelling_channel_overwrite_leaves_it_unset(self):
+        await self._make_team("Red", 901, "Alice")
+        await self._make_team("Blue", 902, "Bob")
+        shared_channel = FakeChannel("Arena")
+        blue_ctx = self._ctx(user_id=902, name="Bob")
+        await self.helperObj.setTeamVoiceChannelHelper(blue_ctx, "Blue", shared_channel)
+
+        red_ctx = self._ctx()
+        await self.helperObj.setTeamVoiceChannelHelper(red_ctx, "Red", shared_channel)
+        view = red_ctx.response.send_message.call_args.kwargs["view"]
+
+        click = self._ctx()
+        await view.cancel.callback(click)
+
+        _, red_team = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        self.assertEqual(red_team.get_voice_channel(), "")
+
+    async def test_overwrite_confirmation_rejects_non_invoker(self):
+        await self._make_team("Red", 901, "Alice")
+        await self._make_team("Blue", 902, "Bob")
+        shared_channel = FakeChannel("Arena")
+        blue_ctx = self._ctx(user_id=902, name="Bob")
+        await self.helperObj.setTeamVoiceChannelHelper(blue_ctx, "Blue", shared_channel)
+
+        red_ctx = self._ctx()
+        await self.helperObj.setTeamVoiceChannelHelper(red_ctx, "Red", shared_channel)
+        view = red_ctx.response.send_message.call_args.kwargs["view"]
+
+        stranger = FakeInteraction(self.guild, FakeMember("Stranger", id=999))
+        allowed = await view.interaction_check(stranger)
+
+        self.assertFalse(allowed)
+        stranger.response.send_message.assert_awaited_once()
+        self.assertTrue(stranger.response.send_message.call_args.kwargs.get("ephemeral"))
+
+
+class TeamInviteHelperTests(HelperTestCase):
+    def _ctx(self, user_id=901, name="Alice", channel=None):
+        return FakeInteraction(self.guild, FakeMember(name, id=user_id), channel=channel)
+
+    async def _make_team(self, name="Red", captain_id=901, captain_name="Alice"):
+        ctx = self._ctx(user_id=captain_id, name=captain_name)
+        await self.helperObj.createTeamHelper(ctx, name, 5)
+
+    async def test_rejects_unknown_team(self):
+        ctx = self._ctx()
+        target = FakeMember("Bob", id=902)
+        await self.helperObj.teamInviteHelper(ctx, "Nonexistent", target)
+        ctx.response.send_message.assert_awaited_once_with("No team named **Nonexistent** in this server.")
+
+    async def test_rejects_non_captain(self):
+        await self._make_team()
+        ctx = self._ctx(user_id=903, name="Cleo")
+        target = FakeMember("Bob", id=902)
+        await self.helperObj.teamInviteHelper(ctx, "Red", target)
+        ctx.response.send_message.assert_awaited_once_with("Only **Red**'s captain can invite players.")
+
+    async def test_rejects_inviting_a_bot(self):
+        await self._make_team()
+        ctx = self._ctx()
+        target = FakeMember("Botty", id=902, bot=True)
+        await self.helperObj.teamInviteHelper(ctx, "Red", target)
+        ctx.response.send_message.assert_awaited_once_with("You can't invite a bot to a team.")
+
+    async def test_rejects_inviting_someone_already_on_the_team(self):
+        await self._make_team()
+        ctx = self._ctx()
+        await self.helperObj.teamInviteHelper(ctx, "Red", ctx.user)
+        ctx.response.send_message.assert_awaited_once_with("Alice is already on **Red**.")
+
+    async def test_successful_invite_posts_message_and_stores_pending_row(self):
+        await self._make_team()
+        channel = FakeChannel("general")
+        ctx = self._ctx(channel=channel)
+        target = FakeMember("Bob", id=902)
+        posted_message = FakeMessage(id=777)
+        ctx.original_response.return_value = posted_message
+
+        await self.helperObj.teamInviteHelper(ctx, "Red", target)
+
+        ctx.response.send_message.assert_awaited_once()
+        text = ctx.response.send_message.call_args.args[0]
+        self.assertIn(target.mention, text)
+        self.assertIn(ctx.user.mention, text)
+        posted_message.add_reaction.assert_awaited_once_with(helper_module.TEAM_INVITE_ACCEPT_EMOJI)
+
+        # nobody's added to the roster yet
+        _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        self.assertEqual(len(team.get_players()), 1)
+
+        self.cursor.execute(
+            "SELECT guildId, channelId, teamName, inviterId, targetId FROM team_invites WHERE messageId=?",
+            (777,)
+        )
+        self.assertEqual(self.cursor.fetchone(), (GUILD_ID, channel.id, "Red", 901, 902))
+
+
+class HandleTeamInviteReactionTests(HelperTestCase):
+    def setUp(self):
+        super().setUp()
+        self.channel = FakeChannel("general")
+        self.helperObj.client = FakeClient(channels=[self.channel], guilds=[self.guild])
+
+    async def _make_team_and_invite(self):
+        create_ctx = FakeInteraction(self.guild, FakeMember("Alice", id=901), channel=self.channel)
+        await self.helperObj.createTeamHelper(create_ctx, "Red", 5)
+        target = FakeMember("Bob", id=902)
+        invite_ctx = FakeInteraction(self.guild, FakeMember("Alice", id=901), channel=self.channel)
+        posted_message = FakeMessage(id=888)
+        invite_ctx.original_response.return_value = posted_message
+        await self.helperObj.teamInviteHelper(invite_ctx, "Red", target)
+        return posted_message
+
+    async def test_ignores_unrelated_emoji(self):
+        message = await self._make_team_and_invite()
+        payload = FakePayload(GUILD_ID, message.id, self.channel.id, "🎉", user_id=902)
+        await self.helperObj.handleTeamInviteReaction(payload)
+        _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        self.assertEqual(len(team.get_players()), 1)
+
+    async def test_accept_from_someone_other_than_the_invitee_is_ignored(self):
+        message = await self._make_team_and_invite()
+        payload = FakePayload(
+            GUILD_ID, message.id, self.channel.id, helper_module.TEAM_INVITE_ACCEPT_EMOJI, user_id=903
+        )
+        await self.helperObj.handleTeamInviteReaction(payload)
+        _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        self.assertEqual(len(team.get_players()), 1)
+
+    async def test_accept_from_invitee_adds_them_to_the_roster(self):
+        message = await self._make_team_and_invite()
+        payload = FakePayload(
+            GUILD_ID, message.id, self.channel.id, helper_module.TEAM_INVITE_ACCEPT_EMOJI, user_id=902
+        )
+        await self.helperObj.handleTeamInviteReaction(payload)
+
+        _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        self.assertEqual({p.get_id() for p in team.get_players()}, {901, 902})
+        self.channel.send.assert_awaited_once()
+        self.assertIn("Bob", self.channel.send.call_args.args[0])
+
+        self.cursor.execute("SELECT COUNT(*) FROM team_invites")
+        self.assertEqual(self.cursor.fetchone()[0], 0)
+
+    async def test_concurrent_accepts_only_add_once(self):
+        message = await self._make_team_and_invite()
+        payload1 = FakePayload(
+            GUILD_ID, message.id, self.channel.id, helper_module.TEAM_INVITE_ACCEPT_EMOJI, user_id=902
+        )
+        payload2 = FakePayload(
+            GUILD_ID, message.id, self.channel.id, helper_module.TEAM_INVITE_ACCEPT_EMOJI, user_id=902
+        )
+        await asyncio.gather(
+            self.helperObj.handleTeamInviteReaction(payload1),
+            self.helperObj.handleTeamInviteReaction(payload2),
+        )
+        _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        self.assertEqual(len(team.get_players()), 2)
+
+
+class TeamStatsHelperTests(HelperTestCase):
+    def _ctx(self, user_id=901, name="Alice"):
+        return FakeInteraction(self.guild, FakeMember(name, id=user_id))
+
+    async def test_rejects_unknown_team(self):
+        ctx = self._ctx()
+        await self.helperObj.teamStatsHelper(ctx, "Nonexistent")
+        ctx.response.send_message.assert_awaited_once_with("No team named **Nonexistent** in this server.")
+
+    async def test_reports_fresh_team_stats(self):
+        await self.helperObj.createTeamHelper(self._ctx(), "Red", 5)
+
+        ctx = self._ctx()
+        await self.helperObj.teamStatsHelper(ctx, "Red")
+
+        embed = ctx.response.send_message.call_args.kwargs["embed"]
+        values = {f.name: f.value for f in embed.fields}
+        self.assertEqual(values["Captain"], "Alice")
+        self.assertEqual(values["Roster Size"], "1/5")
+        self.assertEqual(values["Record"], "0W - 0L")
+        self.assertEqual(values["Win Rate"], "N/A")
+        self.assertEqual(values["Voice Channel"], "Not set")
+        self.assertIn("Alice", values["Roster"])
+
+    async def test_reports_win_rate_once_games_are_recorded(self):
+        await self.helperObj.createTeamHelper(self._ctx(), "Red", 5)
+        team_id, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        team.addWin()
+        team.addWin()
+        team.addLoss()
+        self.helperObj.updateTeamData(team_id, team)
+
+        ctx = self._ctx()
+        await self.helperObj.teamStatsHelper(ctx, "Red")
+
+        embed = ctx.response.send_message.call_args.kwargs["embed"]
+        values = {f.name: f.value for f in embed.fields}
+        self.assertEqual(values["Record"], "2W - 1L")
+        self.assertEqual(values["Win Rate"], "66.7%")
+
+
+class TeamLeaderboardHelperTests(HelperTestCase):
+    def _ctx(self, user_id=901, name="Alice"):
+        return FakeInteraction(self.guild, FakeMember(name, id=user_id))
+
+    async def test_no_teams_sends_a_message(self):
+        ctx = self._ctx()
+        await self.helperObj.teamLeaderboardHelper(ctx)
+        ctx.response.send_message.assert_awaited_once_with(
+            "No teams have been created in this server yet!"
+        )
+
+    async def test_ranks_teams_by_win_rate_then_wins_with_no_games_last(self):
+        await self.helperObj.createTeamHelper(self._ctx(901, "Alice"), "Red", 5)
+        await self.helperObj.createTeamHelper(self._ctx(902, "Bob"), "Blue", 5)
+        await self.helperObj.createTeamHelper(self._ctx(903, "Cleo"), "Green", 5)
+
+        red_id, red = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        red.addWin()
+        red.addWin()
+        red.addLoss()  # 66.7%
+        self.helperObj.updateTeamData(red_id, red)
+
+        blue_id, blue = self.helperObj.getTeamRow(GUILD_ID, "Blue")
+        blue.addWin()
+        blue.addWin()
+        blue.addWin()
+        blue.addLoss()  # 75%
+        self.helperObj.updateTeamData(blue_id, blue)
+        # Green never plays — should sink to the bottom
+
+        ctx = self._ctx()
+        await self.helperObj.teamLeaderboardHelper(ctx)
+
+        embed = ctx.response.send_message.call_args.kwargs["embed"]
+        lines = embed.description.split("\n")
+        self.assertTrue(lines[0].startswith("**#1.** Blue"))
+        self.assertTrue(lines[1].startswith("**#2.** Red"))
+        self.assertTrue(lines[2].startswith("**#3.** Green"))
+
+
+class UseTeamsHelperTests(HelperTestCase):
+    def _ctx(self, user_id=901, name="Alice"):
+        return FakeInteraction(self.guild, FakeMember(name, id=user_id))
+
+    async def test_rejects_picking_the_same_team_twice(self):
+        await self.helperObj.createTeamHelper(self._ctx(), "Red", 5)
+        ctx = self._ctx()
+        await self.helperObj.useTeamsHelper(ctx, "Red", "Red", False)
+        ctx.response.send_message.assert_awaited_once_with("Pick two different teams.")
+
+    async def test_rejects_unknown_first_team(self):
+        ctx = self._ctx()
+        await self.helperObj.useTeamsHelper(ctx, "Red", "Blue", False)
+        ctx.response.send_message.assert_awaited_once_with("No team named **Red** in this server.")
+
+    async def test_rejects_unknown_second_team(self):
+        await self.helperObj.createTeamHelper(self._ctx(901, "Alice"), "Red", 5)
+        ctx = self._ctx()
+        await self.helperObj.useTeamsHelper(ctx, "Red", "Blue", False)
+        ctx.response.send_message.assert_awaited_once_with("No team named **Blue** in this server.")
+
+    async def test_loads_teams_casually_without_touching_is_ranked(self):
+        await self.helperObj.createTeamHelper(self._ctx(901, "Alice"), "Red", 5)
+        await self.helperObj.createTeamHelper(self._ctx(902, "Bob"), "Blue", 5)
+        self.helperObj.update(GUILD_ID, "is_ranked", 1)  # stale value from a previous ranked game
+
+        ctx = self._ctx()
+        await self.helperObj.useTeamsHelper(ctx, "Red", "Blue", False)
+
+        self.assertEqual(self.helperObj.get(GUILD_ID, "is_ranked"), 0)  # reset by clearTeamsHelper
+        self.assertEqual(self.helperObj.get(GUILD_ID, "mode"), "Normal")
+        team1 = Team()
+        team1.deserializeTeam(self.helperObj.get(GUILD_ID, "team1"))
+        self.assertEqual(team1.get_name(), "Red")
+        team2 = Team()
+        team2.deserializeTeam(self.helperObj.get(GUILD_ID, "team2"))
+        self.assertEqual(team2.get_name(), "Blue")
+        ctx.response.send_message.assert_awaited_once()
+        self.assertIn('Use "/start"', ctx.response.send_message.call_args.args[0])
+
+    async def test_loads_teams_ranked_and_sets_is_ranked(self):
+        await self.helperObj.createTeamHelper(self._ctx(901, "Alice"), "Red", 5)
+        await self.helperObj.createTeamHelper(self._ctx(902, "Bob"), "Blue", 5)
+
+        ctx = self._ctx()
+        await self.helperObj.useTeamsHelper(ctx, "Red", "Blue", True)
+
+        self.assertEqual(self.helperObj.get(GUILD_ID, "is_ranked"), 1)
+        self.assertEqual(self.helperObj.get(GUILD_ID, "mode"), "Ranked")
+        self.assertIn("ranked", ctx.response.send_message.call_args.args[0].lower())
+
+    async def test_loading_teams_does_not_mutate_the_stored_persistent_team(self):
+        await self.helperObj.createTeamHelper(self._ctx(901, "Alice"), "Red", 5)
+        await self.helperObj.createTeamHelper(self._ctx(902, "Bob"), "Blue", 5)
+        before_id, _ = self.helperObj.getTeamRow(GUILD_ID, "Red")
+
+        ctx = self._ctx()
+        await self.helperObj.useTeamsHelper(ctx, "Red", "Blue", False)
+
+        # useTeamsHelper sets id=1/id=2 on its own in-memory copy for
+        # movefunc's sake — the persistent team's row/id in `teams` is
+        # untouched, since it never calls updateTeamData.
+        after_id, stored_red = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        self.assertEqual(after_id, before_id)
+        self.assertEqual(stored_red.get_id(), before_id)
+
+
+class RegisterTeamHelperTests(HelperTestCase):
+    def _ctx(self, user_id=901, name="Alice"):
+        return FakeInteraction(self.guild, FakeMember(name, id=user_id))
+
+    async def _make_team(self, team_name, captain_id, captain_name, size):
+        ctx = self._ctx(user_id=captain_id, name=captain_name)
+        await self.helperObj.createTeamHelper(ctx, team_name, size)
+        team_id, team = self.helperObj.getTeamRow(GUILD_ID, team_name)
+        while team.get_size() < size:
+            team.add_player(Player(1000 + team.get_size(), f"Filler{team.get_size()}"))
+        self.helperObj.updateTeamData(team_id, team)
+        return team_id
+
+    async def test_rejects_when_no_tournament_exists(self):
+        await self._make_team("Red", 901, "Alice", 2)
+        ctx = self._ctx()
+        await self.helperObj.registerTeamHelper(ctx, "Red")
+        ctx.response.send_message.assert_awaited_once_with(
+            "No tournament set up for this server — use /tournament-create first."
+        )
+
+    async def test_rejects_unknown_team(self):
+        self.helperObj.saveTournament(GUILD_ID, Tournament("Cup", 2, 4))
+        ctx = self._ctx()
+        await self.helperObj.registerTeamHelper(ctx, "Nonexistent")
+        ctx.response.send_message.assert_awaited_once_with("No team named **Nonexistent** in this server.")
+
+    async def test_rejects_non_captain(self):
+        self.helperObj.saveTournament(GUILD_ID, Tournament("Cup", 2, 4))
+        await self._make_team("Red", 901, "Alice", 2)
+        ctx = self._ctx(user_id=902, name="Bob")
+        await self.helperObj.registerTeamHelper(ctx, "Red")
+        ctx.response.send_message.assert_awaited_once_with(
+            "Only **Red**'s captain can register it for the tournament."
+        )
+
+    async def test_rejects_wrong_team_size(self):
+        self.helperObj.saveTournament(GUILD_ID, Tournament("Cup", 3, 4))
+        await self._make_team("Red", 901, "Alice", 2)
+        ctx = self._ctx()
+        await self.helperObj.registerTeamHelper(ctx, "Red")
+        ctx.response.send_message.assert_awaited_once_with(
+            "**Red** has 2 player(s), but this tournament needs teams of exactly 3."
+        )
+
+    async def test_rejects_double_registration(self):
+        self.helperObj.saveTournament(GUILD_ID, Tournament("Cup", 2, 4))
+        await self._make_team("Red", 901, "Alice", 2)
+        ctx1 = self._ctx()
+        await self.helperObj.registerTeamHelper(ctx1, "Red")
+        ctx2 = self._ctx()
+        await self.helperObj.registerTeamHelper(ctx2, "Red")
+        ctx2.response.send_message.assert_awaited_once_with(
+            "**Red** is already registered for this tournament."
+        )
+
+    async def test_rejects_when_bracket_is_full(self):
+        self.helperObj.saveTournament(GUILD_ID, Tournament("Cup", 2, 1))
+        await self._make_team("Red", 901, "Alice", 2)
+        await self._make_team("Blue", 902, "Bob", 2)
+
+        ctx1 = self._ctx()
+        await self.helperObj.registerTeamHelper(ctx1, "Red")
+
+        ctx2 = self._ctx(user_id=902, name="Bob")
+        await self.helperObj.registerTeamHelper(ctx2, "Blue")
+        ctx2.response.send_message.assert_awaited_once_with("This tournament's bracket is already full.")
+
+    async def test_rejects_shared_player_across_registered_teams(self):
+        self.helperObj.saveTournament(GUILD_ID, Tournament("Cup", 2, 4))
+        await self._make_team("Red", 901, "Alice", 2)
+        await self._make_team("Blue", 902, "Bob", 2)
+
+        _, red = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        shared_player_id = red.get_players()[1].get_id()
+        blue_id, blue = self.helperObj.getTeamRow(GUILD_ID, "Blue")
+        blue.get_players()[1].set_id(shared_player_id)
+        self.helperObj.updateTeamData(blue_id, blue)
+
+        ctx1 = self._ctx()
+        await self.helperObj.registerTeamHelper(ctx1, "Red")
+        ctx2 = self._ctx(user_id=902, name="Bob")
+        await self.helperObj.registerTeamHelper(ctx2, "Blue")
+
+        ctx2.response.send_message.assert_awaited_once()
+        self.assertIn(
+            "already on a team registered", ctx2.response.send_message.call_args.args[0]
+        )
+        tournament = self.helperObj.getTournament(GUILD_ID)
+        self.assertEqual(len(tournament.get_teams()), 1)
+
+    async def test_successful_registration_saves_and_confirms(self):
+        self.helperObj.saveTournament(GUILD_ID, Tournament("Cup", 2, 4))
+        await self._make_team("Red", 901, "Alice", 2)
+
+        ctx = self._ctx()
+        await self.helperObj.registerTeamHelper(ctx, "Red")
+
+        ctx.response.send_message.assert_awaited_once_with("**Red** registered for **Cup**! (1/4 teams)")
+        tournament = self.helperObj.getTournament(GUILD_ID)
+        self.assertEqual(len(tournament.get_teams()), 1)
+        self.assertEqual(tournament.get_teams()[0].get_name(), "Red")
+
+
+class BuildBracketTests(HelperTestCase):
+    def _team(self, name):
+        team = Team()
+        team.set_name(name)
+        return team
+
+    def test_power_of_two_team_count_builds_a_full_tree_with_no_byes(self):
+        teams = [self._team(f"Team{i}") for i in range(4)]
+        nodes = self.helperObj.buildBracket(teams)
+
+        self.assertEqual(len(nodes), 7)  # 4 leaves + 2 round-2 + 1 final
+        leaves = nodes[:4]
+        self.assertEqual({n.team.get_name() for n in leaves}, {t.get_name() for t in teams})
+        for leaf in leaves:
+            self.assertIsNone(leaf.previous)
+            self.assertIsNotNone(leaf.next)
+            self.assertIsNotNone(leaf.opponent)
+
+        final = nodes[-1]
+        self.assertIsNone(final.team)
+        self.assertIsNone(final.next)
+        self.assertIsNotNone(final.previous)
+
+    def test_non_power_of_two_team_count_pads_with_byes(self):
+        teams = [self._team(f"Team{i}") for i in range(3)]
+        nodes = self.helperObj.buildBracket(teams)
+
+        self.assertEqual(len(nodes), 7)  # rounds up to 4 leaf slots
+        bye_count = sum(1 for n in nodes[:4] if n.team is None)
+        self.assertEqual(bye_count, 1)
+
+    def test_opponent_pairing_is_symmetric_and_shares_next(self):
+        teams = [self._team(f"Team{i}") for i in range(4)]
+        nodes = self.helperObj.buildBracket(teams)
+        leaf = nodes[0]
+        self.assertIs(leaf.opponent.opponent, leaf)
+        self.assertIs(leaf.next, leaf.opponent.next)
+
+    def test_two_teams_builds_a_single_match_bracket(self):
+        teams = [self._team("Red"), self._team("Blue")]
+        nodes = self.helperObj.buildBracket(teams)
+        self.assertEqual(len(nodes), 3)
+        self.assertIsNone(nodes[-1].team)
+        self.assertIsNone(nodes[-1].next)
+
+
+class CreateBracketHelperTests(HelperTestCase):
+    def _ctx(self, user_id=901, name="Alice"):
+        return FakeInteraction(self.guild, FakeMember(name, id=user_id))
+
+    def _team(self, name):
+        team = Team()
+        team.set_name(name)
+        return team
+
+    async def test_rejects_when_no_tournament_exists(self):
+        ctx = self._ctx()
+        await self.helperObj.createBracketHelper(ctx, False)
+        ctx.response.send_message.assert_awaited_once_with(
+            "No tournament set up for this server — use /tournament-create first."
+        )
+
+    async def test_rejects_fewer_than_two_registered_teams(self):
+        tournament = Tournament("Cup", 2, 4)
+        tournament.register_team(self._team("Red"))
+        self.helperObj.saveTournament(GUILD_ID, tournament)
+
+        ctx = self._ctx()
+        await self.helperObj.createBracketHelper(ctx, False)
+        ctx.response.send_message.assert_awaited_once_with(
+            "Need at least 2 registered teams to build a bracket."
+        )
+
+    async def test_builds_and_saves_a_bracket(self):
+        tournament = Tournament("Cup", 2, 4)
+        tournament.register_team(self._team("Red"))
+        tournament.register_team(self._team("Blue"))
+        self.helperObj.saveTournament(GUILD_ID, tournament)
+
+        ctx = self._ctx()
+        await self.helperObj.createBracketHelper(ctx, True)
+
+        ctx.response.send_message.assert_awaited_once_with(
+            "Bracket created for **Cup** — 2 teams, double elimination."
+        )
+        restored = self.helperObj.getTournament(GUILD_ID)
+        self.assertTrue(restored.is_double_elimination())
+        self.assertEqual(len(restored.get_bracket()), 3)
+
+    async def test_calling_again_rerolls_the_bracket(self):
+        tournament = Tournament("Cup", 2, 4)
+        tournament.register_team(self._team("Red"))
+        tournament.register_team(self._team("Blue"))
+        self.helperObj.saveTournament(GUILD_ID, tournament)
+
+        ctx1 = self._ctx()
+        await self.helperObj.createBracketHelper(ctx1, False)
+
+        ctx2 = self._ctx()
+        await self.helperObj.createBracketHelper(ctx2, False)
+        second = self.helperObj.getTournament(GUILD_ID)
+
+        self.cursor.execute("SELECT COUNT(*) FROM tournaments WHERE guildId=?", (GUILD_ID,))
+        self.assertEqual(self.cursor.fetchone()[0], 1)
+        self.assertEqual(len(second.get_bracket()), 3)
+
+
+def _captained_team(name, captain_id, captain_name, extra_players=()):
+    team = Team()
+    team.set_name(name)
+    captain = Player(captain_id, captain_name)
+    team.add_player(captain)
+    for player_id, player_name in extra_players:
+        team.add_player(Player(player_id, player_name))
+    team.set_captain(captain)
+    return team
+
+
+class BracketRoundsAndLabelTests(HelperTestCase):
+    def test_bracket_rounds_groups_by_round_size(self):
+        teams = [Team() for _ in range(4)]
+        for i, team in enumerate(teams):
+            team.set_name(f"Team{i}")
+        nodes = self.helperObj.buildBracket(teams)
+        rounds = self.helperObj._bracketRounds(nodes)
+        self.assertEqual([len(r) for r in rounds], [4, 2, 1])
+
+    def test_empty_bracket_has_no_rounds(self):
+        self.assertEqual(self.helperObj._bracketRounds([]), [])
+
+    def test_node_label_uses_real_team_name_when_known(self):
+        team = Team()
+        team.set_name("Red")
+        node = BracketNode(team)
+        self.assertEqual(self.helperObj._nodeLabel(node), "Red")
+
+    def test_node_label_describes_the_feeder_pairing_one_level_deep(self):
+        red, blue = Team(), Team()
+        red.set_name("Red")
+        blue.set_name("Blue")
+        leaf_a, leaf_b, parent = BracketNode(red), BracketNode(blue), BracketNode()
+        leaf_a.opponent = leaf_b
+        leaf_b.opponent = leaf_a
+        leaf_a.next = parent
+        leaf_b.next = parent
+        parent.previous = leaf_a
+
+        self.assertEqual(self.helperObj._nodeLabel(parent), "Winner of (Red vs Blue)")
+
+    def test_node_label_is_tbd_with_no_team_and_no_previous(self):
+        self.assertEqual(self.helperObj._nodeLabel(BracketNode()), "TBD")
+
+
+class RenderBracketTextTests(HelperTestCase):
+    async def test_no_bracket_yet(self):
+        tournament = Tournament("Cup", 2, 4)
+        self.assertEqual(self.helperObj.renderBracketText(tournament), "No bracket has been created yet.")
+
+    async def test_renders_round_one_real_matchups_and_champion_line(self):
+        tournament = Tournament("Cup", 2, 4)
+        red, blue = Team(), Team()
+        red.set_name("Red")
+        blue.set_name("Blue")
+        tournament.set_bracket(self.helperObj.buildBracket([red, blue]))
+
+        text = self.helperObj.renderBracketText(tournament)
+
+        self.assertIn("Cup", text)
+        self.assertIn("__Round 1__", text)
+        # buildBracket shuffles seeding, so don't assume which side is which
+        self.assertIn("Red", text)
+        self.assertIn("Blue", text)
+        self.assertIn(" vs ", text)
+        self.assertIn("Champion:", text)
+        # only one real round exists, so the champion resolves one level
+        # deep to a known pairing rather than staying a bare "TBD"
+        self.assertIn("Winner of (", text)
+
+
+class PrintBracketHelperTests(HelperTestCase):
+    def _ctx(self, user_id=901, name="Alice"):
+        return FakeInteraction(self.guild, FakeMember(name, id=user_id))
+
+    async def test_rejects_when_no_tournament_exists(self):
+        ctx = self._ctx()
+        await self.helperObj.printBracketHelper(ctx)
+        ctx.response.send_message.assert_awaited_once_with(
+            "No tournament set up for this server — use /tournament-create first."
+        )
+
+    async def test_prints_the_bracket(self):
+        tournament = Tournament("Cup", 2, 4)
+        red, blue = Team(), Team()
+        red.set_name("Red")
+        blue.set_name("Blue")
+        tournament.set_bracket(self.helperObj.buildBracket([red, blue]))
+        self.helperObj.saveTournament(GUILD_ID, tournament)
+
+        ctx = self._ctx()
+        await self.helperObj.printBracketHelper(ctx)
+
+        ctx.response.send_message.assert_awaited_once()
+        text = ctx.response.send_message.call_args.args[0]
+        self.assertIn("Red", text)
+        self.assertIn("Blue", text)
+
+
+class StartTournamentHelperTests(HelperTestCase):
+    def setUp(self):
+        super().setUp()
+        self.channel = FakeChannel("tourney-chat")
+        self.channel.send = AsyncMock(side_effect=lambda *a, **k: FakeMessage())
+        self.helperObj.client = FakeClient(channels=[self.channel], guilds=[self.guild])
+
+    def _ctx(self):
+        return FakeInteraction(self.guild, FakeMember("Alice", id=901), channel=self.channel)
+
+    def _tournament_with_teams(self, *teams, team_size=1):
+        tournament = Tournament("Cup", team_size, len(teams))
+        for team in teams:
+            tournament.register_team(team)
+        tournament.set_bracket(self.helperObj.buildBracket(list(teams)))
+        self.helperObj.saveTournament(GUILD_ID, tournament)
+        return tournament
+
+    async def test_rejects_when_no_tournament_exists(self):
+        ctx = self._ctx()
+        await self.helperObj.startTournamentHelper(ctx, "sequential")
+        ctx.response.send_message.assert_awaited_once_with(
+            "No tournament set up for this server — use /tournament-create first."
+        )
+
+    async def test_rejects_when_no_bracket_exists(self):
+        self.helperObj.saveTournament(GUILD_ID, Tournament("Cup", 1, 2))
+        ctx = self._ctx()
+        await self.helperObj.startTournamentHelper(ctx, "sequential")
+        ctx.response.send_message.assert_awaited_once_with(
+            "No bracket has been created yet — use /tournament-create-bracket first."
+        )
+
+    async def test_rejects_when_already_finished(self):
+        red = _captained_team("Red", 901, "Alice")
+        blue = _captained_team("Blue", 902, "Bob")
+        tournament = self._tournament_with_teams(red, blue)
+        champion_node = tournament.get_bracket()[-1]
+        champion_node.team = red
+        self.helperObj.saveTournament(GUILD_ID, tournament)
+
+        ctx = self._ctx()
+        await self.helperObj.startTournamentHelper(ctx, "sequential")
+        ctx.response.send_message.assert_awaited_once_with(
+            "**Cup** is already finished — **Red** is the champion!"
+        )
+
+    async def test_rejects_when_round_already_in_progress(self):
+        red = _captained_team("Red", 901, "Alice")
+        blue = _captained_team("Blue", 902, "Bob")
+        self._tournament_with_teams(red, blue)
+        self.cursor.execute(
+            "INSERT INTO tournament_matches(guildId, roundIndex, nodeIndex, team1, team2, state, mode, "
+            "messageId, channelId, winner) VALUES(?, 0, 0, ?, ?, 'PENDING_READY', 'sequential', 1, ?, NULL)",
+            (GUILD_ID, red.serializeTeam(), blue.serializeTeam(), self.channel.id)
+        )
+        self.db.commit()
+
+        ctx = self._ctx()
+        await self.helperObj.startTournamentHelper(ctx, "sequential")
+        ctx.response.send_message.assert_awaited_once_with(
+            "This tournament's current round is already in progress."
+        )
+
+    async def test_sequential_posts_ready_check_for_first_match_only(self):
+        red = _captained_team("Red", 901, "Alice")
+        blue = _captained_team("Blue", 902, "Bob")
+        cleo = _captained_team("Cleo Team", 903, "Cleo")
+        dan = _captained_team("Dan Team", 904, "Dan")
+        self._tournament_with_teams(red, blue, cleo, dan)
+
+        ctx = self._ctx()
+        await self.helperObj.startTournamentHelper(ctx, "sequential")
+
+        self.cursor.execute(
+            "SELECT state FROM tournament_matches WHERE guildId=? ORDER BY id", (GUILD_ID,)
+        )
+        states = [row[0] for row in self.cursor.fetchall()]
+        self.assertEqual(states, ["PENDING_READY", "QUEUED"])
+
+    async def test_simultaneous_posts_report_for_every_match(self):
+        red = _captained_team("Red", 901, "Alice")
+        blue = _captained_team("Blue", 902, "Bob")
+        cleo = _captained_team("Cleo Team", 903, "Cleo")
+        dan = _captained_team("Dan Team", 904, "Dan")
+        self._tournament_with_teams(red, blue, cleo, dan)
+
+        ctx = self._ctx()
+        await self.helperObj.startTournamentHelper(ctx, "simultaneous")
+
+        self.cursor.execute(
+            "SELECT state FROM tournament_matches WHERE guildId=? ORDER BY id", (GUILD_ID,)
+        )
+        states = [row[0] for row in self.cursor.fetchall()]
+        self.assertEqual(states, ["AWAITING_RESULT", "AWAITING_RESULT"])
+        # 2 matches * (1 report message + 2 reactions) = channel.send called
+        # at least twice for the reports, on top of the round-kickoff message
+        self.assertGreaterEqual(self.channel.send.await_count, 3)
+
+    async def test_bye_auto_advances_without_creating_a_match(self):
+        red = _captained_team("Red", 901, "Alice")
+        blue = _captained_team("Blue", 902, "Bob")
+        cleo = _captained_team("Cleo Team", 903, "Cleo")
+        # 3 teams -> bracket size 4, one bye
+        tournament = self._tournament_with_teams(red, blue, cleo)
+
+        ctx = self._ctx()
+        await self.helperObj.startTournamentHelper(ctx, "simultaneous")
+
+        # only 1 real match created (the bye pair never becomes a match)
+        self.cursor.execute("SELECT COUNT(*) FROM tournament_matches WHERE guildId=?", (GUILD_ID,))
+        self.assertEqual(self.cursor.fetchone()[0], 1)
+
+
+class HandleTournamentReactionTests(HelperTestCase):
+    def setUp(self):
+        super().setUp()
+        self.channel = FakeChannel("tourney-chat")
+        self.channel.send = AsyncMock(side_effect=lambda *a, **k: FakeMessage())
+        self.helperObj.client = FakeClient(channels=[self.channel], guilds=[self.guild])
+
+    def _setup_tournament(self, *teams):
+        tournament = Tournament("Cup", 1, len(teams))
+        for team in teams:
+            tournament.register_team(team)
+        tournament.set_bracket(self.helperObj.buildBracket(list(teams)))
+        self.helperObj.saveTournament(GUILD_ID, tournament)
+        return tournament
+
+    async def _start(self, mode, *teams):
+        self._setup_tournament(*teams)
+        ctx = FakeInteraction(self.guild, FakeMember("Alice", id=901), channel=self.channel)
+        await self.helperObj.startTournamentHelper(ctx, mode)
+
+    def _only_match(self):
+        self.cursor.execute("SELECT id, messageId FROM tournament_matches WHERE guildId=?", (GUILD_ID,))
+        return self.cursor.fetchone()
+
+    async def test_ignores_unrelated_emoji(self):
+        red = _captained_team("Red", 901, "Alice")
+        blue = _captained_team("Blue", 902, "Bob")
+        await self._start("sequential", red, blue)
+        match_id, message_id = self._only_match()
+
+        payload = FakePayload(GUILD_ID, message_id, self.channel.id, "🎉", user_id=901)
+        await self.helperObj.handleTournamentReaction(payload)
+
+        self.cursor.execute("SELECT state FROM tournament_matches WHERE id=?", (match_id,))
+        self.assertEqual(self.cursor.fetchone()[0], "PENDING_READY")
+
+    async def test_ready_reaction_from_non_captain_is_ignored(self):
+        red = _captained_team("Red", 901, "Alice")
+        blue = _captained_team("Blue", 902, "Bob")
+        await self._start("sequential", red, blue)
+        match_id, message_id = self._only_match()
+
+        payload = FakePayload(
+            GUILD_ID, message_id, self.channel.id, helper_module.TOURNAMENT_READY_EMOJI, user_id=999
+        )
+        await self.helperObj.handleTournamentReaction(payload)
+
+        self.cursor.execute("SELECT state FROM tournament_matches WHERE id=?", (match_id,))
+        self.assertEqual(self.cursor.fetchone()[0], "PENDING_READY")
+        self.assertIsNone(self.helperObj.get(GUILD_ID, "active_tournament_match_id"))
+
+    async def test_ready_reaction_from_either_captain_starts_the_match(self):
+        red = _captained_team("Red", 901, "Alice")
+        blue = _captained_team("Blue", 902, "Bob")
+        await self._start("sequential", red, blue)
+        match_id, message_id = self._only_match()
+
+        payload = FakePayload(
+            GUILD_ID, message_id, self.channel.id, helper_module.TOURNAMENT_READY_EMOJI, user_id=902
+        )
+        await self.helperObj.handleTournamentReaction(payload)
+
+        self.cursor.execute("SELECT state FROM tournament_matches WHERE id=?", (match_id,))
+        self.assertEqual(self.cursor.fetchone()[0], "AWAITING_RESULT")
+        self.assertEqual(self.helperObj.get(GUILD_ID, "active_tournament_match_id"), match_id)
+        self.assertEqual(self.helperObj.get(GUILD_ID, "betting_state"), "OPEN")
+
+    async def test_sequential_resolution_advances_bracket_via_record_result(self):
+        red = _captained_team("Red", 901, "Alice")
+        blue = _captained_team("Blue", 902, "Bob")
+        await self._start("sequential", red, blue)
+        match_id, message_id = self._only_match()
+
+        ready_payload = FakePayload(
+            GUILD_ID, message_id, self.channel.id, helper_module.TOURNAMENT_READY_EMOJI, user_id=902
+        )
+        await self.helperObj.handleTournamentReaction(ready_payload)
+
+        team1 = Team()
+        team1.deserializeTeam(self.helperObj.get(GUILD_ID, "team1"))
+
+        # simulate the betting timer eventually resolving the game
+        await self.helperObj.recordResult(GUILD_ID, 1, self.channel)
+
+        self.cursor.execute("SELECT state, winner FROM tournament_matches WHERE id=?", (match_id,))
+        state, winner = self.cursor.fetchone()
+        self.assertEqual(state, "RESOLVED")
+        self.assertEqual(winner, 1)
+        self.assertIsNone(self.helperObj.get(GUILD_ID, "active_tournament_match_id"))
+
+        updated = self.helperObj.getTournament(GUILD_ID)
+        champion = updated.get_bracket()[-1]
+        self.assertEqual(champion.team.get_name(), team1.get_name())
+
+        printed = "\n".join(c.args[0] for c in self.channel.send.call_args_list if c.args)
+        self.assertIn("Champion:", printed)
+
+    async def test_simultaneous_result_reaction_resolves_match_and_advances(self):
+        red = _captained_team("Red", 901, "Alice")
+        blue = _captained_team("Blue", 902, "Bob")
+        await self._start("simultaneous", red, blue)
+        match_id, message_id = self._only_match()
+
+        self.cursor.execute("SELECT team2 FROM tournament_matches WHERE id=?", (match_id,))
+        team2 = Team()
+        team2.deserializeTeam(self.cursor.fetchone()[0])
+
+        payload = FakePayload(
+            GUILD_ID, message_id, self.channel.id, helper_module.TEAM_EMOJIS[2], user_id=555
+        )
+        await self.helperObj.handleTournamentReaction(payload)
+
+        self.cursor.execute("SELECT state, winner FROM tournament_matches WHERE id=?", (match_id,))
+        state, winner = self.cursor.fetchone()
+        self.assertEqual(state, "RESOLVED")
+        self.assertEqual(winner, 2)
+
+        updated = self.helperObj.getTournament(GUILD_ID)
+        champion = updated.get_bracket()[-1]
+        self.assertEqual(champion.team.get_name(), team2.get_name())
+
+    async def test_simultaneous_reaction_on_a_pending_ready_match_is_ignored(self):
+        red = _captained_team("Red", 901, "Alice")
+        blue = _captained_team("Blue", 902, "Bob")
+        await self._start("sequential", red, blue)
+        match_id, message_id = self._only_match()
+
+        payload = FakePayload(
+            GUILD_ID, message_id, self.channel.id, helper_module.TEAM_EMOJIS[1], user_id=555
+        )
+        await self.helperObj.handleTournamentReaction(payload)
+
+        self.cursor.execute("SELECT state FROM tournament_matches WHERE id=?", (match_id,))
+        self.assertEqual(self.cursor.fetchone()[0], "PENDING_READY")
+
+    async def test_round_advances_once_every_match_in_it_resolves(self):
+        red = _captained_team("Red", 901, "Alice")
+        blue = _captained_team("Blue", 902, "Bob")
+        cleo = _captained_team("Cleo Team", 903, "Cleo")
+        dan = _captained_team("Dan Team", 904, "Dan")
+        await self._start("simultaneous", red, blue, cleo, dan)
+
+        self.cursor.execute(
+            "SELECT id, messageId FROM tournament_matches WHERE guildId=? ORDER BY id", (GUILD_ID,)
+        )
+        rows = self.cursor.fetchall()
+        self.assertEqual(len(rows), 2)
+
+        for match_id, message_id in rows:
+            payload = FakePayload(
+                GUILD_ID, message_id, self.channel.id, helper_module.TEAM_EMOJIS[1], user_id=555
+            )
+            await self.helperObj.handleTournamentReaction(payload)
+
+        self.cursor.execute(
+            "SELECT COUNT(*) FROM tournament_matches WHERE guildId=? AND roundIndex=1", (GUILD_ID,)
+        )
+        self.assertEqual(self.cursor.fetchone()[0], 1)
+
+        # the round-end transition posted its own "Round 1 has ended!"
+        # message and a fresh bracket, ahead of round 2's own kickoff
+        messages = [c.args[0] for c in self.channel.send.call_args_list if c.args]
+        self.assertTrue(any("Round 1 has ended!" in m for m in messages))
+
+    async def test_final_round_resolving_announces_the_champion(self):
+        red = _captained_team("Red", 901, "Alice")
+        blue = _captained_team("Blue", 902, "Bob")
+        await self._start("simultaneous", red, blue)
+        match_id, message_id = self._only_match()
+
+        payload = FakePayload(
+            GUILD_ID, message_id, self.channel.id, helper_module.TEAM_EMOJIS[1], user_id=555
+        )
+        await self.helperObj.handleTournamentReaction(payload)
+
+        messages = [c.args[0] for c in self.channel.send.call_args_list if c.args]
+        self.assertTrue(any("is complete!" in m and "Champion" in m for m in messages))
+
+
+class CorrectTournamentMatchHelperTests(HelperTestCase):
+    def setUp(self):
+        super().setUp()
+        self.channel = FakeChannel("tourney-chat")
+        self.channel.send = AsyncMock(side_effect=lambda *a, **k: FakeMessage())
+        self.helperObj.client = FakeClient(channels=[self.channel], guilds=[self.guild])
+
+    def _ctx(self):
+        return FakeInteraction(self.guild, FakeMember("Admin", id=1), channel=self.channel)
+
+    async def _resolved_match(self, winner=1):
+        red = _captained_team("Red", 901, "Alice")
+        blue = _captained_team("Blue", 902, "Bob")
+        tournament = Tournament("Cup", 1, 2)
+        tournament.register_team(red)
+        tournament.register_team(blue)
+        tournament.set_bracket(self.helperObj.buildBracket([red, blue]))
+        self.helperObj.saveTournament(GUILD_ID, tournament)
+
+        ctx = FakeInteraction(self.guild, FakeMember("Alice", id=901), channel=self.channel)
+        await self.helperObj.startTournamentHelper(ctx, "simultaneous")
+
+        self.cursor.execute("SELECT id, messageId FROM tournament_matches WHERE guildId=?", (GUILD_ID,))
+        match_id, message_id = self.cursor.fetchone()
+        payload = FakePayload(
+            GUILD_ID, message_id, self.channel.id, helper_module.TEAM_EMOJIS[winner], user_id=555
+        )
+        await self.helperObj.handleTournamentReaction(payload)
+        return match_id
+
+    async def test_rejects_unknown_match(self):
+        ctx = self._ctx()
+        await self.helperObj.reportCorrectWinnerHelper(ctx, 1, match_id=9999)
+        ctx.response.send_message.assert_awaited_once_with(
+            "No tournament match with id 9999 in this server."
+        )
+
+    async def test_rejects_unresolved_match(self):
+        red = _captained_team("Red", 901, "Alice")
+        blue = _captained_team("Blue", 902, "Bob")
+        tournament = Tournament("Cup", 1, 2)
+        tournament.register_team(red)
+        tournament.register_team(blue)
+        tournament.set_bracket(self.helperObj.buildBracket([red, blue]))
+        self.helperObj.saveTournament(GUILD_ID, tournament)
+        ctx0 = FakeInteraction(self.guild, FakeMember("Alice", id=901), channel=self.channel)
+        await self.helperObj.startTournamentHelper(ctx0, "simultaneous")
+        self.cursor.execute("SELECT id FROM tournament_matches WHERE guildId=?", (GUILD_ID,))
+        match_id = self.cursor.fetchone()[0]
+
+        ctx = self._ctx()
+        await self.helperObj.reportCorrectWinnerHelper(ctx, 1, match_id=match_id)
+        ctx.response.send_message.assert_awaited_once_with(f"Match #{match_id} hasn't been resolved yet.")
+
+    async def test_rejects_already_correct_team(self):
+        match_id = await self._resolved_match(winner=1)
+        ctx = self._ctx()
+        await self.helperObj.reportCorrectWinnerHelper(ctx, 1, match_id=match_id)
+        ctx.response.send_message.assert_awaited_once_with(
+            f"Match #{match_id} is already recorded as Team 1."
+        )
+
+    async def test_rejects_once_next_round_has_started(self):
+        match_id = await self._resolved_match(winner=1)  # this IS the final, so no next round exists
+        # force a fake "next round already started" scenario by inserting
+        # a stray row at roundIndex+1
+        self.cursor.execute("SELECT roundIndex FROM tournament_matches WHERE id=?", (match_id,))
+        round_index = self.cursor.fetchone()[0]
+        self.cursor.execute(
+            "INSERT INTO tournament_matches(guildId, roundIndex, nodeIndex, team1, team2, state, mode, "
+            "messageId, channelId, winner) VALUES(?, ?, 0, '', '', 'QUEUED', 'simultaneous', NULL, ?, NULL)",
+            (GUILD_ID, round_index + 1, self.channel.id)
+        )
+        self.db.commit()
+
+        ctx = self._ctx()
+        await self.helperObj.reportCorrectWinnerHelper(ctx, 2, match_id=match_id)
+        ctx.response.send_message.assert_awaited_once_with(
+            f"Can't correct Match #{match_id} — the next round has already started."
+        )
+
+    async def test_successful_correction_flips_bracket_and_winner(self):
+        match_id = await self._resolved_match(winner=1)
+        self.cursor.execute("SELECT team2 FROM tournament_matches WHERE id=?", (match_id,))
+        team2 = Team()
+        team2.deserializeTeam(self.cursor.fetchone()[0])
+
+        ctx = self._ctx()
+        await self.helperObj.reportCorrectWinnerHelper(ctx, 2, match_id=match_id)
+
+        ctx.response.send_message.assert_awaited_once()
+        self.assertIn("corrected", ctx.response.send_message.call_args.args[0])
+
+        self.cursor.execute("SELECT winner FROM tournament_matches WHERE id=?", (match_id,))
+        self.assertEqual(self.cursor.fetchone()[0], 2)
+
+        tournament = self.helperObj.getTournament(GUILD_ID)
+        champion = tournament.get_bracket()[-1]
+        self.assertEqual(champion.team.get_name(), team2.get_name())
+
+
 class RandomRoleHelperTests(HelperTestCase):
     async def test_assigns_a_role_line_per_player(self):
         team1 = Team()
@@ -787,6 +2251,39 @@ class SetTeamHelperTests(HelperTestCase):
         await self.helperObj.setTeamHelper(ctx, "Red", "Blue")
 
         self.assertEqual(len(self.guild.channels), 2)
+
+
+class SetWagerChannelHelperTests(HelperTestCase):
+    async def test_creates_the_channel_when_missing(self):
+        ctx = FakeInteraction(self.guild, FakeMember("Caller"))
+
+        await self.helperObj.setWagerChannelHelper(ctx, "bets")
+
+        created = [c for c in self.guild.channels if c.name == "bets"]
+        self.assertEqual(len(created), 1)
+        self.assertEqual(created[0].kind, "text")
+        self.assertEqual(self.helperObj.get(GUILD_ID, "wager_channel"), "bets")
+        ctx.response.send_message.assert_awaited_once()
+        self.assertIn(created[0].mention, ctx.response.send_message.call_args.args[0])
+
+    async def test_reuses_an_existing_text_channel(self):
+        self.guild.channels.append(FakeChannel("bets", kind="text"))
+        ctx = FakeInteraction(self.guild, FakeMember("Caller"))
+
+        await self.helperObj.setWagerChannelHelper(ctx, "bets")
+
+        self.assertEqual(len(self.guild.channels), 1)
+        self.assertEqual(self.helperObj.get(GUILD_ID, "wager_channel"), "bets")
+
+    async def test_ignores_a_same_named_voice_channel(self):
+        self.guild.channels.append(FakeChannel("bets", kind="voice"))
+        ctx = FakeInteraction(self.guild, FakeMember("Caller"))
+
+        await self.helperObj.setWagerChannelHelper(ctx, "bets")
+
+        # a new text channel is created rather than reusing the voice one
+        text_channels = [c for c in self.guild.channels if c.kind == "text"]
+        self.assertEqual(len(text_channels), 1)
 
 
 class NotifyHelperTests(HelperTestCase):
@@ -1636,6 +3133,38 @@ class StartBettingHelperTests(HelperTestCase):
         await asyncio.wait([task])
         self.assertTrue(task.done())
 
+    async def test_redirects_to_the_configured_wager_channel(self):
+        origin_channel = FakeChannel("game-chat")
+        wager_channel = FakeChannel("bets", kind="text")
+        self.guild.channels.append(wager_channel)
+        self.helperObj.client = FakeClient(guilds=[self.guild])
+        self.helperObj.update(GUILD_ID, "wager_channel", "bets")
+
+        ctx = FakeInteraction(self.guild, FakeMember("Caller"), channel=origin_channel)
+        await self.helperObj.startBettingHelper(ctx)
+
+        origin_channel.send.assert_not_awaited()
+        wager_channel.send.assert_awaited_once()
+        self.assertEqual(self.helperObj.get(GUILD_ID, "betting_channel_id"), wager_channel.id)
+
+        task = self.helperObj.bettingTasks[GUILD_ID]
+        task.cancel()
+        await asyncio.wait([task])
+
+    async def test_falls_back_to_the_origin_channel_if_wager_channel_unresolvable(self):
+        origin_channel = FakeChannel("game-chat")
+        self.helperObj.client = FakeClient(guilds=[self.guild])
+        self.helperObj.update(GUILD_ID, "wager_channel", "does-not-exist")
+
+        ctx = FakeInteraction(self.guild, FakeMember("Caller"), channel=origin_channel)
+        await self.helperObj.startBettingHelper(ctx)
+
+        origin_channel.send.assert_awaited_once()
+
+        task = self.helperObj.bettingTasks[GUILD_ID]
+        task.cancel()
+        await asyncio.wait([task])
+
     async def test_full_timer_flow_opens_reports_and_awaits_result(self):
         with patch.object(helper_module, "BETTING_DURATION_SECONDS", 0), \
              patch.object(helper_module, "WINNER_REPORT_DELAY_SECONDS", 0):
@@ -2211,10 +3740,12 @@ class CommandRegistrationTests(BotModuleTestCase):
     def test_all_expected_commands_registered(self):
         names = {c.name for c in self.bot.tree.get_commands(guild=discord.Object(id=COMMAND_GUILD_ID))}
         expected = {
-            "set-team-size", "set-team-channels", "start", "wager", "wager-against", "daily",
+            "team-set-size", "team-set-channels", "start", "wager", "wager-against", "daily",
             "stats", "leaderboard", "help", "make-teams", "ranked", "return", "report-correct-winner",
             "captains", "ranked-captains", "choose", "clear", "notify", "notify-role",
-            "roll", "randomize-roles",
+            "roll", "randomize-roles", "tournament-create", "team-create", "team-set-voice-channel",
+            "team-invite", "team-stats", "team-leaderboard", "tournament-register", "tournament-create-bracket",
+            "tournament-print-bracket", "tournament-start", "wager-set-channel", "team-use",
         }
         self.assertEqual(names, expected)
 
@@ -2241,48 +3772,48 @@ class GuildLifecycleEventTests(BotModuleTestCase):
 
 
 class ReactionEventTests(BotModuleTestCase):
-    def _patch_all_handlers(self):
-        return (
-            patch.object(self.bot.helperObj, "handleWinnerReaction", AsyncMock()),
-            patch.object(self.bot.helperObj, "handleDuelReaction", AsyncMock()),
-            patch.object(self.bot.helperObj, "handleLeaderboardReaction", AsyncMock()),
-        )
+    HANDLER_NAMES = (
+        "handleWinnerReaction", "handleDuelReaction", "handleLeaderboardReaction",
+        "handleTeamInviteReaction", "handleTournamentReaction",
+    )
+
+    def _patch_all_handlers(self, stack):
+        return {
+            name: stack.enter_context(patch.object(self.bot.helperObj, name, AsyncMock()))
+            for name in self.HANDLER_NAMES
+        }
 
     async def test_ignores_bot_reactions(self):
         payload = SimpleNamespace(member=FakeMember("BotUser", bot=True), guild_id=1)
-        winner_patch, duel_patch, leaderboard_patch = self._patch_all_handlers()
-        with winner_patch as winner_mock, duel_patch as duel_mock, leaderboard_patch as leaderboard_mock:
+        with contextlib.ExitStack() as stack:
+            mocks = self._patch_all_handlers(stack)
             await self.bot.on_raw_reaction_add(payload)
-        winner_mock.assert_not_awaited()
-        duel_mock.assert_not_awaited()
-        leaderboard_mock.assert_not_awaited()
+        for mock in mocks.values():
+            mock.assert_not_awaited()
 
     async def test_ignores_reactions_with_no_member(self):
         payload = SimpleNamespace(member=None, guild_id=1)
-        winner_patch, duel_patch, leaderboard_patch = self._patch_all_handlers()
-        with winner_patch as winner_mock, duel_patch as duel_mock, leaderboard_patch as leaderboard_mock:
+        with contextlib.ExitStack() as stack:
+            mocks = self._patch_all_handlers(stack)
             await self.bot.on_raw_reaction_add(payload)
-        winner_mock.assert_not_awaited()
-        duel_mock.assert_not_awaited()
-        leaderboard_mock.assert_not_awaited()
+        for mock in mocks.values():
+            mock.assert_not_awaited()
 
     async def test_ignores_dm_reactions(self):
         payload = SimpleNamespace(member=FakeMember("User"), guild_id=None)
-        winner_patch, duel_patch, leaderboard_patch = self._patch_all_handlers()
-        with winner_patch as winner_mock, duel_patch as duel_mock, leaderboard_patch as leaderboard_mock:
+        with contextlib.ExitStack() as stack:
+            mocks = self._patch_all_handlers(stack)
             await self.bot.on_raw_reaction_add(payload)
-        winner_mock.assert_not_awaited()
-        duel_mock.assert_not_awaited()
-        leaderboard_mock.assert_not_awaited()
+        for mock in mocks.values():
+            mock.assert_not_awaited()
 
     async def test_delegates_valid_guild_member_reaction(self):
         payload = SimpleNamespace(member=FakeMember("User"), guild_id=1)
-        winner_patch, duel_patch, leaderboard_patch = self._patch_all_handlers()
-        with winner_patch as winner_mock, duel_patch as duel_mock, leaderboard_patch as leaderboard_mock:
+        with contextlib.ExitStack() as stack:
+            mocks = self._patch_all_handlers(stack)
             await self.bot.on_raw_reaction_add(payload)
-        winner_mock.assert_awaited_once_with(payload)
-        duel_mock.assert_awaited_once_with(payload)
-        leaderboard_mock.assert_awaited_once_with(payload)
+        for mock in mocks.values():
+            mock.assert_awaited_once_with(payload)
 
 
 class CommandDelegationTests(BotModuleTestCase):
@@ -2336,6 +3867,131 @@ class CommandDelegationTests(BotModuleTestCase):
             await self._command("leaderboard").callback(ctx, filter=filter_choice, order=order_choice)
         mock.assert_awaited_once_with(ctx, "balance", "asc")
 
+    async def test_create_tournament_delegates(self):
+        ctx = self._ctx()
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "createTournamentHelper", mock):
+            await self._command("tournament-create").callback(ctx, "Spring Cup", 5, 8)
+        mock.assert_awaited_once_with(ctx, "Spring Cup", 5, 8, False)
+
+    async def test_create_tournament_passes_double_elim_flag(self):
+        ctx = self._ctx()
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "createTournamentHelper", mock):
+            await self._command("tournament-create").callback(ctx, "Spring Cup", 5, 8, double_elim=True)
+        mock.assert_awaited_once_with(ctx, "Spring Cup", 5, 8, True)
+
+    async def test_register_team_delegates(self):
+        ctx = self._ctx()
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "registerTeamHelper", mock):
+            await self._command("tournament-register").callback(ctx, "Red")
+        mock.assert_awaited_once_with(ctx, "Red")
+
+    async def test_create_bracket_passes_resolved_elimination_type(self):
+        ctx = self._ctx()
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "createBracketHelper", mock):
+            choice = app_commands.Choice(name="Double elimination", value="double")
+            await self._command("tournament-create-bracket").callback(ctx, elimination_type=choice)
+        mock.assert_awaited_once_with(ctx, True)
+
+    async def test_create_bracket_single_elimination_resolves_to_false(self):
+        ctx = self._ctx()
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "createBracketHelper", mock):
+            choice = app_commands.Choice(name="Single elimination", value="single")
+            await self._command("tournament-create-bracket").callback(ctx, elimination_type=choice)
+        mock.assert_awaited_once_with(ctx, False)
+
+    async def test_print_bracket_delegates(self):
+        ctx = self._ctx()
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "printBracketHelper", mock):
+            await self._command("tournament-print-bracket").callback(ctx)
+        mock.assert_awaited_once_with(ctx)
+
+    async def test_start_tournament_passes_resolved_mode(self):
+        ctx = self._ctx()
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "startTournamentHelper", mock):
+            choice = app_commands.Choice(name="Sequential", value="sequential")
+            await self._command("tournament-start").callback(ctx, mode=choice)
+        mock.assert_awaited_once_with(ctx, "sequential")
+
+    async def test_start_tournament_simultaneous_mode(self):
+        ctx = self._ctx()
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "startTournamentHelper", mock):
+            choice = app_commands.Choice(name="Simultaneous", value="simultaneous")
+            await self._command("tournament-start").callback(ctx, mode=choice)
+        mock.assert_awaited_once_with(ctx, "simultaneous")
+
+    async def test_create_team_delegates(self):
+        ctx = self._ctx()
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "createTeamHelper", mock):
+            await self._command("team-create").callback(ctx, "Red", 5)
+        mock.assert_awaited_once_with(ctx, "Red", 5)
+
+    async def test_set_team_voice_channel_defaults_channel_to_none(self):
+        ctx = self._ctx()
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "setTeamVoiceChannelHelper", mock):
+            await self._command("team-set-voice-channel").callback(ctx, "Red")
+        mock.assert_awaited_once_with(ctx, "Red", None)
+
+    async def test_set_team_voice_channel_passes_channel(self):
+        ctx = self._ctx()
+        mock = AsyncMock()
+        channel = FakeChannel("Arena")
+        with patch.object(self.bot.helperObj, "setTeamVoiceChannelHelper", mock):
+            await self._command("team-set-voice-channel").callback(ctx, "Red", channel=channel)
+        mock.assert_awaited_once_with(ctx, "Red", channel)
+
+    async def test_team_invite_delegates(self):
+        ctx = self._ctx()
+        target = FakeMember("Bob", id=902)
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "teamInviteHelper", mock):
+            await self._command("team-invite").callback(ctx, "Red", target)
+        mock.assert_awaited_once_with(ctx, "Red", target)
+
+    async def test_team_stats_delegates(self):
+        ctx = self._ctx()
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "teamStatsHelper", mock):
+            await self._command("team-stats").callback(ctx, "Red")
+        mock.assert_awaited_once_with(ctx, "Red")
+
+    async def test_team_leaderboard_delegates(self):
+        ctx = self._ctx()
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "teamLeaderboardHelper", mock):
+            await self._command("team-leaderboard").callback(ctx)
+        mock.assert_awaited_once_with(ctx)
+
+    async def test_use_teams_defaults_ranked_to_false(self):
+        ctx = self._ctx()
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "useTeamsHelper", mock):
+            await self._command("team-use").callback(ctx, "Red", "Blue")
+        mock.assert_awaited_once_with(ctx, "Red", "Blue", False)
+
+    async def test_use_teams_passes_ranked_flag(self):
+        ctx = self._ctx()
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "useTeamsHelper", mock):
+            await self._command("team-use").callback(ctx, "Red", "Blue", ranked=True)
+        mock.assert_awaited_once_with(ctx, "Red", "Blue", True)
+
+    async def test_set_wager_channel_delegates(self):
+        ctx = self._ctx()
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "setWagerChannelHelper", mock):
+            await self._command("wager-set-channel").callback(ctx, "bets")
+        mock.assert_awaited_once_with(ctx, "bets")
+
     async def test_return_delegates(self):
         ctx = self._ctx()
         mock = AsyncMock()
@@ -2347,7 +4003,7 @@ class CommandDelegationTests(BotModuleTestCase):
         ctx = self._ctx()
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "setTeamHelper", mock):
-            await self._command("set-team-channels").callback(ctx, team1="Red", team2="Blue")
+            await self._command("team-set-channels").callback(ctx, team1="Red", team2="Blue")
         mock.assert_awaited_once_with(ctx, "Red", "Blue")
 
     async def test_choose_delegates_to_choose_func(self):
@@ -2377,7 +4033,7 @@ class SetTeamSizeCommandTests(BotModuleTestCase):
         await self._insert_guild_row(guild_id)
         ctx = self._ctx(guild_id=guild_id)
 
-        await self._command("set-team-size").callback(ctx, sizechange=4)
+        await self._command("team-set-size").callback(ctx, sizechange=4)
 
         self.assertEqual(self.bot.helperObj.get(guild_id, "team_size"), 4)
         ctx.response.send_message.assert_awaited_once_with("Set team size!")
@@ -2401,6 +4057,29 @@ class RollCommandTests(BotModuleTestCase):
 
 
 class ClearCommandTests(BotModuleTestCase):
+    def test_requires_manage_guild_permission(self):
+        cmd = self._command("clear")
+        denied = SimpleNamespace(permissions=discord.Permissions.none())
+
+        with self.assertRaises(app_commands.MissingPermissions):
+            for check in cmd.checks:
+                check(denied)
+
+    def test_manage_guild_permission_is_sufficient(self):
+        cmd = self._command("clear")
+        allowed = SimpleNamespace(permissions=discord.Permissions(manage_guild=True))
+
+        for check in cmd.checks:
+            self.assertTrue(check(allowed))
+
+    async def test_error_handler_reports_missing_permission(self):
+        ctx = self._ctx()
+        error = app_commands.MissingPermissions(["manage_guild"])
+        await self.bot.clearAll_error(ctx, error)
+        ctx.response.send_message.assert_awaited_once_with(
+            "You need the Manage Server permission to use /clear."
+        )
+
     async def test_clears_optional_fields_when_requested(self):
         guild_id = 903
         await self._insert_guild_row(guild_id)
@@ -2805,7 +4484,15 @@ class ReportCorrectWinnerCommandTests(BotModuleTestCase):
         with patch.object(self.bot.helperObj, "reportCorrectWinnerHelper", mock):
             choice = app_commands.Choice(name="Team 2", value=2)
             await self._command("report-correct-winner").callback(ctx, choice)
-        mock.assert_awaited_once_with(ctx, 2)
+        mock.assert_awaited_once_with(ctx, 2, None)
+
+    async def test_delegates_with_match_id(self):
+        ctx = self._ctx()
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "reportCorrectWinnerHelper", mock):
+            choice = app_commands.Choice(name="Team 2", value=2)
+            await self._command("report-correct-winner").callback(ctx, choice, match_id=42)
+        mock.assert_awaited_once_with(ctx, 2, 42)
 
     def test_requires_manage_guild_permission(self):
         cmd = self._command("report-correct-winner")

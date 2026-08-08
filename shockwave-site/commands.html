@@ -35,6 +35,7 @@
         <div class="nav-label">Overview</div>
         <a class="nav-link" href="index.html#top">Introduction</a>
         <a class="nav-link" href="index.html#quick-start">Draft-night flow</a>
+        <a class="nav-link" href="index.html#tournament-flow">Tournament flow</a>
       </div>
       <div class="nav-group">
         <div class="nav-label">Get started</div>
@@ -46,6 +47,7 @@
         <a class="nav-link" href="commands.html#team-formation">Team formation</a>
         <a class="nav-link" href="commands.html#voice-ops">Voice channel ops</a>
         <a class="nav-link" href="commands.html#betting">Betting &amp; economy</a>
+        <a class="nav-link" href="commands.html#tournaments">Tournaments &amp; teams</a>
         <a class="nav-link" href="commands.html#utility">Utility</a>
       </div>
       <div class="nav-group">
@@ -79,9 +81,9 @@
         <h2>Team setup</h2>
         <p class="muted">Run these once per server, or whenever you want to reset a session.</p>
 
-        <div class="cmd-card" id="set-team-channels">
+        <div class="cmd-card" id="team-set-channels">
           <div class="cmd-head">
-            <span class="cmd-name"><span class="slash">/</span>set-team-channels</span>
+            <span class="cmd-name"><span class="slash">/</span>team-set-channels</span>
             <span class="cmd-badge">setup</span>
           </div>
           <p class="cmd-desc">Names the two voice channels teams get moved into. Creates them if they don't already exist on the server.</p>
@@ -92,9 +94,9 @@
           </table>
         </div>
 
-        <div class="cmd-card" id="set-team-size">
+        <div class="cmd-card" id="team-set-size">
           <div class="cmd-head">
-            <span class="cmd-name"><span class="slash">/</span>set-team-size</span>
+            <span class="cmd-name"><span class="slash">/</span>team-set-size</span>
             <span class="cmd-badge">setup</span>
           </div>
           <p class="cmd-desc">Sets how many players make up one side. Used when notifying people how big the game is.</p>
@@ -107,13 +109,13 @@
         <div class="cmd-card" id="clear">
           <div class="cmd-head">
             <span class="cmd-name"><span class="slash">/</span>clear</span>
-            <span class="cmd-badge">setup</span>
+            <span class="cmd-badge">admin</span>
           </div>
-          <p class="cmd-desc">Wipes the current teams and draft state so you can start a fresh session. Channel names, tournament data, and player elo/economy are kept unless you explicitly clear them too.</p>
+          <p class="cmd-desc">Wipes the current teams and draft state so you can start a fresh session. Channel names, tournament data, and player elo/economy are kept unless you explicitly clear them too. Requires the <strong style="color:var(--text);">Manage Server</strong> permission.</p>
           <table class="params">
             <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
             <tr><td class="param-name">clear_channels</td><td class="param-type">boolean, optional</td><td>Also forget the saved team channel names.</td></tr>
-            <tr><td class="param-name">clear_tournament</td><td class="param-type">boolean, optional</td><td>Also clear tournament bracket data.</td></tr>
+            <tr><td class="param-name">clear_tournament</td><td class="param-type">boolean, optional</td><td>Legacy/unused field, kept for backwards compatibility — doesn't touch a tournament created with <code class="inline">/tournament-create</code>.</td></tr>
             <tr><td class="param-name">clear_elo</td><td class="param-type">boolean, optional</td><td>Resets every player's elo back to 1000 for this server — balance, wins/losses, and gold are untouched. Server-wide, so it asks for confirmation before it runs (see below).</td></tr>
             <tr><td class="param-name">clear_economy</td><td class="param-type">boolean, optional</td><td>Wipes every member's stats for this server entirely — balance, elo, game record, betting record, and gold wagered/won/lost. Also server-wide and confirmation-gated; if both this and <code class="inline">clear_elo</code> are set, this one wins since it already includes an elo reset.</td></tr>
           </table>
@@ -401,6 +403,18 @@
           fixes it after the fact.
         </div>
 
+        <div class="cmd-card" id="wager-set-channel">
+          <div class="cmd-head">
+            <span class="cmd-name"><span class="slash">/</span>wager-set-channel</span>
+            <span class="cmd-badge">betting</span>
+          </div>
+          <p class="cmd-desc">Redirects every betting posting (open/closed/winner-report) to one specific text channel, instead of wherever <code class="inline">/start</code> (or a <a href="commands.html#tournament-start" style="color:var(--gold);">tournament match</a>) happens to run.</p>
+          <table class="params">
+            <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+            <tr><td class="param-name">channel_name</td><td class="param-type">string</td><td>Name of the text channel to use — created automatically if it doesn't exist.</td></tr>
+          </table>
+        </div>
+
         <div class="cmd-card" id="wager">
           <div class="cmd-head">
             <span class="cmd-name"><span class="slash">/</span>wager</span>
@@ -518,7 +532,238 @@
           <table class="params">
             <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
             <tr><td class="param-name">team</td><td class="param-type">choice</td><td>The team that actually won.</td></tr>
+            <tr><td class="param-name">match_id</td><td class="param-type">integer, optional</td><td>Correct a specific <a href="commands.html#tournament-start" style="color:var(--gold);">tournament match</a> instead of the last game — see the note there. Doesn't touch payouts/elo, only that match's recorded winner and the bracket.</td></tr>
           </table>
+        </div>
+      </section>
+
+      <hr class="rule">
+
+      <!-- ============ TOURNAMENTS & TEAMS ============ -->
+      <section class="block" id="tournaments">
+        <h2>Tournaments &amp; teams</h2>
+        <p class="muted">
+          A separate system from the casual/ranked games above — persistent, named teams a player can
+          captain, and a bracket built from whichever of those teams register for the server's tournament.
+        </p>
+
+        <h3>Persistent teams</h3>
+        <p class="muted">
+          Distinct from the temporary team1/team2 a <code class="inline">/make-teams</code> or
+          <code class="inline">/captains</code> game produces — these stick around across sessions and are
+          what tournament registration works against.
+        </p>
+
+        <div class="cmd-card" id="team-create">
+          <div class="cmd-head">
+            <span class="cmd-name"><span class="slash">/</span>team-create</span>
+            <span class="cmd-badge">teams</span>
+          </div>
+          <p class="cmd-desc">Creates a persistent team with you as its captain — team ids are assigned automatically.</p>
+          <table class="params">
+            <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+            <tr><td class="param-name">name</td><td class="param-type">string</td><td>Team name. Must be unique in this server.</td></tr>
+            <tr><td class="param-name">team_size</td><td class="param-type">integer</td><td>How many players the team is looking for in total.</td></tr>
+          </table>
+        </div>
+
+        <div class="cmd-card" id="team-set-voice-channel">
+          <div class="cmd-head">
+            <span class="cmd-name"><span class="slash">/</span>team-set-voice-channel</span>
+            <span class="cmd-badge">teams</span>
+          </div>
+          <p class="cmd-desc">Sets a team's voice channel. Captain-only.</p>
+          <table class="params">
+            <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+            <tr><td class="param-name">team</td><td class="param-type">string</td><td>Name of the team.</td></tr>
+            <tr><td class="param-name">channel</td><td class="param-type">voice channel, optional</td><td>Channel to use. Omit to create a new one named after the team.</td></tr>
+          </table>
+          <div class="cmd-note">
+            <strong>Reusing another team's channel asks first.</strong> If the channel you name is already set
+            for a different team, Shockwave posts a warning with "Yes, use it anyway" / "No" buttons instead of
+            silently reassigning it. "No" doesn't retry anything — just run the command again with a different
+            channel.
+          </div>
+        </div>
+
+        <div class="cmd-card" id="team-invite">
+          <div class="cmd-head">
+            <span class="cmd-name"><span class="slash">/</span>team-invite</span>
+            <span class="cmd-badge">teams</span>
+          </div>
+          <p class="cmd-desc">Invites another member to a team you captain. Captain-only.</p>
+          <table class="params">
+            <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+            <tr><td class="param-name">team</td><td class="param-type">string</td><td>Name of the team.</td></tr>
+            <tr><td class="param-name">member</td><td class="param-type">member</td><td>Who to invite.</td></tr>
+          </table>
+          <div class="cmd-note">
+            <strong>The invite has to be accepted.</strong> Shockwave posts a message mentioning the invited
+            player and reacts with ✅ — only they can react to accept, and they only actually join the roster
+            once they do.
+          </div>
+        </div>
+
+        <div class="cmd-card" id="team-stats">
+          <div class="cmd-head">
+            <span class="cmd-name"><span class="slash">/</span>team-stats</span>
+            <span class="cmd-badge">teams</span>
+          </div>
+          <p class="cmd-desc">Shows a team's captain, roster, voice channel, and win/loss record.</p>
+          <table class="params">
+            <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+            <tr><td class="param-name">team</td><td class="param-type">string</td><td>Name of the team.</td></tr>
+          </table>
+        </div>
+
+        <div class="cmd-card" id="team-leaderboard">
+          <div class="cmd-head">
+            <span class="cmd-name"><span class="slash">/</span>team-leaderboard</span>
+            <span class="cmd-badge">teams</span>
+          </div>
+          <p class="cmd-desc">Ranks every team in the server by win rate (then total wins), highest first. Teams that haven't played yet sink to the bottom instead of showing a misleading 0%.</p>
+        </div>
+
+        <div class="cmd-card" id="team-use">
+          <div class="cmd-head">
+            <span class="cmd-name"><span class="slash">/</span>team-use</span>
+            <span class="cmd-badge">teams</span>
+          </div>
+          <p class="cmd-desc">Loads two persistent teams straight into a casual or ranked game, skipping <code class="inline">/make-teams</code>/<code class="inline">/ranked</code>'s random-split-or-draft entirely — the quickest way to run a scrim between two teams that already exist.</p>
+          <table class="params">
+            <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+            <tr><td class="param-name">team1</td><td class="param-type">string</td><td>Name of the first team.</td></tr>
+            <tr><td class="param-name">team2</td><td class="param-type">string</td><td>Name of the second team. Must be different from team1.</td></tr>
+            <tr><td class="param-name">ranked</td><td class="param-type">boolean, optional</td><td>Track elo for this game. Defaults to casual.</td></tr>
+          </table>
+          <div class="cmd-note">
+            <strong>Same contract as /make-teams and /ranked.</strong> This only loads the roster — nobody
+            moves and no elo/betting starts until you run <code class="inline">/start</code>.
+          </div>
+        </div>
+
+        <hr class="rule" style="margin:40px 0;">
+
+        <h3>Tournaments</h3>
+        <p class="muted">
+          A server has at most one tournament at a time. Build the shell, register teams into it, then build
+          the bracket — re-running the bracket step rerolls it from whoever's currently registered.
+        </p>
+
+        <div class="cmd-card" id="tournament-create">
+          <div class="cmd-head">
+            <span class="cmd-name"><span class="slash">/</span>tournament-create</span>
+            <span class="cmd-badge">tournament</span>
+          </div>
+          <p class="cmd-desc">Creates an empty tournament shell for this server — a name, a team size, and a bracket size. A server can only have one tournament at a time.</p>
+          <table class="params">
+            <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+            <tr><td class="param-name">name</td><td class="param-type">string</td><td>Tournament name.</td></tr>
+            <tr><td class="param-name">teamsize</td><td class="param-type">integer</td><td>Number of players on each registered team.</td></tr>
+            <tr><td class="param-name">numteams</td><td class="param-type">integer</td><td>How many teams the bracket holds. At least 2.</td></tr>
+            <tr><td class="param-name">double_elim</td><td class="param-type">boolean, optional</td><td>Double elimination instead of single. Defaults to single.</td></tr>
+          </table>
+          <div class="cmd-note">
+            <strong>Creating the first tournament in a server needs no special permission — overwriting an
+            existing one does.</strong> Since a server only ever has one tournament, running this again while
+            one already exists requires the <strong style="color:var(--text);">Manage Server</strong>
+            permission, and doesn't overwrite it right away even then — Shockwave posts a warning naming the
+            existing tournament with "Overwrite tournament" / "Cancel" buttons, same confirmation pattern as
+            <code class="inline">/clear</code>'s <code class="inline">clear_elo</code>/<code class="inline">clear_economy</code>.
+            Only the member who ran the command can click them, and the prompt expires after 30 seconds
+            untouched if ignored.
+          </div>
+        </div>
+
+        <div class="cmd-card" id="tournament-register">
+          <div class="cmd-head">
+            <span class="cmd-name"><span class="slash">/</span>tournament-register</span>
+            <span class="cmd-badge">tournament</span>
+          </div>
+          <p class="cmd-desc">Registers one of your teams for the server's tournament. Captain-only.</p>
+          <table class="params">
+            <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+            <tr><td class="param-name">team</td><td class="param-type">string</td><td>Name of the team to register.</td></tr>
+          </table>
+          <div class="cmd-note">
+            <strong>Has to actually fit.</strong> The team's current roster size must match the tournament's
+            team size exactly, it can't already be registered, the bracket can't already be full, and none of
+            its players can already be on another team registered for this same tournament — a player can sit
+            on multiple teams in the server, just not two that are both in the same tournament.
+          </div>
+        </div>
+
+        <div class="cmd-card" id="tournament-create-bracket">
+          <div class="cmd-head">
+            <span class="cmd-name"><span class="slash">/</span>tournament-create-bracket</span>
+            <span class="cmd-badge">tournament</span>
+          </div>
+          <p class="cmd-desc">Builds the tournament bracket from whichever teams are currently registered, seeded in random order.</p>
+          <table class="params">
+            <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+            <tr><td class="param-name">elimination_type</td><td class="param-type">choice</td><td>Single or double elimination.</td></tr>
+          </table>
+          <div class="cmd-note">
+            <strong>Running it again is a reroll.</strong> There's no confirmation here — calling
+            <code class="inline">/tournament-create-bracket</code> again replaces whatever bracket already existed,
+            reshuffled from the currently-registered teams. If the team count isn't a power of two, the
+            leftover slots are byes. The bracket is printed automatically right after — no need to also run
+            <code class="inline">/tournament-print-bracket</code> unless you want to see it again later.
+          </div>
+        </div>
+
+        <div class="cmd-card" id="tournament-print-bracket">
+          <div class="cmd-head">
+            <span class="cmd-name"><span class="slash">/</span>tournament-print-bracket</span>
+            <span class="cmd-badge">tournament</span>
+          </div>
+          <p class="cmd-desc">Prints the current bracket — real matchups for round 1, "Winner of (X vs Y)" for the round right after that, and a champion line.</p>
+          <div class="cmd-note">
+            <strong>Only expands one level.</strong> Round 2's possible matchups are spelled out from round 1's
+            real teams, but rounds further out just show <code class="inline">TBD</code> — genuinely unknown
+            until the games before them are actually played.
+          </div>
+        </div>
+
+        <div class="cmd-card" id="tournament-start">
+          <div class="cmd-head">
+            <span class="cmd-name"><span class="slash">/</span>tournament-start</span>
+            <span class="cmd-badge">tournament</span>
+          </div>
+          <p class="cmd-desc">Starts playing the current round of the bracket. Byes auto-advance immediately; everything else becomes a match.</p>
+          <table class="params">
+            <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+            <tr><td class="param-name">mode</td><td class="param-type">choice</td><td>Sequential or Simultaneous — see below. Applies to the whole tournament run, not just this round.</td></tr>
+          </table>
+          <div class="cmd-note">
+            <strong>Sequential.</strong> One match at a time. Shockwave posts "<code class="inline">Match #N: A
+            vs B — react with ✅ when ready</code>" — either team's captain can react to begin it. Once
+            accepted, that match runs through the exact same cycle as <code class="inline">/start</code>:
+            <code class="inline">/wager</code> opens, the usual 1️⃣/2️⃣ winner report resolves it, payouts and
+            elo apply normally. As soon as it resolves, the bracket updates in chat and the next match's ready
+            check goes out — the round doesn't advance until every match in it is done, even if two other
+            teams are both sitting there ready to go.
+          </div>
+          <div class="cmd-note">
+            <strong>Simultaneous.</strong> Every match in the round posts its "<code class="inline">Match #N: A
+            vs B</code>" report at once, reacted with 1️⃣/2️⃣ like any normal winner report — no ready check, no
+            betting (there's no way to run multiple betting pools at once). The bracket updates in chat as
+            each one comes in.
+          </div>
+          <div class="cmd-note">
+            <strong>Round transitions get their own announcement.</strong> Once every match in a round has
+            resolved, Shockwave posts "<code class="inline">🏁 Round N has ended!</code>" with a fresh copy of
+            the bracket, then immediately kicks off the next round — or, once the bracket has nothing left to
+            play, announces the champion. None of this blocks the bot: everything runs off reactions rather
+            than a waiting loop, so <code class="inline">/wager</code> and every other command keep working
+            normally for other games in progress while a tournament round plays out.
+          </div>
+          <div class="cmd-note">
+            <strong>Every match gets an id.</strong> Shown as <code class="inline">Match #N</code> in its
+            messages — pass it as <code class="inline">match_id</code> to
+            <a href="commands.html#report-correct-winner" style="color:var(--gold);">/report-correct-winner</a>
+            to fix a wrong reaction, as long as the next round hasn't started yet.
+          </div>
         </div>
       </section>
 

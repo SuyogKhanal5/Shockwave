@@ -35,6 +35,7 @@
         <div class="nav-label">Overview</div>
         <a class="nav-link" href="index.html#top">Introduction</a>
         <a class="nav-link" href="index.html#quick-start">Draft-night flow</a>
+        <a class="nav-link" href="index.html#tournament-flow">Tournament flow</a>
       </div>
       <div class="nav-group">
         <div class="nav-label">Get started</div>
@@ -45,6 +46,7 @@
         <a class="nav-link" href="commands.html#team-setup">Team setup</a>
         <a class="nav-link" href="commands.html#team-formation">Team formation</a>
         <a class="nav-link" href="commands.html#voice-ops">Voice channel ops</a>
+        <a class="nav-link" href="commands.html#tournaments">Tournaments &amp; teams</a>
         <a class="nav-link" href="commands.html#utility">Utility</a>
       </div>
       <div class="nav-group">
@@ -113,7 +115,7 @@
             <div class="flow-num">01</div>
             <div class="flow-body">
               <h4>Point the bot at your voice channels</h4>
-              <p>Run <code class="inline">/set-team-channels</code> once per server. Shockwave creates the channels if they don't exist yet.</p>
+              <p>Run <code class="inline">/team-set-channels</code> once per server. Shockwave creates the channels if they don't exist yet. If your games aren't 5v5, also run <code class="inline">/team-set-size</code> so commands like <code class="inline">/notify</code> know how big a game to advertise.</p>
             </div>
           </div>
           <div class="flow-step">
@@ -156,9 +158,46 @@
 
       <hr class="rule">
 
+      <section class="block" id="tournament-flow">
+        <div class="eyebrow">Running a bracket, not just a scrim</div>
+        <h2>Tournaments are a second, separate flow</h2>
+        <p class="muted" style="max-width:58ch;">
+          Everything above is one game at a time. For a real bracket, Shockwave has a
+          parallel system built around persistent teams instead of an ad-hoc roster.
+        </p>
+
+        <div class="flow">
+          <div class="flow-step">
+            <div class="flow-num">01</div>
+            <div class="flow-body">
+              <h4>Stand up persistent teams</h4>
+              <p><code class="inline">/team-create</code> makes a named team with a captain and a target size — it sticks around across sessions. Captains grow the roster with <code class="inline">/team-invite</code> and give it a home with <code class="inline">/team-set-voice-channel</code>.</p>
+            </div>
+          </div>
+          <div class="flow-step">
+            <div class="flow-num">02</div>
+            <div class="flow-body">
+              <h4>Open the tournament and register</h4>
+              <p><code class="inline">/tournament-create</code> sets the name, team size, and bracket size once for the server. Captains bring their own team in with <code class="inline">/tournament-register</code>.</p>
+            </div>
+          </div>
+          <div class="flow-step">
+            <div class="flow-num">03</div>
+            <div class="flow-body">
+              <h4>Build the bracket and play it out</h4>
+              <p><code class="inline">/tournament-create-bracket</code> seeds a real single-elimination tree — <code class="inline">/tournament-start</code> then plays it match by match (one at a time with betting, or every match in the round at once), updating the bracket in chat as each result comes in until there's a champion.</p>
+            </div>
+          </div>
+        </div>
+
+        <p style="margin-top:14px;"><a href="commands.html#tournaments" style="color:var(--gold);">Full tournament &amp; team command reference →</a></p>
+      </section>
+
+      <hr class="rule">
+
       <section class="block">
         <div class="eyebrow">What it handles</div>
-        <h2>Five things, done well</h2>
+        <h2>Six things, done well</h2>
         <div class="grid">
           <div class="card">
             <h3>Team setup</h3>
@@ -177,8 +216,13 @@
           </div>
           <div class="card">
             <h3>Betting &amp; economy</h3>
-            <p>A gold balance for every member, daily gold, and pari-mutuel bets on who wins each game.</p>
+            <p>A gold balance for every member, daily gold, pari-mutuel bets on who wins each game, and heads-up wagers between two players.</p>
             <a class="card-link" href="commands.html#betting">See betting commands →</a>
+          </div>
+          <div class="card">
+            <h3>Tournaments &amp; teams</h3>
+            <p>Persistent named teams with captains and their own voice channel, registered into a real single-elimination bracket that plays itself out match by match.</p>
+            <a class="card-link" href="commands.html#tournaments">See tournament commands →</a>
           </div>
           <div class="card">
             <h3>Utility</h3>
