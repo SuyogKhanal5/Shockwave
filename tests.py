@@ -61,6 +61,10 @@ WAGERS_SCHEMA = (
     "PRIMARY KEY(guildId, userId))"
 )
 LAST_RESULT_SCHEMA = "CREATE TABLE last_result(guildId PRIMARY KEY, data)"
+DUELS_SCHEMA = (
+    "CREATE TABLE duels(id INTEGER PRIMARY KEY AUTOINCREMENT, guildId, channelId, messageId, "
+    "challengerId, challengerName, targetId, targetName, amount, state)"
+)
 
 
 def make_db():
@@ -70,6 +74,7 @@ def make_db():
     cursor.execute(ECONOMY_SCHEMA)
     cursor.execute(WAGERS_SCHEMA)
     cursor.execute(LAST_RESULT_SCHEMA)
+    cursor.execute(DUELS_SCHEMA)
     db.commit()
     return db, cursor
 
@@ -155,6 +160,7 @@ class FakeInteraction:
         self.channel = channel if channel is not None else FakeChannel("text-channel")
         self.response = AsyncMock()
         self.followup = AsyncMock()
+        self.original_response = AsyncMock(return_value=FakeMessage())
 
 
 class FakeClient:
@@ -171,12 +177,13 @@ class FakeClient:
 
 
 class FakePayload:
-    def __init__(self, guild_id, message_id, channel_id, emoji, member=None):
+    def __init__(self, guild_id, message_id, channel_id, emoji, member=None, user_id=None):
         self.guild_id = guild_id
         self.message_id = message_id
         self.channel_id = channel_id
         self.emoji = emoji
         self.member = member
+        self.user_id = user_id if user_id is not None else (member.id if member is not None else None)
 
 
 # ===========================================================================
@@ -1722,6 +1729,227 @@ class HandleWinnerReactionTests(HelperTestCase):
         mock.assert_awaited_once()
 
 
+class ChallengeDuelHelperTests(HelperTestCase):
+    def _ctx(self, user_id=901, name="Alice", channel=None):
+        return FakeInteraction(self.guild, FakeMember(name, id=user_id), channel=channel)
+
+    async def test_rejects_challenging_yourself(self):
+        ctx = self._ctx()
+        await self.helperObj.challengeDuelHelper(ctx, ctx.user, 100)
+        ctx.response.send_message.assert_awaited_once_with("You can't wager against yourself!")
+
+    async def test_rejects_challenging_a_bot(self):
+        ctx = self._ctx()
+        target = FakeMember("Botty", id=902, bot=True)
+        await self.helperObj.challengeDuelHelper(ctx, target, 100)
+        ctx.response.send_message.assert_awaited_once_with("You can't wager against a bot!")
+
+    async def test_rejects_non_positive_amount(self):
+        ctx = self._ctx()
+        target = FakeMember("Bob", id=902)
+        await self.helperObj.challengeDuelHelper(ctx, target, 0)
+        ctx.response.send_message.assert_awaited_once_with(
+            "Wager amount must be greater than 0."
+        )
+
+    async def test_rejects_insufficient_balance(self):
+        ctx = self._ctx()
+        target = FakeMember("Bob", id=902)
+        await self.helperObj.challengeDuelHelper(ctx, target, 100)
+        ctx.response.send_message.assert_awaited_once_with(
+            "You don't have enough gold for that! Your balance is 0."
+        )
+
+    async def test_successful_challenge_posts_message_and_stores_pending_duel(self):
+        self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.cursor.execute(
+            "UPDATE economy SET balance=1000 WHERE guildId=? AND userId=?", (GUILD_ID, 901)
+        )
+        self.db.commit()
+
+        channel = FakeChannel("general")
+        ctx = self._ctx(channel=channel)
+        target = FakeMember("Bob", id=902)
+        posted_message = FakeMessage(id=4242)
+        ctx.original_response.return_value = posted_message
+
+        await self.helperObj.challengeDuelHelper(ctx, target, 250)
+
+        ctx.response.send_message.assert_awaited_once()
+        text = ctx.response.send_message.call_args.args[0]
+        self.assertIn(target.mention, text)
+        self.assertIn(ctx.user.mention, text)
+        self.assertIn("250", text)
+        posted_message.add_reaction.assert_awaited_once_with(helper_module.DUEL_ACCEPT_EMOJI)
+
+        # challenging doesn't escrow anything up front
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "balance"), 1000)
+
+        self.cursor.execute(
+            "SELECT guildId, channelId, messageId, challengerId, targetId, amount, state FROM duels"
+        )
+        row = self.cursor.fetchone()
+        self.assertEqual(
+            row, (GUILD_ID, channel.id, posted_message.id, 901, 902, 250, "PENDING_ACCEPT")
+        )
+
+
+class HandleDuelReactionTests(HelperTestCase):
+    def setUp(self):
+        super().setUp()
+        self.channel = FakeChannel("general")
+        self.helperObj.client = FakeClient(channels=[self.channel], guilds=[self.guild])
+        self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.helperObj.ensureEconomyRow(GUILD_ID, 902, "Bob")
+        self.cursor.execute(
+            "UPDATE economy SET balance=1000 WHERE guildId=? AND userId IN (901, 902)",
+            (GUILD_ID,),
+        )
+        self.db.commit()
+        self.cursor.execute(
+            "INSERT INTO duels(guildId, channelId, messageId, challengerId, challengerName, "
+            "targetId, targetName, amount, state) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'PENDING_ACCEPT')",
+            (GUILD_ID, self.channel.id, 555, 901, "Alice", 902, "Bob", 250),
+        )
+        self.db.commit()
+        # accepting posts a new message and reacts on it — give it a real
+        # id/add_reaction rather than the channel's plain default AsyncMock.
+        self.channel.send = AsyncMock(return_value=FakeMessage(id=777))
+
+    async def test_ignores_unrelated_emoji(self):
+        payload = FakePayload(GUILD_ID, 555, self.channel.id, "🎉", user_id=902)
+        await self.helperObj.handleDuelReaction(payload)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "balance"), 1000)
+
+    async def test_accept_from_challenger_is_ignored(self):
+        payload = FakePayload(
+            GUILD_ID, 555, self.channel.id, helper_module.DUEL_ACCEPT_EMOJI, user_id=901
+        )
+        await self.helperObj.handleDuelReaction(payload)
+
+        self.cursor.execute("SELECT state FROM duels WHERE messageId=555")
+        self.assertEqual(self.cursor.fetchone()[0], "PENDING_ACCEPT")
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "balance"), 1000)
+
+    async def test_accept_from_target_escrows_both_and_posts_result_prompt(self):
+        result_message = self.channel.send.return_value
+
+        payload = FakePayload(
+            GUILD_ID, 555, self.channel.id, helper_module.DUEL_ACCEPT_EMOJI, user_id=902
+        )
+        await self.helperObj.handleDuelReaction(payload)
+
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "balance"), 750)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 902, "balance"), 750)
+
+        self.cursor.execute(
+            "SELECT state, messageId FROM duels WHERE challengerId=901 AND targetId=902"
+        )
+        state, message_id = self.cursor.fetchone()
+        self.assertEqual(state, "AWAITING_RESULT")
+        self.assertEqual(message_id, 777)
+
+        result_message.add_reaction.assert_any_await(helper_module.DUEL_CHALLENGER_EMOJI)
+        result_message.add_reaction.assert_any_await(helper_module.DUEL_TARGET_EMOJI)
+
+    async def test_accept_cancels_if_either_side_cant_cover_it(self):
+        self.cursor.execute(
+            "UPDATE economy SET balance=100 WHERE guildId=? AND userId=902", (GUILD_ID,)
+        )
+        self.db.commit()
+
+        payload = FakePayload(
+            GUILD_ID, 555, self.channel.id, helper_module.DUEL_ACCEPT_EMOJI, user_id=902
+        )
+        await self.helperObj.handleDuelReaction(payload)
+
+        # nothing escrowed, no duel left behind
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "balance"), 1000)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 902, "balance"), 100)
+        self.cursor.execute("SELECT COUNT(*) FROM duels")
+        self.assertEqual(self.cursor.fetchone()[0], 0)
+        self.channel.send.assert_awaited_once()
+
+    async def test_result_reaction_before_accept_is_ignored(self):
+        payload = FakePayload(
+            GUILD_ID, 555, self.channel.id, helper_module.DUEL_CHALLENGER_EMOJI, user_id=555
+        )
+        await self.helperObj.handleDuelReaction(payload)
+
+        self.cursor.execute("SELECT state FROM duels WHERE messageId=555")
+        self.assertEqual(self.cursor.fetchone()[0], "PENDING_ACCEPT")
+
+    async def test_challenger_win_pays_out_and_updates_bet_records(self):
+        accept_payload = FakePayload(
+            GUILD_ID, 555, self.channel.id, helper_module.DUEL_ACCEPT_EMOJI, user_id=902
+        )
+        await self.helperObj.handleDuelReaction(accept_payload)
+
+        self.cursor.execute("SELECT messageId FROM duels WHERE challengerId=901")
+        result_message_id = self.cursor.fetchone()[0]
+
+        win_payload = FakePayload(
+            GUILD_ID, result_message_id, self.channel.id, helper_module.DUEL_CHALLENGER_EMOJI, user_id=903
+        )
+        await self.helperObj.handleDuelReaction(win_payload)
+
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "balance"), 1250)  # 750 + 500 pot
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "wins"), 1)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "gold_won"), 250)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 902, "balance"), 750)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 902, "losses"), 1)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 902, "gold_lost"), 250)
+
+        self.cursor.execute("SELECT COUNT(*) FROM duels")
+        self.assertEqual(self.cursor.fetchone()[0], 0)
+
+    async def test_target_win_pays_out_the_other_way(self):
+        accept_payload = FakePayload(
+            GUILD_ID, 555, self.channel.id, helper_module.DUEL_ACCEPT_EMOJI, user_id=902
+        )
+        await self.helperObj.handleDuelReaction(accept_payload)
+
+        self.cursor.execute("SELECT messageId FROM duels WHERE challengerId=901")
+        result_message_id = self.cursor.fetchone()[0]
+
+        win_payload = FakePayload(
+            GUILD_ID, result_message_id, self.channel.id, helper_module.DUEL_TARGET_EMOJI, user_id=903
+        )
+        await self.helperObj.handleDuelReaction(win_payload)
+
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 902, "balance"), 1250)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 902, "wins"), 1)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "balance"), 750)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "losses"), 1)
+
+    async def test_concurrent_result_reactions_only_pay_out_once(self):
+        accept_payload = FakePayload(
+            GUILD_ID, 555, self.channel.id, helper_module.DUEL_ACCEPT_EMOJI, user_id=902
+        )
+        await self.helperObj.handleDuelReaction(accept_payload)
+
+        self.cursor.execute("SELECT messageId FROM duels WHERE challengerId=901")
+        result_message_id = self.cursor.fetchone()[0]
+
+        payload1 = FakePayload(
+            GUILD_ID, result_message_id, self.channel.id, helper_module.DUEL_CHALLENGER_EMOJI, user_id=903
+        )
+        payload2 = FakePayload(
+            GUILD_ID, result_message_id, self.channel.id, helper_module.DUEL_TARGET_EMOJI, user_id=904
+        )
+        await asyncio.gather(
+            self.helperObj.handleDuelReaction(payload1),
+            self.helperObj.handleDuelReaction(payload2),
+        )
+
+        # exactly one side paid out — total gold in the pot is conserved
+        total = (
+            self.helperObj.getEconomy(GUILD_ID, 901, "balance")
+            + self.helperObj.getEconomy(GUILD_ID, 902, "balance")
+        )
+        self.assertEqual(total, 2000)
+
+
 # ===========================================================================
 # bot.py — import with DB/token side effects redirected away from the real
 # project database and the real bot token, then exercise command callbacks
@@ -1769,7 +1997,7 @@ class CommandRegistrationTests(BotModuleTestCase):
     def test_all_expected_commands_registered(self):
         names = {c.name for c in self.bot.tree.get_commands(guild=discord.Object(id=COMMAND_GUILD_ID))}
         expected = {
-            "set-team-size", "set-team-channels", "start", "wager", "daily",
+            "set-team-size", "set-team-channels", "start", "wager", "wager-against", "daily",
             "stats", "help", "make-teams", "ranked", "return", "report-correct-winner",
             "captains", "ranked-captains", "choose", "clear", "notify", "notify-role",
             "roll", "randomize-roles",
@@ -1801,27 +2029,35 @@ class GuildLifecycleEventTests(BotModuleTestCase):
 class ReactionEventTests(BotModuleTestCase):
     async def test_ignores_bot_reactions(self):
         payload = SimpleNamespace(member=FakeMember("BotUser", bot=True), guild_id=1)
-        with patch.object(self.bot.helperObj, "handleWinnerReaction", AsyncMock()) as mock:
+        with patch.object(self.bot.helperObj, "handleWinnerReaction", AsyncMock()) as winner_mock, \
+             patch.object(self.bot.helperObj, "handleDuelReaction", AsyncMock()) as duel_mock:
             await self.bot.on_raw_reaction_add(payload)
-        mock.assert_not_awaited()
+        winner_mock.assert_not_awaited()
+        duel_mock.assert_not_awaited()
 
     async def test_ignores_reactions_with_no_member(self):
         payload = SimpleNamespace(member=None, guild_id=1)
-        with patch.object(self.bot.helperObj, "handleWinnerReaction", AsyncMock()) as mock:
+        with patch.object(self.bot.helperObj, "handleWinnerReaction", AsyncMock()) as winner_mock, \
+             patch.object(self.bot.helperObj, "handleDuelReaction", AsyncMock()) as duel_mock:
             await self.bot.on_raw_reaction_add(payload)
-        mock.assert_not_awaited()
+        winner_mock.assert_not_awaited()
+        duel_mock.assert_not_awaited()
 
     async def test_ignores_dm_reactions(self):
         payload = SimpleNamespace(member=FakeMember("User"), guild_id=None)
-        with patch.object(self.bot.helperObj, "handleWinnerReaction", AsyncMock()) as mock:
+        with patch.object(self.bot.helperObj, "handleWinnerReaction", AsyncMock()) as winner_mock, \
+             patch.object(self.bot.helperObj, "handleDuelReaction", AsyncMock()) as duel_mock:
             await self.bot.on_raw_reaction_add(payload)
-        mock.assert_not_awaited()
+        winner_mock.assert_not_awaited()
+        duel_mock.assert_not_awaited()
 
     async def test_delegates_valid_guild_member_reaction(self):
         payload = SimpleNamespace(member=FakeMember("User"), guild_id=1)
-        with patch.object(self.bot.helperObj, "handleWinnerReaction", AsyncMock()) as mock:
+        with patch.object(self.bot.helperObj, "handleWinnerReaction", AsyncMock()) as winner_mock, \
+             patch.object(self.bot.helperObj, "handleDuelReaction", AsyncMock()) as duel_mock:
             await self.bot.on_raw_reaction_add(payload)
-        mock.assert_awaited_once_with(payload)
+        winner_mock.assert_awaited_once_with(payload)
+        duel_mock.assert_awaited_once_with(payload)
 
 
 class CommandDelegationTests(BotModuleTestCase):
@@ -1843,6 +2079,14 @@ class CommandDelegationTests(BotModuleTestCase):
             choice = app_commands.Choice(name="Team 2", value=2)
             await self._command("wager").callback(ctx, 250, choice)
         mock.assert_awaited_once_with(ctx, 250, 2)
+
+    async def test_wager_against_delegates(self):
+        ctx = self._ctx()
+        target = FakeMember("Bob", id=902)
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "challengeDuelHelper", mock):
+            await self._command("wager-against").callback(ctx, target, 250)
+        mock.assert_awaited_once_with(ctx, target, 250)
 
     async def test_daily_delegates(self):
         ctx = self._ctx()

@@ -419,6 +419,28 @@
           </div>
         </div>
 
+        <div class="cmd-card" id="wager-against">
+          <div class="cmd-head">
+            <span class="cmd-name"><span class="slash">/</span>wager-against</span>
+            <span class="cmd-badge">betting</span>
+          </div>
+          <p class="cmd-desc">Challenges another player to a heads-up gold wager, completely separate from the team-game betting above — no <code class="inline">/start</code> or current game required.</p>
+          <table class="params">
+            <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+            <tr><td class="param-name">member</td><td class="param-type">member</td><td>Who to challenge. Can't be yourself or a bot.</td></tr>
+            <tr><td class="param-name">amount</td><td class="param-type">integer</td><td>How much gold each side stakes. Must not exceed your balance.</td></tr>
+          </table>
+          <div class="cmd-note">
+            <strong>How it plays out.</strong> Shockwave posts a message mentioning the challenged player and
+            reacts with ✅ — only they can react to accept. Nothing is held from either side until they do; on
+            accept, both players' gold is escrowed and a new message goes out asking who actually won, reacted
+            with 🔵 (challenger) and 🔴 (challenged player) automatically. The first valid reaction from anyone
+            in the server records the result and pays the full pot to the winner — same "first reaction wins"
+            behavior as reporting a team game's winner. If either player can no longer cover the amount by the
+            time it's accepted, the wager is cancelled instead of running.
+          </div>
+        </div>
+
         <div class="cmd-card" id="daily">
           <div class="cmd-head">
             <span class="cmd-name"><span class="slash">/</span>daily</span>

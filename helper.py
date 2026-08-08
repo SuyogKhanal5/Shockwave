@@ -45,6 +45,14 @@ ELO_DIVISIONS = ["IV", "III", "II", "I"]
 # instead of I-IV once you hit Master.
 ELO_DIVISIONED_TIER_COUNT = 6
 
+# /wager-against: a heads-up gold wager between two specific players,
+# independent of the team-game betting above. The challenged player
+# accepts with a checkmark; once accepted, anyone can react blue/red to
+# report who actually won, same as the team-game winner report.
+DUEL_ACCEPT_EMOJI = "✅"       # ✅
+DUEL_CHALLENGER_EMOJI = "\U0001f535"  # 🔵 — challenger ("player 1") won
+DUEL_TARGET_EMOJI = "\U0001f534"      # 🔴 — target ("player 2") won
+
 # BUG FIX: this dict used to only live in main.py. helper.py's
 # randomRoleHelper did `global roles` and expected to find it — but each
 # Python module has its own separate global namespace, so that `global`
@@ -1023,6 +1031,185 @@ class helpers():
 
         if guild is not None and await self.moveMembersToOriginalChannel(guild):
             await channel.send("Moved everyone back to the original channel!")
+
+    # ---------------- Duels (/wager-against) ----------------
+
+    # Challenges `member` to a heads-up wager for `amount` gold, independent
+    # of any team game — posts a message mentioning them and reacts with
+    # DUEL_ACCEPT_EMOJI; the duel only actually escrows gold once they react
+    # to accept (see handleDuelReaction), so nothing is held here.
+    async def challengeDuelHelper(self, ctx, member, amount):
+        guild_id = ctx.guild.id
+        challenger = ctx.user
+
+        if member.id == challenger.id:
+            await ctx.response.send_message("You can't wager against yourself!")
+            return
+
+        if member.bot:
+            await ctx.response.send_message("You can't wager against a bot!")
+            return
+
+        if amount <= 0:
+            await ctx.response.send_message("Wager amount must be greater than 0.")
+            return
+
+        self.ensureEconomyRow(guild_id, challenger.id, challenger.name)
+        balance = self.getEconomy(guild_id, challenger.id, "balance")
+        if amount > balance:
+            await ctx.response.send_message(
+                f"You don't have enough gold for that! Your balance is {balance}."
+            )
+            return
+
+        self.cursor.execute(
+            "INSERT INTO duels(guildId, channelId, messageId, challengerId, challengerName, "
+            "targetId, targetName, amount, state) VALUES(?, ?, NULL, ?, ?, ?, ?, ?, 'PENDING_ACCEPT')",
+            (guild_id, ctx.channel.id, challenger.id, challenger.name, member.id, member.name, amount)
+        )
+        self.db.commit()
+        duel_id = self.cursor.lastrowid
+
+        await ctx.response.send_message(
+            f"{member.mention}, {challenger.mention} has challenged you to a **{amount} gold** wager! "
+            f"React with {DUEL_ACCEPT_EMOJI} to accept."
+        )
+        msg = await ctx.original_response()
+        await msg.add_reaction(DUEL_ACCEPT_EMOJI)
+
+        self.cursor.execute("UPDATE duels SET messageId=? WHERE id=?", (msg.id, duel_id))
+        self.db.commit()
+
+    # Called from bot.py's on_raw_reaction_add for every reaction — no-ops
+    # immediately unless the emoji/message match a duel currently waiting on
+    # exactly that reaction.
+    async def handleDuelReaction(self, payload):
+        guild_id = payload.guild_id
+        if guild_id is None:
+            return
+
+        emoji = str(payload.emoji)
+        if emoji not in (DUEL_ACCEPT_EMOJI, DUEL_CHALLENGER_EMOJI, DUEL_TARGET_EMOJI):
+            return
+
+        self.cursor.execute(
+            "SELECT id, channelId, challengerId, challengerName, targetId, targetName, amount, state "
+            "FROM duels WHERE guildId=? AND messageId=?",
+            (guild_id, payload.message_id)
+        )
+        row = self.cursor.fetchone()
+        if row is None:
+            return
+        duel_id, channel_id, challenger_id, challenger_name, target_id, target_name, amount, state = row
+
+        if emoji == DUEL_ACCEPT_EMOJI:
+            # Only the challenged player can accept their own challenge.
+            if state != "PENDING_ACCEPT" or payload.user_id != target_id:
+                return
+            await self._acceptDuel(
+                guild_id, duel_id, channel_id, challenger_id, challenger_name, target_id, target_name, amount
+            )
+            return
+
+        if state != "AWAITING_RESULT":
+            return
+        winner_is_challenger = emoji == DUEL_CHALLENGER_EMOJI
+        await self._resolveDuel(
+            guild_id, duel_id, channel_id, challenger_id, challenger_name,
+            target_id, target_name, amount, winner_is_challenger
+        )
+
+    # Escrows `amount` from both players and posts the win/loss report
+    # message, pre-reacted with the blue/red circle choices.
+    async def _acceptDuel(
+        self, guild_id, duel_id, channel_id, challenger_id, challenger_name, target_id, target_name, amount
+    ):
+        # BUG-PRONE PATTERN AVOIDED: flip the state before anything async
+        # below, so a double-click on accept can't process twice.
+        self.cursor.execute("UPDATE duels SET state='ACCEPTING' WHERE id=?", (duel_id,))
+        self.db.commit()
+
+        self.ensureEconomyRow(guild_id, target_id, target_name)
+        challenger_balance = self.getEconomy(guild_id, challenger_id, "balance")
+        target_balance = self.getEconomy(guild_id, target_id, "balance")
+
+        channel = self.client.get_channel(channel_id)
+        if channel is None:
+            channel = await self.client.fetch_channel(channel_id)
+
+        if challenger_balance < amount or target_balance < amount:
+            self.cursor.execute("DELETE FROM duels WHERE id=?", (duel_id,))
+            self.db.commit()
+            await channel.send(
+                f"Wager cancelled — one of you no longer has {amount} gold to cover it."
+            )
+            return
+
+        self.cursor.execute(
+            "UPDATE economy SET balance = balance - ? WHERE guildId=? AND userId=?",
+            (amount, guild_id, challenger_id)
+        )
+        self.cursor.execute(
+            "UPDATE economy SET balance = balance - ? WHERE guildId=? AND userId=?",
+            (amount, guild_id, target_id)
+        )
+        self.db.commit()
+
+        pot = amount * 2
+        msg = await channel.send(
+            f"\U0001f4b0 **{challenger_name}** vs **{target_name}** — {pot} gold on the line! "
+            f"React with {DUEL_CHALLENGER_EMOJI} if {challenger_name} won, "
+            f"or {DUEL_TARGET_EMOJI} if {target_name} won."
+        )
+        await msg.add_reaction(DUEL_CHALLENGER_EMOJI)
+        await msg.add_reaction(DUEL_TARGET_EMOJI)
+
+        self.cursor.execute(
+            "UPDATE duels SET state='AWAITING_RESULT', messageId=? WHERE id=?", (msg.id, duel_id)
+        )
+        self.db.commit()
+
+    # Pays the pot to the winner and records both players' bet win/loss
+    # stats, same economy columns the team-game bets use.
+    async def _resolveDuel(
+        self, guild_id, duel_id, channel_id, challenger_id, challenger_name,
+        target_id, target_name, amount, winner_is_challenger
+    ):
+        # BUG-PRONE PATTERN AVOIDED: delete the duel row before anything
+        # async below, so a second near-simultaneous reaction can't also
+        # pass the AWAITING_RESULT check and pay out twice.
+        self.cursor.execute("DELETE FROM duels WHERE id=?", (duel_id,))
+        self.db.commit()
+
+        if winner_is_challenger:
+            winner_id, winner_name, loser_id, loser_name = (
+                challenger_id, challenger_name, target_id, target_name
+            )
+        else:
+            winner_id, winner_name, loser_id, loser_name = (
+                target_id, target_name, challenger_id, challenger_name
+            )
+
+        pot = amount * 2
+        self.cursor.execute(
+            "UPDATE economy SET balance = balance + ?, wins = wins + 1, "
+            "gold_wagered = gold_wagered + ?, gold_won = gold_won + ? WHERE guildId=? AND userId=?",
+            (pot, amount, amount, guild_id, winner_id)
+        )
+        self.cursor.execute(
+            "UPDATE economy SET losses = losses + 1, gold_wagered = gold_wagered + ?, "
+            "gold_lost = gold_lost + ? WHERE guildId=? AND userId=?",
+            (amount, amount, guild_id, loser_id)
+        )
+        self.db.commit()
+
+        channel = self.client.get_channel(channel_id)
+        if channel is None:
+            channel = await self.client.fetch_channel(channel_id)
+
+        await channel.send(
+            f"\U0001f3c6 **{winner_name}** wins the wager against **{loser_name}** and takes home **{pot} gold**!"
+        )
 
     # Pari-mutuel betting payouts (winners split the losing side's pool
     # proportional to their own wager, on top of getting their own wager

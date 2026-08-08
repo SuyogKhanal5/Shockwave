@@ -98,6 +98,15 @@ cursor.execute(
 cursor.execute(
     "CREATE TABLE IF NOT EXISTS last_result(guildId PRIMARY KEY, data)"
 )
+# One row per active /wager-against challenge — unlike the team-game
+# `wagers` table above, several of these can be open at once per guild
+# (different pairs of players), so each is tracked by its own row/message
+# rather than a single column on `servers`.
+cursor.execute(
+    "CREATE TABLE IF NOT EXISTS duels("
+    "id INTEGER PRIMARY KEY AUTOINCREMENT, guildId, channelId, messageId, "
+    "challengerId, challengerName, targetId, targetName, amount, state)"
+)
 mainDB.commit()
 
 helperObj = helper.helpers(cursor, mainDB)
@@ -151,6 +160,7 @@ async def on_raw_reaction_add(payload):
         return
 
     await helperObj.handleWinnerReaction(payload)
+    await helperObj.handleDuelReaction(payload)
 
 # Commands
 # TODO: change ids when putting into production
@@ -204,6 +214,16 @@ async def start(ctx):
 ])
 async def wager(ctx, amount: int, team: app_commands.Choice[int]):
     await helperObj.wagerHelper(ctx, amount, team.value)
+
+
+@tree.command(
+    name="wager-against",
+    description="Challenge another player to a heads-up gold wager",
+    guild=discord.Object(id=526081127643873280)
+)
+@app_commands.describe(member="Who to challenge", amount="How much gold is on the line")
+async def wagerAgainst(ctx, member: discord.Member, amount: int):
+    await helperObj.challengeDuelHelper(ctx, member, amount)
 
 
 @tree.command(
