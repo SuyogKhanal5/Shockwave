@@ -107,6 +107,12 @@ cursor.execute(
     "id INTEGER PRIMARY KEY AUTOINCREMENT, guildId, channelId, messageId, "
     "challengerId, challengerName, targetId, targetName, amount, state)"
 )
+# One row per posted /leaderboard message, tracking which page it's
+# currently showing so the paging reactions know what to re-render.
+cursor.execute(
+    "CREATE TABLE IF NOT EXISTS leaderboards("
+    "messageId INTEGER PRIMARY KEY, guildId, channelId, filter, sort_order, page)"
+)
 mainDB.commit()
 
 helperObj = helper.helpers(cursor, mainDB)
@@ -161,6 +167,7 @@ async def on_raw_reaction_add(payload):
 
     await helperObj.handleWinnerReaction(payload)
     await helperObj.handleDuelReaction(payload)
+    await helperObj.handleLeaderboardReaction(payload)
 
 # Commands
 # TODO: change ids when putting into production
@@ -243,6 +250,39 @@ async def daily(ctx):
 @app_commands.describe(member="Whose stats to look up — defaults to you")
 async def stats(ctx, member: discord.Member = None):
     await helperObj.statsHelper(ctx, member)
+
+
+@tree.command(
+    name="leaderboard",
+    description="Rank the server by a stat — react to page through it",
+    guild=discord.Object(id=526081127643873280)
+)
+@app_commands.describe(
+    filter="Which stat to rank by — omit for an overview of elo, balance, and record",
+    order="Highest-first or lowest-first — defaults to highest-first"
+)
+@app_commands.choices(filter=[
+    app_commands.Choice(name="Elo", value="elo"),
+    app_commands.Choice(name="Balance", value="balance"),
+    app_commands.Choice(name="Game Wins", value="game_wins"),
+    app_commands.Choice(name="Game Losses", value="game_losses"),
+    app_commands.Choice(name="Game Win Rate", value="game_win_rate"),
+    app_commands.Choice(name="Bet Wins", value="bet_wins"),
+    app_commands.Choice(name="Bet Losses", value="bet_losses"),
+    app_commands.Choice(name="Bet Win Rate", value="bet_win_rate"),
+    app_commands.Choice(name="Net Gold", value="net_gold"),
+    app_commands.Choice(name="Gold Wagered", value="gold_wagered"),
+])
+@app_commands.choices(order=[
+    app_commands.Choice(name="Descending (highest first)", value="desc"),
+    app_commands.Choice(name="Ascending (lowest first)", value="asc"),
+])
+async def leaderboard(
+    ctx, filter: app_commands.Choice[str] = None, order: app_commands.Choice[str] = None
+):
+    stat = filter.value if filter is not None else None
+    sort_order = order.value if order is not None else "desc"
+    await helperObj.leaderboardHelper(ctx, stat, sort_order)
 
 
 # TODO: update website to current shockwave website

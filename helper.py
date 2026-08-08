@@ -53,6 +53,33 @@ DUEL_ACCEPT_EMOJI = "✅"       # ✅
 DUEL_CHALLENGER_EMOJI = "\U0001f535"  # 🔵 — challenger ("player 1") won
 DUEL_TARGET_EMOJI = "\U0001f534"      # 🔴 — target ("player 2") won
 
+# /leaderboard: paged via reactions rather than re-running the command —
+# clicking one of these edits the existing message instead of posting a
+# new one (see handleLeaderboardReaction).
+LEADERBOARD_PAGE_SIZE = 10
+LEADERBOARD_FIRST_EMOJI = "⏮️"  # ⏮️ jump to the first page
+LEADERBOARD_PREV_EMOJI = "◀️"   # ◀️ previous page
+LEADERBOARD_NEXT_EMOJI = "▶️"   # ▶️ next page
+LEADERBOARD_LAST_EMOJI = "⏭️"   # ⏭️ jump to the last page
+LEADERBOARD_NAV_EMOJIS = (
+    LEADERBOARD_FIRST_EMOJI, LEADERBOARD_PREV_EMOJI, LEADERBOARD_NEXT_EMOJI, LEADERBOARD_LAST_EMOJI
+)
+
+# Every stat /leaderboard can filter/sort by, and its display label. "elo"
+# doubles as the default sort when no filter is given (the overview view).
+LEADERBOARD_STAT_LABELS = {
+    "elo": "Elo",
+    "balance": "Balance",
+    "game_wins": "Game Wins",
+    "game_losses": "Game Losses",
+    "game_win_rate": "Game Win Rate",
+    "bet_wins": "Bet Wins",
+    "bet_losses": "Bet Losses",
+    "bet_win_rate": "Bet Win Rate",
+    "net_gold": "Net Gold",
+    "gold_wagered": "Gold Wagered",
+}
+
 # BUG FIX: this dict used to only live in main.py. helper.py's
 # randomRoleHelper did `global roles` and expected to find it — but each
 # Python module has its own separate global namespace, so that `global`
@@ -1446,6 +1473,182 @@ class helpers():
         embed.add_field(name="Gold Wagered", value=str(gold_wagered), inline=True)
 
         await ctx.response.send_message(embed=embed)
+
+    # ---------------- Leaderboard ----------------
+
+    # One dict per player with an economy row in this guild — raw columns
+    # plus the same computed rates/totals /stats shows (win rates, net
+    # gold), so every LEADERBOARD_STAT_LABELS key is directly readable off
+    # each entry with entry[stat]. Win rates are None (not 0) when a player
+    # has no games/bets yet, so they can sort to the bottom instead of
+    # looking like the worst possible rate.
+    def getLeaderboardEntries(self, guild_id):
+        self.cursor.execute(
+            "SELECT userId, username, balance, wins, losses, gold_wagered, gold_won, gold_lost, "
+            "game_wins, game_losses, elo FROM economy WHERE guildId=?",
+            (guild_id,)
+        )
+        entries = []
+        for (user_id, username, balance, bet_wins, bet_losses, gold_wagered,
+             gold_won, gold_lost, game_wins, game_losses, elo) in self.cursor.fetchall():
+            bet_games = bet_wins + bet_losses
+            game_games = game_wins + game_losses
+            entries.append({
+                "user_id": user_id,
+                "username": username,
+                "balance": balance,
+                "bet_wins": bet_wins,
+                "bet_losses": bet_losses,
+                "gold_wagered": gold_wagered,
+                "net_gold": gold_won - gold_lost,
+                "game_wins": game_wins,
+                "game_losses": game_losses,
+                "elo": elo,
+                "bet_win_rate": (bet_wins / bet_games) if bet_games > 0 else None,
+                "game_win_rate": (game_wins / game_games) if game_games > 0 else None,
+            })
+        return entries
+
+    # Sorts by entry[stat] — highest first for order="desc", lowest first
+    # for order="asc" — with entries missing that stat (None, e.g. a win
+    # rate with no games played yet) always sinking to the bottom
+    # regardless of direction, rather than flipping to the top on "asc".
+    def _sortLeaderboardEntries(self, entries, stat, order):
+        def sort_key(entry):
+            value = entry[stat]
+            if value is None:
+                return (1, 0)
+            return (0, -value if order == "desc" else value)
+
+        return sorted(entries, key=sort_key)
+
+    def _formatLeaderboardStat(self, entry, stat):
+        value = entry[stat]
+        if stat in ("game_win_rate", "bet_win_rate"):
+            return f"{value * 100:.1f}%" if value is not None else "N/A"
+        if stat == "elo":
+            return f"{value} ({self.eloRankLabel(value)})"
+        if stat in ("balance", "gold_wagered"):
+            return f"{value} gold"
+        if stat == "net_gold":
+            return f"{value:+d} gold"
+        return str(value)
+
+    def _leaderboardPageCount(self, entries):
+        return max(1, -(-len(entries) // LEADERBOARD_PAGE_SIZE))  # ceil division
+
+    # Builds one page of the leaderboard embed. `stat` is None for the
+    # default overview (sorted by elo, showing elo/record together) or one
+    # of LEADERBOARD_STAT_LABELS for a single ranked stat.
+    def _renderLeaderboardEmbed(self, guild_name, entries_sorted, stat, order, page):
+        total_pages = self._leaderboardPageCount(entries_sorted)
+        start = page * LEADERBOARD_PAGE_SIZE
+        page_entries = entries_sorted[start:start + LEADERBOARD_PAGE_SIZE]
+
+        title = (
+            f"\U0001f3c6 {guild_name} Leaderboard — Overview" if stat is None
+            else f"\U0001f3c6 {guild_name} Leaderboard — {LEADERBOARD_STAT_LABELS[stat]}"
+        )
+
+        lines = []
+        for i, entry in enumerate(page_entries):
+            rank = start + i + 1
+            if stat is None:
+                lines.append(
+                    f"**#{rank}.** {entry['username']} — Elo: {entry['elo']} | "
+                    f"Record: {entry['game_wins']}W-{entry['game_losses']}L"
+                )
+            else:
+                lines.append(
+                    f"**#{rank}.** {entry['username']} — {self._formatLeaderboardStat(entry, stat)}"
+                )
+
+        embed = discord.Embed(
+            title=title,
+            description="\n".join(lines) if lines else "Nobody on this page.",
+            color=discord.Color.gold(),
+        )
+        order_label = "Ascending" if order == "asc" else "Descending"
+        embed.set_footer(text=f"Page {page + 1}/{total_pages} · {order_label}")
+        return embed
+
+    # Posts the first page and pre-reacts with the paging emoji — clicking
+    # them (handleLeaderboardReaction) edits this same message rather than
+    # posting a new one, so the current view is tracked by messageId here.
+    async def leaderboardHelper(self, ctx, stat, order):
+        guild_id = ctx.guild.id
+
+        entries = self.getLeaderboardEntries(guild_id)
+        if not entries:
+            await ctx.response.send_message("Nobody has any stats to show yet in this server!")
+            return
+
+        entries_sorted = self._sortLeaderboardEntries(entries, stat if stat is not None else "elo", order)
+        embed = self._renderLeaderboardEmbed(ctx.guild.name, entries_sorted, stat, order, page=0)
+
+        await ctx.response.send_message(embed=embed)
+        msg = await ctx.original_response()
+        for emoji in LEADERBOARD_NAV_EMOJIS:
+            await msg.add_reaction(emoji)
+
+        self.cursor.execute(
+            "INSERT OR REPLACE INTO leaderboards(messageId, guildId, channelId, filter, sort_order, page) "
+            "VALUES(?, ?, ?, ?, ?, 0)",
+            (msg.id, guild_id, ctx.channel.id, stat, order)
+        )
+        self.db.commit()
+
+    # Called from bot.py's on_raw_reaction_add for every reaction — no-ops
+    # unless the emoji/message match an active leaderboard page view.
+    async def handleLeaderboardReaction(self, payload):
+        guild_id = payload.guild_id
+        if guild_id is None:
+            return
+
+        emoji = str(payload.emoji)
+        if emoji not in LEADERBOARD_NAV_EMOJIS:
+            return
+
+        self.cursor.execute(
+            "SELECT channelId, filter, sort_order, page FROM leaderboards WHERE guildId=? AND messageId=?",
+            (guild_id, payload.message_id)
+        )
+        row = self.cursor.fetchone()
+        if row is None:
+            return
+        channel_id, stat, order, page = row
+
+        entries = self.getLeaderboardEntries(guild_id)
+        entries_sorted = self._sortLeaderboardEntries(entries, stat if stat is not None else "elo", order)
+        total_pages = self._leaderboardPageCount(entries_sorted)
+
+        if emoji == LEADERBOARD_FIRST_EMOJI:
+            new_page = 0
+        elif emoji == LEADERBOARD_PREV_EMOJI:
+            new_page = max(0, page - 1)
+        elif emoji == LEADERBOARD_NEXT_EMOJI:
+            new_page = min(total_pages - 1, page + 1)
+        else:
+            new_page = total_pages - 1
+
+        if new_page == page:
+            return
+
+        channel = self.client.get_channel(channel_id)
+        if channel is None:
+            channel = await self.client.fetch_channel(channel_id)
+        message = await channel.fetch_message(payload.message_id)
+
+        guild = self.client.get_guild(guild_id)
+        guild_name = guild.name if guild is not None else ""
+        embed = self._renderLeaderboardEmbed(guild_name, entries_sorted, stat, order, new_page)
+        await message.edit(embed=embed)
+
+        self.cursor.execute(
+            "UPDATE leaderboards SET page=? WHERE guildId=? AND messageId=?",
+            (new_page, guild_id, payload.message_id)
+        )
+        self.db.commit()
 
     # Cancels the running betting timer (if any) and, if the game had an
     # unresolved bet round (open, closed-but-unreported, or awaiting a

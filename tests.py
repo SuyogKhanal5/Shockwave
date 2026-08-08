@@ -65,6 +65,10 @@ DUELS_SCHEMA = (
     "CREATE TABLE duels(id INTEGER PRIMARY KEY AUTOINCREMENT, guildId, channelId, messageId, "
     "challengerId, challengerName, targetId, targetName, amount, state)"
 )
+LEADERBOARDS_SCHEMA = (
+    "CREATE TABLE leaderboards(messageId INTEGER PRIMARY KEY, guildId, channelId, "
+    "filter, sort_order, page)"
+)
 
 
 def make_db():
@@ -75,6 +79,7 @@ def make_db():
     cursor.execute(WAGERS_SCHEMA)
     cursor.execute(LAST_RESULT_SCHEMA)
     cursor.execute(DUELS_SCHEMA)
+    cursor.execute(LEADERBOARDS_SCHEMA)
     db.commit()
     return db, cursor
 
@@ -126,6 +131,7 @@ class FakeMessage:
     def __init__(self, id=None):
         self.id = id if id is not None else next_id()
         self.add_reaction = AsyncMock()
+        self.edit = AsyncMock()
 
 
 class FakeChannel:
@@ -135,6 +141,7 @@ class FakeChannel:
         self.members = members if members is not None else []
         self.send = AsyncMock()
         self.create_invite = AsyncMock(return_value="https://discord.gg/fake-invite")
+        self.fetch_message = AsyncMock(return_value=FakeMessage())
 
     def __str__(self):
         return self.name
@@ -1950,6 +1957,213 @@ class HandleDuelReactionTests(HelperTestCase):
         self.assertEqual(total, 2000)
 
 
+class LeaderboardHelperTests(HelperTestCase):
+    def _ctx(self, user_id=901, name="Alice", channel=None):
+        return FakeInteraction(self.guild, FakeMember(name, id=user_id), channel=channel)
+
+    def _seed_players(self):
+        self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.helperObj.ensureEconomyRow(GUILD_ID, 902, "Bob")
+        self.helperObj.ensureEconomyRow(GUILD_ID, 903, "Cleo")
+        self.cursor.execute(
+            "UPDATE economy SET elo=1300, balance=500, wins=3, losses=1, "
+            "game_wins=5, game_losses=2, gold_won=300, gold_lost=100, gold_wagered=400 "
+            "WHERE guildId=? AND userId=901", (GUILD_ID,)
+        )
+        self.cursor.execute(
+            "UPDATE economy SET elo=900, balance=1500, wins=1, losses=4, "
+            "game_wins=1, game_losses=6, gold_won=50, gold_lost=200, gold_wagered=250 "
+            "WHERE guildId=? AND userId=902", (GUILD_ID,)
+        )
+        # Cleo has no bets/games played yet — her win rates should be None.
+        self.cursor.execute(
+            "UPDATE economy SET elo=1000, balance=0 WHERE guildId=? AND userId=903", (GUILD_ID,)
+        )
+        self.db.commit()
+
+    async def test_no_entries_sends_message_and_stores_nothing(self):
+        ctx = self._ctx()
+        await self.helperObj.leaderboardHelper(ctx, None, "desc")
+
+        ctx.response.send_message.assert_awaited_once_with(
+            "Nobody has any stats to show yet in this server!"
+        )
+        self.cursor.execute("SELECT COUNT(*) FROM leaderboards")
+        self.assertEqual(self.cursor.fetchone()[0], 0)
+
+    def test_get_leaderboard_entries_computes_rates_and_none_for_no_games(self):
+        self._seed_players()
+        entries = self.helperObj.getLeaderboardEntries(GUILD_ID)
+        by_id = {e["user_id"]: e for e in entries}
+
+        self.assertAlmostEqual(by_id[901]["bet_win_rate"], 0.75)
+        self.assertAlmostEqual(by_id[901]["game_win_rate"], 5 / 7)
+        self.assertEqual(by_id[901]["net_gold"], 200)
+        self.assertIsNone(by_id[903]["bet_win_rate"])
+        self.assertIsNone(by_id[903]["game_win_rate"])
+
+    def test_sort_descending_by_elo_puts_highest_first(self):
+        self._seed_players()
+        entries = self.helperObj.getLeaderboardEntries(GUILD_ID)
+        sorted_entries = self.helperObj._sortLeaderboardEntries(entries, "elo", "desc")
+        self.assertEqual([e["user_id"] for e in sorted_entries], [901, 903, 902])
+
+    def test_sort_ascending_by_elo_puts_lowest_first(self):
+        self._seed_players()
+        entries = self.helperObj.getLeaderboardEntries(GUILD_ID)
+        sorted_entries = self.helperObj._sortLeaderboardEntries(entries, "elo", "asc")
+        self.assertEqual([e["user_id"] for e in sorted_entries], [902, 903, 901])
+
+    def test_sort_sinks_missing_stat_to_the_bottom_regardless_of_order(self):
+        self._seed_players()
+        entries = self.helperObj.getLeaderboardEntries(GUILD_ID)
+        desc = self.helperObj._sortLeaderboardEntries(entries, "bet_win_rate", "desc")
+        asc = self.helperObj._sortLeaderboardEntries(entries, "bet_win_rate", "asc")
+        self.assertEqual(desc[-1]["user_id"], 903)
+        self.assertEqual(asc[-1]["user_id"], 903)
+
+    async def test_successful_call_posts_embed_reacts_and_stores_page_state(self):
+        self._seed_players()
+        channel = FakeChannel("leaderboard-chat")
+        ctx = self._ctx(channel=channel)
+        posted_message = FakeMessage(id=8888)
+        ctx.original_response.return_value = posted_message
+
+        await self.helperObj.leaderboardHelper(ctx, "balance", "asc")
+
+        ctx.response.send_message.assert_awaited_once()
+        embed = ctx.response.send_message.call_args.kwargs["embed"]
+        self.assertIn("Balance", embed.title)
+        lines = embed.description.split("\n")
+        # ascending balance: Cleo (0), Alice (500), Bob (1500)
+        self.assertTrue(lines[0].startswith("**#1.** Cleo"))
+        self.assertTrue(lines[2].startswith("**#3.** Bob"))
+
+        for emoji in helper_module.LEADERBOARD_NAV_EMOJIS:
+            posted_message.add_reaction.assert_any_await(emoji)
+
+        self.cursor.execute(
+            "SELECT guildId, channelId, filter, sort_order, page FROM leaderboards WHERE messageId=?",
+            (8888,)
+        )
+        self.assertEqual(self.cursor.fetchone(), (GUILD_ID, channel.id, "balance", "asc", 0))
+
+    async def test_overview_mode_defaults_sort_to_elo_and_shows_elo_and_record(self):
+        self._seed_players()
+        ctx = self._ctx()
+
+        await self.helperObj.leaderboardHelper(ctx, None, "desc")
+
+        embed = ctx.response.send_message.call_args.kwargs["embed"]
+        self.assertIn("Overview", embed.title)
+        lines = embed.description.split("\n")
+        self.assertTrue(lines[0].startswith("**#1.** Alice"))  # highest elo (1300)
+        self.assertIn("Elo:", lines[0])
+        self.assertIn("Record:", lines[0])
+        self.assertNotIn("Balance:", lines[0])
+
+
+class HandleLeaderboardReactionTests(HelperTestCase):
+    def setUp(self):
+        super().setUp()
+        self.channel = FakeChannel("leaderboard-chat")
+        self.helperObj.client = FakeClient(channels=[self.channel], guilds=[self.guild])
+
+        for i in range(25):
+            user_id = 1000 + i
+            self.helperObj.ensureEconomyRow(GUILD_ID, user_id, f"Player{i:02d}")
+            self.cursor.execute(
+                "UPDATE economy SET elo=? WHERE guildId=? AND userId=?",
+                (1000 + i, GUILD_ID, user_id)
+            )
+        self.db.commit()
+
+        self.message = FakeMessage(id=9999)
+        self.channel.fetch_message = AsyncMock(return_value=self.message)
+        self.cursor.execute(
+            "INSERT INTO leaderboards(messageId, guildId, channelId, filter, sort_order, page) "
+            "VALUES(9999, ?, ?, NULL, 'desc', 1)",
+            (GUILD_ID, self.channel.id)
+        )
+        self.db.commit()
+
+    def _page(self):
+        self.cursor.execute("SELECT page FROM leaderboards WHERE messageId=9999")
+        return self.cursor.fetchone()[0]
+
+    async def test_ignores_unrelated_emoji(self):
+        payload = FakePayload(GUILD_ID, 9999, self.channel.id, "🎉", user_id=1)
+        await self.helperObj.handleLeaderboardReaction(payload)
+        self.message.edit.assert_not_awaited()
+
+    async def test_ignores_unknown_message(self):
+        payload = FakePayload(
+            GUILD_ID, 12345, self.channel.id, helper_module.LEADERBOARD_NEXT_EMOJI, user_id=1
+        )
+        await self.helperObj.handleLeaderboardReaction(payload)
+        self.message.edit.assert_not_awaited()
+
+    async def test_next_advances_page_and_edits_message(self):
+        payload = FakePayload(
+            GUILD_ID, 9999, self.channel.id, helper_module.LEADERBOARD_NEXT_EMOJI, user_id=1
+        )
+        await self.helperObj.handleLeaderboardReaction(payload)
+
+        self.assertEqual(self._page(), 2)
+        self.message.edit.assert_awaited_once()
+        embed = self.message.edit.call_args.kwargs["embed"]
+        self.assertIn("Page 3/3", embed.footer.text)
+
+    async def test_prev_goes_back_a_page(self):
+        payload = FakePayload(
+            GUILD_ID, 9999, self.channel.id, helper_module.LEADERBOARD_PREV_EMOJI, user_id=1
+        )
+        await self.helperObj.handleLeaderboardReaction(payload)
+        self.assertEqual(self._page(), 0)
+
+    async def test_first_jumps_to_page_zero(self):
+        payload = FakePayload(
+            GUILD_ID, 9999, self.channel.id, helper_module.LEADERBOARD_FIRST_EMOJI, user_id=1
+        )
+        await self.helperObj.handleLeaderboardReaction(payload)
+        self.assertEqual(self._page(), 0)
+
+    async def test_last_jumps_to_final_page(self):
+        payload = FakePayload(
+            GUILD_ID, 9999, self.channel.id, helper_module.LEADERBOARD_LAST_EMOJI, user_id=1
+        )
+        await self.helperObj.handleLeaderboardReaction(payload)
+        self.assertEqual(self._page(), 2)  # 25 entries / 10 per page = 3 pages (0, 1, 2)
+
+    async def test_next_at_last_page_is_a_noop(self):
+        self.cursor.execute("UPDATE leaderboards SET page=2 WHERE messageId=9999")
+        self.db.commit()
+        payload = FakePayload(
+            GUILD_ID, 9999, self.channel.id, helper_module.LEADERBOARD_NEXT_EMOJI, user_id=1
+        )
+        await self.helperObj.handleLeaderboardReaction(payload)
+        self.assertEqual(self._page(), 2)
+        self.message.edit.assert_not_awaited()
+
+    async def test_prev_at_first_page_is_a_noop(self):
+        self.cursor.execute("UPDATE leaderboards SET page=0 WHERE messageId=9999")
+        self.db.commit()
+        payload = FakePayload(
+            GUILD_ID, 9999, self.channel.id, helper_module.LEADERBOARD_PREV_EMOJI, user_id=1
+        )
+        await self.helperObj.handleLeaderboardReaction(payload)
+        self.assertEqual(self._page(), 0)
+        self.message.edit.assert_not_awaited()
+
+    async def test_edits_existing_message_rather_than_sending_new_one(self):
+        payload = FakePayload(
+            GUILD_ID, 9999, self.channel.id, helper_module.LEADERBOARD_NEXT_EMOJI, user_id=1
+        )
+        await self.helperObj.handleLeaderboardReaction(payload)
+        self.message.edit.assert_awaited_once()
+        self.channel.send.assert_not_awaited()
+
+
 # ===========================================================================
 # bot.py — import with DB/token side effects redirected away from the real
 # project database and the real bot token, then exercise command callbacks
@@ -1998,7 +2212,7 @@ class CommandRegistrationTests(BotModuleTestCase):
         names = {c.name for c in self.bot.tree.get_commands(guild=discord.Object(id=COMMAND_GUILD_ID))}
         expected = {
             "set-team-size", "set-team-channels", "start", "wager", "wager-against", "daily",
-            "stats", "help", "make-teams", "ranked", "return", "report-correct-winner",
+            "stats", "leaderboard", "help", "make-teams", "ranked", "return", "report-correct-winner",
             "captains", "ranked-captains", "choose", "clear", "notify", "notify-role",
             "roll", "randomize-roles",
         }
@@ -2027,37 +2241,48 @@ class GuildLifecycleEventTests(BotModuleTestCase):
 
 
 class ReactionEventTests(BotModuleTestCase):
+    def _patch_all_handlers(self):
+        return (
+            patch.object(self.bot.helperObj, "handleWinnerReaction", AsyncMock()),
+            patch.object(self.bot.helperObj, "handleDuelReaction", AsyncMock()),
+            patch.object(self.bot.helperObj, "handleLeaderboardReaction", AsyncMock()),
+        )
+
     async def test_ignores_bot_reactions(self):
         payload = SimpleNamespace(member=FakeMember("BotUser", bot=True), guild_id=1)
-        with patch.object(self.bot.helperObj, "handleWinnerReaction", AsyncMock()) as winner_mock, \
-             patch.object(self.bot.helperObj, "handleDuelReaction", AsyncMock()) as duel_mock:
+        winner_patch, duel_patch, leaderboard_patch = self._patch_all_handlers()
+        with winner_patch as winner_mock, duel_patch as duel_mock, leaderboard_patch as leaderboard_mock:
             await self.bot.on_raw_reaction_add(payload)
         winner_mock.assert_not_awaited()
         duel_mock.assert_not_awaited()
+        leaderboard_mock.assert_not_awaited()
 
     async def test_ignores_reactions_with_no_member(self):
         payload = SimpleNamespace(member=None, guild_id=1)
-        with patch.object(self.bot.helperObj, "handleWinnerReaction", AsyncMock()) as winner_mock, \
-             patch.object(self.bot.helperObj, "handleDuelReaction", AsyncMock()) as duel_mock:
+        winner_patch, duel_patch, leaderboard_patch = self._patch_all_handlers()
+        with winner_patch as winner_mock, duel_patch as duel_mock, leaderboard_patch as leaderboard_mock:
             await self.bot.on_raw_reaction_add(payload)
         winner_mock.assert_not_awaited()
         duel_mock.assert_not_awaited()
+        leaderboard_mock.assert_not_awaited()
 
     async def test_ignores_dm_reactions(self):
         payload = SimpleNamespace(member=FakeMember("User"), guild_id=None)
-        with patch.object(self.bot.helperObj, "handleWinnerReaction", AsyncMock()) as winner_mock, \
-             patch.object(self.bot.helperObj, "handleDuelReaction", AsyncMock()) as duel_mock:
+        winner_patch, duel_patch, leaderboard_patch = self._patch_all_handlers()
+        with winner_patch as winner_mock, duel_patch as duel_mock, leaderboard_patch as leaderboard_mock:
             await self.bot.on_raw_reaction_add(payload)
         winner_mock.assert_not_awaited()
         duel_mock.assert_not_awaited()
+        leaderboard_mock.assert_not_awaited()
 
     async def test_delegates_valid_guild_member_reaction(self):
         payload = SimpleNamespace(member=FakeMember("User"), guild_id=1)
-        with patch.object(self.bot.helperObj, "handleWinnerReaction", AsyncMock()) as winner_mock, \
-             patch.object(self.bot.helperObj, "handleDuelReaction", AsyncMock()) as duel_mock:
+        winner_patch, duel_patch, leaderboard_patch = self._patch_all_handlers()
+        with winner_patch as winner_mock, duel_patch as duel_mock, leaderboard_patch as leaderboard_mock:
             await self.bot.on_raw_reaction_add(payload)
         winner_mock.assert_awaited_once_with(payload)
         duel_mock.assert_awaited_once_with(payload)
+        leaderboard_mock.assert_awaited_once_with(payload)
 
 
 class CommandDelegationTests(BotModuleTestCase):
@@ -2094,6 +2319,22 @@ class CommandDelegationTests(BotModuleTestCase):
         with patch.object(self.bot.helperObj, "dailyHelper", mock):
             await self._command("daily").callback(ctx)
         mock.assert_awaited_once_with(ctx)
+
+    async def test_leaderboard_defaults_to_no_filter_and_descending(self):
+        ctx = self._ctx()
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "leaderboardHelper", mock):
+            await self._command("leaderboard").callback(ctx)
+        mock.assert_awaited_once_with(ctx, None, "desc")
+
+    async def test_leaderboard_passes_resolved_filter_and_order(self):
+        ctx = self._ctx()
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "leaderboardHelper", mock):
+            filter_choice = app_commands.Choice(name="Balance", value="balance")
+            order_choice = app_commands.Choice(name="Ascending (lowest first)", value="asc")
+            await self._command("leaderboard").callback(ctx, filter=filter_choice, order=order_choice)
+        mock.assert_awaited_once_with(ctx, "balance", "asc")
 
     async def test_return_delegates(self):
         ctx = self._ctx()

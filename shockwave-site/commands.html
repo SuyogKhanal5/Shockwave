@@ -488,6 +488,27 @@
           </div>
         </div>
 
+        <div class="cmd-card" id="leaderboard">
+          <div class="cmd-head">
+            <span class="cmd-name"><span class="slash">/</span>leaderboard</span>
+            <span class="cmd-badge">betting</span>
+          </div>
+          <p class="cmd-desc">Ranks every player in the server who has stats to show. Leave both options out for an overview sorted by elo, showing just the raw elo number and game record; pick a specific stat to rank by just that instead.</p>
+          <table class="params">
+            <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+            <tr><td class="param-name">filter</td><td class="param-type">choice, optional</td><td>Elo, Balance, Game Wins, Game Losses, Game Win Rate, Bet Wins, Bet Losses, Bet Win Rate, Net Gold, or Gold Wagered. Omit for the elo-sorted overview.</td></tr>
+            <tr><td class="param-name">order</td><td class="param-type">choice, optional</td><td>Descending (highest first) or Ascending (lowest first). Defaults to Descending.</td></tr>
+          </table>
+          <div class="cmd-note">
+            <strong>Paging happens on the same message.</strong> The result is reacted with ⏮️ ◀️ ▶️ ⏭️ —
+            clicking previous/next/first/last edits that message in place instead of posting a new one, so the
+            leaderboard stays a single message no matter how many pages someone flips through. Anyone in the
+            server can page through it, not just whoever ran the command. Players who've never touched the
+            economy (no <code class="inline">/daily</code>, bets, or games) don't have a row yet and won't
+            appear until they do.
+          </div>
+        </div>
+
         <div class="cmd-card" id="report-correct-winner">
           <div class="cmd-head">
             <span class="cmd-name"><span class="slash">/</span>report-correct-winner</span>
