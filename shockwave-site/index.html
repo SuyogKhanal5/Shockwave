@@ -130,7 +130,7 @@
             <div class="flow-num">03</div>
             <div class="flow-body">
               <h4>Build the roster — casual or ranked</h4>
-              <p>Shuffle instantly with <code class="inline">/make-teams</code>, or let two captains draft live with <code class="inline">/captains</code> and <code class="inline">/choose</code> — a casual game, elo untouched either way. Want it to count? <code class="inline">/ranked</code> and <code class="inline">/ranked-captains</code> run the exact same two paths, but balance teams by elo and update it when the winner's in. Full breakdown, side by side: <a href="commands.html#team-formation" style="color:var(--gold);">casual vs. ranked setup →</a></p>
+              <p>Shuffle instantly with <code class="inline">/make-teams</code>, or let two captains draft live with <code class="inline">/captains</code> and <code class="inline">/choose</code> — a casual game, elo untouched either way. Want it to count? Add <code class="inline">ranked:true</code> to either one and it balances teams by elo and updates it when the winner's in. Full breakdown, side by side: <a href="commands.html#team-formation" style="color:var(--gold);">casual vs. ranked setup →</a></p>
             </div>
           </div>
           <div class="flow-step">
@@ -144,7 +144,7 @@
             <div class="flow-num">05</div>
             <div class="flow-body">
               <h4>Report the winner</h4>
-              <p>Shockwave asks who won and reacts with 1️⃣/2️⃣ itself — one click settles every bet, updates game records (and elo for ranked games), and moves both teams back to the original channel automatically.</p>
+              <p>Shockwave asks who won and reacts with 🔵/🔴 itself — one click settles every bet, updates game records (and elo for ranked games), and moves both teams back to the original channel automatically.</p>
             </div>
           </div>
           <div class="flow-step">
@@ -186,7 +186,7 @@
             <div class="flow-num">03</div>
             <div class="flow-body">
               <h4>Build the bracket and play it out</h4>
-              <p><code class="inline">/tournament-create-bracket</code> seeds a real single-elimination tree — <code class="inline">/tournament-start</code> then plays it match by match (one at a time with betting, or every match in the round at once), updating the bracket in chat as each result comes in until there's a champion.</p>
+              <p><code class="inline">/tournament-create-bracket</code> seeds a real single- or double-elimination tree — <code class="inline">/tournament-start</code> then plays it match by match (one at a time with betting, or every match in the round at once), updating the bracket in chat as each result comes in. Double elimination keeps going through a losers bracket and Grand Finals before there's a champion.</p>
             </div>
           </div>
         </div>
@@ -222,7 +222,7 @@
           </div>
           <div class="card">
             <h3>Tournaments &amp; teams</h3>
-            <p>Persistent named teams with captains and their own voice channel, registered into a real single-elimination bracket that plays itself out match by match.</p>
+            <p>Persistent named teams with captains and their own voice channel, registered into a real single- or double-elimination bracket that plays itself out match by match.</p>
             <a class="card-link" href="commands.html#tournaments">See tournament commands →</a>
           </div>
           <div class="card">

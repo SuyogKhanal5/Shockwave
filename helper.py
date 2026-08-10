@@ -1,17 +1,149 @@
 import discord
 from TourneyClasses import (
     Team, Tournament, Match, Player, BracketNode, serialize_bracket, deserialize_bracket,
+    serialize_losers_rounds, deserialize_losers_rounds,
 )
 import random
 import asyncio
 import datetime
+import io
+import itertools
 import json
+import math
+import os
 import numpy as np
+from PIL import Image, ImageDraw, ImageFont
+
+# Every bracket/matchup image is actually drawn at BRACKET_SUPERSAMPLE times
+# its final size, then downscaled with LANCZOS resampling in _imageToFile —
+# PIL's ImageDraw has no antialiasing of its own (lines and glyph edges come
+# out visibly jagged at 1x), and rendering bigger then shrinking down is the
+# standard way around that. Every pixel-valued constant below is already
+# expressed at supersampled scale (hence "* BRACKET_SUPERSAMPLE" throughout)
+# so the actual drawing code just uses them as-is and never has to think
+# about the scale factor itself.
+BRACKET_SUPERSAMPLE = 2
+
+# Bracket-image layout constants (see _renderTreeImage and friends) — plain
+# pixel values, not something a server would ever need to tune.
+BRACKET_FONT_SIZE = 16 * BRACKET_SUPERSAMPLE
+BRACKET_TITLE_FONT_SIZE = 22 * BRACKET_SUPERSAMPLE
+BRACKET_SUBTITLE_FONT_SIZE = 12 * BRACKET_SUPERSAMPLE
+BRACKET_ROUND_LABEL_FONT_SIZE = 13 * BRACKET_SUPERSAMPLE
+BRACKET_ROUND_LABEL_HEIGHT = 22 * BRACKET_SUPERSAMPLE
+BRACKET_ROW_HEIGHT = 28 * BRACKET_SUPERSAMPLE
+BRACKET_PADDING = 10 * BRACKET_SUPERSAMPLE
+BRACKET_MARGIN = 20 * BRACKET_SUPERSAMPLE
+BRACKET_CORNER_RADIUS = 6 * BRACKET_SUPERSAMPLE
+BRACKET_CHAMPION_STAR_RADIUS = 7 * BRACKET_SUPERSAMPLE
+# Extra room reserved before a champion/final-result label for its star
+# badge (see _drawChampionLabel) — the star itself plus a little breathing
+# room on each side of it.
+BRACKET_CHAMPION_BADGE_GAP = BRACKET_CHAMPION_STAR_RADIUS * 2 + BRACKET_PADDING * 2
+BRACKET_LOGO_HEIGHT = 26 * BRACKET_SUPERSAMPLE
+BRACKET_SUBTITLE_GAP = 6 * BRACKET_SUPERSAMPLE           # between the title row and the subtitle
+BRACKET_HEADER_RULE_GAP = 10 * BRACKET_SUPERSAMPLE       # between the header text block and its accent rule
+BRACKET_HEADER_RULE_MARGIN = 12 * BRACKET_SUPERSAMPLE    # between the accent rule and whatever's drawn below it
+BRACKET_BORDER_RADIUS = 14 * BRACKET_SUPERSAMPLE
+# Connector lines, the accent rule, and the outer frame all used bare
+# hardcoded width= literals before — named and scaled now so they shrink
+# back down to the same relative thickness post-downscale instead of
+# staying full-width on a now-3x-bigger canvas.
+BRACKET_LINE_WIDTH = 2 * BRACKET_SUPERSAMPLE
+BRACKET_RULE_WIDTH = 1 * BRACKET_SUPERSAMPLE
+BRACKET_LOGO_PATH = os.path.join(os.path.dirname(__file__), "shockwave-site", "assets", "img", "logo-mark.png")
+# Built-in Clash faction/region logos a team can pick from (see
+# /team-set-logo and _ensureLogo) — one file per available logo, named after
+# it (e.g. "Demacia.png"), no subfolders.
+TEAM_LOGO_DIR = os.path.join(os.path.dirname(__file__), "assets", "clash-logos")
+
+# Real TTF fonts instead of PIL's built-in default font, which is a small
+# bitmap face that looks noticeably rough/pixelated once scaled up to
+# heading sizes. Same two families shockwave-site's own CSS uses
+# (--font-display / --font-body — see styles.css) so the images read as the
+# same brand as the site, not just the same color palette. Chakra Petch for
+# anything headline-ish (titles, team names, "VS"); IBM Plex Sans for body
+# text (roster names, round headers) — both Google/SIL-OFL-licensed and
+# bundled under assets/fonts rather than linked, so rendering doesn't depend
+# on network access or the host having them installed.
+FONTS_DIR = os.path.join(os.path.dirname(__file__), "assets", "fonts")
+CHAKRA_PETCH_REGULAR = os.path.join(FONTS_DIR, "ChakraPetch-Regular.ttf")
+CHAKRA_PETCH_SEMIBOLD = os.path.join(FONTS_DIR, "ChakraPetch-SemiBold.ttf")
+CHAKRA_PETCH_BOLD = os.path.join(FONTS_DIR, "ChakraPetch-Bold.ttf")
+IBM_PLEX_SANS = os.path.join(FONTS_DIR, "IBMPlexSans.ttf")  # variable weight — see _loadFont
+
+# Colors lifted straight from shockwave-site/assets/styles.css's :root
+# palette, so the bracket image reads as part of the same brand instead of
+# a plain black-on-white chart dropped into a dark-themed Discord client.
+BRACKET_BACKGROUND = (21, 11, 34)      # --ink
+BRACKET_BACKGROUND_CENTER = (30, 19, 48)   # --surface — lighter center of the canvas's radial vignette
+BRACKET_TEXT_COLOR = (243, 239, 250)   # --text
+BRACKET_TITLE_COLOR = (237, 198, 67)   # --gold
+BRACKET_LINE_COLOR = (118, 106, 148)   # --muted-dim
+# The losers bracket's own accent, standing in for gold everywhere a
+# winners-bracket image would use it (title, champion label, frame) — makes
+# the two images readable as "which one is this" at a glance, without
+# relying on remembering which caption belongs to which attachment.
+BRACKET_LOSERS_ACCENT_COLOR = (231, 76, 60)   # --team-red
+
+# /matchup image (see _renderMatchupImage) — posted alongside the existing
+# text announcement whenever a tournament match is created (_postMatchReport,
+# _postReadyCheck). Team 1/2's accent colors come straight from
+# shockwave-site's own --team-blue/--team-red palette (see the
+# .discord-embed.blue/.discord-embed.red rules in styles.css) — a different
+# pairing than the bracket image's gold/red winners/losers split, since this
+# is about telling team 1 from team 2, not winners bracket from losers
+# bracket (TEAM2_ACCENT_COLOR's value happens to match
+# BRACKET_LOSERS_ACCENT_COLOR only because both trace back to the same site
+# palette, not because they mean the same thing).
+TEAM1_ACCENT_COLOR = (52, 152, 219)   # --team-blue
+TEAM2_ACCENT_COLOR = (231, 76, 60)    # --team-red
+MATCHUP_LOGO_SIZE = 96 * BRACKET_SUPERSAMPLE
+MATCHUP_COLUMN_GAP = 56 * BRACKET_SUPERSAMPLE   # width reserved for the "VS" divider between columns
+MATCHUP_VS_FONT_SIZE = 30 * BRACKET_SUPERSAMPLE
+
+# A bracket this many rounds deep (16+ teams) splits into two halves that
+# grow toward the center instead of one long strip growing left-to-right —
+# the same idea as a printed tournament bracket poster, and a lot more
+# compact (half the height, since each side only stacks half the leaves).
+# Only the winners bracket ever uses this: its champion's two children are
+# always exactly even halves (buildBracket produces a perfectly balanced
+# tree), which is what makes a symmetric two-sided split look right. The
+# losers bracket has no such guarantee — its final round pairs a whole
+# survivor subtree against a single fresh drop-in leaf (see
+# buildLosersBracket), so splitting it the same way would just be lopsided.
+BRACKET_TWO_SIDED_MIN_ROUNDS = 4
+
+# Lazily loaded and resized once, then reused for every bracket image for
+# the rest of the process — module-level (not per-`helpers` instance) since
+# it's a static asset every instance would otherwise reload identically.
+# False (not None) means loading was already tried and failed, so it isn't
+# retried on every single render.
+_bracket_logo_cache = None
+
+# TrueType fonts loaded once per (path, size, variation) and reused for
+# every image rendered for the rest of the process, same idea as
+# _bracket_logo_cache — module-level since it's static, and there's no
+# reassignment involved so this dict can just be mutated directly (no
+# `global` needed the way _bracket_logo_cache's None/False swap requires).
+_font_cache = {}
 
 BETTING_DURATION_SECONDS = 60
+# _openConcurrentTournamentBetting multiplies a guild's configured
+# per-match timer by however many matches are in the round — this caps
+# the result so a generous base times a big bracket's first round can't
+# leave betting open for an unreasonable stretch.
+MAX_CONCURRENT_BETTING_SECONDS = 1800
 WINNER_REPORT_DELAY_SECONDS = 3
 DAILY_GOLD_AMOUNT = 1000
-TEAM_EMOJIS = {1: "1️⃣", 2: "2️⃣"}
+# /test's simulated wagers (see _postSimulatedWagers) — clearly-fake names
+# so nobody mistakes these for real bettors, and a handful of round gold
+# amounts rather than anything trying to look like a "real" distribution.
+FAKE_BETTOR_NAMES = [
+    "Test Bettor 1", "Test Bettor 2", "Test Bettor 3", "Test Bettor 4", "Test Bettor 5", "Test Bettor 6",
+]
+FAKE_WAGER_AMOUNTS = [25, 50, 75, 100, 150, 200, 250]
+TEAM_EMOJIS = {1: "🔵", 2: "🔴"}   # blue for team 1, red for team 2 — matches TEAM1_ACCENT_COLOR/TEAM2_ACCENT_COLOR
 WINNER_EMOJIS = {emoji: team for team, emoji in TEAM_EMOJIS.items()}
 DEFAULT_ELO = 1000
 ELO_K_FACTOR = 32
@@ -31,7 +163,7 @@ TEAM_INVITE_ACCEPT_EMOJI = "✅"
 
 # /tournament-start (sequential mode): react to mark a queued match ready
 # to begin. Simultaneous-mode match results reuse TEAM_EMOJIS/WINNER_EMOJIS
-# above — same 1️⃣/2️⃣ reporting as a normal game, just scoped to a specific
+# above — same reporting reactions as a normal game, just scoped to a specific
 # tournament_matches row instead of the guild's single betting_message_id.
 TOURNAMENT_READY_EMOJI = "✅"
 
@@ -78,6 +210,17 @@ LEADERBOARD_LAST_EMOJI = "⏭️"   # ⏭️ jump to the last page
 LEADERBOARD_NAV_EMOJIS = (
     LEADERBOARD_FIRST_EMOJI, LEADERBOARD_PREV_EMOJI, LEADERBOARD_NEXT_EMOJI, LEADERBOARD_LAST_EMOJI
 )
+
+# /team-list: what it can sort by, and its display label — same paging
+# (LEADERBOARD_NAV_EMOJIS) and page size as /leaderboard, just over teams
+# instead of players.
+TEAM_LIST_SORT_LABELS = {
+    "name": "Name",
+    "wins": "Wins",
+    "losses": "Losses",
+    "win_rate": "Win Rate",
+    "roster_size": "Roster Size",
+}
 
 # Every stat /leaderboard can filter/sort by, and its display label. "elo"
 # doubles as the default sort when no filter is given (the overview view).
@@ -545,6 +688,26 @@ class helpers():
 
         await ctx.response.send_message(f"All wager postings will now go to {channel.mention}.")
 
+    # How long a betting window stays open, replacing the previously-fixed
+    # BETTING_DURATION_SECONDS. For a simultaneous-mode tournament round
+    # with several matches open at once, this is the PER-MATCH base — see
+    # _openConcurrentTournamentBetting, which multiplies it by however many
+    # matches are in that round (capped so a big base times a big bracket's
+    # first round can't leave betting open for absurdly long).
+    async def setBettingTimerHelper(self, ctx, seconds):
+        if seconds <= 0:
+            await ctx.response.send_message("Betting timer must be greater than 0 seconds.")
+            return
+        if seconds > 600:
+            await ctx.response.send_message("Betting timer can't be more than 600 seconds (10 minutes).")
+            return
+
+        self.update(ctx.guild.id, "betting_timer_seconds", seconds)
+        await ctx.response.send_message(
+            f"Betting windows now stay open for {seconds} seconds. For a tournament round with several "
+            f"matches happening at once, that's multiplied by the number of matches in the round."
+        )
+
     async def both(self, ctx):
         await self.randomizeTeamHelper(ctx)
         await self.randomRoleHelper(ctx)
@@ -834,8 +997,8 @@ class helpers():
         self.update(guild_id, "team_size", 5)
         self.update(guild_id, "mode", "Normal")
         self.update(guild_id, "turn", 1)
-        # Every team-formation path (/make-teams, /captains, /ranked,
-        # /ranked-captains) runs through here first — resetting is_ranked
+        # Every team-formation path (/make-teams, /captains, either with or
+        # without ranked:true) runs through here first — resetting is_ranked
         # to 0 by default means only the ranked-specific helpers, which
         # explicitly set it back to 1 afterward, cause elo to be touched
         # when the winner is eventually reported.
@@ -966,10 +1129,17 @@ class helpers():
     # nested data; everything else is a direct column, one per Tournament
     # attribute.
     def saveTournament(self, guild_id, tournament):
+        losers_nodes = tournament.get_losers_bracket_nodes()
+        losers_payload = {
+            "nodes": serialize_bracket(losers_nodes),
+            "rounds": serialize_losers_rounds(tournament.get_losers_rounds(), losers_nodes),
+            "wb_dependency": tournament.get_losers_bracket_wb_dependency(),
+            "timing": tournament.get_losers_bracket_timing(),
+        }
         self.cursor.execute(
             "INSERT OR REPLACE INTO tournaments"
-            "(guildId, name, team_size, num_teams, double_elimination, teams, bracket) "
-            "VALUES(?, ?, ?, ?, ?, ?, ?)",
+            "(guildId, name, team_size, num_teams, double_elimination, teams, bracket, losers_bracket) "
+            "VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 guild_id,
                 tournament.get_name(),
@@ -977,7 +1147,11 @@ class helpers():
                 tournament.get_num_teams(),
                 int(tournament.is_double_elimination()),
                 json.dumps([team.serializeTeam() for team in tournament.get_teams()]),
-                json.dumps(serialize_bracket(tournament.get_bracket())),
+                # drop_targets=losers_nodes resolves each winners-bracket
+                # result node's `drop_to` (a losers-bracket leaf) against
+                # the losers bracket's own index space.
+                json.dumps(serialize_bracket(tournament.get_bracket(), drop_targets=losers_nodes)),
+                json.dumps(losers_payload),
             )
         )
         self.db.commit()
@@ -985,7 +1159,7 @@ class helpers():
     # Returns the guild's Tournament, or None if it's never created one.
     def getTournament(self, guild_id):
         self.cursor.execute(
-            "SELECT name, team_size, num_teams, double_elimination, teams, bracket "
+            "SELECT name, team_size, num_teams, double_elimination, teams, bracket, losers_bracket "
             "FROM tournaments WHERE guildId=?",
             (guild_id,)
         )
@@ -993,13 +1167,33 @@ class helpers():
         if row is None:
             return None
 
-        name, team_size, num_teams, double_elimination, teams_json, bracket_json = row
+        name, team_size, num_teams, double_elimination, teams_json, bracket_json, losers_json = row
         tournament = Tournament(name, team_size, num_teams, bool(double_elimination))
         for serialized in json.loads(teams_json):
             team = Team()
             team.deserializeTeam(serialized)
             tournament.get_teams().append(team)
-        tournament.set_bracket(deserialize_bracket(json.loads(bracket_json)))
+
+        # Losers bracket has to be deserialized BEFORE the winners bracket,
+        # since a winners-bracket node's `drop_to` resolves against the
+        # losers bracket's node list.
+        losers_nodes, losers_rounds, wb_dependency = [], [], []
+        # "after_winners" here covers both a single-elimination tournament
+        # (the setting is meaningless without a losers bracket at all) and
+        # a double-elimination one saved before this feature existed —
+        # both should keep the original "losers bracket waits for the
+        # whole winners bracket" behavior.
+        timing = "after_winners"
+        if losers_json:
+            losers_data = json.loads(losers_json)
+            losers_nodes = deserialize_bracket(losers_data.get("nodes", []))
+            losers_rounds = deserialize_losers_rounds(losers_data.get("rounds", []), losers_nodes)
+            wb_dependency = losers_data.get("wb_dependency", [])
+            timing = losers_data.get("timing", "after_winners")
+        tournament.set_losers_bracket(losers_nodes, losers_rounds, wb_dependency)
+        tournament.set_losers_bracket_timing(timing)
+
+        tournament.set_bracket(deserialize_bracket(json.loads(bracket_json), drop_targets=losers_nodes))
         return tournament
 
     # Creates a new (empty — no teams registered yet) tournament for the
@@ -1116,9 +1310,26 @@ class helpers():
         random.shuffle(shuffled)
 
         size = self._nextPowerOfTwo(len(shuffled))
-        current_round = [
-            BracketNode(shuffled[i] if i < len(shuffled) else None) for i in range(size)
-        ]
+        num_byes = size - len(shuffled)
+
+        # BUG FIX: placing every real team first and every bye at the tail
+        # (team[i] if i < len(team) else None), then pairing consecutively
+        # by index, could seat two byes in the same first-round pair
+        # whenever num_byes was even — a "BYE vs BYE" match that never has
+        # a winner to report, silently orphaning that slot for the rest of
+        # the bracket (whoever the surviving side eventually reaches it
+        # gets an unearned second auto-advance instead of a real match).
+        # num_byes is always < size // 2 (size is the smallest power of two
+        # >= len(teams)), so there are always at least as many pairs as
+        # byes — spread one bye per pair instead, guaranteeing every bye
+        # is paired against a real team.
+        team_iter = iter(shuffled)
+        slots = []
+        for pair_index in range(size // 2):
+            slots.append(next(team_iter))
+            slots.append(None if pair_index < num_byes else next(team_iter))
+
+        current_round = [BracketNode(team) for team in slots]
         all_nodes = list(current_round)
 
         while len(current_round) > 1:
@@ -1138,12 +1349,141 @@ class helpers():
 
         return all_nodes
 
+    # Builds the losers bracket that pairs with a winners bracket built by
+    # buildBracket(wb_nodes) above, for a double-elimination tournament.
+    # Wires each winners-bracket result node's `drop_to` to the losers-
+    # bracket leaf that should receive its loser once that match resolves
+    # (see _resolveTournamentMatch) — this is the only thing that links the
+    # two trees together; everything else about a losers-bracket match
+    # plays out through the exact same round machinery as the winners
+    # bracket. Returns (flat node list, rounds) — rounds groups each
+    # round's RESULT nodes explicitly, since (unlike the winners bracket)
+    # losers-bracket round sizes don't follow a simple halving pattern and
+    # can't be recovered from the graph alone.
+    #
+    # Losers-bracket rounds alternate in a fixed, well-known pattern for a
+    # k-round winners bracket (k = log2(bracket size)):
+    #   round 1            : winners round 1's losers, paired against each other
+    #   round r, r odd > 1  : last round's survivors, paired against each other
+    #   round r, r even     : last round's survivors, each paired against a
+    #                         fresh loser dropping in from winners round (r//2 + 1)
+    # ending after round (2k - 2) with exactly one survivor: the losers-
+    # bracket champion. (k <= 1 is a degenerate case — with only one
+    # winners-bracket match total, its loser has nobody left to play, so
+    # they become the losers-bracket "champion" with no match at all.)
+    # Returns (all_nodes, rounds, wb_dependency). `wb_dependency[i]` is the
+    # WINNERS-bracket round_index whose losers this losers round NEEDS to
+    # have dropped in before it can start (i.e. that winners round must be
+    # fully RESOLVED first) — or None if this round only depends on the
+    # previous losers round finishing (no NEW winners-bracket input).
+    # Derived from exactly which wb_rounds index gets `drop_to` wired to it
+    # below: `drop_to` set on wb_rounds[Y] means "the match at winners
+    # round_index Y-1 feeds this", since Y is the round the LOSING match's
+    # winner (not loser) populates — the loser goes to drop_to instead. See
+    # "Interleaved losers bracket scheduling" in readme.md for how this
+    # gets used (_readyUnstartedLosersRoundIndex, _advanceInterleavedTournament).
+    def buildLosersBracket(self, wb_nodes):
+        wb_rounds = self._bracketRounds(wb_nodes)
+        k = len(wb_rounds) - 1
+        if k < 1:
+            return [], [], []
+
+        if k == 1:
+            champion = BracketNode()
+            wb_rounds[1][0].drop_to = champion
+            return [champion], [[champion]], [0]
+
+        all_nodes = []
+        rounds = []
+        wb_dependency = []
+        survivors = None
+
+        for r in range(1, 2 * k - 1):
+            if r == 1:
+                sources = wb_rounds[1]
+                round_results = []
+                for i in range(0, len(sources), 2):
+                    leaf_a, leaf_b = BracketNode(), BracketNode()
+                    leaf_a.opponent = leaf_b
+                    leaf_b.opponent = leaf_a
+                    parent = BracketNode()
+                    leaf_a.next = parent
+                    leaf_b.next = parent
+                    parent.previous = leaf_a
+                    sources[i].drop_to = leaf_a
+                    sources[i + 1].drop_to = leaf_b
+                    all_nodes.extend([leaf_a, leaf_b, parent])
+                    round_results.append(parent)
+                survivors = round_results
+                wb_dep = 0
+            elif r % 2 == 1:
+                round_results = []
+                for i in range(0, len(survivors), 2):
+                    a, b = survivors[i], survivors[i + 1]
+                    a.opponent = b
+                    b.opponent = a
+                    parent = BracketNode()
+                    a.next = parent
+                    b.next = parent
+                    parent.previous = a
+                    all_nodes.append(parent)
+                    round_results.append(parent)
+                survivors = round_results
+                wb_dep = None
+            else:
+                wb_sources = wb_rounds[r // 2 + 1]
+                round_results = []
+                for i, survivor in enumerate(survivors):
+                    fresh_leaf = BracketNode()
+                    survivor.opponent = fresh_leaf
+                    fresh_leaf.opponent = survivor
+                    parent = BracketNode()
+                    survivor.next = parent
+                    fresh_leaf.next = parent
+                    parent.previous = survivor
+                    wb_sources[i].drop_to = fresh_leaf
+                    all_nodes.extend([fresh_leaf, parent])
+                    round_results.append(parent)
+                survivors = round_results
+                wb_dep = r // 2
+
+            rounds.append(round_results)
+            wb_dependency.append(wb_dep)
+
+        return all_nodes, rounds, wb_dependency
+
     # Builds (or rebuilds — calling this again is an explicit reroll) the
     # tournament's bracket from whichever teams are currently registered.
-    # Only wires up the single-elimination winners' tree described by
-    # buildBracket; double_elimination is recorded on the tournament but
-    # doesn't currently add a separate losers' bracket.
-    async def createBracketHelper(self, ctx, double_elimination):
+    # Double elimination also builds a real losers bracket (buildLosersBracket)
+    # wired to this winners bracket via each result node's `drop_to`.
+    # Wipes this guild's match history before a fresh bracket replaces it
+    # (used by both createBracketHelper and /test). `tournament_matches.id`
+    # is AUTOINCREMENT specifically so a match id is never reused while
+    # ANY guild might still reference it — _settleMatchWagers and the
+    # concurrent-betting-close timer both key off matchId alone, with no
+    # guildId in the WHERE clause, so a reused id could settle or close out
+    # a completely different guild's still-live match. That guarantee is
+    # only worth breaking when it's free: if this delete just left the
+    # table completely empty (no other guild has a live match either), the
+    # id sequence can restart at 1 with no collision risk at all — which
+    # is also the one case a human actually notices and wants, since a
+    # single test server watching /test expects a fresh bracket to start
+    # back at "Match #1" instead of climbing forever.
+    def _clearTournamentMatchesForGuild(self, guild_id):
+        self.cursor.execute("DELETE FROM tournament_matches WHERE guildId=?", (guild_id,))
+        self.cursor.execute("SELECT COUNT(*) FROM tournament_matches")
+        if self.cursor.fetchone()[0] == 0:
+            # sqlite_sequence only exists once some AUTOINCREMENT table
+            # somewhere in the DB has had its first insert — nothing to
+            # reset yet on a brand new database.
+            self.cursor.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='sqlite_sequence'"
+            )
+            if self.cursor.fetchone() is not None:
+                self.cursor.execute("DELETE FROM sqlite_sequence WHERE name='tournament_matches'")
+        self.db.commit()
+
+    async def createBracketHelper(self, ctx, double_elimination, losers_bracket_timing="after_winners"):
         guild_id = ctx.guild.id
 
         tournament = self.getTournament(guild_id)
@@ -1159,14 +1499,38 @@ class helpers():
             return
 
         tournament.set_double_elimination(double_elimination)
-        tournament.set_bracket(self.buildBracket(teams))
+        wb_nodes = self.buildBracket(teams)
+        tournament.set_bracket(wb_nodes)
+        if double_elimination:
+            lb_nodes, lb_rounds, lb_wb_dependency = self.buildLosersBracket(wb_nodes)
+            tournament.set_losers_bracket(lb_nodes, lb_rounds, lb_wb_dependency)
+            tournament.set_losers_bracket_timing(losers_bracket_timing)
+        else:
+            tournament.set_losers_bracket([], [])
+
+        # Building a bracket (even a reroll of an existing one) starts a
+        # completely fresh tournament run — clear out any match rows left
+        # over from a previous run. Without this, a finished double-
+        # elimination tournament's resolved grand-finals row would still be
+        # sitting there under this guildId, and the next tournament's own
+        # completion check (which looks up the most recent resolved finals
+        # match) could mistake it for having already finished too.
+        self._clearTournamentMatchesForGuild(guild_id)
         self.saveTournament(guild_id, tournament)
 
         elim_style = "double" if double_elimination else "single"
+        timing_note = ""
+        if double_elimination:
+            timing_note = (
+                " Losers bracket starts once the winners bracket finishes."
+                if losers_bracket_timing == "after_winners" else
+                " Losers bracket rounds are interleaved with the winners bracket as they're unlocked."
+            )
         await ctx.response.send_message(
-            f"Bracket created for **{tournament.get_name()}** — {len(teams)} teams, {elim_style} elimination."
+            f"Bracket created for **{tournament.get_name()}** — {len(teams)} teams, "
+            f"{elim_style} elimination.{timing_note}"
         )
-        await ctx.channel.send(self.renderBracketText(tournament))
+        await self._sendBracketText(ctx.channel, tournament, guild_id)
 
     # ---------------- Tournament matches (/tournament-start) ----------------
 
@@ -1186,41 +1550,1153 @@ class helpers():
             round_size //= 2
         return rounds
 
-    # A short description of who is (or could be) in `node` — the real
-    # team name once it's known, otherwise "Winner of (X vs Y)" using the
-    # pairing that feeds this node. Only expands one level (via
-    # previous/previous.opponent, not further back), so it stays a single
-    # short line even deep in the bracket instead of growing exponentially.
-    def _nodeLabel(self, node):
+    # Shockwave's own logo mark, resized once to BRACKET_LOGO_HEIGHT tall
+    # and cached at module scope — see _bracket_logo_cache. None if the
+    # asset couldn't be loaded (e.g. a self-hosted deploy missing the
+    # shockwave-site/ folder); every caller treats that as "skip the logo"
+    # rather than letting a missing file take bracket rendering down with it.
+    def _loadBracketLogo(self):
+        global _bracket_logo_cache
+        if _bracket_logo_cache is None:
+            try:
+                logo = Image.open(BRACKET_LOGO_PATH).convert("RGBA")
+                target_width = round(BRACKET_LOGO_HEIGHT * logo.width / logo.height)
+                _bracket_logo_cache = logo.resize((target_width, BRACKET_LOGO_HEIGHT), Image.LANCZOS)
+            except (OSError, ValueError):
+                _bracket_logo_cache = False
+        return _bracket_logo_cache or None
+
+    # A cached TTF font at a given size — `variation` selects a named
+    # instance out of a variable font (IBM_PLEX_SANS ships every weight in
+    # one file; see its own comment) and is ignored for the static Chakra
+    # Petch files, which don't have any. Falls back to PIL's built-in
+    # default font if the TTF itself is missing (e.g. a self-hosted deploy
+    # that didn't pull assets/fonts) rather than crashing rendering outright
+    # — same "degrade gracefully instead of taking the feature down"
+    # approach _loadBracketLogo takes for a missing logo file.
+    def _loadFont(self, path, size, variation=None):
+        key = (path, size, variation)
+        if key not in _font_cache:
+            try:
+                font = ImageFont.truetype(path, size)
+                if variation is not None:
+                    font.set_variation_by_name(variation)
+            except (OSError, ValueError):
+                font = ImageFont.load_default(size=size)
+            _font_cache[key] = font
+        return _font_cache[key]
+
+    # How tall the logo/title/subtitle/rule block is, in total — computed
+    # independently of any actual drawing so callers can reserve the right
+    # amount of vertical space for it during their own (measurement-first)
+    # layout pass, the same two-pass approach the rest of this file uses.
+    def _bracketHeaderHeight(self, subtitle):
+        height = BRACKET_MARGIN + BRACKET_LOGO_HEIGHT
+        if subtitle:
+            height += BRACKET_SUBTITLE_GAP + BRACKET_SUBTITLE_FONT_SIZE
+        return height + BRACKET_HEADER_RULE_GAP + BRACKET_HEADER_RULE_MARGIN
+
+    # Draws the logo (if available), the title next to it in `accent_color`,
+    # an optional muted subtitle line below (the guild's name, see
+    # renderBracketImages), and a full-width accent rule under the whole
+    # block — the visual "masthead" every bracket/Grand Finals image opens
+    # with. `width` is the FINAL canvas width, known by the time this runs
+    # (unlike _bracketHeaderHeight, called during layout before it exists).
+    def _drawBracketHeader(self, image, draw, title, subtitle, accent_color, width, bold_title=False):
+        title_font = self._loadFont(
+            CHAKRA_PETCH_BOLD if bold_title else CHAKRA_PETCH_SEMIBOLD, BRACKET_TITLE_FONT_SIZE
+        )
+        subtitle_font = self._loadFont(IBM_PLEX_SANS, BRACKET_SUBTITLE_FONT_SIZE, "Regular")
+
+        logo = self._loadBracketLogo()
+        title_x = BRACKET_MARGIN
+        if logo is not None:
+            logo_y = BRACKET_MARGIN + (BRACKET_LOGO_HEIGHT - logo.height) // 2
+            image.paste(logo, (BRACKET_MARGIN, logo_y), logo)
+            title_x = BRACKET_MARGIN + logo.width + BRACKET_PADDING
+
+        # bold_title picks CHAKRA_PETCH_BOLD vs _SEMIBOLD above — a real
+        # heavier font weight, not a faux-bold trick, so nothing extra is
+        # needed here beyond just drawing with that font.
+        draw.text(
+            (title_x, BRACKET_MARGIN + BRACKET_LOGO_HEIGHT / 2), title, font=title_font, fill=accent_color,
+            anchor="lm"
+        )
+
+        bottom = BRACKET_MARGIN + BRACKET_LOGO_HEIGHT
+        if subtitle:
+            subtitle_y = bottom + BRACKET_SUBTITLE_GAP
+            draw.text((BRACKET_MARGIN, subtitle_y), subtitle, font=subtitle_font, fill=BRACKET_LINE_COLOR, anchor="la")
+            bottom = subtitle_y + BRACKET_SUBTITLE_FONT_SIZE
+
+        rule_y = bottom + BRACKET_HEADER_RULE_GAP
+        draw.line(
+            [(BRACKET_MARGIN, rule_y), (width - BRACKET_MARGIN, rule_y)], fill=accent_color,
+            width=BRACKET_RULE_WIDTH
+        )
+
+    # The extra canvas width the header block itself needs — the logo (if
+    # any) plus its gap before the title, compared against the title's own
+    # text and the subtitle's, so a short bracket with a long guild name (or
+    # vice versa) still sizes the canvas to whichever is actually widest.
+    def _bracketHeaderWidth(self, measurer, title, subtitle, title_font, subtitle_font):
+        logo = self._loadBracketLogo()
+        logo_width = (logo.width + BRACKET_PADDING) if logo is not None else 0
+        title_width = logo_width + measurer.textlength(title, font=title_font)
+        subtitle_width = measurer.textlength(subtitle, font=subtitle_font) if subtitle else 0
+        return max(title_width, subtitle_width)
+
+    # A fresh bracket-image canvas: a soft radial vignette (BRACKET_
+    # BACKGROUND_CENTER fading out to BRACKET_BACKGROUND at the corners,
+    # computed with numpy since a plain flat fill at these pixel counts
+    # would otherwise mean a per-pixel Python loop) inside a thin rounded
+    # frame in `accent_color`. Returns (image, draw) — every caller needs
+    # both anyway, and creating them together keeps that pairing from ever
+    # drifting apart.
+    def _createBracketCanvas(self, width, height, accent_color=BRACKET_LINE_COLOR):
+        yy, xx = np.mgrid[0:height, 0:width]
+        cx, cy = width / 2, height / 2
+        max_dist = math.hypot(max(cx, width - cx), max(cy, height - cy))
+        t = np.clip(np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2) / max_dist, 0, 1)[..., None]
+        center = np.array(BRACKET_BACKGROUND_CENTER, dtype=np.float64)
+        edge = np.array(BRACKET_BACKGROUND, dtype=np.float64)
+        image = Image.fromarray((center * (1 - t) + edge * t).astype(np.uint8), "RGB")
+
+        draw = ImageDraw.Draw(image)
+        draw.rounded_rectangle(
+            [BRACKET_LINE_WIDTH, BRACKET_LINE_WIDTH, width - BRACKET_LINE_WIDTH - 1, height - BRACKET_LINE_WIDTH - 1],
+            radius=BRACKET_BORDER_RADIUS, outline=accent_color, width=BRACKET_LINE_WIDTH
+        )
+        return image, draw
+
+    # The text a node prints as itself: its real team name once decided,
+    # otherwise "BYE" for a permanently-empty round-0 slot or "TBD" for a
+    # later round still waiting on an earlier match.
+    def _bracketNodeLabel(self, node, round_index):
         if node.team is not None:
             return node.team.get_name()
-        if node.previous is not None:
-            left, right = node.previous, node.previous.opponent
-            left_name = left.team.get_name() if left.team is not None else "TBD"
-            right_name = right.team.get_name() if right.team is not None else "TBD"
-            return f"Winner of ({left_name} vs {right_name})"
-        return "TBD"
+        return "BYE" if round_index == 0 else "TBD"
 
-    # Text visualization of the whole bracket: real matchups for round 1,
-    # "who could possibly play who" for the round after that (via
-    # _nodeLabel), and a champion line. Posted by /tournament-print-bracket, and
-    # automatically by createBracketHelper right after building one.
-    def renderBracketText(self, tournament):
+    # Whether `node`'s own label is still "current" (its team's latest known
+    # position) or just a waypoint a still-advancing team already passed
+    # through on the way to somewhere else — dimmed in the second case, so a
+    # glance at the tree shows who's still alive without having to trace
+    # every name all the way to its last appearance. A node is a waypoint
+    # exactly when the same team's name is about to repeat one round later
+    # (node.next) — that later label already carries the same story further.
+    def _bracketNodeTextColor(self, node):
+        if node.team is None:
+            return BRACKET_TEXT_COLOR
+        if (
+            node.next is not None and node.next.team is not None
+            and node.next.team.get_name() == node.team.get_name()
+        ):
+            return BRACKET_LINE_COLOR
+        return BRACKET_TEXT_COLOR
+
+    # WB-style round names, keyed off how many rounds remain until the
+    # champion — "Round of 64" for the leaves of a 64-team bracket, on down
+    # to "Finals" for the last real match and "Champion" for the result
+    # itself (round_index == top_round_index).
+    def _roundName(self, round_index, top_round_index):
+        rounds_from_final = top_round_index - round_index
+        if rounds_from_final <= 0:
+            return "Champion"
+        if rounds_from_final == 1:
+            return "Finals"
+        if rounds_from_final == 2:
+            return "Semifinals"
+        if rounds_from_final == 3:
+            return "Quarterfinals"
+        return f"Round of {2 ** rounds_from_final}"
+
+    # The losers bracket doesn't cleanly halve every round the way the
+    # winners bracket does (drop-ins keep the count uneven — see
+    # buildLosersBracket), so "Quarterfinals"-style names don't reliably
+    # apply. Plain numbering instead, 1-indexed from the leaves.
+    def _losersRoundName(self, round_index):
+        return f"Losers Round {round_index + 1}"
+
+    # One text label per round_index, positioned directly above that
+    # column's own nodes (same x formula _assignBracketPositions/
+    # _drawBracketNode use to place them, just one row higher and with no
+    # y-offset of its own) — `offsets`/`x0`/`mirror` need to exactly match
+    # whatever positions were already built from them. `max_round_index` is
+    # the deepest round_index actually present in THIS `offsets` table —
+    # the two-sided renderers pass half_round_index here, not the whole
+    # bracket's top_round_index, since each half only goes that deep.
+    def _drawRoundHeaders(self, draw, offsets, x0, max_round_index, header_y, header_font, name_fn, mirror=False):
+        for round_index in range(max_round_index + 1):
+            x = x0 + (-offsets[round_index] if mirror else offsets[round_index])
+            draw.text(
+                (x, header_y), name_fn(round_index), font=header_font, fill=BRACKET_LINE_COLOR,
+                anchor=("ra" if mirror else "la")
+            )
+
+    # A small 5-pointed star, standing in for a trophy icon — PIL's bundled
+    # default font doesn't reliably have emoji glyphs (see the losers-
+    # bracket-merge note above about box-drawing characters, same issue),
+    # so this is drawn as plain geometry instead of relying on one.
+    def _drawStar(self, draw, cx, cy, radius, color):
+        points = []
+        for i in range(10):
+            angle = -math.pi / 2 + i * math.pi / 5
+            r = radius if i % 2 == 0 else radius * 0.42
+            points.append((cx + r * math.cos(angle), cy + r * math.sin(angle)))
+        draw.polygon(points, fill=color)
+
+    # A champion/final-result label with its own star badge in the gap
+    # BRACKET_CHAMPION_BADGE_GAP already reserves immediately to its left —
+    # every caller that positions a champion-style label needs to have
+    # added that gap to its own x math first (see _renderTreeImage and
+    # friends), same as champion_width already accounts for the text itself.
+    def _drawChampionLabel(self, draw, x, y, label, font, color):
+        star_cx = x - BRACKET_CHAMPION_BADGE_GAP + BRACKET_PADDING + BRACKET_CHAMPION_STAR_RADIUS
+        self._drawStar(draw, star_cx, y, BRACKET_CHAMPION_STAR_RADIUS, color)
+        draw.text((x, y), label, font=font, fill=color, anchor="lm")
+
+    # Draws an axis-aligned two-segment path from `from_point` through
+    # `corner` to `to_point` with the corner rounded to `radius`, instead of
+    # a sharp draw.line — purely cosmetic, softens every elbow in the tree.
+    # Falls back to a sharp corner if either segment is too short to fit the
+    # requested radius, so short connectors near the leaves never overshoot.
+    def _drawRoundedElbow(self, draw, from_point, corner, to_point, color, width, radius):
+        fx, fy = from_point
+        cx, cy = corner
+        tx, ty = to_point
+
+        if fx == cx:
+            vdir = 1 if fy > cy else -1
+            seg1_len = abs(fy - cy)
+            hdir = 1 if tx > cx else -1
+            seg2_len = abs(tx - cx)
+        else:
+            hdir = 1 if fx > cx else -1
+            seg1_len = abs(fx - cx)
+            vdir = 1 if ty > cy else -1
+            seg2_len = abs(ty - cy)
+
+        r = min(radius, seg1_len, seg2_len)
+        if r <= 0:
+            draw.line([from_point, corner, to_point], fill=color, width=width)
+            return
+
+        if fx == cx:
+            trimmed_from = (cx, cy + vdir * r)
+            trimmed_to = (cx + hdir * r, cy)
+        else:
+            trimmed_from = (cx + hdir * r, cy)
+            trimmed_to = (cx, cy + vdir * r)
+
+        draw.line([from_point, trimmed_from], fill=color, width=width)
+        draw.line([trimmed_to, to_point], fill=color, width=width)
+
+        # The arc's center sits `r` away from the corner along BOTH
+        # segments' own directions — the only point equidistant (by r) from
+        # both trimmed endpoints that keeps the curve tangent to each line.
+        center_x, center_y = cx + hdir * r, cy + vdir * r
+        start_angle, end_angle = {
+            (1, -1): (90, 180), (1, 1): (180, 270), (-1, -1): (0, 90), (-1, 1): (270, 360),
+        }[(hdir, vdir)]
+        draw.arc(
+            [center_x - r, center_y - r, center_x + r, center_y + r], start_angle, end_angle,
+            fill=color, width=width
+        )
+
+    # Walks the tree rooted at `node` (a champion node, `round_index` rounds
+    # up from its own leaves) via `previous`/`previous.opponent`, recording
+    # each node's (label, round_index) — leaves included — into `labels`.
+    # A losers-bracket "fresh drop-in" leaf (see buildLosersBracket) renders
+    # at the SAME round_index as whatever sibling it's paired against, not
+    # at 0 the way every winners-bracket leaf does, which is exactly what
+    # makes it land in the right column below (see _assignBracketPositions)
+    # without needing any special-casing here.
+    def _collectBracketLabels(self, node, round_index, labels):
+        labels[id(node)] = (self._bracketNodeLabel(node, round_index), round_index)
+        if node.previous is not None:
+            self._collectBracketLabels(node.previous, round_index - 1, labels)
+            self._collectBracketLabels(node.previous.opponent, round_index - 1, labels)
+
+    # One pixel column per round_index — the X coordinate every node at
+    # that round_index gets drawn at — sized to the widest label anywhere
+    # in that round_index (plus padding for the connector line into it) so
+    # every round lines up in a straight column across the whole image,
+    # the same idea the old ASCII renderer used column_widths for.
+    # `header_font`/`round_name_fn`, if given, also count that round's own
+    # header text (see _drawRoundHeaders) toward its column's width — a
+    # small bracket with short team names but a longer header like "Losers
+    # Round 1" would otherwise size the column to the names alone and run
+    # that header straight into the next one.
+    def _bracketColumnOffsets(self, labels, draw, font, top_round_index, header_font=None, round_name_fn=None):
+        widths = [0] * (top_round_index + 1)
+        for label, round_index in labels.values():
+            widths[round_index] = max(widths[round_index], draw.textlength(label, font=font))
+        if header_font is not None:
+            for round_index in range(top_round_index + 1):
+                header_width = draw.textlength(round_name_fn(round_index), font=header_font)
+                widths[round_index] = max(widths[round_index], header_width)
+
+        offsets = [0] * (top_round_index + 2)
+        for round_index in range(top_round_index + 1):
+            offsets[round_index + 1] = offsets[round_index] + widths[round_index] + BRACKET_PADDING * 4
+        return offsets
+
+    # Recursively assigns every node an (x, y) pixel position — x straight
+    # from `offsets[round_index]`, y for a leaf from a shared counter (so
+    # leaves stack top-to-bottom in traversal order) and for anything else
+    # the midpoint of its two children's y — writing into `positions` and
+    # returning this node's own y so its caller can average it with its
+    # sibling's. Unlike the ASCII renderer, a losers-bracket "fresh drop-in"
+    # leaf needs no special handling at all here: it's still just a leaf,
+    # its x already comes out right since it's called with the SAME
+    # round_index as its sibling, and pixel space doesn't need the leading-
+    # blank padding tightly-packed character columns did.
+    def _assignBracketPositions(self, node, round_index, positions, leaf_counter, offsets):
+        x = offsets[round_index]
+        if node.previous is None:
+            y = next(leaf_counter) * BRACKET_ROW_HEIGHT + BRACKET_ROW_HEIGHT / 2
+            positions[id(node)] = (x, y)
+            return y
+
+        left_y = self._assignBracketPositions(node.previous, round_index - 1, positions, leaf_counter, offsets)
+        right_y = self._assignBracketPositions(
+            node.previous.opponent, round_index - 1, positions, leaf_counter, offsets
+        )
+        y = (left_y + right_y) / 2
+        positions[id(node)] = (x, y)
+        return y
+
+    # Draws `node`'s own label at its position, then (if it's not a leaf)
+    # the ┐/┘ elbow connecting its two children into it, and recurses. Line
+    # drawing rather than box-drawing text characters specifically so this
+    # never depends on a font actually having those glyphs — plain straight
+    # lines render identically on every platform.
+    #
+    # `mirror` draws the exact horizontal mirror image — labels grow
+    # leftward from their anchor (`anchor="rm"` instead of `"lm"`) and every
+    # connector offset flips direction — for the right-hand half of a two-
+    # sided bracket (see _renderTwoSidedTreeImage), where round_index still
+    # increases moving INTO the page (toward the center) but that now means
+    # decreasing x instead of increasing it.
+    # `skip_own_label`, when True, leaves THIS node's own text undrawn (its
+    # connectors and children still get drawn/recursed normally) — for a
+    # caller that wants to draw the root itself separately, as a champion
+    # label with its own star badge (see _drawChampionLabel) instead of a
+    # plain dimmable node.
+    def _drawBracketNode(self, draw, node, positions, labels, font, mirror=False, skip_own_label=False):
+        sign = -1 if mirror else 1
+        x, y = positions[id(node)]
+        if not skip_own_label:
+            label, _ = labels[id(node)]
+            draw.text(
+                (x, y), label, font=font, fill=self._bracketNodeTextColor(node),
+                anchor=("rm" if mirror else "lm")
+            )
+
+        if node.previous is None:
+            return
+
+        left, right = node.previous, node.previous.opponent
+        lx, ly = positions[id(left)]
+        rx, ry = positions[id(right)]
+        left_width = draw.textlength(labels[id(left)][0], font=font)
+        right_width = draw.textlength(labels[id(right)][0], font=font)
+        connector_x = x - sign * BRACKET_PADDING * 2
+        mid = (connector_x, y)
+
+        self._drawRoundedElbow(
+            draw, (lx + sign * (left_width + BRACKET_PADDING), ly), (connector_x, ly), mid,
+            BRACKET_LINE_COLOR, BRACKET_LINE_WIDTH, BRACKET_CORNER_RADIUS
+        )
+        self._drawRoundedElbow(
+            draw, (rx + sign * (right_width + BRACKET_PADDING), ry), (connector_x, ry), mid,
+            BRACKET_LINE_COLOR, BRACKET_LINE_WIDTH, BRACKET_CORNER_RADIUS
+        )
+        draw.line([mid, (x - sign * BRACKET_PADDING, y)], fill=BRACKET_LINE_COLOR, width=BRACKET_LINE_WIDTH)
+
+        self._drawBracketNode(draw, left, positions, labels, font, mirror)
+        self._drawBracketNode(draw, right, positions, labels, font, mirror)
+
+    # Renders one bracket tree (winners or losers) — everything from
+    # `champion_node` down to its leaves — as a standalone image sized to
+    # exactly fit its content, titled `title`. Positions are computed in a
+    # first pass so the canvas can be sized from their actual bounds before
+    # anything is drawn, rather than guessing a size up front and risking
+    # clipping the bottom/right edge.
+    # `accent_color` colors the title and the champion's own label/badge —
+    # gold for the winners bracket, BRACKET_LOSERS_ACCENT_COLOR for the
+    # losers bracket (see _renderLosersBracketImage), so the two images read
+    # as "which one is this" without depending on remembering the caption.
+    # `round_name_fn` similarly defaults to the winners-bracket-style
+    # Round-of-N/Quarterfinals/... naming; the losers bracket passes
+    # _losersRoundName instead (see that method for why).
+    def _renderTreeImage(
+        self, champion_node, top_round_index, title, accent_color=BRACKET_TITLE_COLOR, round_name_fn=None,
+        subtitle=None
+    ):
+        font = self._loadFont(IBM_PLEX_SANS, BRACKET_FONT_SIZE, "Regular")
+        title_font = self._loadFont(CHAKRA_PETCH_SEMIBOLD, BRACKET_TITLE_FONT_SIZE)
+        subtitle_font = self._loadFont(IBM_PLEX_SANS, BRACKET_SUBTITLE_FONT_SIZE, "Regular")
+        header_font = self._loadFont(IBM_PLEX_SANS, BRACKET_ROUND_LABEL_FONT_SIZE, "Medium")
+        measurer = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+
+        if round_name_fn is None:
+            round_name_fn = lambda round_index: self._roundName(round_index, top_round_index)
+
+        labels = {}
+        self._collectBracketLabels(champion_node, top_round_index, labels)
+        offsets = self._bracketColumnOffsets(
+            labels, measurer, font, top_round_index, header_font=header_font, round_name_fn=round_name_fn
+        )
+
+        positions = {}
+        self._assignBracketPositions(champion_node, top_round_index, positions, itertools.count(), offsets)
+
+        header_y = self._bracketHeaderHeight(subtitle)
+        tree_top = header_y + BRACKET_ROUND_LABEL_HEIGHT
+        positions = {key: (x + BRACKET_MARGIN, y + tree_top) for key, (x, y) in positions.items()}
+
+        # The champion's own position is nudged further right to make room
+        # for its star badge (see _drawChampionLabel) — done here, before
+        # anything is drawn, so the connector leading into it (drawn as
+        # part of _drawBracketNode's normal recursion) naturally reaches
+        # the shifted spot instead of needing special-casing later.
+        champion_label = labels[id(champion_node)][0]
+        champion_width = measurer.textlength(champion_label, font=font)
+        champion_x, champion_y = positions[id(champion_node)]
+        champion_x += BRACKET_CHAMPION_BADGE_GAP
+        positions[id(champion_node)] = (champion_x, champion_y)
+
+        header_width = self._bracketHeaderWidth(measurer, title, subtitle, title_font, subtitle_font)
+        width = int(max(champion_x + champion_width, header_width) + BRACKET_MARGIN * 2)
+        height = int(max(y for x, y in positions.values()) + BRACKET_ROW_HEIGHT / 2 + BRACKET_MARGIN)
+
+        image, draw = self._createBracketCanvas(width, height, accent_color)
+        self._drawBracketHeader(image, draw, title, subtitle, accent_color, width)
+        self._drawRoundHeaders(draw, offsets, BRACKET_MARGIN, top_round_index, header_y, header_font, round_name_fn)
+        self._drawBracketNode(draw, champion_node, positions, labels, font, skip_own_label=True)
+        self._drawChampionLabel(draw, champion_x, champion_y, champion_label, font, accent_color)
+        return image
+
+    # Same idea as _renderTreeImage, but for a bracket deep enough
+    # (BRACKET_TWO_SIDED_MIN_ROUNDS+) that it's worth splitting into two
+    # halves growing toward the center — see that constant's comment for
+    # why this only ever gets called for the winners bracket. `champion_node`'s
+    # two children (always exactly even halves — see buildBracket) are laid
+    # out independently, the right one mirrored (_drawBracketNode's `mirror`
+    # flag), and joined by one final connector into the champion in the
+    # middle.
+    def _renderTwoSidedTreeImage(self, champion_node, top_round_index, title, subtitle=None):
+        left_half = champion_node.previous
+        right_half = champion_node.previous.opponent
+        half_round_index = top_round_index - 1
+
+        font = self._loadFont(IBM_PLEX_SANS, BRACKET_FONT_SIZE, "Regular")
+        title_font = self._loadFont(CHAKRA_PETCH_SEMIBOLD, BRACKET_TITLE_FONT_SIZE)
+        subtitle_font = self._loadFont(IBM_PLEX_SANS, BRACKET_SUBTITLE_FONT_SIZE, "Regular")
+        header_font = self._loadFont(IBM_PLEX_SANS, BRACKET_ROUND_LABEL_FONT_SIZE, "Medium")
+        measurer = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+        round_name_fn = lambda round_index: self._roundName(round_index, top_round_index)
+
+        left_labels, right_labels = {}, {}
+        self._collectBracketLabels(left_half, half_round_index, left_labels)
+        self._collectBracketLabels(right_half, half_round_index, right_labels)
+
+        left_offsets = self._bracketColumnOffsets(
+            left_labels, measurer, font, half_round_index, header_font=header_font, round_name_fn=round_name_fn
+        )
+        right_offsets = self._bracketColumnOffsets(
+            right_labels, measurer, font, half_round_index, header_font=header_font, round_name_fn=round_name_fn
+        )
+
+        left_positions, right_positions = {}, {}
+        self._assignBracketPositions(left_half, half_round_index, left_positions, itertools.count(), left_offsets)
+        self._assignBracketPositions(right_half, half_round_index, right_positions, itertools.count(), right_offsets)
+
+        # Each half's own top node (closest to center) sits at its deepest
+        # local x — offsets_*[half_round_index], same as max() over its
+        # positions — and, since _drawBracketNode anchors a label at its
+        # position and extends it AWAY from center, needs its own rendered
+        # width added on top of that to know where it actually ends.
+        champion_label = self._bracketNodeLabel(champion_node, top_round_index)
+        champion_width = measurer.textlength(champion_label, font=font)
+        left_top_x = max(x for x, y in left_positions.values())
+        right_top_x = max(x for x, y in right_positions.values())
+        left_half_width = measurer.textlength(left_labels[id(left_half)][0], font=font)
+        right_half_width = measurer.textlength(right_labels[id(right_half)][0], font=font)
+
+        header_y = self._bracketHeaderHeight(subtitle)
+        tree_top = header_y + BRACKET_ROUND_LABEL_HEIGHT
+        left_x0 = BRACKET_MARGIN
+        connector_x = left_x0 + left_top_x + left_half_width + BRACKET_PADDING * 3
+        champion_x = connector_x + BRACKET_PADDING + BRACKET_CHAMPION_BADGE_GAP
+        # Right_half sits past the champion, not immediately across
+        # connector_x from left_half — otherwise its own top node reads as
+        # a second, unrelated match crowded right next to the actual
+        # result instead of a clearly separate half of the bracket.
+        right_x0 = champion_x + champion_width + BRACKET_PADDING * 3 + right_top_x + right_half_width
+
+        # The right half is also nudged down a couple of rows from where a
+        # plain mirror of the left half would otherwise land. Right_half's
+        # own connector line necessarily crosses the champion's x-range now
+        # (it sits past it) — without this nudge, any bracket without byes
+        # makes both halves the exact same shape, so that line would land
+        # on the champion's exact row and run straight through its label.
+        row_nudge = BRACKET_ROW_HEIGHT * 2
+        left_positions = {key: (x + left_x0, y + tree_top) for key, (x, y) in left_positions.items()}
+        right_positions = {
+            key: (right_x0 - x, y + tree_top + row_nudge) for key, (x, y) in right_positions.items()
+        }
+
+        left_half_x, left_half_y = left_positions[id(left_half)]
+        right_half_x, right_half_y = right_positions[id(right_half)]
+        champion_y = (left_half_y + right_half_y) / 2
+
+        header_width = self._bracketHeaderWidth(measurer, title, subtitle, title_font, subtitle_font)
+        width = int(max(right_x0, champion_x + champion_width, header_width) + BRACKET_MARGIN * 2)
+        height = int(
+            max(y for x, y in list(left_positions.values()) + list(right_positions.values()))
+            + BRACKET_ROW_HEIGHT / 2 + BRACKET_MARGIN
+        )
+
+        image, draw = self._createBracketCanvas(width, height, BRACKET_TITLE_COLOR)
+        self._drawBracketHeader(image, draw, title, subtitle, BRACKET_TITLE_COLOR, width)
+        self._drawRoundHeaders(draw, left_offsets, left_x0, half_round_index, header_y, header_font, round_name_fn)
+        self._drawRoundHeaders(
+            draw, right_offsets, right_x0, half_round_index, header_y, header_font, round_name_fn, mirror=True
+        )
+
+        self._drawBracketNode(draw, left_half, left_positions, left_labels, font, mirror=False)
+        self._drawBracketNode(draw, right_half, right_positions, right_labels, font, mirror=True)
+
+        merge_point = (connector_x, champion_y)
+        self._drawRoundedElbow(
+            draw, (left_half_x + left_half_width + BRACKET_PADDING, left_half_y), (connector_x, left_half_y),
+            merge_point, BRACKET_LINE_COLOR, BRACKET_LINE_WIDTH, BRACKET_CORNER_RADIUS
+        )
+        self._drawRoundedElbow(
+            draw, (right_half_x - right_half_width - BRACKET_PADDING, right_half_y), (connector_x, right_half_y),
+            merge_point, BRACKET_LINE_COLOR, BRACKET_LINE_WIDTH, BRACKET_CORNER_RADIUS
+        )
+        self._drawChampionLabel(draw, champion_x, champion_y, champion_label, font, BRACKET_TITLE_COLOR)
+
+        return image
+
+    # The winners bracket as an image — always present once a bracket
+    # exists at all. A plain hyphen, not an em dash, in the title: PIL's
+    # bundled default font doesn't have a glyph for it, which renders as a
+    # visible tofu box — plain ASCII punctuation is guaranteed to exist in
+    # any font this ends up running with.
+    def _renderWinnersBracketImage(self, tournament, guild_name=None):
+        rounds = self._bracketRounds(tournament.get_bracket())
+        top_round_index = len(rounds) - 1
+        champion_node = rounds[-1][0]
+        title = f"{tournament.get_name()} - Winners Bracket"
+        subtitle = f"for {guild_name}" if guild_name else None
+        if top_round_index >= BRACKET_TWO_SIDED_MIN_ROUNDS:
+            return self._renderTwoSidedTreeImage(champion_node, top_round_index, title, subtitle)
+        return self._renderTreeImage(champion_node, top_round_index, title, subtitle=subtitle)
+
+    # The losers bracket as an image, for a double-elimination tournament —
+    # None for the degenerate 2-team case (a single winners-bracket match
+    # has no one left for its loser to play, so there's no losers-bracket
+    # tree to draw at all).
+    def _renderLosersBracketImage(self, tournament, guild_name=None):
+        lb_rounds = tournament.get_losers_rounds()
+        if not lb_rounds or (len(lb_rounds) == 1 and lb_rounds[0][0].previous is None):
+            return None
+        title = f"{tournament.get_name()} - Losers Bracket"
+        subtitle = f"for {guild_name}" if guild_name else None
+        if len(lb_rounds) >= BRACKET_TWO_SIDED_MIN_ROUNDS:
+            return self._renderLosersTwoSidedTreeImage(lb_rounds, title, subtitle)
+        return self._renderTreeImage(
+            lb_rounds[-1][0], len(lb_rounds), title,
+            accent_color=BRACKET_LOSERS_ACCENT_COLOR, round_name_fn=self._losersRoundName, subtitle=subtitle
+        )
+
+    # _renderTwoSidedTreeImage's counterpart for the losers bracket, which
+    # can't just split at the champion's own two children the way the
+    # winners bracket does: the losers bracket's last round is ALWAYS a
+    # lopsided drop-in (see buildLosersBracket) — one side is the deep
+    # surviving lineage, the other is a single bare leaf (whichever team
+    # lost the winners-bracket final outright) — so that split would put
+    # an entire tree on one side and one bare name on the other.
+    #
+    # One round earlier is where the two winners-bracket-side lineages
+    # actually meet: every losers-bracket round after that keeps
+    # winners-left and winners-right losers strictly separate (each
+    # drop-in pairs a survivor against a fresh loser from the SAME
+    # winners-bracket side — see buildLosersBracket's round-alternation
+    # pattern), right up until the second-to-last round, which is always
+    # exactly one node — the first, and only, point where they merge. THAT
+    # merge is the genuine even split; drawing it two-sided and then
+    # extending one more (normal, single-sided) hop past it to reach the
+    # true champion keeps things honest about where the real asymmetry is,
+    # instead of pushing it into a lopsided top-level split.
+    def _renderLosersTwoSidedTreeImage(self, lb_rounds, title, subtitle=None):
+        champion_node = lb_rounds[-1][0]
+        merge_node = lb_rounds[-2][0]
+        top_round_index = len(lb_rounds)
+        merge_round_index = top_round_index - 1
+        half_round_index = merge_round_index - 1
+
+        left_half = merge_node.previous
+        right_half = merge_node.previous.opponent
+        other_child = (
+            champion_node.previous.opponent if champion_node.previous is merge_node else champion_node.previous
+        )
+
+        font = self._loadFont(IBM_PLEX_SANS, BRACKET_FONT_SIZE, "Regular")
+        title_font = self._loadFont(CHAKRA_PETCH_SEMIBOLD, BRACKET_TITLE_FONT_SIZE)
+        subtitle_font = self._loadFont(IBM_PLEX_SANS, BRACKET_SUBTITLE_FONT_SIZE, "Regular")
+        header_font = self._loadFont(IBM_PLEX_SANS, BRACKET_ROUND_LABEL_FONT_SIZE, "Medium")
+        measurer = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+
+        left_labels, right_labels = {}, {}
+        self._collectBracketLabels(left_half, half_round_index, left_labels)
+        self._collectBracketLabels(right_half, half_round_index, right_labels)
+        left_offsets = self._bracketColumnOffsets(
+            left_labels, measurer, font, half_round_index,
+            header_font=header_font, round_name_fn=self._losersRoundName
+        )
+        right_offsets = self._bracketColumnOffsets(
+            right_labels, measurer, font, half_round_index,
+            header_font=header_font, round_name_fn=self._losersRoundName
+        )
+
+        left_positions, right_positions = {}, {}
+        self._assignBracketPositions(left_half, half_round_index, left_positions, itertools.count(), left_offsets)
+        self._assignBracketPositions(right_half, half_round_index, right_positions, itertools.count(), right_offsets)
+
+        merge_label = self._bracketNodeLabel(merge_node, merge_round_index)
+        merge_width = measurer.textlength(merge_label, font=font)
+        other_label = self._bracketNodeLabel(other_child, merge_round_index)
+        other_width = measurer.textlength(other_label, font=font)
+        champion_label = self._bracketNodeLabel(champion_node, top_round_index)
+        champion_width = measurer.textlength(champion_label, font=font)
+
+        left_top_x = max(x for x, y in left_positions.values())
+        right_top_x = max(x for x, y in right_positions.values())
+        left_half_width = measurer.textlength(left_labels[id(left_half)][0], font=font)
+        right_half_width = measurer.textlength(right_labels[id(right_half)][0], font=font)
+
+        header_y = self._bracketHeaderHeight(subtitle)
+        tree_top = header_y + BRACKET_ROUND_LABEL_HEIGHT
+        left_x0 = BRACKET_MARGIN
+        connector_x = left_x0 + left_top_x + left_half_width + BRACKET_PADDING * 3
+        merge_x = connector_x + BRACKET_PADDING
+        final_connector_x = merge_x + max(merge_width, other_width) + BRACKET_PADDING * 3
+        champion_x = final_connector_x + BRACKET_PADDING + BRACKET_CHAMPION_BADGE_GAP
+        # Right_half sits past the champion, not immediately across
+        # connector_x from left_half — otherwise its own top node reads as
+        # a second, unrelated match crowded right next to the merge_node/
+        # other_child/champion hop instead of a clearly separate half of
+        # the bracket.
+        right_x0 = champion_x + champion_width + BRACKET_PADDING * 3 + right_top_x + right_half_width
+
+        # The right half is also nudged well down from where a plain mirror
+        # of the left half would otherwise land — more than the minimum
+        # needed to keep right_half's own connector line off the hop's rows
+        # (that alone only bought ~1.25 rows of clearance, which technically
+        # doesn't cross anything but still reads as "another game" sitting
+        # right under the champion at a glance). Without any nudge at all,
+        # any bracket without byes makes both halves the exact same shape,
+        # putting right_half's own top on the hop's exact row.
+        row_nudge = BRACKET_ROW_HEIGHT * 6
+        left_positions = {key: (x + left_x0, y + tree_top) for key, (x, y) in left_positions.items()}
+        right_positions = {
+            key: (right_x0 - x, y + tree_top + row_nudge) for key, (x, y) in right_positions.items()
+        }
+
+        left_half_x, left_half_y = left_positions[id(left_half)]
+        right_half_x, right_half_y = right_positions[id(right_half)]
+        bar_mid_y = (left_half_y + right_half_y) / 2
+
+        merge_y = bar_mid_y - BRACKET_ROW_HEIGHT / 2
+        other_x, other_y = merge_x, merge_y + BRACKET_ROW_HEIGHT
+        champion_y = (merge_y + other_y) / 2
+
+        header_width = self._bracketHeaderWidth(measurer, title, subtitle, title_font, subtitle_font)
+        width = int(max(right_x0, champion_x + champion_width, header_width) + BRACKET_MARGIN * 2)
+        height = int(
+            max(other_y, max(y for x, y in list(left_positions.values()) + list(right_positions.values())))
+            + BRACKET_ROW_HEIGHT / 2 + BRACKET_MARGIN
+        )
+
+        image, draw = self._createBracketCanvas(width, height, BRACKET_LOSERS_ACCENT_COLOR)
+        self._drawBracketHeader(image, draw, title, subtitle, BRACKET_LOSERS_ACCENT_COLOR, width)
+        self._drawRoundHeaders(
+            draw, left_offsets, left_x0, half_round_index, header_y, header_font, self._losersRoundName
+        )
+        self._drawRoundHeaders(
+            draw, right_offsets, right_x0, half_round_index, header_y, header_font, self._losersRoundName,
+            mirror=True
+        )
+
+        self._drawBracketNode(draw, left_half, left_positions, left_labels, font, mirror=False)
+        self._drawBracketNode(draw, right_half, right_positions, right_labels, font, mirror=True)
+
+        merge_point = (connector_x, champion_y)
+        self._drawRoundedElbow(
+            draw, (left_half_x + left_half_width + BRACKET_PADDING, left_half_y), (connector_x, left_half_y),
+            merge_point, BRACKET_LINE_COLOR, BRACKET_LINE_WIDTH, BRACKET_CORNER_RADIUS
+        )
+        self._drawRoundedElbow(
+            draw, (right_half_x - right_half_width - BRACKET_PADDING, right_half_y), (connector_x, right_half_y),
+            merge_point, BRACKET_LINE_COLOR, BRACKET_LINE_WIDTH, BRACKET_CORNER_RADIUS
+        )
+        draw.text((merge_x, merge_y), merge_label, font=font, fill=self._bracketNodeTextColor(merge_node), anchor="lm")
+        draw.text(
+            (other_x, other_y), other_label, font=font, fill=self._bracketNodeTextColor(other_child), anchor="lm"
+        )
+
+        final_point = (final_connector_x, champion_y)
+        self._drawRoundedElbow(
+            draw, (merge_x + merge_width + BRACKET_PADDING, merge_y), (final_connector_x, merge_y), final_point,
+            BRACKET_LINE_COLOR, BRACKET_LINE_WIDTH, BRACKET_CORNER_RADIUS
+        )
+        self._drawRoundedElbow(
+            draw, (other_x + other_width + BRACKET_PADDING, other_y), (final_connector_x, other_y), final_point,
+            BRACKET_LINE_COLOR, BRACKET_LINE_WIDTH, BRACKET_CORNER_RADIUS
+        )
+        self._drawChampionLabel(draw, champion_x, champion_y, champion_label, font, BRACKET_LOSERS_ACCENT_COLOR)
+
+        return image
+
+    # A dedicated third image for just the Grand Finals stage: winners-
+    # bracket champion vs losers-bracket champion, and the decider "bracket
+    # reset" match if the losers-bracket side forced one by winning game 1.
+    # None until game 1 has actually been played — not just once both
+    # bracket champions exist, since "vs, nothing decided yet" isn't worth
+    # its own message (see _sendBracketText, which sends this separately
+    # from the winners/losers bracket images, and only when this isn't
+    # None). Split from the actual drawing (_buildGrandFinalsImage) so that
+    # code can also be exercised without a real guildId or any
+    # tournament_matches rows — see /test in bot.py, which simulates a full
+    # run entirely in memory.
+    def _renderGrandFinalsImage(self, guild_id, tournament, guild_name=None):
+        wb_rounds = self._bracketRounds(tournament.get_bracket())
+        wb_champion = wb_rounds[-1][0].team if wb_rounds else None
+        lb_rounds = tournament.get_losers_rounds()
+        lb_champion = lb_rounds[-1][0].team if lb_rounds else None
+        if wb_champion is None or lb_champion is None:
+            return None
+
+        self.cursor.execute(
+            "SELECT roundIndex, team1, team2, winner, state FROM tournament_matches "
+            "WHERE guildId=? AND bracketType='finals' ORDER BY roundIndex",
+            (guild_id,)
+        )
+        game1_winner_name, reset_winner_name = None, None
+        for round_index, team1_ser, team2_ser, winner, state in self.cursor.fetchall():
+            if state != "RESOLVED":
+                continue
+            team1, team2 = Team(), Team()
+            team1.deserializeTeam(team1_ser)
+            team2.deserializeTeam(team2_ser)
+            winning_name = (team1 if winner == 1 else team2).get_name()
+            if round_index == 0:
+                game1_winner_name = winning_name
+            else:
+                reset_winner_name = winning_name
+
+        if game1_winner_name is None:
+            return None
+
+        return self._buildGrandFinalsImage(
+            tournament, wb_champion, lb_champion, game1_winner_name, reset_winner_name, guild_name
+        )
+
+    # The pure rendering half of _renderGrandFinalsImage — no DB access, just
+    # the two bracket champions and however far Grand Finals has resolved
+    # (both winner names None if it hasn't started; reset_winner_name None
+    # until a reset was both needed and played).
+    def _buildGrandFinalsImage(
+        self, tournament, wb_champion, lb_champion, game1_winner_name, reset_winner_name, guild_name=None
+    ):
+        # A reset match only ever happens if the losers-bracket champion
+        # won game 1 (both sides then sit at one loss apiece) — see
+        # _resolveFinalsMatch.
+        needs_reset = game1_winner_name == lb_champion.get_name()
+
+        font = self._loadFont(IBM_PLEX_SANS, BRACKET_FONT_SIZE, "Regular")
+        title_font = self._loadFont(CHAKRA_PETCH_SEMIBOLD, BRACKET_TITLE_FONT_SIZE)
+        subtitle_font = self._loadFont(IBM_PLEX_SANS, BRACKET_SUBTITLE_FONT_SIZE, "Regular")
+        measurer = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+        title = f"{tournament.get_name()} - Grand Finals"
+        subtitle = f"for {guild_name}" if guild_name else None
+
+        game1_label = game1_winner_name if game1_winner_name is not None else "TBD"
+        stages = [{
+            "top": f"{wb_champion.get_name()} (winners bracket)",
+            "bottom": f"{lb_champion.get_name()} (losers bracket)",
+            "result": game1_label,
+            "gold": game1_winner_name is not None and not needs_reset,
+        }]
+        if needs_reset:
+            stages.append({
+                "top": f"{lb_champion.get_name()} (won Game 1)",
+                "bottom": f"{wb_champion.get_name()} (elimination game)",
+                "result": reset_winner_name if reset_winner_name is not None else "TBD",
+                "gold": reset_winner_name is not None,
+            })
+
+        # Two-pass layout, same approach as the rest of this file: measure
+        # everything against a throwaway Draw first so the canvas can be
+        # sized from actual content, then draw for real once it exists.
+        # Stages chain left to right (each one's result feeds the next
+        # stage's inputs), all centered on the same horizontal mid-line.
+        tree_top = self._bracketHeaderHeight(subtitle)
+        x = BRACKET_MARGIN
+        top_y = tree_top
+        layout = []
+        for stage in stages:
+            bottom_y = top_y + BRACKET_ROW_HEIGHT
+            mid_y = (top_y + bottom_y) / 2
+            top_width = measurer.textlength(stage["top"], font=font)
+            bottom_width = measurer.textlength(stage["bottom"], font=font)
+            connector_x = x + max(top_width, bottom_width) + BRACKET_PADDING * 3
+            result_x = connector_x + BRACKET_PADDING
+            if stage["gold"]:
+                result_x += BRACKET_CHAMPION_BADGE_GAP
+            result_width = measurer.textlength(stage["result"], font=font)
+            layout.append({
+                **stage, "x": x, "top_y": top_y, "bottom_y": bottom_y, "mid_y": mid_y,
+                "top_width": top_width, "bottom_width": bottom_width,
+                "connector_x": connector_x, "result_x": result_x, "result_width": result_width,
+            })
+            x = result_x + result_width + BRACKET_PADDING * 3
+            top_y = mid_y - BRACKET_ROW_HEIGHT / 2
+
+        header_width = self._bracketHeaderWidth(measurer, title, subtitle, title_font, subtitle_font)
+        last = layout[-1]
+        width = int(max(last["result_x"] + last["result_width"], header_width) + BRACKET_MARGIN * 2)
+        height = int(max(s["bottom_y"] for s in layout) + BRACKET_ROW_HEIGHT / 2 + BRACKET_MARGIN)
+
+        image, draw = self._createBracketCanvas(width, height, BRACKET_TITLE_COLOR)
+        self._drawBracketHeader(image, draw, title, subtitle, BRACKET_TITLE_COLOR, width)
+
+        for stage in layout:
+            draw.text((stage["x"], stage["top_y"]), stage["top"], font=font, fill=BRACKET_TEXT_COLOR, anchor="lm")
+            draw.text(
+                (stage["x"], stage["bottom_y"]), stage["bottom"], font=font, fill=BRACKET_TEXT_COLOR, anchor="lm"
+            )
+            merge_point = (stage["connector_x"], stage["mid_y"])
+            self._drawRoundedElbow(
+                draw, (stage["x"] + stage["top_width"] + BRACKET_PADDING, stage["top_y"]),
+                (stage["connector_x"], stage["top_y"]), merge_point, BRACKET_LINE_COLOR, BRACKET_LINE_WIDTH, BRACKET_CORNER_RADIUS
+            )
+            self._drawRoundedElbow(
+                draw, (stage["x"] + stage["bottom_width"] + BRACKET_PADDING, stage["bottom_y"]),
+                (stage["connector_x"], stage["bottom_y"]), merge_point, BRACKET_LINE_COLOR, BRACKET_LINE_WIDTH, BRACKET_CORNER_RADIUS
+            )
+            if stage["gold"]:
+                self._drawChampionLabel(
+                    draw, stage["result_x"], stage["mid_y"], stage["result"], font, BRACKET_TITLE_COLOR
+                )
+            else:
+                draw.text(
+                    (stage["result_x"], stage["mid_y"]), stage["result"], font=font, fill=BRACKET_TEXT_COLOR,
+                    anchor="lm"
+                )
+
+        return image
+
+    # Every bracket image for `tournament`, as ready-to-attach discord.Files
+    # — just the winners bracket for single elimination, plus the losers
+    # bracket too (skipped only in the 2-team degenerate case), for double.
+    # The Grand Finals image is deliberately NOT included here — it's sent
+    # as its own separate message, and only once Grand Finals has actually
+    # been played, instead of tagging along on every bracket update — see
+    # _sendBracketText.
+    def renderBracketImages(self, tournament, guild_name=None):
+        files = [
+            self._imageToFile(self._renderWinnersBracketImage(tournament, guild_name), "winners_bracket.png")
+        ]
+        if tournament.is_double_elimination():
+            losers_image = self._renderLosersBracketImage(tournament, guild_name)
+            if losers_image is not None:
+                files.append(self._imageToFile(losers_image, "losers_bracket.png"))
+        return files
+
+    # Every bracket/matchup image is drawn BRACKET_SUPERSAMPLE times bigger
+    # than it's meant to end up (see that constant's own comment) — this is
+    # the one place that scale gets undone, since every renderer's output
+    # passes through here on its way to becoming a discord.File. The
+    # LANCZOS downsize is what actually smooths out jagged text/line edges;
+    # drawing at 1x directly never had any antialiasing to begin with.
+    def _imageToFile(self, image, filename):
+        if BRACKET_SUPERSAMPLE != 1:
+            target_size = (image.width // BRACKET_SUPERSAMPLE, image.height // BRACKET_SUPERSAMPLE)
+            image = image.resize(target_size, Image.LANCZOS)
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        buffer.seek(0)
+        return discord.File(buffer, filename=filename)
+
+    # `team`'s roster with its captain floated to the front (if it has one
+    # and they're actually still on the roster) — what _renderMatchupImage
+    # prints, so "captain at the top" is just "print the list in order"
+    # rather than something each caller has to special-case.
+    def _orderedRoster(self, team):
+        captain = team.get_captain()
+        players = team.get_players()
+        if isinstance(captain, Player) and any(p.get_id() == captain.get_id() for p in players):
+            rest = [p for p in players if p.get_id() != captain.get_id()]
+            return [captain] + rest
+        return list(players)
+
+    # One team's half of the matchup image: its logo, its name, then its
+    # roster with the captain marked with a star (on top of _orderedRoster
+    # already having put them first). A persistent team always has a logo
+    # of its own by now (see _ensureLogo, called on every load) — a team
+    # with none here is really one of the ad-hoc rosters /make-teams,
+    # /captains, etc. build on the fly, which never go through that. Rather
+    # than draw a bare ring for those, pick a random built-in logo just for
+    # this image; not persisted anywhere (there's no stable row to persist
+    # it against), so a rerender can land on a different one, but that's
+    # fine for a team with no identity to keep consistent in the first
+    # place. Only falls back to the ring if the built-in set itself is
+    # unavailable (assets folder missing/empty).
+    def _drawMatchupColumn(
+        self, image, draw, team, roster, cx, logo_top, name_y, roster_top, name_font, team_font, accent_color
+    ):
+        logo_path = team.get_logo_path()
+        if logo_path is None or not os.path.isfile(logo_path):
+            names = self.listAvailableLogos()
+            logo_path = self._resolveLogoPath(random.choice(names)) if names else None
+
+        if logo_path is not None and os.path.isfile(logo_path):
+            logo = Image.open(logo_path).convert("RGBA")
+            logo.thumbnail((MATCHUP_LOGO_SIZE, MATCHUP_LOGO_SIZE), Image.LANCZOS)
+            paste_x = int(cx - logo.width / 2)
+            paste_y = int(logo_top + (MATCHUP_LOGO_SIZE - logo.height) / 2)
+            image.paste(logo, (paste_x, paste_y), logo)
+        else:
+            draw.ellipse(
+                [cx - MATCHUP_LOGO_SIZE / 2, logo_top, cx + MATCHUP_LOGO_SIZE / 2, logo_top + MATCHUP_LOGO_SIZE],
+                outline=accent_color, width=BRACKET_LINE_WIDTH
+            )
+
+        draw.text((cx, name_y), team.get_name(), font=team_font, fill=accent_color, anchor="ma")
+
+        if not roster:
+            draw.text((cx, roster_top), "No players yet", font=name_font, fill=BRACKET_LINE_COLOR, anchor="ma")
+            return
+
+        captain = team.get_captain()
+        captain_id = captain.get_id() if isinstance(captain, Player) else None
+        star_radius = BRACKET_FONT_SIZE / 3
+        for i, player in enumerate(roster):
+            is_captain = captain_id is not None and player.get_id() == captain_id
+            y = roster_top + i * BRACKET_ROW_HEIGHT
+            color = BRACKET_TITLE_COLOR if is_captain else BRACKET_TEXT_COLOR
+            if is_captain:
+                # A drawn star (same shape _drawChampionLabel uses for the
+                # champion badge), not a "★" text glyph — PIL's default
+                # font doesn't actually have that character, so it was
+                # rendering as a tofu box instead of a star.
+                name_width = draw.textlength(player.get_name(), font=name_font)
+                star_cx = cx - name_width / 2 - BRACKET_PADDING / 2 - star_radius
+                self._drawStar(draw, star_cx, y + BRACKET_FONT_SIZE / 2, star_radius, color)
+            draw.text((cx, y), player.get_name(), font=name_font, fill=color, anchor="ma")
+
+    # The "vs" matchup graphic posted alongside the existing text
+    # announcement whenever a tournament match is created (_postMatchReport,
+    # _postReadyCheck) — team 1 and team 2's logos and rosters facing off,
+    # captain on top for each side (see _orderedRoster). Reuses the exact
+    # same canvas/header treatment the bracket images use
+    # (_createBracketCanvas, _drawBracketHeader) so this reads as the same
+    # product instead of a bolted-on second visual style. `round_label` is
+    # this match's place in the tournament (see _matchRoundLabel) — the
+    # headline, since "what round is this" is the thing someone glancing at
+    # the graphic wants first; the tournament/server name and match id are
+    # supporting context underneath.
+    def _renderMatchupImage(self, match_id, team1, team2, round_label, tournament_name, guild_name):
+        # match_id is None for a casual/ranked (non-tournament) matchup —
+        # see _sendMatchupImage — which just omits the "Match #N" part of
+        # the subtitle.
+        name_font = self._loadFont(IBM_PLEX_SANS, BRACKET_FONT_SIZE, "Regular")
+        team_font = self._loadFont(CHAKRA_PETCH_BOLD, BRACKET_TITLE_FONT_SIZE)
+        vs_font = self._loadFont(CHAKRA_PETCH_BOLD, MATCHUP_VS_FONT_SIZE)
+        title_font = self._loadFont(CHAKRA_PETCH_BOLD, BRACKET_TITLE_FONT_SIZE)
+        subtitle_font = self._loadFont(IBM_PLEX_SANS, BRACKET_SUBTITLE_FONT_SIZE, "Regular")
+        measurer = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+
+        roster1 = self._orderedRoster(team1)
+        roster2 = self._orderedRoster(team2)
+        rows = max(len(roster1), len(roster2), 1)
+
+        def column_width(team, roster):
+            name_width = measurer.textlength(team.get_name(), font=team_font)
+            roster_width = max(
+                (measurer.textlength(p.get_name(), font=name_font) for p in roster), default=0
+            )
+            return max(name_width, roster_width, MATCHUP_LOGO_SIZE)
+
+        column_width_px = max(column_width(team1, roster1), column_width(team2, roster2))
+        body_width = BRACKET_MARGIN * 2 + column_width_px * 2 + MATCHUP_COLUMN_GAP
+
+        subtitle_parts = [part for part in (tournament_name, guild_name) if part]
+        if match_id is not None:
+            subtitle_parts.append(f"Match #{match_id}")
+        # Plain hyphen, not "•" — PIL's default font doesn't have that
+        # glyph either (same issue the roster's captain star just had).
+        subtitle = " - ".join(subtitle_parts)
+
+        header_width = self._bracketHeaderWidth(measurer, round_label, subtitle, title_font, subtitle_font)
+        width = int(max(body_width, header_width + BRACKET_MARGIN * 2))
+
+        header_y = self._bracketHeaderHeight(subtitle)
+        logo_top = header_y + BRACKET_PADDING
+        name_y = logo_top + MATCHUP_LOGO_SIZE + BRACKET_PADDING
+        roster_top = name_y + BRACKET_TITLE_FONT_SIZE + BRACKET_PADDING
+        height = int(roster_top + rows * BRACKET_ROW_HEIGHT + BRACKET_MARGIN)
+
+        image, draw = self._createBracketCanvas(width, height, BRACKET_TITLE_COLOR)
+        self._drawBracketHeader(image, draw, round_label, subtitle, BRACKET_TITLE_COLOR, width, bold_title=True)
+
+        left_cx = BRACKET_MARGIN + column_width_px / 2
+        right_cx = width - BRACKET_MARGIN - column_width_px / 2
+        self._drawMatchupColumn(
+            image, draw, team1, roster1, left_cx, logo_top, name_y, roster_top,
+            name_font, team_font, TEAM1_ACCENT_COLOR
+        )
+        self._drawMatchupColumn(
+            image, draw, team2, roster2, right_cx, logo_top, name_y, roster_top,
+            name_font, team_font, TEAM2_ACCENT_COLOR
+        )
+
+        divider_x = width / 2
+        draw.line(
+            [(divider_x, logo_top), (divider_x, height - BRACKET_MARGIN)], fill=BRACKET_LINE_COLOR,
+            width=BRACKET_RULE_WIDTH
+        )
+        draw.text(
+            (divider_x, logo_top + MATCHUP_LOGO_SIZE / 2), "VS", font=vs_font, fill=BRACKET_TITLE_COLOR,
+            anchor="mm"
+        )
+        return image
+
+    # Posts the matchup graphic for a casual/ranked game outside a
+    # tournament — /start, right as the match actually begins (see
+    # sendCurrentMatchupImage) — same renderer tournament matches use
+    # (_renderMatchupImage), just with no match id or tournament name to
+    # put in the subtitle.
+    async def _sendMatchupImage(self, channel, team1, team2, label):
+        guild_name = channel.guild.name if channel.guild is not None else None
+        image = self._renderMatchupImage(None, team1, team2, label, None, guild_name)
+        await channel.send(file=self._imageToFile(image, "matchup.png"))
+
+    # Maps the "mode" stored per-guild (set by /make-teams, /captains,
+    # /team-use) to the matchup image's headline — used by /start, which
+    # posts the image from whatever's currently loaded rather than knowing
+    # for itself how those teams were formed.
+    def _matchupLabelForMode(self, mode):
+        return {
+            "Normal": "Casual Match",
+            "Ranked": "Ranked Match",
+            "Captains": "Captains Match",
+            "Ranked Captains": "Ranked Captains Match",
+        }.get(mode, "Match")
+
+    # The plain-text status that accompanies the bracket images: which
+    # team's the (winners-bracket, for double elimination) champion, the
+    # losers-bracket champion once it has one, and Grand Finals results
+    # once that's started. `guild_id` is only needed for double elimination
+    # (Grand Finals state lives in `tournament_matches`, not on
+    # `tournament` itself) — omit it and that part is skipped.
+    def renderBracketText(self, tournament, guild_id=None):
         rounds = self._bracketRounds(tournament.get_bracket())
         if not rounds:
             return "No bracket has been created yet."
 
-        lines = [f"**\U0001f3c6 {tournament.get_name()} — Bracket**"]
-        for round_index, round_nodes in enumerate(rounds[:-1]):
-            lines.append(f"\n__Round {round_index + 1}__")
-            for i in range(0, len(round_nodes), 2):
-                a, b = round_nodes[i], round_nodes[i + 1]
-                lines.append(f"{self._nodeLabel(a)}  vs  {self._nodeLabel(b)}")
+        champion_node = rounds[-1][0]
+        champion = self._bracketNodeLabel(champion_node, len(rounds) - 1)
+        is_double = tournament.is_double_elimination()
 
-        champion = rounds[-1][0]
-        lines.append(f"\n\U0001f3c6 **Champion:** {self._nodeLabel(champion)}")
+        if not is_double:
+            return f"**{tournament.get_name()}**\n\U0001f3c6 **Champion:** {champion}"
+
+        lines = [f"**{tournament.get_name()}**", f"\U0001f3c6 **Winners Bracket Champion:** {champion}"]
+
+        lb_rounds = tournament.get_losers_rounds()
+        if lb_rounds:
+            if len(lb_rounds) == 1 and lb_rounds[0][0].previous is None:
+                lb_champion_node = lb_rounds[0][0]
+                lb_name = lb_champion_node.team.get_name() if lb_champion_node.team is not None else "TBD"
+                lines.append(f"{lb_name} advances directly to Grand Finals (no losers-bracket match needed).")
+            else:
+                lb_champion = self._bracketNodeLabel(lb_rounds[-1][0], len(lb_rounds))
+                lines.append(f"**Losers Bracket Champion:** {lb_champion}")
+
+        if guild_id is not None:
+            finals_text = self._renderGrandFinalsText(guild_id, tournament)
+            if finals_text:
+                lines.append(finals_text)
 
         return "\n".join(lines)
+
+    # Grand Finals status, once both brackets have produced a champion to
+    # play it — empty string before then (nothing to show yet). Needs
+    # `guild_id` because, unlike everything else this renders, Grand
+    # Finals state lives only in `tournament_matches`, not on `tournament`
+    # itself (see _startGrandFinals).
+    def _renderGrandFinalsText(self, guild_id, tournament):
+        wb_rounds = self._bracketRounds(tournament.get_bracket())
+        wb_champion = wb_rounds[-1][0].team
+        lb_rounds = tournament.get_losers_rounds()
+        lb_champion = lb_rounds[-1][0].team if lb_rounds else None
+
+        if wb_champion is None or lb_champion is None:
+            return ""
+
+        self.cursor.execute(
+            "SELECT roundIndex, team1, team2, winner, state FROM tournament_matches "
+            "WHERE guildId=? AND bracketType='finals' ORDER BY roundIndex",
+            (guild_id,)
+        )
+        rows = self.cursor.fetchall()
+
+        lines = [
+            "**Grand Finals**",
+            f"{wb_champion.get_name()} (winners bracket) vs {lb_champion.get_name()} (losers bracket)",
+        ]
+        for round_index, team1_ser, team2_ser, winner, state in rows:
+            if state != "RESOLVED":
+                continue
+            team1, team2 = Team(), Team()
+            team1.deserializeTeam(team1_ser)
+            team2.deserializeTeam(team2_ser)
+            winning_team = team1 if winner == 1 else team2
+            label = "Game 1" if round_index == 0 else "Bracket Reset"
+            lines.append(f"{label}: **{winning_team.get_name()}** won")
+
+        champion_name = self._tournamentChampionName(guild_id, tournament)
+        if champion_name is not None:
+            lines.append(f"\n\U0001f3c6 **Tournament Champion:** {champion_name}")
+
+        return "\n".join(lines)
+
+    # Posts a tournament's status: the text from renderBracketText plus one
+    # image attachment per bracket (renderBracketImages) — a single
+    # message, single API call, no matter the bracket's size. Images render
+    # fully inline in Discord with no truncation the way an oversized text
+    # message or a big file-attachment preview would have. The Grand
+    # Finals image, if Grand Finals has actually been played, follows as
+    # its own separate message right after — it's a distinct enough stage
+    # that bundling it into the same message as the two full brackets
+    # buried it instead of standing out.
+    async def _sendBracketText(self, channel, tournament, guild_id=None):
+        guild_name = channel.guild.name if channel.guild is not None else None
+        await channel.send(
+            self.renderBracketText(tournament, guild_id),
+            files=self.renderBracketImages(tournament, guild_name)
+        )
+        if guild_id is not None:
+            finals_image = self._renderGrandFinalsImage(guild_id, tournament, guild_name)
+            if finals_image is not None:
+                await channel.send(files=[self._imageToFile(finals_image, "grand_finals.png")])
 
     async def printBracketHelper(self, ctx):
         tournament = self.getTournament(ctx.guild.id)
@@ -1229,19 +2705,50 @@ class helpers():
                 "No tournament set up for this server — use /tournament-create first."
             )
             return
-        await ctx.response.send_message(self.renderBracketText(tournament))
+        await ctx.response.send_message(
+            self.renderBracketText(tournament, ctx.guild.id),
+            files=self.renderBracketImages(tournament, ctx.guild.name)
+        )
+        finals_image = self._renderGrandFinalsImage(ctx.guild.id, tournament, ctx.guild.name)
+        if finals_image is not None:
+            await ctx.channel.send(files=[self._imageToFile(finals_image, "grand_finals.png")])
+
+    # "Where in the tournament is this match" — the matchup graphic's
+    # headline. Winners-bracket rounds get the same "Quarterfinals"/"Round
+    # of 8"-style names the bracket image uses (_roundName, which needs the
+    # bracket's own top_round_index to know how far from the final this
+    # round is); the losers bracket has no such clean naming (see
+    # _losersRoundName's own comment) so it's just numbered; Grand Finals is
+    # its own two-state thing (the first game, or the bracket-reset decider).
+    def _matchRoundLabel(self, tournament, round_index, bracket_type):
+        if bracket_type == "losers":
+            return self._losersRoundName(round_index)
+        if bracket_type == "finals":
+            return "Grand Finals" if round_index == 0 else "Grand Finals — Bracket Reset"
+        top_round_index = len(self._bracketRounds(tournament.get_bracket())) - 1
+        return self._roundName(round_index, top_round_index)
 
     # Posts the "react when ready" prompt for a QUEUED sequential match.
-    async def _postReadyCheck(self, match_id, channel):
-        self.cursor.execute("SELECT team1, team2 FROM tournament_matches WHERE id=?", (match_id,))
-        team1_ser, team2_ser = self.cursor.fetchone()
+    async def _postReadyCheck(self, guild_id, match_id, channel):
+        self.cursor.execute(
+            "SELECT team1, team2, roundIndex, bracketType FROM tournament_matches WHERE id=?", (match_id,)
+        )
+        team1_ser, team2_ser, round_index, bracket_type = self.cursor.fetchone()
         team1, team2 = Team(), Team()
         team1.deserializeTeam(team1_ser)
         team2.deserializeTeam(team2_ser)
 
+        tournament = self.getTournament(guild_id)
+        round_label = self._matchRoundLabel(tournament, round_index, bracket_type)
+        guild_name = channel.guild.name if channel.guild is not None else None
+        matchup_file = self._imageToFile(
+            self._renderMatchupImage(match_id, team1, team2, round_label, tournament.get_name(), guild_name),
+            f"match_{match_id}_vs.png"
+        )
         msg = await channel.send(
             f"**Match #{match_id}:** {team1.get_name()} vs {team2.get_name()} — react with "
-            f"{TOURNAMENT_READY_EMOJI} when ready to play (either captain)!"
+            f"{TOURNAMENT_READY_EMOJI} when ready to play (either captain)!",
+            file=matchup_file
         )
         await msg.add_reaction(TOURNAMENT_READY_EMOJI)
 
@@ -1251,17 +2758,30 @@ class helpers():
         self.db.commit()
 
     # Posts the "who won" prompt for a simultaneous-mode match — no ready
-    # check, no betting, just a direct 1️⃣/2️⃣ report same as a normal game.
-    async def _postMatchReport(self, match_id, channel):
-        self.cursor.execute("SELECT team1, team2 FROM tournament_matches WHERE id=?", (match_id,))
-        team1_ser, team2_ser = self.cursor.fetchone()
+    # check, just a direct TEAM_EMOJIS report same as a normal game. Betting on
+    # it (alongside every other match in the same round) is opened
+    # separately — see _openConcurrentTournamentBetting, called once after
+    # every match in the round has its own report prompt posted.
+    async def _postMatchReport(self, guild_id, match_id, channel):
+        self.cursor.execute(
+            "SELECT team1, team2, roundIndex, bracketType FROM tournament_matches WHERE id=?", (match_id,)
+        )
+        team1_ser, team2_ser, round_index, bracket_type = self.cursor.fetchone()
         team1, team2 = Team(), Team()
         team1.deserializeTeam(team1_ser)
         team2.deserializeTeam(team2_ser)
 
+        tournament = self.getTournament(guild_id)
+        round_label = self._matchRoundLabel(tournament, round_index, bracket_type)
+        guild_name = channel.guild.name if channel.guild is not None else None
+        matchup_file = self._imageToFile(
+            self._renderMatchupImage(match_id, team1, team2, round_label, tournament.get_name(), guild_name),
+            f"match_{match_id}_vs.png"
+        )
         msg = await channel.send(
             f"**Match #{match_id}:** {team1.get_name()} vs {team2.get_name()} — react with "
-            f"{TEAM_EMOJIS[1]} if {team1.get_name()} won, or {TEAM_EMOJIS[2]} if {team2.get_name()} won."
+            f"{TEAM_EMOJIS[1]} if {team1.get_name()} won, or {TEAM_EMOJIS[2]} if {team2.get_name()} won.",
+            file=matchup_file
         )
         await msg.add_reaction(TEAM_EMOJIS[1])
         await msg.add_reaction(TEAM_EMOJIS[2])
@@ -1271,19 +2791,236 @@ class helpers():
         )
         self.db.commit()
 
-    # Queues every real pairing in `round_index` as a tournament_matches
-    # row (byes — a pairing where only one side has a team — auto-advance
-    # immediately with no match at all) and kicks the round off: the first
-    # match's ready-check for sequential, or every match's report prompt
-    # at once for simultaneous. Recurses forward through bye-only rounds
-    # and announces the champion once there's nothing left to play.
+    # Opens one shared betting window covering every match in a just-
+    # posted simultaneous-mode round. Unlike _openBetting's single-game
+    # singleton (one bet per user per GUILD, tracked on the `servers` row),
+    # this is keyed by matchId in `tournament_wagers` — several matches can
+    # be open at once, and a user can bet on more than one of them,
+    # something the old wagers table's PRIMARY KEY(guildId, userId)
+    # couldn't represent at all. Duration is the guild's configured
+    # per-match base (_getBettingTimerSeconds) times how many matches are
+    # in the round, capped so a generous base times a big bracket's first
+    # round can't leave betting open for an unreasonable stretch.
+    async def _openConcurrentTournamentBetting(self, guild_id, match_ids, channel):
+        base = self._getBettingTimerSeconds(guild_id)
+        duration = min(base * len(match_ids), MAX_CONCURRENT_BETTING_SECONDS)
+        match_list = ", ".join(f"#{match_id}" for match_id in match_ids)
+        plural = "es" if len(match_ids) != 1 else ""
+
+        await channel.send(
+            f"\U0001f3b2 Betting is open on {len(match_ids)} match{plural} ({match_list})! Use "
+            f"`/wager <amount> <team> match_id:<id>` to bet on one. Betting closes in {duration} seconds."
+        )
+        asyncio.create_task(self._concurrentBettingTimer(match_ids, channel, duration))
+
+    # No cancellation path (unlike cancelBettingHelper for the singleton
+    # flow) — tournament rounds have no "/return"-equivalent to cancel one
+    # mid-flight. If every match in the round has already resolved by the
+    # time this fires, the UPDATE below just touches already-RESOLVED rows
+    # harmlessly; each match's own wagers were already settled and cleared
+    # at resolution time regardless of what this timer does.
+    async def _concurrentBettingTimer(self, match_ids, channel, duration):
+        await asyncio.sleep(duration)
+        placeholders = ",".join("?" * len(match_ids))
+        self.cursor.execute(
+            f"UPDATE tournament_matches SET bettingClosed=1 WHERE id IN ({placeholders})", match_ids
+        )
+        self.db.commit()
+        await channel.send("\U0001f512 Betting is now closed for this round's matches!")
+
+    # Real-money settlement for one tournament match's wagers — same pari-
+    # mutuel formula as computeGameDeltas's casual-game payouts (winners
+    # split the losing pool proportional to their own wager, on top of
+    # getting it back), just applied directly against `economy` rather than
+    # going through the deltas/summary indirection that exists there so
+    # /report-correct-winner can reverse a casual game's result — a
+    # tournament match's winner is corrected differently (see
+    # _correctTournamentMatchHelper) and doesn't reopen betting on itself.
+    # Scoped to exactly this match_id's rows, so settling one concurrent
+    # match never touches another's still-open bets.
+    async def _settleMatchWagers(self, guild_id, match_id, winning_team, channel):
+        self.cursor.execute(
+            "SELECT userId, username, team, amount FROM tournament_wagers WHERE matchId=?", (match_id,)
+        )
+        wagers = self.cursor.fetchall()
+        if not wagers:
+            return
+
+        winning_bets = [w for w in wagers if w[2] == winning_team]
+        losing_bets = [w for w in wagers if w[2] != winning_team]
+        winning_pool = sum(w[3] for w in winning_bets)
+        losing_pool = sum(w[3] for w in losing_bets)
+
+        lines = [f"\U0001f4b0 **Match #{match_id} payouts:**"]
+        for user_id, username, _team, amount in winning_bets:
+            payout = round(amount + (amount / winning_pool) * losing_pool) if winning_pool > 0 else amount
+            self.cursor.execute(
+                "UPDATE economy SET balance = balance + ?, wins = wins + 1, "
+                "gold_wagered = gold_wagered + ?, gold_won = gold_won + ? WHERE guildId=? AND userId=?",
+                (payout, amount, payout - amount, guild_id, user_id)
+            )
+            lines.append(f"{username} won {payout} gold (bet {amount})")
+        for user_id, username, _team, amount in losing_bets:
+            self.cursor.execute(
+                "UPDATE economy SET losses = losses + 1, gold_wagered = gold_wagered + ?, "
+                "gold_lost = gold_lost + ? WHERE guildId=? AND userId=?",
+                (amount, amount, guild_id, user_id)
+            )
+
+        self.cursor.execute("DELETE FROM tournament_wagers WHERE matchId=?", (match_id,))
+        self.db.commit()
+
+        if len(lines) > 1:
+            await channel.send("\n".join(lines))
+
+    # Queues every real pairing in `round_index` of the WINNERS bracket as a
+    # tournament_matches row (byes — a pairing where only one side has a
+    # team — auto-advance immediately with no match at all, and produce no
+    # loser to drop into the losers bracket) and kicks the round off: the
+    # first match's ready-check for sequential, or every match's report
+    # prompt at once for simultaneous. Recurses forward through bye-only
+    # rounds; once the winners bracket itself is done, a double-elimination
+    # tournament moves on to the losers bracket instead of ending outright.
+    # --- Interleaved losers-bracket scheduling ------------------------------
+    # Only consulted when tournament.get_losers_bracket_timing() ==
+    # "interleaved" (see /tournament-create-bracket) — the default
+    # "after_winners" timing never calls any of this, and _startRound/
+    # _startLosersRound just walk their own round list start to finish
+    # exactly as they always have.
+
+    # The smallest winners round_index with no tournament_matches row at
+    # all yet — "hasn't been started". A round that was skipped entirely
+    # (every pairing a bye — only possible for round 0, but handled
+    # generally) never gets a row, so this jumps straight past it once a
+    # LATER round has actually started.
+    def _nextUnstartedWinnersRoundIndex(self, guild_id):
+        self.cursor.execute(
+            "SELECT MAX(roundIndex) FROM tournament_matches WHERE guildId=? AND bracketType='winners'",
+            (guild_id,)
+        )
+        max_started = self.cursor.fetchone()[0]
+        return 0 if max_started is None else max_started + 1
+
+    # Whether winners round_index is fully done: it has real matches and
+    # every one is RESOLVED, or it never had any (an all-bye round) and
+    # progression has already moved past it.
+    def _winnersRoundFullyResolved(self, guild_id, round_index):
+        self.cursor.execute(
+            "SELECT COUNT(*) FROM tournament_matches WHERE guildId=? AND roundIndex=? AND bracketType='winners'",
+            (guild_id, round_index)
+        )
+        if self.cursor.fetchone()[0] == 0:
+            return self._nextUnstartedWinnersRoundIndex(guild_id) > round_index
+        self.cursor.execute(
+            "SELECT COUNT(*) FROM tournament_matches WHERE guildId=? AND roundIndex=? "
+            "AND bracketType='winners' AND state != 'RESOLVED'",
+            (guild_id, round_index)
+        )
+        return self.cursor.fetchone()[0] == 0
+
+    # Same pair of checks, for the losers bracket.
+    def _nextUnstartedLosersRoundIndex(self, guild_id, lb_rounds):
+        if not lb_rounds:
+            return None
+        self.cursor.execute(
+            "SELECT MAX(roundIndex) FROM tournament_matches WHERE guildId=? AND bracketType='losers'",
+            (guild_id,)
+        )
+        max_started = self.cursor.fetchone()[0]
+        next_ri = 0 if max_started is None else max_started + 1
+        return next_ri if next_ri < len(lb_rounds) else None
+
+    def _losersRoundFullyResolved(self, guild_id, round_index, lb_rounds):
+        self.cursor.execute(
+            "SELECT COUNT(*) FROM tournament_matches WHERE guildId=? AND roundIndex=? AND bracketType='losers'",
+            (guild_id, round_index)
+        )
+        if self.cursor.fetchone()[0] == 0:
+            next_ri = self._nextUnstartedLosersRoundIndex(guild_id, lb_rounds)
+            return next_ri is None or next_ri > round_index
+        self.cursor.execute(
+            "SELECT COUNT(*) FROM tournament_matches WHERE guildId=? AND roundIndex=? "
+            "AND bracketType='losers' AND state != 'RESOLVED'",
+            (guild_id, round_index)
+        )
+        return self.cursor.fetchone()[0] == 0
+
+    # The next losers round that's both unstarted AND actually unlocked:
+    # its own predecessor losers round (if any) is fully resolved, and —
+    # per tournament.get_losers_bracket_wb_dependency() — the winners
+    # round it depends on (if any) is fully resolved too. None if nothing
+    # is ready to start right now.
+    def _readyUnstartedLosersRoundIndex(self, guild_id, tournament):
+        lb_rounds = tournament.get_losers_rounds()
+        next_ri = self._nextUnstartedLosersRoundIndex(guild_id, lb_rounds)
+        if next_ri is None:
+            return None
+        if next_ri > 0 and not self._losersRoundFullyResolved(guild_id, next_ri - 1, lb_rounds):
+            return None
+        wb_dependency = tournament.get_losers_bracket_wb_dependency()
+        dep = wb_dependency[next_ri] if next_ri < len(wb_dependency) else None
+        if dep is not None and not self._winnersRoundFullyResolved(guild_id, dep):
+            return None
+        return next_ri
+
+    # The shared "what should play next" decision for interleaved timing —
+    # called any time a round (winners or losers) finishes. A losers round
+    # that's now unlocked always takes priority (this is what "winners
+    # await the previous round's losers" means); otherwise the winners
+    # bracket advances if it still has a round to play; otherwise both
+    # brackets have nothing left to START (something may still be
+    # mid-play, which will call back in here once it resolves) and Grand
+    # Finals gets a shot — safe to call unconditionally, it silently
+    # no-ops without both champions decided.
+    async def _advanceInterleavedTournament(self, guild_id, tournament, mode, channel):
+        ready_ri = self._readyUnstartedLosersRoundIndex(guild_id, tournament)
+        if ready_ri is not None:
+            await self._startLosersRound(guild_id, tournament, ready_ri, mode, channel)
+            return
+
+        wb_rounds = self._bracketRounds(tournament.get_bracket())
+        champion_decided = wb_rounds[-1][0].team is not None
+        if not champion_decided:
+            next_wb_ri = self._nextUnstartedWinnersRoundIndex(guild_id)
+            await self._startRound(guild_id, tournament, next_wb_ri, mode, channel)
+            return
+
+        await self._startGrandFinals(guild_id, tournament, mode, channel)
+
     async def _startRound(self, guild_id, tournament, round_index, mode, channel):
         rounds = self._bracketRounds(tournament.get_bracket())
+        interleaved = tournament.is_double_elimination() and tournament.get_losers_bracket_timing() == "interleaved"
+
+        # Interleaved timing: a losers round that's now unlocked plays
+        # before winners moves on to round_index — "winners await the
+        # previous round's losers." Not checked for the terminal
+        # round_index itself; see the branch below for what interleaved
+        # mode does once winners is actually done.
+        if interleaved and round_index < len(rounds) - 1:
+            ready_ri = self._readyUnstartedLosersRoundIndex(guild_id, tournament)
+            if ready_ri is not None:
+                await self._startLosersRound(guild_id, tournament, ready_ri, mode, channel)
+                return
 
         if round_index >= len(rounds) - 1:
             champion = rounds[-1][0]
             name = champion.team.get_name() if champion.team is not None else "Unknown"
-            await channel.send(f"\U0001f3c6 **{tournament.get_name()}** is complete! Champion: **{name}**")
+            if tournament.is_double_elimination():
+                await channel.send(
+                    f"\U0001f3c6 **{tournament.get_name()}** winners bracket complete! "
+                    f"**{name}** advances to Grand Finals undefeated."
+                )
+                if interleaved:
+                    # Some losers rounds may already be underway (or even
+                    # finished) — let the shared scheduler pick up
+                    # wherever that's at, rather than blindly restarting
+                    # from round 0.
+                    await self._advanceInterleavedTournament(guild_id, tournament, mode, channel)
+                else:
+                    await self._startLosersRound(guild_id, tournament, 0, mode, channel)
+            else:
+                await channel.send(f"\U0001f3c6 **{tournament.get_name()}** is complete! Champion: **{name}**")
+                await self._postTournamentLeaderboard(channel, guild_id, tournament)
             return
 
         round_nodes = rounds[round_index]
@@ -1309,8 +3046,8 @@ class helpers():
             node_index = bracket.index(a)
             self.cursor.execute(
                 "INSERT INTO tournament_matches"
-                "(guildId, roundIndex, nodeIndex, team1, team2, state, mode, messageId, channelId, winner) "
-                "VALUES(?, ?, ?, ?, ?, 'QUEUED', ?, NULL, ?, NULL)",
+                "(guildId, roundIndex, nodeIndex, team1, team2, state, mode, messageId, channelId, winner, bracketType) "
+                "VALUES(?, ?, ?, ?, ?, 'QUEUED', ?, NULL, ?, NULL, 'winners')",
                 (guild_id, round_index, node_index, a.team.serializeTeam(), b.team.serializeTeam(),
                  mode, channel.id)
             )
@@ -1321,14 +3058,173 @@ class helpers():
         await channel.send(f"__Round {round_index + 1}__ — {len(match_ids)} match{plural} to play.")
 
         if mode == "sequential":
-            await self._postReadyCheck(match_ids[0], channel)
+            await self._postReadyCheck(guild_id, match_ids[0], channel)
         else:
             for match_id in match_ids:
-                await self._postMatchReport(match_id, channel)
+                await self._postMatchReport(guild_id, match_id, channel)
+            await self._openConcurrentTournamentBetting(guild_id, match_ids, channel)
+
+    # Mirrors _startRound above, but for the LOSERS bracket: `round_nodes`
+    # here are the round's RESULT nodes (see buildLosersBracket), so each
+    # match's two participants are reached via `result_node.previous` /
+    # `.previous.opponent` instead of iterating a flat pairs list directly.
+    # A losers-bracket "bye" happens when one feeder never got a team at
+    # all (a winners-bracket bye pairing produces no loser to drop down) —
+    # same auto-advance treatment as a real bye. If BOTH feeders are empty
+    # (two winners-bracket byes landed in the same losers-bracket pairing),
+    # that slot just never fills — same as the equivalent winners-bracket
+    # edge case. Once every losers round has been played, moves on to
+    # Grand Finals.
+    async def _startLosersRound(self, guild_id, tournament, round_index, mode, channel):
+        lb_rounds = tournament.get_losers_rounds()
+
+        if not lb_rounds or round_index >= len(lb_rounds):
+            await self._startGrandFinals(guild_id, tournament, mode, channel)
+            return
+
+        if tournament.get_losers_bracket_timing() == "interleaved":
+            wb_dependency = tournament.get_losers_bracket_wb_dependency()
+            dep = wb_dependency[round_index] if round_index < len(wb_dependency) else None
+            if dep is not None and not self._winnersRoundFullyResolved(guild_id, dep):
+                # Not unlocked yet — pause the losers bracket here and let
+                # the winners bracket continue instead; this exact round
+                # gets retried (via _advanceInterleavedTournament) once its
+                # dependency resolves.
+                await self._advanceInterleavedTournament(guild_id, tournament, mode, channel)
+                return
+
+        round_nodes = lb_rounds[round_index]
+        real_pairs = []
+        for result_node in round_nodes:
+            a = result_node.previous
+            b = a.opponent if a is not None else None
+            if a is not None and a.team is not None and b is not None and b.team is not None:
+                real_pairs.append((a, b))
+            elif a is not None and a.team is not None:
+                result_node.team = a.team
+            elif b is not None and b.team is not None:
+                result_node.team = b.team
+
+        self.saveTournament(guild_id, tournament)
+
+        if not real_pairs:
+            await self._startLosersRound(guild_id, tournament, round_index + 1, mode, channel)
+            return
+
+        losers_nodes = tournament.get_losers_bracket_nodes()
+        match_ids = []
+        for a, b in real_pairs:
+            node_index = losers_nodes.index(a)
+            self.cursor.execute(
+                "INSERT INTO tournament_matches"
+                "(guildId, roundIndex, nodeIndex, team1, team2, state, mode, messageId, channelId, winner, bracketType) "
+                "VALUES(?, ?, ?, ?, ?, 'QUEUED', ?, NULL, ?, NULL, 'losers')",
+                (guild_id, round_index, node_index, a.team.serializeTeam(), b.team.serializeTeam(),
+                 mode, channel.id)
+            )
+            self.db.commit()
+            match_ids.append(self.cursor.lastrowid)
+
+        plural = "es" if len(match_ids) != 1 else ""
+        await channel.send(
+            f"__Losers Bracket Round {round_index + 1}__ — {len(match_ids)} match{plural} to play."
+        )
+
+        if mode == "sequential":
+            await self._postReadyCheck(guild_id, match_ids[0], channel)
+        else:
+            for match_id in match_ids:
+                await self._postMatchReport(guild_id, match_id, channel)
+            await self._openConcurrentTournamentBetting(guild_id, match_ids, channel)
+
+    # Posts the winners-bracket champion vs losers-bracket champion match.
+    # `reset` is True for the second, decider match that's only played if
+    # the losers-bracket champion wins game 1 — at that point both sides
+    # have exactly one loss, so a single game settles it either way.
+    async def _startGrandFinals(self, guild_id, tournament, mode, channel, reset=False):
+        wb_rounds = self._bracketRounds(tournament.get_bracket())
+        wb_champion = wb_rounds[-1][0].team
+        lb_rounds = tournament.get_losers_rounds()
+        lb_champion = lb_rounds[-1][0].team if lb_rounds else None
+
+        if wb_champion is None or lb_champion is None:
+            return
+
+        if not reset:
+            await channel.send(
+                f"\U0001f3c6 **Grand Finals:** {wb_champion.get_name()} (undefeated) vs "
+                f"{lb_champion.get_name()} (one loss) — {lb_champion.get_name()} must win twice "
+                f"to take the title."
+            )
+
+        self.cursor.execute(
+            "INSERT INTO tournament_matches"
+            "(guildId, roundIndex, nodeIndex, team1, team2, state, mode, messageId, channelId, winner, bracketType) "
+            "VALUES(?, ?, -1, ?, ?, 'QUEUED', ?, NULL, ?, NULL, 'finals')",
+            (guild_id, 1 if reset else 0, wb_champion.serializeTeam(), lb_champion.serializeTeam(),
+             mode, channel.id)
+        )
+        self.db.commit()
+        match_id = self.cursor.lastrowid
+
+        if mode == "sequential":
+            await self._postReadyCheck(guild_id, match_id, channel)
+        else:
+            await self._postMatchReport(guild_id, match_id, channel)
+            await self._openConcurrentTournamentBetting(guild_id, [match_id], channel)
+
+    # The overall tournament champion's name once EVERYTHING (including
+    # Grand Finals, and a bracket reset if one was needed) has resolved —
+    # None if there's still something left to play. Single elimination has
+    # no Grand Finals stage, so its own bracket is the whole story.
+    def _tournamentChampionName(self, guild_id, tournament):
+        if not tournament.is_double_elimination():
+            rounds = self._bracketRounds(tournament.get_bracket())
+            champion = rounds[-1][0]
+            return champion.team.get_name() if champion.team is not None else None
+
+        self.cursor.execute(
+            "SELECT roundIndex, team1, team2, winner FROM tournament_matches "
+            "WHERE guildId=? AND bracketType='finals' AND state='RESOLVED' "
+            "ORDER BY roundIndex DESC LIMIT 1",
+            (guild_id,)
+        )
+        row = self.cursor.fetchone()
+        if row is None:
+            return None
+        round_index, team1_ser, team2_ser, winner = row
+
+        team1, team2 = Team(), Team()
+        team1.deserializeTeam(team1_ser)
+        team2.deserializeTeam(team2_ser)
+        winning_team = team1 if winner == 1 else team2
+
+        if round_index == 1:
+            # The decider match — whoever wins it is champion outright.
+            return winning_team.get_name()
+
+        # round_index == 0: only actually over if the winners-bracket
+        # champion won game 1 outright. If the losers-bracket champion won
+        # instead, a reset match is needed — and if one had already been
+        # played, the query above would have returned that row (roundIndex
+        # 1) instead of this one.
+        # Compared by name rather than id: team names are guaranteed unique
+        # per guild (enforced by /team-create), whereas .get_id() is only
+        # ever set once a team's been persisted through _saveNewTeam — a
+        # guarantee this comparison shouldn't have to lean on.
+        wb_rounds = self._bracketRounds(tournament.get_bracket())
+        wb_champion = wb_rounds[-1][0].team
+        if wb_champion is not None and winning_team.get_name() == wb_champion.get_name():
+            return winning_team.get_name()
+        return None
 
     # Starts (or restarts, if the whole tournament is idle) the current
     # round. Refuses to run while a round is already in progress, or once
-    # a champion has already been decided.
+    # a champion has already been decided. Only ever kicks off winners
+    # bracket round 0 — a double-elimination tournament's losers bracket
+    # and Grand Finals play out on their own from there, driven entirely
+    # by match resolution (_resolveTournamentMatch), no repeat command
+    # needed.
     async def startTournamentHelper(self, ctx, mode):
         guild_id = ctx.guild.id
 
@@ -1344,11 +3240,10 @@ class helpers():
             await ctx.response.send_message("No bracket has been created yet — use /tournament-create-bracket first.")
             return
 
-        rounds = self._bracketRounds(bracket)
-        champion = rounds[-1][0]
-        if champion.team is not None:
+        champion_name = self._tournamentChampionName(guild_id, tournament)
+        if champion_name is not None:
             await ctx.response.send_message(
-                f"**{tournament.get_name()}** is already finished — **{champion.team.get_name()}** is the champion!"
+                f"**{tournament.get_name()}** is already finished — **{champion_name}** is the champion!"
             )
             return
 
@@ -1392,7 +3287,7 @@ class helpers():
             channel = await self.client.fetch_channel(payload.channel_id)
 
         # Route through the exact same team-game cycle a casual/ranked
-        # game uses: team1/team2 + betting + the 1️⃣/2️⃣ report message.
+        # game uses: team1/team2 + betting + the TEAM_EMOJIS report message.
         # active_tournament_match_id is what tells recordResult (once that
         # cycle resolves) to come back here and advance the bracket.
         team1.set_id(1)
@@ -1444,14 +3339,17 @@ class helpers():
     # or moves on to the next round once every match in this one has
     # resolved. Shared by both modes — reached via recordResult's hook for
     # sequential, or directly from a result reaction for simultaneous.
+    # Dispatches to the losers-bracket / Grand Finals equivalents below for
+    # anything that isn't a winners-bracket match.
     async def _resolveTournamentMatch(self, guild_id, match_id, winning_team, channel_id):
         self.cursor.execute(
-            "SELECT roundIndex, nodeIndex, mode, state FROM tournament_matches WHERE id=?", (match_id,)
+            "SELECT roundIndex, nodeIndex, mode, state, bracketType FROM tournament_matches WHERE id=?",
+            (match_id,)
         )
         row = self.cursor.fetchone()
         if row is None or row[3] == "RESOLVED":
             return
-        round_index, node_index, mode, _ = row
+        round_index, node_index, mode, _, bracket_type = row
 
         # BUG-PRONE PATTERN AVOIDED: flip to RESOLVED before anything async
         # below, so a concurrent/duplicate call can't process this twice.
@@ -1468,31 +3366,54 @@ class helpers():
         if tournament is None:
             return
 
+        if bracket_type == "finals":
+            await self._resolveFinalsMatch(guild_id, tournament, match_id, round_index, winning_team, mode, channel)
+            return
+
+        if bracket_type == "losers":
+            await self._resolveLosersMatch(
+                guild_id, tournament, match_id, round_index, node_index, winning_team, mode, channel
+            )
+            return
+
         bracket = tournament.get_bracket()
         node_a = bracket[node_index]
         node_b = node_a.opponent
         winner_node = node_a if winning_team == 1 else node_b
+        loser_node = node_b if winning_team == 1 else node_a
         if node_a.next is not None:
             node_a.next.team = winner_node.team
+            # Only a REAL match (both sides had a team) has an actual
+            # loser to drop into the losers bracket — a bye pairing's
+            # "winner" never played anyone, so node_a.next.drop_to (if
+            # this is a double-elimination tournament) is simply left
+            # unfilled, same as the equivalent losers-bracket slot.
+            if loser_node.team is not None:
+                node_a.next.loser = loser_node.team
+                if node_a.next.drop_to is not None:
+                    node_a.next.drop_to.team = loser_node.team
         self.saveTournament(guild_id, tournament)
+        self._recordMatchResult(guild_id, winner_node.team, loser_node.team)
 
         await channel.send(f"**Match #{match_id} result:** {winner_node.team.get_name()} wins!")
-        await channel.send(self.renderBracketText(tournament))
+        await self._settleMatchWagers(guild_id, match_id, winning_team, channel)
+        await self._sendBracketText(channel, tournament, guild_id)
 
         self.cursor.execute(
-            "SELECT COUNT(*) FROM tournament_matches WHERE guildId=? AND roundIndex=? AND state != 'RESOLVED'",
+            "SELECT COUNT(*) FROM tournament_matches WHERE guildId=? AND roundIndex=? "
+            "AND bracketType='winners' AND state != 'RESOLVED'",
             (guild_id, round_index)
         )
         if self.cursor.fetchone()[0] > 0:
             if mode == "sequential":
                 self.cursor.execute(
-                    "SELECT id FROM tournament_matches WHERE guildId=? AND roundIndex=? AND state='QUEUED' "
-                    "ORDER BY id LIMIT 1",
+                    "SELECT id FROM tournament_matches WHERE guildId=? AND roundIndex=? "
+                    "AND bracketType='winners' AND state='QUEUED' ORDER BY id LIMIT 1",
                     (guild_id, round_index)
                 )
                 next_row = self.cursor.fetchone()
                 if next_row is not None:
-                    await self._postReadyCheck(next_row[0], channel)
+                    await self._postReadyCheck(guild_id, next_row[0], channel)
             return
 
         # Every match in this round is in — announce the round ending and
@@ -1505,9 +3426,100 @@ class helpers():
         # (even one that recurses through several bye rounds) never blocks
         # other users from placing bets or running other commands meanwhile.
         await channel.send(f"\U0001f3c1 **Round {round_index + 1} has ended!**")
-        await channel.send(self.renderBracketText(tournament))
+        await self._sendBracketText(channel, tournament, guild_id)
 
         await self._startRound(guild_id, tournament, round_index + 1, mode, channel)
+
+    # Mirrors the winners-bracket tail of _resolveTournamentMatch above,
+    # for a losers-bracket match: propagate the winner into `.next`,
+    # announce, and either advance to the round's next queued match or —
+    # once the round's fully resolved — move on to the next losers round
+    # (or Grand Finals, once there isn't one). A losers-bracket loser is
+    # simply eliminated — nothing further to propagate for them.
+    async def _resolveLosersMatch(
+        self, guild_id, tournament, match_id, round_index, node_index, winning_team, mode, channel
+    ):
+        losers_nodes = tournament.get_losers_bracket_nodes()
+        node_a = losers_nodes[node_index]
+        node_b = node_a.opponent
+        winner_node = node_a if winning_team == 1 else node_b
+        loser_node = node_b if winning_team == 1 else node_a
+        if node_a.next is not None:
+            node_a.next.team = winner_node.team
+        self.saveTournament(guild_id, tournament)
+        self._recordMatchResult(guild_id, winner_node.team, loser_node.team)
+
+        await channel.send(f"**Match #{match_id} result (losers bracket):** {winner_node.team.get_name()} wins!")
+        await self._settleMatchWagers(guild_id, match_id, winning_team, channel)
+        await self._sendBracketText(channel, tournament, guild_id)
+
+        self.cursor.execute(
+            "SELECT COUNT(*) FROM tournament_matches WHERE guildId=? AND roundIndex=? "
+            "AND bracketType='losers' AND state != 'RESOLVED'",
+            (guild_id, round_index)
+        )
+        if self.cursor.fetchone()[0] > 0:
+            if mode == "sequential":
+                self.cursor.execute(
+                    "SELECT id FROM tournament_matches WHERE guildId=? AND roundIndex=? "
+                    "AND bracketType='losers' AND state='QUEUED' ORDER BY id LIMIT 1",
+                    (guild_id, round_index)
+                )
+                next_row = self.cursor.fetchone()
+                if next_row is not None:
+                    await self._postReadyCheck(guild_id, next_row[0], channel)
+            return
+
+        await channel.send(f"\U0001f3c1 **Losers Bracket Round {round_index + 1} has ended!**")
+        await self._sendBracketText(channel, tournament, guild_id)
+
+        await self._startLosersRound(guild_id, tournament, round_index + 1, mode, channel)
+
+    # Resolves a Grand Finals match. roundIndex 0 is the first game
+    # (winners-bracket champion vs losers-bracket champion); if the
+    # losers-bracket champion wins that one, both sides now have exactly
+    # one loss, so a second, decider match (roundIndex 1) is posted instead
+    # of ending the tournament — whoever wins THAT one is champion no
+    # matter what.
+    async def _resolveFinalsMatch(self, guild_id, tournament, match_id, round_index, winning_team, mode, channel):
+        self.cursor.execute("SELECT team1, team2 FROM tournament_matches WHERE id=?", (match_id,))
+        team1_ser, team2_ser = self.cursor.fetchone()
+        team1, team2 = Team(), Team()
+        team1.deserializeTeam(team1_ser)
+        team2.deserializeTeam(team2_ser)
+        winner = team1 if winning_team == 1 else team2
+        loser = team2 if winning_team == 1 else team1
+        # Recorded here regardless of whether this is game 1 or the
+        # decider — both are real, played matches, even when game 1's
+        # result just leads into a reset rather than ending the tournament.
+        self._recordMatchResult(guild_id, winner, loser)
+        await self._settleMatchWagers(guild_id, match_id, winning_team, channel)
+
+        if round_index == 0:
+            # Compared by name, not id — see _tournamentChampionName.
+            wb_rounds = self._bracketRounds(tournament.get_bracket())
+            wb_champion = wb_rounds[-1][0].team
+            if wb_champion is not None and winner.get_name() != wb_champion.get_name():
+                await channel.send(
+                    f"**Grand Finals result:** {winner.get_name()} wins! Since the winners-bracket "
+                    f"champion has now lost once too, one final decider match settles the tournament."
+                )
+                await self._startGrandFinals(guild_id, tournament, mode, channel, reset=True)
+                return
+
+        await channel.send(
+            f"\U0001f3c6 **{tournament.get_name()}** is complete! Champion: **{winner.get_name()}**"
+        )
+        # Every other match-resolution path (_resolveTournamentMatch,
+        # _resolveLosersMatch) reprints the bracket after it updates —
+        # Grand Finals resolving is exactly the same kind of update, and
+        # skipping it here meant the last bracket image anyone saw was
+        # whatever the losers bracket looked like before Grand Finals even
+        # started, never showing the actual finals result.
+        # _sendBracketText already knows how to post the Grand Finals image
+        # too, once _renderGrandFinalsImage finds a resolved finals match.
+        await self._sendBracketText(channel, tournament, guild_id)
+        await self._postTournamentLeaderboard(channel, guild_id, tournament)
 
     # /report-correct-winner's match_id path: fixes a specific tournament
     # match's recorded winner and re-propagates the bracket, independent
@@ -1519,14 +3531,22 @@ class helpers():
         guild_id = ctx.guild.id
 
         self.cursor.execute(
-            "SELECT roundIndex, nodeIndex, state, winner FROM tournament_matches WHERE guildId=? AND id=?",
+            "SELECT roundIndex, nodeIndex, state, winner, bracketType FROM tournament_matches "
+            "WHERE guildId=? AND id=?",
             (guild_id, match_id)
         )
         row = self.cursor.fetchone()
         if row is None:
             await ctx.response.send_message(f"No tournament match with id {match_id} in this server.")
             return
-        round_index, node_index, state, winner = row
+        round_index, node_index, state, winner, bracket_type = row
+
+        if bracket_type != "winners":
+            await ctx.response.send_message(
+                f"Match #{match_id} is a {'losers bracket' if bracket_type == 'losers' else 'Grand Finals'} "
+                f"match — correcting those isn't supported yet."
+            )
+            return
 
         if state != "RESOLVED":
             await ctx.response.send_message(f"Match #{match_id} hasn't been resolved yet.")
@@ -1537,7 +3557,7 @@ class helpers():
             return
 
         self.cursor.execute(
-            "SELECT COUNT(*) FROM tournament_matches WHERE guildId=? AND roundIndex=?",
+            "SELECT COUNT(*) FROM tournament_matches WHERE guildId=? AND roundIndex=? AND bracketType='winners'",
             (guild_id, round_index + 1)
         )
         if self.cursor.fetchone()[0] > 0:
@@ -1565,7 +3585,7 @@ class helpers():
         await ctx.response.send_message(
             f"Match #{match_id} corrected: **{correct_winner_node.team.get_name()}** actually won."
         )
-        await ctx.channel.send(self.renderBracketText(tournament))
+        await self._sendBracketText(ctx.channel, tournament, guild_id)
 
     # ---------------- Persistent teams ----------------
 
@@ -1582,6 +3602,7 @@ class helpers():
         team_id, data = row
         team = Team()
         team.deserializeTeam(data)
+        self._ensureLogo(team_id, team)
         return team_id, team
 
     def getTeamById(self, guild_id, team_id):
@@ -1593,6 +3614,7 @@ class helpers():
             return None
         team = Team()
         team.deserializeTeam(row[0])
+        self._ensureLogo(team_id, team)
         return team
 
     def getTeamsForGuild(self, guild_id):
@@ -1601,12 +3623,251 @@ class helpers():
         for team_id, data in self.cursor.fetchall():
             team = Team()
             team.deserializeTeam(data)
+            self._ensureLogo(team_id, team)
             teams.append((team_id, team))
         return teams
+
+    # Every team in the guild `user_id` is a rostered player on (captain or
+    # not) — what /my-teams pages through. Sorted by team_id so paging
+    # stays stable across reactions even though this is recomputed fresh
+    # from the DB on every page flip (see handleMyTeamsReaction), the same
+    # way getLeaderboardEntries is recomputed fresh rather than snapshotted.
+    def getTeamsForPlayer(self, guild_id, user_id):
+        teams = self.getTeamsForGuild(guild_id)
+        mine = [
+            (team_id, team) for team_id, team in teams
+            if any(player.get_id() == user_id for player in team.get_players())
+        ]
+        return sorted(mine, key=lambda entry: entry[0])
+
+    # ---------------- /team-list ----------------
+
+    # Every team in the guild, filtered/sorted for /team-list. `search` is a
+    # case-insensitive substring match on the team's name; `recruiting_only`
+    # keeps only teams that HAVE a target size (set via /team-create) and
+    # haven't reached it yet — a team with no target size is an ephemeral
+    # game-formation roster, never "recruiting" in the sense this filter
+    # means. `sort`/`order` are always applied, even filtered down to
+    # nothing, so a page-flip on an empty result still has a stable (if
+    # empty) list to re-render instead of erroring.
+    def _filterAndSortTeams(self, guild_id, search, recruiting_only, sort, order):
+        teams = self.getTeamsForGuild(guild_id)
+
+        if search:
+            needle = search.lower()
+            teams = [(team_id, team) for team_id, team in teams if needle in team.get_name().lower()]
+
+        if recruiting_only:
+            teams = [
+                (team_id, team) for team_id, team in teams
+                if team.get_team_size() is not None and team.get_size() < team.get_team_size()
+            ]
+
+        def sort_key(entry):
+            _, team = entry
+            if sort == "wins":
+                return team.wins
+            if sort == "losses":
+                return team.losses
+            if sort == "roster_size":
+                return team.get_size()
+            if sort == "win_rate":
+                games = team.wins + team.losses
+                return (team.wins / games) if games > 0 else -1
+            return team.get_name().lower()
+
+        return sorted(teams, key=sort_key, reverse=(order == "desc"))
+
+    def _teamListPageCount(self, teams):
+        return max(1, -(-len(teams) // LEADERBOARD_PAGE_SIZE))
+
+    def _renderTeamListEmbed(self, guild_name, teams_sorted, search, recruiting_only, sort, order, page):
+        total_pages = self._teamListPageCount(teams_sorted)
+        start = page * LEADERBOARD_PAGE_SIZE
+        page_teams = teams_sorted[start:start + LEADERBOARD_PAGE_SIZE]
+
+        lines = []
+        for i, (_, team) in enumerate(page_teams):
+            rank = start + i + 1
+            target_size = team.get_team_size()
+            roster_size = f"{team.get_size()}/{target_size}" if target_size is not None else str(team.get_size())
+            games = team.wins + team.losses
+            win_rate = f"{(team.wins / games) * 100:.1f}%" if games > 0 else "N/A"
+            lines.append(
+                f"**#{rank}.** {team.get_name()} — {roster_size} players | "
+                f"{team.wins}W-{team.losses}L ({win_rate})"
+            )
+
+        embed = discord.Embed(
+            title=f"\U0001f4cb {guild_name} Teams",
+            description="\n".join(lines) if lines else "No teams match those filters.",
+            color=discord.Color.gold(),
+        )
+        active_filters = []
+        if search:
+            active_filters.append(f'search "{search}"')
+        if recruiting_only:
+            active_filters.append("recruiting only")
+        filter_text = f" · {', '.join(active_filters)}" if active_filters else ""
+        order_label = "Ascending" if order == "asc" else "Descending"
+        embed.set_footer(
+            text=f"Page {page + 1}/{total_pages} · Sorted by {TEAM_LIST_SORT_LABELS[sort]} "
+                 f"({order_label}){filter_text}"
+        )
+        return embed
+
+    # Posts the first page and pre-reacts with the paging emoji, same
+    # pattern as leaderboardHelper/myTeamsHelper — clicking them
+    # (handleTeamListReaction) edits this same message.
+    async def teamListHelper(self, ctx, search, recruiting_only, sort, order):
+        guild_id = ctx.guild.id
+
+        teams_sorted = self._filterAndSortTeams(guild_id, search, recruiting_only, sort, order)
+        if not teams_sorted:
+            message = "No teams have been created in this server yet!" if not (search or recruiting_only) \
+                else "No teams match those filters."
+            await ctx.response.send_message(message)
+            return
+
+        embed = self._renderTeamListEmbed(
+            ctx.guild.name, teams_sorted, search, recruiting_only, sort, order, page=0
+        )
+        await ctx.response.send_message(embed=embed)
+        msg = await ctx.original_response()
+        for emoji in LEADERBOARD_NAV_EMOJIS:
+            await msg.add_reaction(emoji)
+
+        self.cursor.execute(
+            "INSERT OR REPLACE INTO team_list_views"
+            "(messageId, guildId, channelId, search, recruitingOnly, sort, sort_order, page) "
+            "VALUES(?, ?, ?, ?, ?, ?, ?, 0)",
+            (msg.id, guild_id, ctx.channel.id, search, int(recruiting_only), sort, order)
+        )
+        self.db.commit()
+
+    # Called from bot.py's on_raw_reaction_add — no-ops unless the emoji/
+    # message match an active /team-list page view.
+    async def handleTeamListReaction(self, payload):
+        guild_id = payload.guild_id
+        if guild_id is None:
+            return
+
+        emoji = str(payload.emoji)
+        if emoji not in LEADERBOARD_NAV_EMOJIS:
+            return
+
+        self.cursor.execute(
+            "SELECT channelId, search, recruitingOnly, sort, sort_order, page FROM team_list_views "
+            "WHERE guildId=? AND messageId=?",
+            (guild_id, payload.message_id)
+        )
+        row = self.cursor.fetchone()
+        if row is None:
+            return
+        channel_id, search, recruiting_only, sort, order, page = row
+        recruiting_only = bool(recruiting_only)
+
+        teams_sorted = self._filterAndSortTeams(guild_id, search, recruiting_only, sort, order)
+        total_pages = self._teamListPageCount(teams_sorted)
+
+        if emoji == LEADERBOARD_FIRST_EMOJI:
+            new_page = 0
+        elif emoji == LEADERBOARD_PREV_EMOJI:
+            new_page = max(0, page - 1)
+        elif emoji == LEADERBOARD_NEXT_EMOJI:
+            new_page = min(total_pages - 1, page + 1)
+        else:
+            new_page = total_pages - 1
+
+        if new_page == page:
+            return
+
+        channel = self.client.get_channel(channel_id)
+        if channel is None:
+            channel = await self.client.fetch_channel(channel_id)
+        message = await channel.fetch_message(payload.message_id)
+
+        guild = self.client.get_guild(guild_id)
+        guild_name = guild.name if guild is not None else ""
+        embed = self._renderTeamListEmbed(guild_name, teams_sorted, search, recruiting_only, sort, order, new_page)
+        await message.edit(embed=embed)
+        await self._clearPagingReaction(message, payload)
+
+        self.cursor.execute(
+            "UPDATE team_list_views SET page=? WHERE guildId=? AND messageId=?",
+            (new_page, guild_id, payload.message_id)
+        )
+        self.db.commit()
+
+    # Every built-in logo's name (filename minus extension), e.g. "Demacia"
+    # for assets/clash-logos/Demacia.png — what /team-set-logo's autocomplete
+    # offers and validates against. Empty if the folder isn't there at all
+    # (e.g. a dev checkout that never fetched it) rather than raising.
+    def listAvailableLogos(self):
+        if not os.path.isdir(TEAM_LOGO_DIR):
+            return []
+        names = [
+            os.path.splitext(f)[0] for f in os.listdir(TEAM_LOGO_DIR)
+            if os.path.isfile(os.path.join(TEAM_LOGO_DIR, f))
+        ]
+        return sorted(names)
+
+    # Case-insensitive lookup from a logo's name back to its file path —
+    # None if `name` isn't one of listAvailableLogos()'s names.
+    def _resolveLogoPath(self, name):
+        if not os.path.isdir(TEAM_LOGO_DIR):
+            return None
+        target = name.strip().lower()
+        for filename in os.listdir(TEAM_LOGO_DIR):
+            stem, _ext = os.path.splitext(filename)
+            if stem.lower() == target:
+                return os.path.join(TEAM_LOGO_DIR, filename)
+        return None
+
+    # A team with no logo yet gets a random built-in one, persisted right
+    # away — called everywhere a team is loaded (not just created), so a
+    # team that predates this feature self-heals into having a logo the
+    # next time it's touched instead of needing a one-off migration.
+    # No-op if the assets folder is missing/empty; a team just stays
+    # logo-less rather than this raising.
+    def _ensureLogo(self, team_id, team):
+        if team.get_logo_path() is not None:
+            return
+        names = self.listAvailableLogos()
+        if not names:
+            return
+        team.set_logo_path(self._resolveLogoPath(random.choice(names)))
+        self.updateTeamData(team_id, team)
 
     def updateTeamData(self, team_id, team):
         self.cursor.execute("UPDATE teams SET data=? WHERE id=?", (team.serializeTeam(), team_id))
         self.db.commit()
+
+    # Records one played tournament match against each side's PERSISTENT
+    # team record — the one /team-list, /my-teams, and /team-stats actually
+    # read — called from every match-resolution path (winners bracket,
+    # losers bracket, Grand Finals). Looked up by name rather than trusting
+    # the bracket node's own embedded Team object: that's just a snapshot
+    # from whenever the bracket was last serialized, not the live,
+    # incrementally-updated row, so writing straight back through it would
+    # silently lose whatever wins/losses had already accumulated since.
+    # Either side can be None (a bracket node with no team — shouldn't
+    # happen for a match that was ever actually queued, but this is cheap
+    # insurance) or simply not a persisted team at all, in which case
+    # there's nothing to record and this is a no-op.
+    def _recordMatchResult(self, guild_id, winner_team, loser_team):
+        for team, won in ((winner_team, True), (loser_team, False)):
+            if team is None:
+                continue
+            result = self.getTeamRow(guild_id, team.get_name())
+            if result is None:
+                continue
+            team_id, persisted_team = result
+            if won:
+                persisted_team.addWin()
+            else:
+                persisted_team.addLoss()
+            self.updateTeamData(team_id, persisted_team)
 
     def isTeamCaptain(self, team, user_id):
         captain = team.get_captain()
@@ -1624,6 +3885,7 @@ class helpers():
         team_id = self.cursor.lastrowid
         team.set_id(team_id)
         self.updateTeamData(team_id, team)
+        self._ensureLogo(team_id, team)
         return team_id
 
     # Creates a new persistent team with the caller as its captain. Unlike
@@ -1704,10 +3966,50 @@ class helpers():
         self.updateTeamData(team_id, team)
         await ctx.response.send_message(f"**{team_name}**'s voice channel is now {channel.mention}.")
 
-    # Invites `member` to a team the caller captains — posts a message
-    # mentioning them and reacts with TEAM_INVITE_ACCEPT_EMOJI; the member
-    # only actually joins once they react themselves (handleTeamInviteReaction).
-    async def teamInviteHelper(self, ctx, team_name, member):
+    # Sets a team's logo to one of the built-in Clash logos (assets/clash-
+    # logos) — captain-only, same as the voice-channel/invite commands.
+    # `logo_name` is validated against listAvailableLogos() rather than
+    # trusted outright, since a client can send an arbitrary string for a
+    # slash command option even when it's autocomplete-backed.
+    async def setTeamLogoHelper(self, ctx, team_name, logo_name):
+        guild_id = ctx.guild.id
+
+        result = self.getTeamRow(guild_id, team_name)
+        if result is None:
+            await ctx.response.send_message(f"No team named **{team_name}** in this server.")
+            return
+        team_id, team = result
+
+        if not self.isTeamCaptain(team, ctx.user.id):
+            await ctx.response.send_message(f"Only **{team_name}**'s captain can set its logo.")
+            return
+
+        logo_path = self._resolveLogoPath(logo_name)
+        if logo_path is None:
+            await ctx.response.send_message(
+                f"No logo named **{logo_name}** — pick one from the autocomplete list."
+            )
+            return
+
+        team.set_logo_path(logo_path)
+        self.updateTeamData(team_id, team)
+
+        logo_display_name = os.path.splitext(os.path.basename(logo_path))[0]
+        await ctx.response.send_message(
+            f"Set **{team_name}**'s logo to **{logo_display_name}**.",
+            file=discord.File(logo_path)
+        )
+
+    # Invites `members` (one or more) to a team the caller captains — posts
+    # a single message mentioning everyone valid and reacts once with
+    # TEAM_INVITE_ACCEPT_EMOJI; each invited member only actually joins
+    # once THEY react themselves (handleTeamInviteReaction), independently
+    # of whether anyone else invited alongside them has. Bots, duplicates
+    # (the same member passed more than once), and players already on the
+    # team are filtered out rather than failing the whole command — with
+    # exactly one member given, the old single-invite error messages are
+    # preserved verbatim rather than folded into the multi-invite phrasing.
+    async def teamInviteHelper(self, ctx, team_name, members):
         guild_id = ctx.guild.id
 
         result = self.getTeamRow(guild_id, team_name)
@@ -1720,35 +4022,65 @@ class helpers():
             await ctx.response.send_message(f"Only **{team_name}**'s captain can invite players.")
             return
 
-        if member.bot:
-            await ctx.response.send_message("You can't invite a bot to a team.")
+        seen_ids = set()
+        unique_members = []
+        for member in members:
+            if member.id in seen_ids:
+                continue
+            seen_ids.add(member.id)
+            unique_members.append(member)
+
+        rostered_ids = {player.get_id() for player in team.get_players()}
+        valid, skipped = [], []
+        for member in unique_members:
+            if member.bot:
+                skipped.append((member, "bot"))
+            elif member.id in rostered_ids:
+                skipped.append((member, "already on the team"))
+            else:
+                valid.append(member)
+
+        if not valid:
+            if len(unique_members) == 1:
+                member, reason = skipped[0]
+                if reason == "bot":
+                    await ctx.response.send_message("You can't invite a bot to a team.")
+                else:
+                    await ctx.response.send_message(f"{member.display_name} is already on **{team_name}**.")
+                return
+            reasons = "; ".join(f"{member.display_name} ({reason})" for member, reason in skipped)
+            await ctx.response.send_message(f"Nobody to invite — {reasons}.")
             return
 
-        if any(player.get_id() == member.id for player in team.get_players()):
-            await ctx.response.send_message(f"{member.display_name} is already on **{team_name}**.")
-            return
-
-        self.cursor.execute(
-            "INSERT INTO team_invites"
-            "(guildId, channelId, messageId, teamId, teamName, inviterId, targetId, targetName) "
-            "VALUES(?, ?, NULL, ?, ?, ?, ?, ?)",
-            (guild_id, ctx.channel.id, team_id, team_name, ctx.user.id, member.id, member.name)
-        )
-        self.db.commit()
-        invite_id = self.cursor.lastrowid
-
-        await ctx.response.send_message(
-            f"{member.mention}, {ctx.user.mention} invited you to join **{team_name}**! "
+        mentions = ", ".join(member.mention for member in valid)
+        message = (
+            f"{mentions}, {ctx.user.mention} invited you to join **{team_name}**! "
             f"React with {TEAM_INVITE_ACCEPT_EMOJI} to accept."
         )
+        if skipped:
+            reasons = "; ".join(f"{member.display_name} ({reason})" for member, reason in skipped)
+            message += f"\n(Not invited: {reasons}.)"
+
+        await ctx.response.send_message(message)
         msg = await ctx.original_response()
         await msg.add_reaction(TEAM_INVITE_ACCEPT_EMOJI)
 
-        self.cursor.execute("UPDATE team_invites SET messageId=? WHERE id=?", (msg.id, invite_id))
+        for member in valid:
+            self.cursor.execute(
+                "INSERT INTO team_invites"
+                "(guildId, channelId, messageId, teamId, teamName, inviterId, targetId, targetName) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+                (guild_id, ctx.channel.id, msg.id, team_id, team_name, ctx.user.id, member.id, member.name)
+            )
         self.db.commit()
 
     # Called from bot.py's on_raw_reaction_add — no-ops unless the emoji/
-    # message match a pending invite and the reactor is the invited player.
+    # message match a pending invite for the reactor specifically. Several
+    # invitees can now share one messageId (one /team-invite call, several
+    # people invited at once), so this is looked up by (messageId, the
+    # reactor's own id) together rather than fetching whatever row happens
+    # to come back first for the message and comparing targetId after —
+    # each invitee accepting only ever resolves their OWN row.
     async def handleTeamInviteReaction(self, payload):
         guild_id = payload.guild_id
         if guild_id is None:
@@ -1759,16 +4091,13 @@ class helpers():
 
         self.cursor.execute(
             "SELECT id, channelId, teamId, teamName, targetId, targetName "
-            "FROM team_invites WHERE guildId=? AND messageId=?",
-            (guild_id, payload.message_id)
+            "FROM team_invites WHERE guildId=? AND messageId=? AND targetId=?",
+            (guild_id, payload.message_id, payload.user_id)
         )
         row = self.cursor.fetchone()
         if row is None:
             return
         invite_id, channel_id, team_id, team_name, target_id, target_name = row
-
-        if payload.user_id != target_id:
-            return
 
         # BUG-PRONE PATTERN AVOIDED: delete the invite before anything
         # async below, so a double-click can't add the player twice.
@@ -1787,13 +4116,13 @@ class helpers():
             channel = await self.client.fetch_channel(channel_id)
         await channel.send(f"**{target_name}** has joined **{team_name}**!")
 
-    async def teamStatsHelper(self, ctx, team_name):
-        result = self.getTeamRow(ctx.guild.id, team_name)
-        if result is None:
-            await ctx.response.send_message(f"No team named **{team_name}** in this server.")
-            return
-        _, team = result
-
+    # Builds a team's stats embed — shared by /team-stats and /my-teams's
+    # paging, so both stay in sync automatically. Returns (embed, file):
+    # file is None whenever there's no logo to attach (the built-in set was
+    # unavailable when _ensureLogo ran, or the file's since been removed
+    # from disk) — send the embed without a thumbnail rather than erroring
+    # on a discord.File() open that can't succeed.
+    def _renderTeamStatsEmbed(self, team):
         games = team.wins + team.losses
         win_rate = f"{(team.wins / games) * 100:.1f}%" if games > 0 else "N/A"
         captain = team.get_captain()
@@ -1810,38 +4139,269 @@ class helpers():
         embed.add_field(name="Voice Channel", value=team.get_voice_channel() or "Not set", inline=True)
         embed.add_field(name="Roster", value=roster, inline=False)
 
-        await ctx.response.send_message(embed=embed)
+        logo_path = team.get_logo_path()
+        file = None
+        if logo_path is not None and os.path.isfile(logo_path):
+            filename = os.path.basename(logo_path)
+            file = discord.File(logo_path, filename=filename)
+            embed.set_thumbnail(url=f"attachment://{filename}")
 
-    # Ranks every team in the guild by win rate (teams with no recorded
-    # games sink to the bottom rather than looking like a 0% win rate),
-    # then by total wins. Single embed, no paging — server team counts are
-    # small enough that this doesn't need /leaderboard's page reactions.
-    async def teamLeaderboardHelper(self, ctx):
-        teams = self.getTeamsForGuild(ctx.guild.id)
+        return embed, file
+
+    async def teamStatsHelper(self, ctx, team_name):
+        result = self.getTeamRow(ctx.guild.id, team_name)
+        if result is None:
+            await ctx.response.send_message(f"No team named **{team_name}** in this server.")
+            return
+        _, team = result
+
+        embed, file = self._renderTeamStatsEmbed(team)
+        if file is not None:
+            await ctx.response.send_message(embed=embed, file=file)
+        else:
+            await ctx.response.send_message(embed=embed)
+
+    # ---------------- /my-teams ----------------
+
+    # One team per "page" rather than a batch of rows like /leaderboard —
+    # /my-teams is for flipping through each of YOUR teams' full stats
+    # cards one at a time, not scanning a ranked list.
+    def _myTeamsPageCount(self, teams):
+        return max(1, len(teams))
+
+    # Same embed /team-stats uses, plus a "Team X/N" footer so paging has
+    # something to orient by (team-stats itself doesn't need one — there's
+    # only ever the one team on screen there).
+    def _renderMyTeamsEmbed(self, teams, page):
+        team_id, team = teams[page]
+        embed, file = self._renderTeamStatsEmbed(team)
+        embed.set_footer(text=f"Team {page + 1}/{len(teams)}")
+        return embed, file
+
+    # Posts the caller's first team and pre-reacts with the same paging
+    # emoji /leaderboard uses — clicking them (handleMyTeamsReaction) edits
+    # this same message. Tracked by messageId+userId rather than just
+    # messageId/guildId the way leaderboards is, since which teams a page
+    # flip should show depends on who's paging, not just which server.
+    # Clears the reactor's own click after a paginated view (/my-teams,
+    # /leaderboard) advances, so they can press the same nav emoji again
+    # immediately instead of having to un-react manually first. Tolerates
+    # failure — removing someone ELSE's reaction needs Manage Messages,
+    # and a server that hasn't granted the bot that permission shouldn't
+    # make paging itself break; the click is just left uncleared.
+    async def _clearPagingReaction(self, message, payload):
+        try:
+            await message.remove_reaction(payload.emoji, payload.member)
+        except discord.HTTPException:
+            pass
+
+    async def myTeamsHelper(self, ctx):
+        guild_id = ctx.guild.id
+        user_id = ctx.user.id
+
+        teams = self.getTeamsForPlayer(guild_id, user_id)
         if not teams:
-            await ctx.response.send_message("No teams have been created in this server yet!")
+            await ctx.response.send_message("You're not on any teams in this server.")
             return
 
-        def sort_key(entry):
-            _, team = entry
-            games = team.wins + team.losses
-            win_rate = (team.wins / games) if games > 0 else -1
-            return (-win_rate, -team.wins)
+        embed, file = self._renderMyTeamsEmbed(teams, page=0)
+        if file is not None:
+            await ctx.response.send_message(embed=embed, file=file)
+        else:
+            await ctx.response.send_message(embed=embed)
+        msg = await ctx.original_response()
+        for emoji in LEADERBOARD_NAV_EMOJIS:
+            await msg.add_reaction(emoji)
+
+        self.cursor.execute(
+            "INSERT OR REPLACE INTO my_team_views(messageId, guildId, channelId, userId, page) "
+            "VALUES(?, ?, ?, ?, 0)",
+            (msg.id, guild_id, ctx.channel.id, user_id)
+        )
+        self.db.commit()
+
+    # Called from bot.py's on_raw_reaction_add for every reaction — no-ops
+    # unless the emoji/message match an active /my-teams page view. Only
+    # the caller who posted it can page it — checked implicitly, since
+    # this looks the view up by messageId and re-derives the team list from
+    # the stored userId regardless of who actually clicked the reaction;
+    # anyone else's click still moves the same shared view. That matches
+    # how /leaderboard's paging already behaves (any reactor can page a
+    # guild-wide view) — a personal view being paged by someone else just
+    # steps through the OWNER's teams, not the clicker's.
+    async def handleMyTeamsReaction(self, payload):
+        guild_id = payload.guild_id
+        if guild_id is None:
+            return
+
+        emoji = str(payload.emoji)
+        if emoji not in LEADERBOARD_NAV_EMOJIS:
+            return
+
+        self.cursor.execute(
+            "SELECT channelId, userId, page FROM my_team_views WHERE guildId=? AND messageId=?",
+            (guild_id, payload.message_id)
+        )
+        row = self.cursor.fetchone()
+        if row is None:
+            return
+        channel_id, user_id, page = row
+
+        teams = self.getTeamsForPlayer(guild_id, user_id)
+        if not teams:
+            return
+        total_pages = self._myTeamsPageCount(teams)
+        page = min(page, total_pages - 1)
+
+        if emoji == LEADERBOARD_FIRST_EMOJI:
+            new_page = 0
+        elif emoji == LEADERBOARD_PREV_EMOJI:
+            new_page = max(0, page - 1)
+        elif emoji == LEADERBOARD_NEXT_EMOJI:
+            new_page = min(total_pages - 1, page + 1)
+        else:
+            new_page = total_pages - 1
+
+        if new_page == page:
+            return
+
+        channel = self.client.get_channel(channel_id)
+        if channel is None:
+            channel = await self.client.fetch_channel(channel_id)
+        message = await channel.fetch_message(payload.message_id)
+
+        embed, file = self._renderMyTeamsEmbed(teams, new_page)
+        await message.edit(embed=embed, attachments=[file] if file is not None else [])
+        await self._clearPagingReaction(message, payload)
+
+        self.cursor.execute(
+            "UPDATE my_team_views SET page=? WHERE guildId=? AND messageId=?",
+            (new_page, guild_id, payload.message_id)
+        )
+        self.db.commit()
+
+    # Per-team win/loss record scoped to just THIS tournament, computed from
+    # resolved tournament_matches rows rather than each team's own persisted
+    # (all-time, cross-tournament) wins/losses. tournament_matches has no
+    # tournamentId column, but doesn't need one here: a guild has exactly
+    # one tournament at a time, and building a fresh bracket always clears
+    # out the previous tournament's rows first (see
+    # _clearTournamentMatchesForGuild) — so every row still in the table for
+    # this guild belongs to THIS tournament. Keyed by team NAME (matching
+    # how _recordMatchResult/getTeamRow already resolve a bracket team back
+    # to its persisted row), seeded at 0-0 for every registered team so one
+    # that never won a game still shows up instead of being left out.
+    def _tournamentTeamRecords(self, guild_id, tournament):
+        records = {team.get_name(): [0, 0] for team in tournament.get_teams()}
+        self.cursor.execute(
+            "SELECT team1, team2, winner FROM tournament_matches WHERE guildId=? AND state='RESOLVED'",
+            (guild_id,)
+        )
+        for team1_ser, team2_ser, winner in self.cursor.fetchall():
+            if winner is None:
+                continue
+            team1, team2 = Team(), Team()
+            team1.deserializeTeam(team1_ser)
+            team2.deserializeTeam(team2_ser)
+            winner_name = team1.get_name() if winner == 1 else team2.get_name()
+            loser_name = team2.get_name() if winner == 1 else team1.get_name()
+            if winner_name in records:
+                records[winner_name][0] += 1
+            if loser_name in records:
+                records[loser_name][1] += 1
+        return records
+
+    # The "tournament just finished" results embed — every team REGISTERED
+    # FOR THIS TOURNAMENT, ranked by its record IN THIS TOURNAMENT (see
+    # _tournamentTeamRecords). Deliberately distinct from
+    # _renderTeamListEmbed (/team-list), which is server-wide
+    # and all-time on purpose — this one exists specifically so a team that
+    # played in a dozen past tournaments doesn't show up here with its
+    # entire history, and a team that wasn't even in this one doesn't show
+    # up at all.
+    def _renderTournamentResultsEmbed(self, guild_id, tournament, guild_name):
+        teams = tournament.get_teams()
+        if not teams:
+            return None
+        records = self._tournamentTeamRecords(guild_id, tournament)
+
+        def sort_key(team):
+            wins, losses = records[team.get_name()]
+            games = wins + losses
+            win_rate = (wins / games) if games > 0 else -1
+            return (-win_rate, -wins)
 
         ranked = sorted(teams, key=sort_key)
 
         lines = []
-        for i, (_, team) in enumerate(ranked, start=1):
-            games = team.wins + team.losses
-            win_rate = f"{(team.wins / games) * 100:.1f}%" if games > 0 else "N/A"
-            lines.append(f"**#{i}.** {team.get_name()} — {team.wins}W-{team.losses}L ({win_rate})")
+        for i, team in enumerate(ranked, start=1):
+            wins, losses = records[team.get_name()]
+            games = wins + losses
+            win_rate = f"{(wins / games) * 100:.1f}%" if games > 0 else "N/A"
+            lines.append(f"**#{i}.** {team.get_name()} — {wins}W-{losses}L ({win_rate})")
 
-        embed = discord.Embed(
-            title=f"\U0001f3c6 {ctx.guild.name} Team Leaderboard",
-            description="\n".join(lines),
-            color=discord.Color.gold(),
-        )
-        await ctx.response.send_message(embed=embed)
+        title = f"\U0001f3c6 {tournament.get_name()} Results"
+        if guild_name:
+            title += f" — {guild_name}"
+        return discord.Embed(title=title, description="\n".join(lines), color=discord.Color.gold())
+
+    # Posts the tournament-scoped results embed right after a tournament
+    # fully wraps up (both the single-elimination and double-elimination
+    # "it's complete" messages call this). No-op if there are somehow no
+    # registered teams — shouldn't happen right after a tournament
+    # finishes, but _renderTournamentResultsEmbed already handles it
+    # cleanly either way.
+    async def _postTournamentLeaderboard(self, channel, guild_id, tournament):
+        guild_name = channel.guild.name if channel.guild is not None else None
+        embed = self._renderTournamentResultsEmbed(guild_id, tournament, guild_name)
+        if embed is not None:
+            await channel.send(embed=embed)
+
+    # /test's per-match flavor: a handful of clearly-fake bettors wager on
+    # one side or the other. Deliberately NOT the real wagers/economy
+    # tables — those are built around a single guild-wide betting_state,
+    # one active bet per user at a time (see wagerHelper), which can't
+    # represent several tournament matches being open at once the way
+    # simultaneous mode routinely has. Returns the wager list so
+    # _postSimulatedPayout can settle the same bets once the match
+    # resolves, without needing a second DB round-trip to reconstruct them.
+    async def _postSimulatedWagers(self, match_id, channel):
+        self.cursor.execute("SELECT team1, team2 FROM tournament_matches WHERE id=?", (match_id,))
+        team1_ser, team2_ser = self.cursor.fetchone()
+        team1, team2 = Team(), Team()
+        team1.deserializeTeam(team1_ser)
+        team2.deserializeTeam(team2_ser)
+
+        bettors = random.sample(FAKE_BETTOR_NAMES, random.randint(2, min(5, len(FAKE_BETTOR_NAMES))))
+        wagers = [(name, random.choice([1, 2]), random.choice(FAKE_WAGER_AMOUNTS)) for name in bettors]
+
+        lines = [f"\U0001f3b2 **Betting on Match #{match_id}** ({team1.get_name()} vs {team2.get_name()}):"]
+        for name, team_choice, amount in wagers:
+            team_name = team1.get_name() if team_choice == 1 else team2.get_name()
+            lines.append(f"{name} wagers {amount} gold on **{team_name}**")
+        await channel.send("\n".join(lines))
+
+        return wagers, team1, team2
+
+    # Settles the wagers _postSimulatedWagers just posted, once the match's
+    # real winner is known — same pari-mutuel formula computeGameDeltas
+    # uses for real bets (winners split the losing pool proportional to
+    # their own wager, on top of getting it back), just without an
+    # economy table on the other end of it to actually credit.
+    async def _postSimulatedPayout(self, channel, wagers, team1, team2, winning_team):
+        winning_pool = sum(amount for _, team_choice, amount in wagers if team_choice == winning_team)
+        losing_pool = sum(amount for _, team_choice, amount in wagers if team_choice != winning_team)
+        winner_name = team1.get_name() if winning_team == 1 else team2.get_name()
+
+        lines = [f"\U0001f4b0 **{winner_name}** won the bet — payouts:"]
+        for name, team_choice, amount in wagers:
+            if team_choice != winning_team:
+                continue
+            payout = round(amount + (amount / winning_pool) * losing_pool) if winning_pool > 0 else amount
+            lines.append(f"{name} won {payout} gold (bet {amount})")
+        if len(lines) == 1:
+            lines.append("(nobody bet on the winning side!)")
+        await channel.send("\n".join(lines))
 
     # Loads two persistent teams straight into team1/team2 for a casual or
     # ranked game — the "quickly reuse a tournament team" path, skipping
@@ -1949,12 +4509,21 @@ class helpers():
             lookup[user_id] = elo if elo is not None else DEFAULT_ELO
         return lookup
 
-    async def wagerHelper(self, ctx, amount: int, team: int):
+    # `match_id`, when given, bets on that ONE specific tournament match
+    # (see _openConcurrentTournamentBetting) instead of the single current
+    # casual/ranked/sequential-tournament game — a separate path
+    # (_placeTournamentWager) since it's scoped by matchId in
+    # `tournament_wagers` rather than the guild-wide `wagers` singleton.
+    async def wagerHelper(self, ctx, amount: int, team: int, match_id: int = None):
         guild_id = ctx.guild.id
         user_id = ctx.user.id
 
         if amount <= 0:
             await ctx.response.send_message("Wager amount must be greater than 0.")
+            return
+
+        if match_id is not None:
+            await self._placeTournamentWager(ctx, guild_id, user_id, amount, team, match_id)
             return
 
         state = self.get(guild_id, "betting_state")
@@ -1996,9 +4565,87 @@ class helpers():
 
         await ctx.response.send_message(f"You wagered {amount} gold on Team {team}!")
 
+    # wagerHelper's match_id path. Same shape as the block above it (state
+    # check, self-bet guard, balance check, duplicate-bet guard, escrow,
+    # insert) but scoped to one match instead of the whole guild — several
+    # of these can be running at once for a simultaneous-mode round, each
+    # independently.
+    async def _placeTournamentWager(self, ctx, guild_id, user_id, amount, team, match_id):
+        self.cursor.execute(
+            "SELECT team1, team2, state, bettingClosed FROM tournament_matches WHERE id=? AND guildId=?",
+            (match_id, guild_id)
+        )
+        row = self.cursor.fetchone()
+        if row is None:
+            await ctx.response.send_message(f"No tournament match with id {match_id} in this server.")
+            return
+        team1_ser, team2_ser, state, betting_closed = row
+        if state == "RESOLVED" or betting_closed:
+            await ctx.response.send_message(f"Betting is closed for match #{match_id}.")
+            return
+
+        team1, team2 = Team(), Team()
+        team1.deserializeTeam(team1_ser)
+        team2.deserializeTeam(team2_ser)
+        rostered_ids = {p.get_id() for p in team1.get_players()} | {p.get_id() for p in team2.get_players()}
+        if user_id in rostered_ids:
+            await ctx.response.send_message("You can't wager on a match you're playing in!")
+            return
+
+        self.ensureEconomyRow(guild_id, user_id, ctx.user.name)
+        balance = self.getEconomy(guild_id, user_id, "balance")
+        if amount > balance:
+            await ctx.response.send_message(f"You don't have enough gold for that! Your balance is {balance}.")
+            return
+
+        self.cursor.execute(
+            "SELECT team FROM tournament_wagers WHERE matchId=? AND userId=?", (match_id, user_id)
+        )
+        if self.cursor.fetchone() is not None:
+            await ctx.response.send_message(f"You've already placed a bet on match #{match_id}.")
+            return
+
+        self.cursor.execute(
+            "UPDATE economy SET balance = balance - ? WHERE guildId=? AND userId=?",
+            (amount, guild_id, user_id)
+        )
+        self.cursor.execute(
+            "INSERT INTO tournament_wagers(matchId, guildId, userId, username, team, amount) "
+            "VALUES(?, ?, ?, ?, ?, ?)",
+            (match_id, guild_id, user_id, ctx.user.name, team, amount)
+        )
+        self.db.commit()
+
+        await ctx.response.send_message(f"You wagered {amount} gold on Team {team} for match #{match_id}!")
+
     # Kicks off the betting window for the game that was just /start'd.
     async def startBettingHelper(self, ctx):
         await self._openBetting(ctx.guild.id, ctx.channel)
+
+    # Posts the matchup graphic for whatever's currently loaded into
+    # team1/team2 — used by /start, right as the match actually begins,
+    # using whichever mode (/make-teams, /captains, /team-use, ranked or
+    # not) most recently set them up.
+    async def sendCurrentMatchupImage(self, ctx):
+        team1 = Team()
+        team1.deserializeTeam(self.get(ctx.guild.id, "team1"))
+        team2 = Team()
+        team2.deserializeTeam(self.get(ctx.guild.id, "team2"))
+        label = self._matchupLabelForMode(self.get(ctx.guild.id, "mode"))
+        await self._sendMatchupImage(ctx.channel, team1, team2, label)
+
+    # This guild's own configured betting-window length (/set-betting-timer),
+    # or BETTING_DURATION_SECONDS for a guild that's never set one. Doesn't
+    # go through self.get() — that crashes outright if there's no `servers`
+    # row for this guild at all, which a real guild always has by the time
+    # any command can run (see on_guild_join), but /test's simulated
+    # tournament has no reason to require one just to open a betting window.
+    def _getBettingTimerSeconds(self, guild_id):
+        self.cursor.execute("SELECT betting_timer_seconds FROM servers WHERE guildId=?", (guild_id,))
+        row = self.cursor.fetchone()
+        if row is None or row[0] is None:
+            return BETTING_DURATION_SECONDS
+        return int(row[0])
 
     # Core of the above, taking guild_id/channel directly rather than a
     # full Interaction — /tournament-start's sequential mode calls this
@@ -2025,9 +4672,10 @@ class helpers():
         self.update(guild_id, "betting_message_id", None)
         self.update(guild_id, "betting_channel_id", channel.id)
 
+        duration = self._getBettingTimerSeconds(guild_id)
         await channel.send(
             "🎲 Betting is now open! Use `/wager <amount> <team>` to bet on this game. "
-            f"Betting closes in {BETTING_DURATION_SECONDS} seconds."
+            f"Betting closes in {duration} seconds."
         )
 
         # BUG-PRONE PATTERN AVOIDED: awaiting asyncio.sleep() directly inside
@@ -2037,12 +4685,12 @@ class helpers():
         # for a full minute, and a cancelled game (/return) would have no
         # way to stop it from firing later. Running it as its own Task makes
         # both of those explicit and lets cancelBettingHelper cancel it.
-        task = asyncio.create_task(self._bettingTimer(guild_id, channel))
+        task = asyncio.create_task(self._bettingTimer(guild_id, channel, duration))
         self.bettingTasks[guild_id] = task
 
-    async def _bettingTimer(self, guild_id, channel):
+    async def _bettingTimer(self, guild_id, channel, duration):
         try:
-            await asyncio.sleep(BETTING_DURATION_SECONDS)
+            await asyncio.sleep(duration)
 
             self.update(guild_id, "betting_state", "CLOSED")
             await channel.send("🔒 Betting is now closed! No more wagers will be accepted for this game.")
@@ -2050,8 +4698,8 @@ class helpers():
             await asyncio.sleep(WINNER_REPORT_DELAY_SECONDS)
 
             msg = await channel.send(
-                "Which team won? React with 1️⃣ for Team 1 or 2️⃣ for Team 2 to record the result "
-                "and pay out bets."
+                f"Which team won? React with {TEAM_EMOJIS[1]} for Team 1 or {TEAM_EMOJIS[2]} for Team 2 "
+                f"to record the result and pay out bets."
             )
             await msg.add_reaction(TEAM_EMOJIS[1])
             await msg.add_reaction(TEAM_EMOJIS[2])
@@ -2068,7 +4716,7 @@ class helpers():
             self.bettingTasks.pop(guild_id, None)
 
     # Called from bot.py's on_raw_reaction_add. Resolves the winner from a
-    # 1️⃣/2️⃣ reaction on the stored betting message and pays out bets.
+    # TEAM_EMOJIS reaction on the stored betting message and pays out bets.
     async def handleWinnerReaction(self, payload):
         guild_id = payload.guild_id
         if guild_id is None:
@@ -2088,7 +4736,7 @@ class helpers():
             return
 
         # BUG-PRONE PATTERN AVOIDED: flip the state before doing anything
-        # async below, so a second reaction (e.g. both 1️⃣ and 2️⃣ clicked
+        # async below, so a second reaction (e.g. both TEAM_EMOJIS clicked
         # near-simultaneously) can't also pass the check above and pay out
         # twice.
         self.update(guild_id, "betting_state", "NONE")
@@ -2368,7 +5016,7 @@ class helpers():
 
         # Game record (game_wins/game_losses) is tracked for every reported
         # game regardless of ranked status. Elo is not — it's exclusive to
-        # games started via /ranked or /ranked-captains (is_ranked=True),
+        # games started with ranked:true (is_ranked=True),
         # so a casual /make-teams or /captains game never moves anyone's
         # rating.
         elo_changes = []
@@ -2741,6 +5389,7 @@ class helpers():
         guild_name = guild.name if guild is not None else ""
         embed = self._renderLeaderboardEmbed(guild_name, entries_sorted, stat, order, new_page)
         await message.edit(embed=embed)
+        await self._clearPagingReaction(message, payload)
 
         self.cursor.execute(
             "UPDATE leaderboards SET page=? WHERE guildId=? AND messageId=?",

@@ -120,7 +120,7 @@
             <div class="flow-num">04</div>
             <div class="flow-body">
               <h4>Check the bot permissions</h4>
-              <p>A <strong style="color:var(--text);">Bot Permissions</strong> panel appears below. Check the five permissions in the table further down this page — Discord builds the invite URL for you as you check boxes.</p>
+              <p>A <strong style="color:var(--text);">Bot Permissions</strong> panel appears below. Check the seven permissions in the table further down this page — Discord builds the invite URL for you as you check boxes.</p>
             </div>
           </div>
           <div class="flow-step">
@@ -128,7 +128,7 @@
             <div class="flow-body">
               <h4>Copy the generated URL</h4>
               <p>Scroll down and copy the <strong style="color:var(--text);">Generated Link</strong>. It looks like this, with your own client ID in place of the placeholder:</p>
-              <pre class="codeblock" style="margin-top:10px;"><span class="c">https://discord.com/oauth2/authorize?client_id=</span><span class="v">YOUR_CLIENT_ID</span><span class="c">&permissions=</span><span class="v">17828944</span><span class="c">&scope=bot%20applications.commands</span></pre>
+              <pre class="codeblock" style="margin-top:10px;"><span class="c">https://discord.com/oauth2/authorize?client_id=</span><span class="v">YOUR_CLIENT_ID</span><span class="c">&permissions=</span><span class="v">17861712</span><span class="c">&scope=bot%20applications.commands</span></pre>
             </div>
           </div>
           <div class="flow-step">
@@ -145,7 +145,7 @@
 
       <section class="block">
         <h2>Permissions, and why each one is needed</h2>
-        <p class="muted">Shockwave asks for six permissions — nothing broader than what its commands actually do.</p>
+        <p class="muted">Shockwave asks for seven permissions — nothing broader than what its commands actually do.</p>
         <table class="params">
           <tr><th>Permission</th><th>Needed for</th><th>Why</th></tr>
           <tr>
@@ -171,12 +171,17 @@
           <tr>
             <td class="param-name">Add Reactions</td>
             <td class="param-type">/start</td>
-            <td>The bot reacts with 1️⃣ and 2️⃣ on the winner-report message so recording a result and paying out bets is a single click.</td>
+            <td>The bot reacts with 🔵 and 🔴 on the winner-report message so recording a result and paying out bets is a single click.</td>
           </tr>
           <tr>
             <td class="param-name">Send Messages</td>
             <td class="param-type">Every command</td>
             <td>Posts confirmations, team embeds, and error messages back into the channel.</td>
+          </tr>
+          <tr>
+            <td class="param-name">Attach Files</td>
+            <td class="param-type">/tournament-print-bracket and tournament matches</td>
+            <td>The bracket is posted as an actual image, not text — needs this to upload it.</td>
           </tr>
         </table>
       </section>
@@ -197,7 +202,11 @@
         </div>
 
         <div class="cmd-note" style="margin-top:20px;">
-          <strong>Commands not showing up?</strong> This build syncs commands to one specific server (guild) ID, set in the bot's own code — not automatically to every server it joins. If you're inviting a shared/hosted instance, ask whoever runs it to add your server's ID. If you're running your own copy, see <a href="self-hosting.html" style="color:var(--spark);">step 6 of the self-hosting guide</a> to point it at your server.
+          <strong>Commands not showing up?</strong> Shockwave publishes its commands to every server it's in
+          automatically — on startup, and again the moment it joins a new one — so there's nothing to
+          configure per-server. Give it a few seconds after authorizing, then try typing
+          <code class="inline">/</code> again. Still nothing? The bot's own instance may simply be offline —
+          check with whoever runs it.
         </div>
       </section>
 

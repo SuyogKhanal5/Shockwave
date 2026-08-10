@@ -169,8 +169,8 @@
           <summary>How do I set it up for another game?</summary>
           <div class="faq-body">
             <p>Exactly the same as League, minus the roles: run <code class="inline">/team-set-channels</code>
-            once, then use <code class="inline">/make-teams</code>, <code class="inline">/captains</code>, or
-            <code class="inline">/ranked</code>/<code class="inline">/ranked-captains</code> without
+            once, then use <code class="inline">/make-teams</code> or <code class="inline">/captains</code> —
+            with <code class="inline">ranked:true</code> if you want it tracked, and without
             <code class="inline">use_roles</code> turned on. You get two balanced (or drafted) teams, moved
             into voice channels, with betting and elo working exactly as documented. This works for Valorant
             5-stacks, Rocket League 3v3s, a chess club splitting into two draft brackets, or any other group
@@ -193,7 +193,8 @@
           <summary>Does ranked elo make sense for a non-League game?</summary>
           <div class="faq-body">
             <p>Yes — the elo system is a standard win/loss rating (the same math chess ratings use), not
-            anything League-flavored. <code class="inline">/ranked</code> balances teams by current elo and
+            anything League-flavored. <code class="inline">ranked:true</code> on <code class="inline">/make-teams</code>
+            or <code class="inline">/captains</code> balances teams by current elo and
             adjusts it after a reported result regardless of what game you're actually playing.</p>
           </div>
         </details>

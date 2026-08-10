@@ -23,14 +23,18 @@ Layout:
 import asyncio
 import contextlib
 import itertools
+import os
+import random
 import sqlite3
 import sys
+import tempfile
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, mock_open, patch
+from unittest.mock import AsyncMock, PropertyMock, mock_open, patch
 
 import discord
 from discord import app_commands
+from PIL import Image
 
 from TourneyClasses import (
     Player, Team, Tournament, BracketNode, serialize_bracket, deserialize_bracket,
@@ -39,7 +43,6 @@ import helper as helper_module
 from helper import helpers as Helpers
 
 GUILD_ID = 555000111
-COMMAND_GUILD_ID = 526081127643873280  # matches the guild id every @tree.command in bot.py registers under
 
 
 # ---------------------------------------------------------------------------
@@ -53,7 +56,7 @@ SERVERS_SCHEMA = (
     "players, channel1, channel2, mode, turn, team_size, tournament, elo, "
     "result1, result2, captain1, captain2, "
     "betting_state, betting_message_id, betting_channel_id, is_ranked, "
-    "active_tournament_match_id, wager_channel)"
+    "active_tournament_match_id, wager_channel, betting_timer_seconds)"
 )
 ECONOMY_SCHEMA = (
     "CREATE TABLE economy(guildId, userId, username, balance, wins, losses, "
@@ -73,10 +76,17 @@ LEADERBOARDS_SCHEMA = (
     "CREATE TABLE leaderboards(messageId INTEGER PRIMARY KEY, guildId, channelId, "
     "filter, sort_order, page)"
 )
+MY_TEAM_VIEWS_SCHEMA = (
+    "CREATE TABLE my_team_views(messageId INTEGER PRIMARY KEY, guildId, channelId, userId, page)"
+)
+TEAM_LIST_VIEWS_SCHEMA = (
+    "CREATE TABLE team_list_views(messageId INTEGER PRIMARY KEY, guildId, channelId, "
+    "search, recruitingOnly, sort, sort_order, page)"
+)
 TEAMS_SCHEMA = "CREATE TABLE teams(id INTEGER PRIMARY KEY AUTOINCREMENT, guildId, name, data)"
 TOURNAMENTS_SCHEMA = (
     "CREATE TABLE tournaments(guildId PRIMARY KEY, name, team_size, num_teams, "
-    "double_elimination, teams, bracket)"
+    "double_elimination, teams, bracket, losers_bracket)"
 )
 TEAM_INVITES_SCHEMA = (
     "CREATE TABLE team_invites(id INTEGER PRIMARY KEY AUTOINCREMENT, guildId, channelId, "
@@ -84,7 +94,12 @@ TEAM_INVITES_SCHEMA = (
 )
 TOURNAMENT_MATCHES_SCHEMA = (
     "CREATE TABLE tournament_matches(id INTEGER PRIMARY KEY AUTOINCREMENT, guildId, roundIndex, "
-    "nodeIndex, team1, team2, state, mode, messageId, channelId, winner)"
+    "nodeIndex, team1, team2, state, mode, messageId, channelId, winner, bracketType, "
+    "bettingClosed DEFAULT 0)"
+)
+TOURNAMENT_WAGERS_SCHEMA = (
+    "CREATE TABLE tournament_wagers(matchId, guildId, userId, username, team, amount, "
+    "PRIMARY KEY(matchId, userId))"
 )
 
 
@@ -97,10 +112,13 @@ def make_db():
     cursor.execute(LAST_RESULT_SCHEMA)
     cursor.execute(DUELS_SCHEMA)
     cursor.execute(LEADERBOARDS_SCHEMA)
+    cursor.execute(MY_TEAM_VIEWS_SCHEMA)
+    cursor.execute(TEAM_LIST_VIEWS_SCHEMA)
     cursor.execute(TEAMS_SCHEMA)
     cursor.execute(TOURNAMENTS_SCHEMA)
     cursor.execute(TEAM_INVITES_SCHEMA)
     cursor.execute(TOURNAMENT_MATCHES_SCHEMA)
+    cursor.execute(TOURNAMENT_WAGERS_SCHEMA)
     db.commit()
     return db, cursor
 
@@ -108,8 +126,8 @@ def make_db():
 def insert_guild_row(cursor, db, guild_id=GUILD_ID, name="Test Guild"):
     cursor.execute(
         "INSERT INTO servers VALUES(?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, "
-        "NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'NONE', NULL, NULL, 0, NULL, NULL)",
-        (guild_id, name),
+        "NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'NONE', NULL, NULL, 0, NULL, NULL, ?)",
+        (guild_id, name, helper_module.BETTING_DURATION_SECONDS),
     )
     db.commit()
 
@@ -156,16 +174,18 @@ class FakeMessage:
     def __init__(self, id=None):
         self.id = id if id is not None else next_id()
         self.add_reaction = AsyncMock()
+        self.remove_reaction = AsyncMock()
         self.edit = AsyncMock()
 
 
 class FakeChannel:
-    def __init__(self, name, id=None, members=None, kind="voice"):
+    def __init__(self, name, id=None, members=None, kind="voice", guild=None):
         self.name = name
         self.id = id if id is not None else next_id()
         self.members = members if members is not None else []
         self.mention = f"<#{self.id}>"
         self.kind = kind
+        self.guild = guild
         self.send = AsyncMock()
         self.create_invite = AsyncMock(return_value="https://discord.gg/fake-invite")
         self.fetch_message = AsyncMock(return_value=FakeMessage())
@@ -200,7 +220,7 @@ class FakeInteraction:
     def __init__(self, guild, user, channel=None):
         self.guild = guild
         self.user = user
-        self.channel = channel if channel is not None else FakeChannel("text-channel")
+        self.channel = channel if channel is not None else FakeChannel("text-channel", guild=guild)
         self.response = AsyncMock()
         self.followup = AsyncMock()
         self.original_response = AsyncMock(return_value=FakeMessage())
@@ -1188,6 +1208,144 @@ class SetTeamVoiceChannelHelperTests(HelperTestCase):
         self.assertTrue(stranger.response.send_message.call_args.kwargs.get("ephemeral"))
 
 
+class _FakeLogoDirTestCase(HelperTestCase):
+    LOGO_NAMES = ("Demacia", "Noxus", "Freljord")
+
+    def setUp(self):
+        super().setUp()
+        # ignore_cleanup_errors: a test that sends a discord.File built from
+        # one of these without closing it (easy to forget — teamStatsHelper
+        # attaches one internally) leaves the fd open, and Windows won't let
+        # a directory delete out from under an open file the way POSIX does.
+        self._logo_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        # Real, decodable 1x1 images — not just empty placeholder files —
+        # since _drawMatchupColumn's random-logo fallback (see
+        # _renderMatchupImage) now actually opens one of these with PIL for
+        # any team that doesn't have a logo of its own, not just the ones
+        # explicitly testing logo content.
+        for name in self.LOGO_NAMES:
+            Image.new("RGBA", (1, 1), (255, 0, 0, 255)).save(
+                os.path.join(self._logo_dir.name, f"{name}.png")
+            )
+        self._logo_dir_patch = patch.object(helper_module, "TEAM_LOGO_DIR", self._logo_dir.name)
+        self._logo_dir_patch.start()
+
+    def tearDown(self):
+        self._logo_dir_patch.stop()
+        self._logo_dir.cleanup()
+        super().tearDown()
+
+
+class TeamLogoTests(_FakeLogoDirTestCase):
+    def test_lists_available_logos_by_name_without_extension(self):
+        self.assertEqual(self.helperObj.listAvailableLogos(), ["Demacia", "Freljord", "Noxus"])
+
+    def test_returns_empty_list_when_the_folder_is_missing(self):
+        with patch.object(helper_module, "TEAM_LOGO_DIR", os.path.join(self._logo_dir.name, "nope")):
+            self.assertEqual(self.helperObj.listAvailableLogos(), [])
+
+    def test_resolve_logo_path_is_case_insensitive(self):
+        path = self.helperObj._resolveLogoPath("demacia")
+        self.assertEqual(os.path.basename(path), "Demacia.png")
+
+    def test_resolve_logo_path_returns_none_for_an_unknown_name(self):
+        self.assertIsNone(self.helperObj._resolveLogoPath("Nonexistent"))
+
+    def test_saving_a_new_team_assigns_a_random_logo(self):
+        team = Team()
+        team.set_name("Red")
+        self.helperObj._saveNewTeam(GUILD_ID, team)
+
+        _, persisted = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        self.assertIsNotNone(persisted.get_logo_path())
+        self.assertIn(
+            os.path.basename(persisted.get_logo_path()),
+            [f"{name}.png" for name in self.LOGO_NAMES]
+        )
+
+    def test_saving_a_new_team_does_not_override_a_preset_logo(self):
+        team = Team()
+        team.set_name("Red")
+        team.set_logo_path("/some/custom/path.png")
+        self.helperObj._saveNewTeam(GUILD_ID, team)
+
+        _, persisted = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        self.assertEqual(persisted.get_logo_path(), "/some/custom/path.png")
+
+    def test_loading_a_pre_existing_logo_less_team_self_heals(self):
+        # Simulates a team saved before this feature existed — no 10th
+        # (logo_path) field in its serialized data at all.
+        self.cursor.execute(
+            "INSERT INTO teams(guildId, name, data) VALUES(?, ?, ?)",
+            (GUILD_ID, "Legacy", "[1, Legacy, , 0, , , 0, 0, None]")
+        )
+        self.db.commit()
+        team_id = self.cursor.lastrowid
+
+        _, team = self.helperObj.getTeamRow(GUILD_ID, "Legacy")
+        self.assertIsNotNone(team.get_logo_path())
+
+        # persisted back to the DB, not just assigned in memory
+        self.cursor.execute("SELECT data FROM teams WHERE id=?", (team_id,))
+        reloaded = Team()
+        reloaded.deserializeTeam(self.cursor.fetchone()[0])
+        self.assertIsNotNone(reloaded.get_logo_path())
+
+    def test_no_op_when_no_logos_are_available(self):
+        with patch.object(helper_module, "TEAM_LOGO_DIR", os.path.join(self._logo_dir.name, "nope")):
+            team = Team()
+            team.set_name("Red")
+            self.helperObj._saveNewTeam(GUILD_ID, team)
+
+            _, persisted = self.helperObj.getTeamRow(GUILD_ID, "Red")
+            self.assertIsNone(persisted.get_logo_path())
+
+
+class SetTeamLogoHelperTests(_FakeLogoDirTestCase):
+    def _ctx(self, user_id=901, name="Alice"):
+        return FakeInteraction(self.guild, FakeMember(name, id=user_id))
+
+    async def _make_team(self, name="Red", captain_id=901, captain_name="Alice"):
+        ctx = self._ctx(user_id=captain_id, name=captain_name)
+        await self.helperObj.createTeamHelper(ctx, name, 5)
+
+    async def test_rejects_unknown_team(self):
+        ctx = self._ctx()
+        await self.helperObj.setTeamLogoHelper(ctx, "Nonexistent", "Demacia")
+        ctx.response.send_message.assert_awaited_once_with("No team named **Nonexistent** in this server.")
+
+    async def test_rejects_non_captain(self):
+        await self._make_team()
+        ctx = self._ctx(user_id=902, name="Bob")
+        await self.helperObj.setTeamLogoHelper(ctx, "Red", "Demacia")
+        ctx.response.send_message.assert_awaited_once_with("Only **Red**'s captain can set its logo.")
+
+    async def test_rejects_an_unknown_logo_name(self):
+        await self._make_team()
+        ctx = self._ctx()
+        await self.helperObj.setTeamLogoHelper(ctx, "Red", "NotALogo")
+        ctx.response.send_message.assert_awaited_once_with(
+            "No logo named **NotALogo** — pick one from the autocomplete list."
+        )
+
+    async def test_sets_the_logo_case_insensitively_and_attaches_the_file(self):
+        await self._make_team()
+        ctx = self._ctx()
+
+        await self.helperObj.setTeamLogoHelper(ctx, "Red", "demacia")
+
+        _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        self.assertEqual(os.path.basename(team.get_logo_path()), "Demacia.png")
+        ctx.response.send_message.assert_awaited_once()
+        args, kwargs = ctx.response.send_message.call_args
+        self.assertIn("Red", args[0])
+        self.assertIn("Demacia", args[0])
+        self.assertIsInstance(kwargs["file"], discord.File)
+        # discord.File keeps its underlying fp open — close it so Windows
+        # doesn't hold the temp logo dir locked when tearDown deletes it.
+        kwargs["file"].close()
+
+
 class TeamInviteHelperTests(HelperTestCase):
     def _ctx(self, user_id=901, name="Alice", channel=None):
         return FakeInteraction(self.guild, FakeMember(name, id=user_id), channel=channel)
@@ -1199,27 +1357,27 @@ class TeamInviteHelperTests(HelperTestCase):
     async def test_rejects_unknown_team(self):
         ctx = self._ctx()
         target = FakeMember("Bob", id=902)
-        await self.helperObj.teamInviteHelper(ctx, "Nonexistent", target)
+        await self.helperObj.teamInviteHelper(ctx, "Nonexistent", [target])
         ctx.response.send_message.assert_awaited_once_with("No team named **Nonexistent** in this server.")
 
     async def test_rejects_non_captain(self):
         await self._make_team()
         ctx = self._ctx(user_id=903, name="Cleo")
         target = FakeMember("Bob", id=902)
-        await self.helperObj.teamInviteHelper(ctx, "Red", target)
+        await self.helperObj.teamInviteHelper(ctx, "Red", [target])
         ctx.response.send_message.assert_awaited_once_with("Only **Red**'s captain can invite players.")
 
     async def test_rejects_inviting_a_bot(self):
         await self._make_team()
         ctx = self._ctx()
         target = FakeMember("Botty", id=902, bot=True)
-        await self.helperObj.teamInviteHelper(ctx, "Red", target)
+        await self.helperObj.teamInviteHelper(ctx, "Red", [target])
         ctx.response.send_message.assert_awaited_once_with("You can't invite a bot to a team.")
 
     async def test_rejects_inviting_someone_already_on_the_team(self):
         await self._make_team()
         ctx = self._ctx()
-        await self.helperObj.teamInviteHelper(ctx, "Red", ctx.user)
+        await self.helperObj.teamInviteHelper(ctx, "Red", [ctx.user])
         ctx.response.send_message.assert_awaited_once_with("Alice is already on **Red**.")
 
     async def test_successful_invite_posts_message_and_stores_pending_row(self):
@@ -1230,7 +1388,7 @@ class TeamInviteHelperTests(HelperTestCase):
         posted_message = FakeMessage(id=777)
         ctx.original_response.return_value = posted_message
 
-        await self.helperObj.teamInviteHelper(ctx, "Red", target)
+        await self.helperObj.teamInviteHelper(ctx, "Red", [target])
 
         ctx.response.send_message.assert_awaited_once()
         text = ctx.response.send_message.call_args.args[0]
@@ -1248,6 +1406,75 @@ class TeamInviteHelperTests(HelperTestCase):
         )
         self.assertEqual(self.cursor.fetchone(), (GUILD_ID, channel.id, "Red", 901, 902))
 
+    async def test_invites_multiple_members_in_one_message(self):
+        await self._make_team()
+        channel = FakeChannel("general")
+        ctx = self._ctx(channel=channel)
+        bob = FakeMember("Bob", id=902)
+        cleo = FakeMember("Cleo", id=903)
+        posted_message = FakeMessage(id=778)
+        ctx.original_response.return_value = posted_message
+
+        await self.helperObj.teamInviteHelper(ctx, "Red", [bob, cleo])
+
+        ctx.response.send_message.assert_awaited_once()
+        text = ctx.response.send_message.call_args.args[0]
+        self.assertIn(bob.mention, text)
+        self.assertIn(cleo.mention, text)
+        # one shared message, one shared reaction — not one of each per invitee
+        posted_message.add_reaction.assert_awaited_once_with(helper_module.TEAM_INVITE_ACCEPT_EMOJI)
+
+        self.cursor.execute(
+            "SELECT targetId FROM team_invites WHERE messageId=? ORDER BY targetId", (778,)
+        )
+        self.assertEqual([row[0] for row in self.cursor.fetchall()], [902, 903])
+
+    async def test_deduplicates_the_same_member_passed_twice(self):
+        await self._make_team()
+        ctx = self._ctx()
+        bob = FakeMember("Bob", id=902)
+        posted_message = FakeMessage(id=779)
+        ctx.original_response.return_value = posted_message
+
+        await self.helperObj.teamInviteHelper(ctx, "Red", [bob, bob])
+
+        self.cursor.execute("SELECT COUNT(*) FROM team_invites WHERE messageId=?", (779,))
+        self.assertEqual(self.cursor.fetchone()[0], 1)
+
+    async def test_skips_invalid_members_but_still_invites_the_valid_ones(self):
+        await self._make_team()
+        ctx = self._ctx()
+        bob = FakeMember("Bob", id=902)
+        botty = FakeMember("Botty", id=904, bot=True)
+        posted_message = FakeMessage(id=780)
+        ctx.original_response.return_value = posted_message
+
+        # ctx.user (Alice, 901) is already on the team, botty is a bot —
+        # both should be skipped with a note while Bob still gets invited.
+        await self.helperObj.teamInviteHelper(ctx, "Red", [bob, ctx.user, botty])
+
+        text = ctx.response.send_message.call_args.args[0]
+        self.assertIn(bob.mention, text)
+        self.assertIn("Not invited", text)
+        self.assertIn("Alice", text)
+        self.assertIn("Botty", text)
+
+        self.cursor.execute("SELECT targetId FROM team_invites WHERE messageId=?", (780,))
+        self.assertEqual(self.cursor.fetchall(), [(902,)])
+
+    async def test_all_members_invalid_reports_every_reason_without_inviting(self):
+        await self._make_team()
+        ctx = self._ctx()
+        botty = FakeMember("Botty", id=904, bot=True)
+
+        await self.helperObj.teamInviteHelper(ctx, "Red", [ctx.user, botty])
+
+        text = ctx.response.send_message.call_args.args[0]
+        self.assertIn("Alice", text)
+        self.assertIn("Botty", text)
+        self.cursor.execute("SELECT COUNT(*) FROM team_invites")
+        self.assertEqual(self.cursor.fetchone()[0], 0)
+
 
 class HandleTeamInviteReactionTests(HelperTestCase):
     def setUp(self):
@@ -1255,14 +1482,15 @@ class HandleTeamInviteReactionTests(HelperTestCase):
         self.channel = FakeChannel("general")
         self.helperObj.client = FakeClient(channels=[self.channel], guilds=[self.guild])
 
-    async def _make_team_and_invite(self):
+    async def _make_team_and_invite(self, members=None):
         create_ctx = FakeInteraction(self.guild, FakeMember("Alice", id=901), channel=self.channel)
         await self.helperObj.createTeamHelper(create_ctx, "Red", 5)
-        target = FakeMember("Bob", id=902)
+        if members is None:
+            members = [FakeMember("Bob", id=902)]
         invite_ctx = FakeInteraction(self.guild, FakeMember("Alice", id=901), channel=self.channel)
         posted_message = FakeMessage(id=888)
         invite_ctx.original_response.return_value = posted_message
-        await self.helperObj.teamInviteHelper(invite_ctx, "Red", target)
+        await self.helperObj.teamInviteHelper(invite_ctx, "Red", members)
         return posted_message
 
     async def test_ignores_unrelated_emoji(self):
@@ -1311,8 +1539,33 @@ class HandleTeamInviteReactionTests(HelperTestCase):
         _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
         self.assertEqual(len(team.get_players()), 2)
 
+    async def test_multiple_invitees_on_the_same_message_accept_independently(self):
+        message = await self._make_team_and_invite(
+            [FakeMember("Bob", id=902), FakeMember("Cleo", id=903)]
+        )
 
-class TeamStatsHelperTests(HelperTestCase):
+        bob_payload = FakePayload(
+            GUILD_ID, message.id, self.channel.id, helper_module.TEAM_INVITE_ACCEPT_EMOJI, user_id=902
+        )
+        await self.helperObj.handleTeamInviteReaction(bob_payload)
+
+        _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        self.assertEqual({p.get_id() for p in team.get_players()}, {901, 902})
+
+        # Cleo's own invite (same messageId) is untouched by Bob's accept
+        self.cursor.execute("SELECT targetId FROM team_invites WHERE messageId=?", (message.id,))
+        self.assertEqual(self.cursor.fetchall(), [(903,)])
+
+        cleo_payload = FakePayload(
+            GUILD_ID, message.id, self.channel.id, helper_module.TEAM_INVITE_ACCEPT_EMOJI, user_id=903
+        )
+        await self.helperObj.handleTeamInviteReaction(cleo_payload)
+
+        _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        self.assertEqual({p.get_id() for p in team.get_players()}, {901, 902, 903})
+
+
+class TeamStatsHelperTests(_FakeLogoDirTestCase):
     def _ctx(self, user_id=901, name="Alice"):
         return FakeInteraction(self.guild, FakeMember(name, id=user_id))
 
@@ -1352,45 +1605,227 @@ class TeamStatsHelperTests(HelperTestCase):
         self.assertEqual(values["Record"], "2W - 1L")
         self.assertEqual(values["Win Rate"], "66.7%")
 
+    async def test_embed_shows_the_teams_logo_as_a_thumbnail(self):
+        # createTeamHelper -> _saveNewTeam -> _ensureLogo means a fresh team
+        # already has one of the fake logo dir's files assigned.
+        await self.helperObj.createTeamHelper(self._ctx(), "Red", 5)
+        _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        expected_filename = os.path.basename(team.get_logo_path())
 
-class TeamLeaderboardHelperTests(HelperTestCase):
+        ctx = self._ctx()
+        await self.helperObj.teamStatsHelper(ctx, "Red")
+
+        kwargs = ctx.response.send_message.call_args.kwargs
+        embed = kwargs["embed"]
+        self.assertEqual(embed.thumbnail.url, f"attachment://{expected_filename}")
+        self.assertIsInstance(kwargs["file"], discord.File)
+        self.assertEqual(kwargs["file"].filename, expected_filename)
+        kwargs["file"].close()
+
+    async def test_no_thumbnail_or_file_when_the_team_has_no_logo(self):
+        await self.helperObj.createTeamHelper(self._ctx(), "Red", 5)
+        team_id, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        team.set_logo_path(None)
+        self.helperObj.updateTeamData(team_id, team)
+
+        # An empty logo dir for this call specifically — otherwise
+        # getTeamRow's own self-heal (_ensureLogo) would just reassign a
+        # random one from the fake dir the moment teamStatsHelper reads
+        # this team back, and there'd be no way to observe the "genuinely
+        # has no logo" case at all.
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as empty_dir, \
+             patch.object(helper_module, "TEAM_LOGO_DIR", empty_dir):
+            ctx = self._ctx()
+            await self.helperObj.teamStatsHelper(ctx, "Red")
+
+        kwargs = ctx.response.send_message.call_args.kwargs
+        self.assertNotIn("file", kwargs)
+        self.assertIsNone(kwargs["embed"].thumbnail.url)
+
+    async def test_no_thumbnail_or_file_when_the_logo_file_no_longer_exists_on_disk(self):
+        await self.helperObj.createTeamHelper(self._ctx(), "Red", 5)
+        team_id, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        team.set_logo_path(os.path.join(self._logo_dir.name, "Deleted.png"))
+        self.helperObj.updateTeamData(team_id, team)
+
+        ctx = self._ctx()
+        await self.helperObj.teamStatsHelper(ctx, "Red")
+
+        kwargs = ctx.response.send_message.call_args.kwargs
+        self.assertNotIn("file", kwargs)
+
+
+class GetTeamsForPlayerTests(HelperTestCase):
+    def _ctx(self, user_id=901, name="Alice"):
+        return FakeInteraction(self.guild, FakeMember(name, id=user_id))
+
+    async def test_returns_only_teams_the_player_is_rostered_on(self):
+        await self.helperObj.createTeamHelper(self._ctx(901, "Alice"), "Red", 5)
+        await self.helperObj.createTeamHelper(self._ctx(902, "Bob"), "Blue", 5)
+
+        mine = self.helperObj.getTeamsForPlayer(GUILD_ID, 901)
+        self.assertEqual([team.get_name() for _, team in mine], ["Red"])
+
+    async def test_finds_teams_where_the_player_is_a_non_captain_member(self):
+        await self.helperObj.createTeamHelper(self._ctx(901, "Alice"), "Red", 5)
+        red_id, red = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        red.add_player(Player(902, "Bob"))
+        self.helperObj.updateTeamData(red_id, red)
+
+        mine = self.helperObj.getTeamsForPlayer(GUILD_ID, 902)
+        self.assertEqual([team.get_name() for _, team in mine], ["Red"])
+
+    async def test_empty_when_the_player_is_on_no_teams(self):
+        await self.helperObj.createTeamHelper(self._ctx(901, "Alice"), "Red", 5)
+        self.assertEqual(self.helperObj.getTeamsForPlayer(GUILD_ID, 999), [])
+
+    async def test_sorted_by_team_id_for_stable_paging(self):
+        await self.helperObj.createTeamHelper(self._ctx(901, "Alice"), "Zeta", 5)
+        red_id, red = self.helperObj.getTeamRow(GUILD_ID, "Zeta")
+        red.add_player(Player(902, "Bob"))
+        self.helperObj.updateTeamData(red_id, red)
+
+        await self.helperObj.createTeamHelper(self._ctx(902, "Bob"), "Alpha", 5)
+
+        mine = self.helperObj.getTeamsForPlayer(GUILD_ID, 902)
+        self.assertEqual([team.get_name() for _, team in mine], ["Zeta", "Alpha"])
+
+
+class MyTeamsHelperTests(_FakeLogoDirTestCase):
     def _ctx(self, user_id=901, name="Alice"):
         return FakeInteraction(self.guild, FakeMember(name, id=user_id))
 
     async def test_no_teams_sends_a_message(self):
         ctx = self._ctx()
-        await self.helperObj.teamLeaderboardHelper(ctx)
+        await self.helperObj.myTeamsHelper(ctx)
+        ctx.response.send_message.assert_awaited_once_with("You're not on any teams in this server.")
+
+    async def test_posts_the_first_team_reacts_and_tracks_the_view(self):
+        await self.helperObj.createTeamHelper(self._ctx(), "Red", 5)
+        await self.helperObj.createTeamHelper(self._ctx(), "Blue", 5)
+
+        ctx = self._ctx()
+        posted = FakeMessage(id=4242)
+        ctx.original_response.return_value = posted
+        await self.helperObj.myTeamsHelper(ctx)
+
+        kwargs = ctx.response.send_message.call_args.kwargs
+        embed = kwargs["embed"]
+        self.assertEqual(embed.title, "Red Stats")
+        self.assertIn("Team 1/2", embed.footer.text)
+        for emoji in helper_module.LEADERBOARD_NAV_EMOJIS:
+            posted.add_reaction.assert_any_await(emoji)
+
+        self.cursor.execute(
+            "SELECT guildId, channelId, userId, page FROM my_team_views WHERE messageId=4242"
+        )
+        self.assertEqual(self.cursor.fetchone(), (GUILD_ID, ctx.channel.id, 901, 0))
+        if "file" in kwargs:
+            kwargs["file"].close()
+
+    async def test_teams_are_ordered_by_team_id(self):
+        await self.helperObj.createTeamHelper(self._ctx(), "Zeta", 5)
+        await self.helperObj.createTeamHelper(self._ctx(), "Alpha", 5)
+
+        ctx = self._ctx()
+        await self.helperObj.myTeamsHelper(ctx)
+
+        embed = ctx.response.send_message.call_args.kwargs["embed"]
+        self.assertEqual(embed.title, "Zeta Stats")
+        kwargs = ctx.response.send_message.call_args.kwargs
+        if "file" in kwargs:
+            kwargs["file"].close()
+
+
+class TeamListHelperTests(HelperTestCase):
+    def _ctx(self, user_id=901, name="Alice"):
+        return FakeInteraction(self.guild, FakeMember(name, id=user_id))
+
+    async def test_no_teams_at_all_sends_a_message(self):
+        ctx = self._ctx()
+        await self.helperObj.teamListHelper(ctx, None, False, "name", "asc")
         ctx.response.send_message.assert_awaited_once_with(
             "No teams have been created in this server yet!"
         )
 
-    async def test_ranks_teams_by_win_rate_then_wins_with_no_games_last(self):
-        await self.helperObj.createTeamHelper(self._ctx(901, "Alice"), "Red", 5)
-        await self.helperObj.createTeamHelper(self._ctx(902, "Bob"), "Blue", 5)
-        await self.helperObj.createTeamHelper(self._ctx(903, "Cleo"), "Green", 5)
+    async def test_filters_that_match_nothing_send_a_different_message(self):
+        await self.helperObj.createTeamHelper(self._ctx(), "Red", 5)
+        ctx = self._ctx()
+        await self.helperObj.teamListHelper(ctx, "Nonexistent", False, "name", "asc")
+        ctx.response.send_message.assert_awaited_once_with("No teams match those filters.")
 
-        red_id, red = self.helperObj.getTeamRow(GUILD_ID, "Red")
-        red.addWin()
-        red.addWin()
-        red.addLoss()  # 66.7%
-        self.helperObj.updateTeamData(red_id, red)
-
-        blue_id, blue = self.helperObj.getTeamRow(GUILD_ID, "Blue")
-        blue.addWin()
-        blue.addWin()
-        blue.addWin()
-        blue.addLoss()  # 75%
-        self.helperObj.updateTeamData(blue_id, blue)
-        # Green never plays — should sink to the bottom
+    async def test_sorted_by_name_ascending_by_default(self):
+        await self.helperObj.createTeamHelper(self._ctx(901, "Alice"), "Zeta", 5)
+        await self.helperObj.createTeamHelper(self._ctx(902, "Bob"), "Alpha", 5)
 
         ctx = self._ctx()
-        await self.helperObj.teamLeaderboardHelper(ctx)
+        await self.helperObj.teamListHelper(ctx, None, False, "name", "asc")
 
         embed = ctx.response.send_message.call_args.kwargs["embed"]
         lines = embed.description.split("\n")
-        self.assertTrue(lines[0].startswith("**#1.** Blue"))
-        self.assertTrue(lines[1].startswith("**#2.** Red"))
-        self.assertTrue(lines[2].startswith("**#3.** Green"))
+        self.assertTrue(lines[0].startswith("**#1.** Alpha"))
+        self.assertTrue(lines[1].startswith("**#2.** Zeta"))
+
+    async def test_search_filters_by_name_substring_case_insensitively(self):
+        await self.helperObj.createTeamHelper(self._ctx(901, "Alice"), "Red Dragons", 5)
+        await self.helperObj.createTeamHelper(self._ctx(902, "Bob"), "Blue Wolves", 5)
+
+        ctx = self._ctx()
+        await self.helperObj.teamListHelper(ctx, "dragon", False, "name", "asc")
+
+        embed = ctx.response.send_message.call_args.kwargs["embed"]
+        self.assertIn("Red Dragons", embed.description)
+        self.assertNotIn("Blue Wolves", embed.description)
+
+    async def test_recruiting_only_excludes_full_and_sizeless_teams(self):
+        await self.helperObj.createTeamHelper(self._ctx(901, "Alice"), "NeedsPlayers", 5)
+        full_ctx = self._ctx(902, "Bob")
+        await self.helperObj.createTeamHelper(full_ctx, "Full", 1)  # captain alone fills a size-1 team
+
+        ctx = self._ctx()
+        await self.helperObj.teamListHelper(ctx, None, True, "name", "asc")
+
+        embed = ctx.response.send_message.call_args.kwargs["embed"]
+        self.assertIn("NeedsPlayers", embed.description)
+        self.assertNotIn("Full", embed.description)
+
+    async def test_sort_by_wins_descending(self):
+        await self.helperObj.createTeamHelper(self._ctx(901, "Alice"), "Red", 5)
+        await self.helperObj.createTeamHelper(self._ctx(902, "Bob"), "Blue", 5)
+        red_id, red = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        red.addWin()
+        red.addWin()
+        self.helperObj.updateTeamData(red_id, red)
+        blue_id, blue = self.helperObj.getTeamRow(GUILD_ID, "Blue")
+        blue.addWin()
+        self.helperObj.updateTeamData(blue_id, blue)
+
+        ctx = self._ctx()
+        await self.helperObj.teamListHelper(ctx, None, False, "wins", "desc")
+
+        embed = ctx.response.send_message.call_args.kwargs["embed"]
+        lines = embed.description.split("\n")
+        self.assertTrue(lines[0].startswith("**#1.** Red"))
+        self.assertTrue(lines[1].startswith("**#2.** Blue"))
+
+    async def test_posts_and_reacts_and_stores_the_view(self):
+        await self.helperObj.createTeamHelper(self._ctx(901, "Alice"), "Red", 5)
+        ctx = self._ctx()
+        posted = FakeMessage(id=6161)
+        ctx.original_response.return_value = posted
+
+        await self.helperObj.teamListHelper(ctx, "re", True, "wins", "desc")
+
+        for emoji in helper_module.LEADERBOARD_NAV_EMOJIS:
+            posted.add_reaction.assert_any_await(emoji)
+
+        self.cursor.execute(
+            "SELECT guildId, channelId, search, recruitingOnly, sort, sort_order, page "
+            "FROM team_list_views WHERE messageId=6161"
+        )
+        self.assertEqual(
+            self.cursor.fetchone(), (GUILD_ID, ctx.channel.id, "re", 1, "wins", "desc", 0)
+        )
 
 
 class UseTeamsHelperTests(HelperTestCase):
@@ -1609,6 +2044,23 @@ class BuildBracketTests(HelperTestCase):
         self.assertIsNone(nodes[-1].team)
         self.assertIsNone(nodes[-1].next)
 
+    def test_byes_are_never_paired_against_each_other(self):
+        # 6 teams in an 8-slot bracket needs 2 byes — a naive "real teams
+        # first, byes at the tail, pair consecutively" seeding puts both
+        # byes in the same first-round pair, which never has a winner to
+        # report. Run it many times (buildBracket shuffles) to catch it
+        # regardless of where randomization happens to place things.
+        teams = [self._team(f"Team{i}") for i in range(6)]
+        for _ in range(50):
+            nodes = self.helperObj.buildBracket(teams)
+            leaves = nodes[:8]
+            for i in range(0, len(leaves), 2):
+                a, b = leaves[i], leaves[i + 1]
+                self.assertFalse(
+                    a.team is None and b.team is None,
+                    "two byes were paired against each other"
+                )
+
 
 class CreateBracketHelperTests(HelperTestCase):
     def _ctx(self, user_id=901, name="Alice"):
@@ -1647,7 +2099,8 @@ class CreateBracketHelperTests(HelperTestCase):
         await self.helperObj.createBracketHelper(ctx, True)
 
         ctx.response.send_message.assert_awaited_once_with(
-            "Bracket created for **Cup** — 2 teams, double elimination."
+            "Bracket created for **Cup** — 2 teams, double elimination. "
+            "Losers bracket starts once the winners bracket finishes."
         )
         restored = self.helperObj.getTournament(GUILD_ID)
         self.assertTrue(restored.is_double_elimination())
@@ -1669,6 +2122,53 @@ class CreateBracketHelperTests(HelperTestCase):
         self.cursor.execute("SELECT COUNT(*) FROM tournaments WHERE guildId=?", (GUILD_ID,))
         self.assertEqual(self.cursor.fetchone()[0], 1)
         self.assertEqual(len(second.get_bracket()), 3)
+
+
+class ClearTournamentMatchesForGuildTests(HelperTestCase):
+    def _insert_match(self, guild_id, match_id=None):
+        columns = "(guildId, roundIndex, nodeIndex, team1, team2, state, mode, messageId, channelId, winner, bracketType)"
+        values = "(?, 0, 0, '', '', 'RESOLVED', 'simultaneous', NULL, NULL, NULL, 'winners')"
+        if match_id is None:
+            self.cursor.execute(f"INSERT INTO tournament_matches{columns} VALUES{values}", (guild_id,))
+        else:
+            self.cursor.execute(
+                f"INSERT INTO tournament_matches(id, guildId, roundIndex, nodeIndex, team1, team2, state, "
+                f"mode, messageId, channelId, winner, bracketType) "
+                f"VALUES(?, ?, 0, 0, '', '', 'RESOLVED', 'simultaneous', NULL, NULL, NULL, 'winners')",
+                (match_id, guild_id)
+            )
+        self.db.commit()
+        return self.cursor.lastrowid
+
+    async def test_restarts_the_id_sequence_once_the_table_is_left_completely_empty(self):
+        self._insert_match(GUILD_ID)
+        self._insert_match(GUILD_ID)
+
+        self.helperObj._clearTournamentMatchesForGuild(GUILD_ID)
+
+        new_id = self._insert_match(GUILD_ID)
+        self.assertEqual(new_id, 1)
+
+    async def test_does_not_restart_the_sequence_while_another_guild_still_has_rows(self):
+        self._insert_match(GUILD_ID)
+        other_guild_match_id = self._insert_match(902)
+
+        self.helperObj._clearTournamentMatchesForGuild(GUILD_ID)
+
+        new_id = self._insert_match(GUILD_ID)
+        # continues past the other guild's highest id instead of colliding
+        # with it — _settleMatchWagers and the concurrent-betting-close
+        # timer both key off matchId alone, with no guildId in their WHERE
+        # clause, so a reused id could settle or close out that guild's
+        # still-live match.
+        self.assertGreater(new_id, other_guild_match_id)
+
+    async def test_does_not_crash_on_a_database_that_has_never_had_a_match(self):
+        # sqlite_sequence doesn't exist at all until some AUTOINCREMENT
+        # table's first insert happens anywhere in the DB.
+        self.helperObj._clearTournamentMatchesForGuild(GUILD_ID)
+        new_id = self._insert_match(GUILD_ID)
+        self.assertEqual(new_id, 1)
 
 
 def _captained_team(name, captain_id, captain_name, extra_players=()):
@@ -1698,31 +2198,23 @@ class BracketRoundsAndLabelTests(HelperTestCase):
         team = Team()
         team.set_name("Red")
         node = BracketNode(team)
-        self.assertEqual(self.helperObj._nodeLabel(node), "Red")
+        self.assertEqual(self.helperObj._bracketNodeLabel(node, round_index=1), "Red")
 
-    def test_node_label_describes_the_feeder_pairing_one_level_deep(self):
-        red, blue = Team(), Team()
-        red.set_name("Red")
-        blue.set_name("Blue")
-        leaf_a, leaf_b, parent = BracketNode(red), BracketNode(blue), BracketNode()
-        leaf_a.opponent = leaf_b
-        leaf_b.opponent = leaf_a
-        leaf_a.next = parent
-        leaf_b.next = parent
-        parent.previous = leaf_a
+    def test_node_label_is_bye_for_an_empty_round_zero_slot(self):
+        self.assertEqual(self.helperObj._bracketNodeLabel(BracketNode(), round_index=0), "BYE")
 
-        self.assertEqual(self.helperObj._nodeLabel(parent), "Winner of (Red vs Blue)")
-
-    def test_node_label_is_tbd_with_no_team_and_no_previous(self):
-        self.assertEqual(self.helperObj._nodeLabel(BracketNode()), "TBD")
+    def test_node_label_is_tbd_for_an_undecided_later_round(self):
+        self.assertEqual(self.helperObj._bracketNodeLabel(BracketNode(), round_index=1), "TBD")
 
 
 class RenderBracketTextTests(HelperTestCase):
     async def test_no_bracket_yet(self):
         tournament = Tournament("Cup", 2, 4)
-        self.assertEqual(self.helperObj.renderBracketText(tournament), "No bracket has been created yet.")
+        self.assertEqual(
+            self.helperObj.renderBracketText(tournament), "No bracket has been created yet."
+        )
 
-    async def test_renders_round_one_real_matchups_and_champion_line(self):
+    async def test_single_elimination_shows_tournament_name_and_champion_status(self):
         tournament = Tournament("Cup", 2, 4)
         red, blue = Team(), Team()
         red.set_name("Red")
@@ -1732,15 +2224,209 @@ class RenderBracketTextTests(HelperTestCase):
         text = self.helperObj.renderBracketText(tournament)
 
         self.assertIn("Cup", text)
-        self.assertIn("__Round 1__", text)
-        # buildBracket shuffles seeding, so don't assume which side is which
-        self.assertIn("Red", text)
-        self.assertIn("Blue", text)
-        self.assertIn(" vs ", text)
-        self.assertIn("Champion:", text)
-        # only one real round exists, so the champion resolves one level
-        # deep to a known pairing rather than staying a bare "TBD"
-        self.assertIn("Winner of (", text)
+        self.assertIn("Champion:** TBD", text)
+        # the tree itself (team names, connectors) lives in the image now
+        # (renderBracketImages) — the text is just a short status line
+        self.assertNotIn("```", text)
+
+    async def test_resolved_winner_shows_real_name_instead_of_tbd(self):
+        tournament = Tournament("Cup", 2, 2)
+        red, blue = Team(), Team()
+        red.set_name("Red")
+        blue.set_name("Blue")
+        bracket = self.helperObj.buildBracket([red, blue])
+        tournament.set_bracket(bracket)
+
+        rounds = self.helperObj._bracketRounds(bracket)
+        leaf_a = rounds[0][0]
+        leaf_a.next.team = leaf_a.team
+
+        text = self.helperObj.renderBracketText(tournament)
+        self.assertIn(f"Champion:** {leaf_a.team.get_name()}", text)
+
+
+# ===========================================================================
+# Bracket images — the winners/losers trees themselves are drawn as PNGs
+# (see renderBracketImages) rather than ASCII art, so tests here check
+# structure (file count/names, valid PNG data, image doesn't crash and
+# grows sensibly with more/longer content) rather than exact pixel content.
+# ===========================================================================
+
+class BracketImageTests(HelperTestCase):
+    def _team(self, name):
+        team = Team()
+        team.set_name(name)
+        return team
+
+    def test_single_elimination_produces_one_image(self):
+        teams = [self._team(n) for n in ["Red", "Blue"]]
+        tournament = Tournament("Cup", 1, 2, False)
+        tournament.set_bracket(self.helperObj.buildBracket(teams))
+
+        files = self.helperObj.renderBracketImages(tournament)
+        self.assertEqual(len(files), 1)
+        self.assertEqual(files[0].filename, "winners_bracket.png")
+        # every PNG file starts with this fixed 8-byte signature
+        self.assertTrue(files[0].fp.read(8).startswith(b"\x89PNG"))
+
+    def test_double_elimination_produces_two_images(self):
+        teams = [self._team(f"T{i}") for i in range(4)]
+        wb_nodes = self.helperObj.buildBracket(teams)
+        lb_nodes, lb_rounds, _ = self.helperObj.buildLosersBracket(wb_nodes)
+        tournament = Tournament("Cup", 1, 4, True)
+        tournament.set_bracket(wb_nodes)
+        tournament.set_losers_bracket(lb_nodes, lb_rounds)
+
+        files = self.helperObj.renderBracketImages(tournament)
+        self.assertEqual([f.filename for f in files], ["winners_bracket.png", "losers_bracket.png"])
+
+    def test_grand_finals_image_only_appears_once_game_one_is_played(self):
+        # renderBracketImages itself never includes the Grand Finals image —
+        # it's sent as its own separate message (see _sendBracketText), and
+        # only once Grand Finals has actually been played, so it's covered
+        # here via _renderGrandFinalsImage directly instead.
+        red, blue, cleo, dan = (self._team(n) for n in ["Red", "Blue", "Cleo Team", "Dan Team"])
+        wb_nodes = self.helperObj.buildBracket([red, blue, cleo, dan])
+        lb_nodes, lb_rounds, _ = self.helperObj.buildLosersBracket(wb_nodes)
+        tournament = Tournament("Cup", 1, 4, True)
+        tournament.set_bracket(wb_nodes)
+        tournament.set_losers_bracket(lb_nodes, lb_rounds)
+
+        files = self.helperObj.renderBracketImages(tournament)
+        self.assertEqual([f.filename for f in files], ["winners_bracket.png", "losers_bracket.png"])
+
+        # Before either bracket has a champion, there's nothing to draw yet.
+        self.assertIsNone(self.helperObj._renderGrandFinalsImage(GUILD_ID, tournament))
+
+        # Both champions exist, but Grand Finals game 1 hasn't been played —
+        # still None, since "vs, nothing decided yet" isn't worth a message.
+        wb_champion = self.helperObj._bracketRounds(wb_nodes)[-1][0]
+        wb_champion.team = red
+        lb_rounds[-1][0].team = blue
+        self.assertIsNone(self.helperObj._renderGrandFinalsImage(GUILD_ID, tournament))
+
+        # Game 1 resolved: the image appears.
+        self.cursor.execute(
+            "INSERT INTO tournament_matches"
+            "(guildId, roundIndex, nodeIndex, team1, team2, state, mode, messageId, channelId, winner, "
+            "bracketType) VALUES(?, 0, -1, ?, ?, 'RESOLVED', 'sequential', NULL, NULL, 1, 'finals')",
+            (GUILD_ID, red.serializeTeam(), blue.serializeTeam())
+        )
+        self.db.commit()
+        image = self.helperObj._renderGrandFinalsImage(GUILD_ID, tournament)
+        self.assertIsNotNone(image)
+        self.assertGreater(image.width, 0)
+
+    def test_degenerate_two_team_double_elimination_has_no_losers_image(self):
+        # only one winners-bracket match exists at all, so its loser has
+        # nobody left to play — no losers-bracket tree to draw
+        teams = [self._team(n) for n in ["Red", "Blue"]]
+        wb_nodes = self.helperObj.buildBracket(teams)
+        lb_nodes, lb_rounds, _ = self.helperObj.buildLosersBracket(wb_nodes)
+        tournament = Tournament("Cup", 1, 2, True)
+        tournament.set_bracket(wb_nodes)
+        tournament.set_losers_bracket(lb_nodes, lb_rounds)
+
+        files = self.helperObj.renderBracketImages(tournament)
+        self.assertEqual([f.filename for f in files], ["winners_bracket.png"])
+
+    def test_image_grows_taller_with_more_teams(self):
+        def image_for(n):
+            teams = [self._team(f"T{i}") for i in range(n)]
+            tournament = Tournament("Cup", 1, n, False)
+            tournament.set_bracket(self.helperObj.buildBracket(teams))
+            return self.helperObj._renderWinnersBracketImage(tournament)
+
+        small = image_for(4)
+        large = image_for(32)
+        self.assertGreater(large.height, small.height)
+
+    def test_image_grows_wider_with_longer_team_names(self):
+        def image_for(teams):
+            tournament = Tournament("Cup", 1, 4, False)
+            tournament.set_bracket(self.helperObj.buildBracket(teams))
+            return self.helperObj._renderWinnersBracketImage(tournament)
+
+        narrow = image_for([self._team(f"T{i}") for i in range(4)])
+        wide = image_for([self._team(f"A Very Long Team Name Indeed Number {i}") for i in range(4)])
+        self.assertGreater(wide.width, narrow.width)
+
+    def test_bye_slot_renders_without_crashing(self):
+        teams = [self._team(f"T{i}") for i in range(3)]  # bracket size 4, one bye
+        tournament = Tournament("Cup", 1, 3, False)
+        tournament.set_bracket(self.helperObj.buildBracket(teams))
+        image = self.helperObj._renderWinnersBracketImage(tournament)
+        self.assertGreater(image.width, 0)
+        self.assertGreater(image.height, 0)
+
+    def test_losers_bracket_with_fresh_drop_in_leaves_renders_without_crashing(self):
+        # Regression coverage for the losers-bracket "fresh drop-in" leaf
+        # positioning (see _assignBracketPositions) across several team
+        # counts, including non-power-of-two ones — those feed winners-
+        # bracket byes into the losers bracket, which used to need special-
+        # case leading-blank padding in the old ASCII renderer; the pixel-
+        # based layout needs no such handling, but this still guards
+        # against it silently breaking again. Also spans both sides of the
+        # two-sided-layout threshold (8 and 16+ teams).
+        for n in [2, 3, 4, 5, 6, 7, 8, 16, 20, 32]:
+            teams = [self._team(f"T{i}") for i in range(n)]
+            wb_nodes = self.helperObj.buildBracket(teams)
+            lb_nodes, lb_rounds, _ = self.helperObj.buildLosersBracket(wb_nodes)
+            tournament = Tournament("Cup", 1, n, True)
+            tournament.set_bracket(wb_nodes)
+            tournament.set_losers_bracket(lb_nodes, lb_rounds)
+
+            files = self.helperObj.renderBracketImages(tournament)
+            self.assertGreaterEqual(len(files), 1, f"n={n}")
+            for f in files:
+                self.assertTrue(f.fp.read(8).startswith(b"\x89PNG"), f"n={n}, {f.filename}")
+
+    def test_losers_bracket_uses_two_sided_layout_once_large_enough(self):
+        def build_tournament(n):
+            teams = [self._team(f"T{i}") for i in range(n)]
+            wb_nodes = self.helperObj.buildBracket(teams)
+            lb_nodes, lb_rounds, _ = self.helperObj.buildLosersBracket(wb_nodes)
+            tournament = Tournament("Cup", 1, n, True)
+            tournament.set_bracket(wb_nodes)
+            tournament.set_losers_bracket(lb_nodes, lb_rounds)
+            return tournament, lb_rounds
+
+        # 8 teams is the smallest losers bracket that clears
+        # BRACKET_TWO_SIDED_MIN_ROUNDS (4 losers-bracket rounds) — below
+        # that it should stay on the single-sided renderer.
+        _, small_lb_rounds = build_tournament(4)
+        self.assertLess(len(small_lb_rounds), helper_module.BRACKET_TWO_SIDED_MIN_ROUNDS)
+
+        large_tournament, large_lb_rounds = build_tournament(8)
+        self.assertGreaterEqual(len(large_lb_rounds), helper_module.BRACKET_TWO_SIDED_MIN_ROUNDS)
+        large_image = self.helperObj._renderLosersBracketImage(large_tournament)
+
+        # the two-sided layout converges toward the center, which for a
+        # roughly-symmetric bracket makes it noticeably wider than tall —
+        # not a precise assertion, just a sanity check that something
+        # structurally different is actually happening once the layout
+        # switches over (the single-sided renderer would instead keep
+        # growing taller as team count increases, same as the winners-
+        # bracket equivalent test above).
+        self.assertGreater(large_image.width, large_image.height)
+
+    def test_losers_bracket_two_sided_merge_point_renders_without_crashing(self):
+        # The smallest bracket that reaches the two-sided losers-bracket
+        # layout (8 teams — see BRACKET_TWO_SIDED_MIN_ROUNDS) also has the
+        # smallest possible "merge point" halves (see
+        # _renderLosersTwoSidedTreeImage) — each just a single match deep.
+        # Exercises the boundary directly rather than relying on a bigger
+        # bracket to happen to cover it.
+        teams = [self._team(f"T{i}") for i in range(8)]
+        wb_nodes = self.helperObj.buildBracket(teams)
+        lb_nodes, lb_rounds, _ = self.helperObj.buildLosersBracket(wb_nodes)
+        tournament = Tournament("Cup", 1, 8, True)
+        tournament.set_bracket(wb_nodes)
+        tournament.set_losers_bracket(lb_nodes, lb_rounds)
+
+        image = self.helperObj._renderLosersTwoSidedTreeImage(lb_rounds, "Cup - Losers Bracket")
+        self.assertGreater(image.width, 0)
+        self.assertGreater(image.height, 0)
 
 
 class PrintBracketHelperTests(HelperTestCase):
@@ -1767,14 +2453,132 @@ class PrintBracketHelperTests(HelperTestCase):
 
         ctx.response.send_message.assert_awaited_once()
         text = ctx.response.send_message.call_args.args[0]
-        self.assertIn("Red", text)
-        self.assertIn("Blue", text)
+        self.assertIn("Cup", text)
+
+        files = ctx.response.send_message.call_args.kwargs.get("files")
+        self.assertEqual(len(files), 1)
+        self.assertEqual(files[0].filename, "winners_bracket.png")
+
+
+class RenderMatchupImageTests(_FakeLogoDirTestCase):
+    def _team(self, name, captain_id=None, captain_name=None, extra_players=()):
+        team = Team()
+        team.set_name(name)
+        # extra_players added BEFORE the captain, so a naive "first player
+        # in the list" reading would get this wrong — _orderedRoster has to
+        # actually float the captain to the front, not just happen to
+        # already find them there.
+        for player_id, player_name in extra_players:
+            team.add_player(Player(player_id, player_name))
+        if captain_id is not None:
+            captain = Player(captain_id, captain_name)
+            team.add_player(captain)
+            team.set_captain(captain)
+        return team
+
+    def test_ordered_roster_puts_the_captain_first(self):
+        team = self._team(
+            "Red", captain_id=902, captain_name="Bob",
+            extra_players=[(901, "Alice"), (903, "Cleo")]
+        )
+        roster = self.helperObj._orderedRoster(team)
+        self.assertEqual([p.get_name() for p in roster], ["Bob", "Alice", "Cleo"])
+
+    def test_ordered_roster_with_no_captain_preserves_original_order(self):
+        team = Team()
+        team.set_name("Red")
+        team.add_player(Player(901, "Alice"))
+        team.add_player(Player(902, "Bob"))
+        roster = self.helperObj._orderedRoster(team)
+        self.assertEqual([p.get_name() for p in roster], ["Alice", "Bob"])
+
+    def test_renders_without_crashing_for_teams_with_and_without_logos(self):
+        team1 = self._team("Red", captain_id=901, captain_name="Alice", extra_players=[(902, "Bob")])
+        real_logo_path = os.path.join(self._logo_dir.name, "Demacia.png")
+        team1.set_logo_path(real_logo_path)
+        team2 = self._team("Blue", captain_id=903, captain_name="Cleo")  # no logo set
+
+        image = self.helperObj._renderMatchupImage(7, team1, team2, "Round 1", "Cup", "Test Guild")
+        self.assertEqual(image.mode, "RGB")
+        self.assertGreater(image.width, 0)
+        self.assertGreater(image.height, 0)
+
+    def test_team_with_no_logo_gets_a_random_built_in_one_instead_of_a_bare_ring(self):
+        # /make-teams, /captains, etc. build ad-hoc Team objects that never
+        # go through _ensureLogo (that's only ever called for persistent
+        # teams), so team.get_logo_path() is None for them — this is what
+        # picks a stand-in logo for the matchup graphic instead of just
+        # drawing an empty ring.
+        team1 = self._team("Red", captain_id=901, captain_name="Alice")
+        team2 = self._team("Blue", captain_id=902, captain_name="Bob")
+        self.assertIsNone(team1.get_logo_path())
+        self.assertIsNone(team2.get_logo_path())
+
+        with patch.object(helper_module.random, "choice", side_effect=lambda seq: seq[0]) as choice_mock:
+            self.helperObj._renderMatchupImage(1, team1, team2, "Round 1", "Cup", "Test Guild")
+
+        # once per team, picking from the same built-in set listAvailableLogos() returns
+        self.assertEqual(choice_mock.call_count, 2)
+        for call in choice_mock.call_args_list:
+            self.assertEqual(call.args[0], self.helperObj.listAvailableLogos())
+
+        # still leaves the team objects themselves untouched — nothing to
+        # persist a pick against for a team with no stable identity.
+        self.assertIsNone(team1.get_logo_path())
+        self.assertIsNone(team2.get_logo_path())
+
+    def test_taller_roster_grows_the_canvas(self):
+        big_team = self._team(
+            "Red", captain_id=901, captain_name="Alice",
+            extra_players=[(902, "Bob"), (903, "Cleo"), (904, "Dan")]
+        )
+        small_team = self._team("Blue", captain_id=905, captain_name="Eve")
+
+        tall_image = self.helperObj._renderMatchupImage(1, big_team, small_team, "Round 1", "Cup", "Test Guild")
+        short_image = self.helperObj._renderMatchupImage(2, small_team, small_team, "Round 1", "Cup", "Test Guild")
+        self.assertGreater(tall_image.height, short_image.height)
+
+    def test_header_includes_round_tournament_and_guild_name(self):
+        team1 = self._team("Red", captain_id=901, captain_name="Alice")
+        team2 = self._team("Blue", captain_id=902, captain_name="Bob")
+
+        image = self.helperObj._renderMatchupImage(
+            3, team1, team2, "Semifinals", "Winter Cup", "Test Guild"
+        )
+        # No text-extraction from a rendered PNG, so this just confirms the
+        # canvas grows to accommodate a long subtitle rather than clipping
+        # it — the actual string content is exercised by _matchRoundLabel's
+        # and _postMatchReport's own tests.
+        short_header_image = self.helperObj._renderMatchupImage(3, team1, team2, "R1", None, None)
+        self.assertGreaterEqual(image.width, short_header_image.width)
+
+    def test_match_round_label_winners_bracket_uses_round_names(self):
+        tournament = Tournament("Cup", 1, 4)
+        red, blue, cleo, dan = Team(), Team(), Team(), Team()
+        for t, n in ((red, "Red"), (blue, "Blue"), (cleo, "Cleo"), (dan, "Dan")):
+            t.set_name(n)
+        tournament.set_bracket(self.helperObj.buildBracket([red, blue, cleo, dan]))
+
+        self.assertEqual(self.helperObj._matchRoundLabel(tournament, 0, "winners"), "Semifinals")
+        self.assertEqual(self.helperObj._matchRoundLabel(tournament, 1, "winners"), "Finals")
+
+    def test_match_round_label_losers_bracket_is_numbered(self):
+        tournament = Tournament("Cup", 1, 4)
+        self.assertEqual(self.helperObj._matchRoundLabel(tournament, 0, "losers"), "Losers Round 1")
+        self.assertEqual(self.helperObj._matchRoundLabel(tournament, 2, "losers"), "Losers Round 3")
+
+    def test_match_round_label_finals(self):
+        tournament = Tournament("Cup", 1, 4)
+        self.assertEqual(self.helperObj._matchRoundLabel(tournament, 0, "finals"), "Grand Finals")
+        self.assertEqual(
+            self.helperObj._matchRoundLabel(tournament, 1, "finals"), "Grand Finals — Bracket Reset"
+        )
 
 
 class StartTournamentHelperTests(HelperTestCase):
     def setUp(self):
         super().setUp()
-        self.channel = FakeChannel("tourney-chat")
+        self.channel = FakeChannel("tourney-chat", guild=self.guild)
         self.channel.send = AsyncMock(side_effect=lambda *a, **k: FakeMessage())
         self.helperObj.client = FakeClient(channels=[self.channel], guilds=[self.guild])
 
@@ -1851,6 +2655,19 @@ class StartTournamentHelperTests(HelperTestCase):
         states = [row[0] for row in self.cursor.fetchall()]
         self.assertEqual(states, ["PENDING_READY", "QUEUED"])
 
+    async def test_sequential_ready_check_attaches_a_matchup_image(self):
+        red = _captained_team("Red", 901, "Alice")
+        blue = _captained_team("Blue", 902, "Bob")
+        self._tournament_with_teams(red, blue)
+
+        ctx = self._ctx()
+        await self.helperObj.startTournamentHelper(ctx, "sequential")
+
+        file_calls = [c for c in self.channel.send.call_args_list if "file" in c.kwargs]
+        self.assertEqual(len(file_calls), 1)
+        self.assertIsInstance(file_calls[0].kwargs["file"], discord.File)
+        self.assertTrue(file_calls[0].kwargs["file"].filename.endswith("_vs.png"))
+
     async def test_simultaneous_posts_report_for_every_match(self):
         red = _captained_team("Red", 901, "Alice")
         blue = _captained_team("Blue", 902, "Bob")
@@ -1870,6 +2687,21 @@ class StartTournamentHelperTests(HelperTestCase):
         # at least twice for the reports, on top of the round-kickoff message
         self.assertGreaterEqual(self.channel.send.await_count, 3)
 
+    async def test_simultaneous_reports_each_attach_a_matchup_image(self):
+        red = _captained_team("Red", 901, "Alice")
+        blue = _captained_team("Blue", 902, "Bob")
+        cleo = _captained_team("Cleo Team", 903, "Cleo")
+        dan = _captained_team("Dan Team", 904, "Dan")
+        self._tournament_with_teams(red, blue, cleo, dan)
+
+        ctx = self._ctx()
+        await self.helperObj.startTournamentHelper(ctx, "simultaneous")
+
+        file_calls = [c for c in self.channel.send.call_args_list if "file" in c.kwargs]
+        self.assertEqual(len(file_calls), 2)  # one per match
+        for call in file_calls:
+            self.assertIsInstance(call.kwargs["file"], discord.File)
+
     async def test_bye_auto_advances_without_creating_a_match(self):
         red = _captained_team("Red", 901, "Alice")
         blue = _captained_team("Blue", 902, "Bob")
@@ -1888,7 +2720,7 @@ class StartTournamentHelperTests(HelperTestCase):
 class HandleTournamentReactionTests(HelperTestCase):
     def setUp(self):
         super().setUp()
-        self.channel = FakeChannel("tourney-chat")
+        self.channel = FakeChannel("tourney-chat", guild=self.guild)
         self.channel.send = AsyncMock(side_effect=lambda *a, **k: FakeMessage())
         self.helperObj.client = FakeClient(channels=[self.channel], guilds=[self.guild])
 
@@ -2063,11 +2895,27 @@ class HandleTournamentReactionTests(HelperTestCase):
         messages = [c.args[0] for c in self.channel.send.call_args_list if c.args]
         self.assertTrue(any("is complete!" in m and "Champion" in m for m in messages))
 
+    async def test_tournament_completion_posts_team_leaderboard(self):
+        red = _captained_team("Red", 901, "Alice")
+        blue = _captained_team("Blue", 902, "Bob")
+        self.helperObj._saveNewTeam(GUILD_ID, red)
+        self.helperObj._saveNewTeam(GUILD_ID, blue)
+        await self._start("simultaneous", red, blue)
+        match_id, message_id = self._only_match()
+
+        payload = FakePayload(
+            GUILD_ID, message_id, self.channel.id, helper_module.TEAM_EMOJIS[1], user_id=555
+        )
+        await self.helperObj.handleTournamentReaction(payload)
+
+        embeds = [c.kwargs["embed"] for c in self.channel.send.call_args_list if "embed" in c.kwargs]
+        self.assertTrue(any("Results" in e.title for e in embeds))
+
 
 class CorrectTournamentMatchHelperTests(HelperTestCase):
     def setUp(self):
         super().setUp()
-        self.channel = FakeChannel("tourney-chat")
+        self.channel = FakeChannel("tourney-chat", guild=self.guild)
         self.channel.send = AsyncMock(side_effect=lambda *a, **k: FakeMessage())
         self.helperObj.client = FakeClient(channels=[self.channel], guilds=[self.guild])
 
@@ -2134,7 +2982,8 @@ class CorrectTournamentMatchHelperTests(HelperTestCase):
         round_index = self.cursor.fetchone()[0]
         self.cursor.execute(
             "INSERT INTO tournament_matches(guildId, roundIndex, nodeIndex, team1, team2, state, mode, "
-            "messageId, channelId, winner) VALUES(?, ?, 0, '', '', 'QUEUED', 'simultaneous', NULL, ?, NULL)",
+            "messageId, channelId, winner, bracketType) "
+            "VALUES(?, ?, 0, '', '', 'QUEUED', 'simultaneous', NULL, ?, NULL, 'winners')",
             (GUILD_ID, round_index + 1, self.channel.id)
         )
         self.db.commit()
@@ -2163,6 +3012,769 @@ class CorrectTournamentMatchHelperTests(HelperTestCase):
         tournament = self.helperObj.getTournament(GUILD_ID)
         champion = tournament.get_bracket()[-1]
         self.assertEqual(champion.team.get_name(), team2.get_name())
+
+    async def test_rejects_correcting_a_losers_bracket_match(self):
+        self.cursor.execute(
+            "INSERT INTO tournament_matches(guildId, roundIndex, nodeIndex, team1, team2, state, mode, "
+            "messageId, channelId, winner, bracketType) "
+            "VALUES(?, 0, 0, '', '', 'RESOLVED', 'simultaneous', NULL, ?, 1, 'losers')",
+            (GUILD_ID, self.channel.id)
+        )
+        self.db.commit()
+        self.cursor.execute("SELECT id FROM tournament_matches WHERE guildId=?", (GUILD_ID,))
+        match_id = self.cursor.fetchone()[0]
+
+        ctx = self._ctx()
+        await self.helperObj.reportCorrectWinnerHelper(ctx, 2, match_id=match_id)
+        ctx.response.send_message.assert_awaited_once_with(
+            f"Match #{match_id} is a losers bracket match — correcting those isn't supported yet."
+        )
+
+    async def test_rejects_correcting_a_grand_finals_match(self):
+        self.cursor.execute(
+            "INSERT INTO tournament_matches(guildId, roundIndex, nodeIndex, team1, team2, state, mode, "
+            "messageId, channelId, winner, bracketType) "
+            "VALUES(?, 0, -1, '', '', 'RESOLVED', 'simultaneous', NULL, ?, 1, 'finals')",
+            (GUILD_ID, self.channel.id)
+        )
+        self.db.commit()
+        self.cursor.execute("SELECT id FROM tournament_matches WHERE guildId=?", (GUILD_ID,))
+        match_id = self.cursor.fetchone()[0]
+
+        ctx = self._ctx()
+        await self.helperObj.reportCorrectWinnerHelper(ctx, 2, match_id=match_id)
+        ctx.response.send_message.assert_awaited_once_with(
+            f"Match #{match_id} is a Grand Finals match — correcting those isn't supported yet."
+        )
+
+
+# ===========================================================================
+# Double elimination — real losers bracket, Grand Finals, bracket reset.
+# ===========================================================================
+
+class BuildLosersBracketTests(HelperTestCase):
+    def _team(self, name):
+        team = Team()
+        team.set_name(name)
+        return team
+
+    def test_degenerate_two_team_bracket_has_no_real_match(self):
+        # Only one winners-bracket match exists at all — its loser has
+        # nobody left to play, so they become the losers-bracket "champion"
+        # directly, with no match ever created for them.
+        teams = [self._team(f"T{i}") for i in range(2)]
+        wb_nodes = self.helperObj.buildBracket(teams)
+        lb_nodes, lb_rounds, _ = self.helperObj.buildLosersBracket(wb_nodes)
+        self.assertEqual(len(lb_nodes), 1)
+        self.assertEqual([len(r) for r in lb_rounds], [1])
+        self.assertIsNone(lb_nodes[0].previous)
+
+    def test_four_team_bracket_round_sizes(self):
+        teams = [self._team(f"T{i}") for i in range(4)]
+        wb_nodes = self.helperObj.buildBracket(teams)
+        _, lb_rounds, _ = self.helperObj.buildLosersBracket(wb_nodes)
+        self.assertEqual([len(r) for r in lb_rounds], [1, 1])
+
+    def test_eight_team_bracket_round_sizes(self):
+        teams = [self._team(f"T{i}") for i in range(8)]
+        wb_nodes = self.helperObj.buildBracket(teams)
+        _, lb_rounds, _ = self.helperObj.buildLosersBracket(wb_nodes)
+        self.assertEqual([len(r) for r in lb_rounds], [2, 2, 1, 1])
+
+    def test_sixteen_team_bracket_round_sizes(self):
+        teams = [self._team(f"T{i}") for i in range(16)]
+        wb_nodes = self.helperObj.buildBracket(teams)
+        _, lb_rounds, _ = self.helperObj.buildLosersBracket(wb_nodes)
+        self.assertEqual([len(r) for r in lb_rounds], [4, 4, 2, 2, 1, 1])
+
+    def test_every_winners_result_node_gets_a_drop_to_target(self):
+        teams = [self._team(f"T{i}") for i in range(8)]
+        wb_nodes = self.helperObj.buildBracket(teams)
+        lb_nodes, _, _ = self.helperObj.buildLosersBracket(wb_nodes)
+        wb_rounds = self.helperObj._bracketRounds(wb_nodes)
+        for round_nodes in wb_rounds[1:]:
+            for node in round_nodes:
+                self.assertIsNotNone(node.drop_to)
+                self.assertIn(node.drop_to, lb_nodes)
+
+    def test_playing_it_out_always_reaches_a_losers_champion(self):
+        # Property-style coverage across a range of team counts (including
+        # non-power-of-two, which feeds winners-bracket byes into the
+        # losers bracket) — every one of these should reach a real losers-
+        # bracket champion, distinct from the winners-bracket champion,
+        # without crashing or stalling, regardless of how buildBracket's
+        # random seeding shuffled things.
+        for n in [2, 3, 4, 5, 6, 7, 8, 9, 15, 16]:
+            for _ in range(5):
+                teams = [self._team(f"T{i}") for i in range(n)]
+                wb_nodes = self.helperObj.buildBracket(teams)
+                lb_nodes, lb_rounds, _ = self.helperObj.buildLosersBracket(wb_nodes)
+
+                wb_rounds = self.helperObj._bracketRounds(wb_nodes)
+                for round_nodes in wb_rounds[:-1]:
+                    for i in range(0, len(round_nodes), 2):
+                        a, b = round_nodes[i], round_nodes[i + 1]
+                        if a.team is not None and b.team is not None:
+                            winner, loser = random.choice([(a, b), (b, a)])
+                            if winner.next is not None:
+                                winner.next.team = winner.team
+                                winner.next.loser = loser.team
+                                if winner.next.drop_to is not None:
+                                    winner.next.drop_to.team = loser.team
+                        elif a.team is not None or b.team is not None:
+                            winner = a if a.team is not None else b
+                            if winner.next is not None:
+                                winner.next.team = winner.team
+
+                for round_nodes in lb_rounds:
+                    for result in round_nodes:
+                        fa = result.previous
+                        fb = fa.opponent if fa is not None else None
+                        if fa is not None and fa.team is not None and fb is not None and fb.team is not None:
+                            result.team = random.choice([fa, fb]).team
+                        elif fa is not None and fa.team is not None:
+                            result.team = fa.team
+                        elif fb is not None and fb.team is not None:
+                            result.team = fb.team
+
+                wb_champ = wb_rounds[-1][0].team
+                lb_champ = lb_rounds[-1][0].team if lb_rounds else None
+                self.assertIsNotNone(wb_champ, f"n={n}: no winners champion")
+                self.assertIsNotNone(lb_champ, f"n={n}: no losers champion")
+                self.assertNotEqual(
+                    wb_champ.get_name(), lb_champ.get_name(), f"n={n}: same team both champion"
+                )
+
+
+class CreateBracketHelperDoubleEliminationTests(HelperTestCase):
+    def _ctx(self, user_id=901, name="Alice"):
+        return FakeInteraction(self.guild, FakeMember(name, id=user_id))
+
+    def _team(self, name):
+        team = Team()
+        team.set_name(name)
+        return team
+
+    async def test_double_elimination_also_builds_a_losers_bracket(self):
+        tournament = Tournament("Cup", 1, 4)
+        for name in ["Red", "Blue", "Cleo", "Dan"]:
+            tournament.register_team(self._team(name))
+        self.helperObj.saveTournament(GUILD_ID, tournament)
+
+        ctx = self._ctx()
+        await self.helperObj.createBracketHelper(ctx, True)
+
+        restored = self.helperObj.getTournament(GUILD_ID)
+        self.assertTrue(restored.is_double_elimination())
+        self.assertGreater(len(restored.get_losers_bracket_nodes()), 0)
+        self.assertEqual([len(r) for r in restored.get_losers_rounds()], [1, 1])
+
+    async def test_single_elimination_leaves_losers_bracket_empty(self):
+        tournament = Tournament("Cup", 1, 2)
+        tournament.register_team(self._team("Red"))
+        tournament.register_team(self._team("Blue"))
+        self.helperObj.saveTournament(GUILD_ID, tournament)
+
+        ctx = self._ctx()
+        await self.helperObj.createBracketHelper(ctx, False)
+
+        restored = self.helperObj.getTournament(GUILD_ID)
+        self.assertEqual(restored.get_losers_bracket_nodes(), [])
+        self.assertEqual(restored.get_losers_rounds(), [])
+
+    async def test_stale_match_rows_are_cleared_on_a_fresh_bracket(self):
+        # A finished tournament's resolved Grand Finals row shouldn't stick
+        # around to confuse the NEXT tournament's own completion check.
+        tournament = Tournament("Cup", 1, 2)
+        tournament.register_team(self._team("Red"))
+        tournament.register_team(self._team("Blue"))
+        self.helperObj.saveTournament(GUILD_ID, tournament)
+
+        self.cursor.execute(
+            "INSERT INTO tournament_matches(guildId, roundIndex, nodeIndex, team1, team2, state, mode, "
+            "messageId, channelId, winner, bracketType) "
+            "VALUES(?, 0, 0, '', '', 'RESOLVED', 'simultaneous', NULL, NULL, 1, 'finals')",
+            (GUILD_ID,)
+        )
+        self.db.commit()
+
+        ctx = self._ctx()
+        await self.helperObj.createBracketHelper(ctx, True)
+
+        self.cursor.execute("SELECT COUNT(*) FROM tournament_matches WHERE guildId=?", (GUILD_ID,))
+        self.assertEqual(self.cursor.fetchone()[0], 0)
+
+
+class TournamentDoubleEliminationPersistenceTests(HelperTestCase):
+    def _team(self, name):
+        team = Team()
+        team.set_name(name)
+        return team
+
+    def test_losers_bracket_and_drop_to_survive_a_roundtrip(self):
+        teams = [self._team(f"T{i}") for i in range(8)]
+        wb_nodes = self.helperObj.buildBracket(teams)
+        lb_nodes, lb_rounds, _ = self.helperObj.buildLosersBracket(wb_nodes)
+
+        tournament = Tournament("Cup", 1, 8, True)
+        for team in teams:
+            tournament.register_team(team)
+        tournament.set_bracket(wb_nodes)
+        tournament.set_losers_bracket(lb_nodes, lb_rounds)
+        self.helperObj.saveTournament(GUILD_ID, tournament)
+
+        restored = self.helperObj.getTournament(GUILD_ID)
+        self.assertEqual(len(restored.get_losers_bracket_nodes()), len(lb_nodes))
+        self.assertEqual(
+            [len(r) for r in restored.get_losers_rounds()], [len(r) for r in lb_rounds]
+        )
+
+        wb_rounds = self.helperObj._bracketRounds(restored.get_bracket())
+        result_node = wb_rounds[1][0]
+        self.assertIsNotNone(result_node.drop_to)
+        self.assertIn(result_node.drop_to, restored.get_losers_bracket_nodes())
+
+    def test_loser_field_survives_a_roundtrip_once_set(self):
+        red, blue = self._team("Red"), self._team("Blue")
+        wb_nodes = self.helperObj.buildBracket([red, blue])
+        tournament = Tournament("Cup", 1, 2)
+        tournament.set_bracket(wb_nodes)
+
+        rounds = self.helperObj._bracketRounds(wb_nodes)
+        leaf_a, leaf_b = rounds[0][0], rounds[0][1]
+        leaf_a.next.team = leaf_a.team
+        leaf_a.next.loser = leaf_b.team
+        self.helperObj.saveTournament(GUILD_ID, tournament)
+
+        restored = self.helperObj.getTournament(GUILD_ID)
+        champion = self.helperObj._bracketRounds(restored.get_bracket())[-1][0]
+        self.assertEqual(champion.loser.get_name(), leaf_b.team.get_name())
+
+
+class RenderBracketTextDoubleEliminationTests(HelperTestCase):
+    def _team(self, name):
+        team = Team()
+        team.set_name(name)
+        return team
+
+    def test_shows_winners_and_losers_champion_status(self):
+        teams = [self._team(f"T{i}") for i in range(4)]
+        wb_nodes = self.helperObj.buildBracket(teams)
+        lb_nodes, lb_rounds, _ = self.helperObj.buildLosersBracket(wb_nodes)
+        tournament = Tournament("Cup", 1, 4, True)
+        tournament.set_bracket(wb_nodes)
+        tournament.set_losers_bracket(lb_nodes, lb_rounds)
+
+        text = self.helperObj.renderBracketText(tournament)
+        self.assertIn("Winners Bracket Champion", text)
+        self.assertIn("Losers Bracket Champion", text)
+        # the actual tree (team names, connectors) lives in the image now
+        # (renderBracketImages), not this status text
+        self.assertNotIn("```", text)
+
+    def test_degenerate_two_team_bracket_explains_no_losers_match_needed(self):
+        teams = [self._team(n) for n in ["Red", "Blue"]]
+        wb_nodes = self.helperObj.buildBracket(teams)
+        lb_nodes, lb_rounds, _ = self.helperObj.buildLosersBracket(wb_nodes)
+        tournament = Tournament("Cup", 1, 2, True)
+        tournament.set_bracket(wb_nodes)
+        tournament.set_losers_bracket(lb_nodes, lb_rounds)
+
+        text = self.helperObj.renderBracketText(tournament)
+        self.assertIn("advances directly to Grand Finals", text)
+        self.assertNotIn("Losers Bracket Champion", text)
+
+    def test_single_elimination_has_no_losers_bracket_status(self):
+        teams = [self._team(f"T{i}") for i in range(4)]
+        tournament = Tournament("Cup", 1, 4, False)
+        tournament.set_bracket(self.helperObj.buildBracket(teams))
+
+        text = self.helperObj.renderBracketText(tournament)
+        self.assertNotIn("Losers Bracket", text)
+        self.assertNotIn("Winners Bracket Champion", text)
+        self.assertIn("**Champion:**", text)
+
+    def test_grand_finals_section_only_shows_once_both_brackets_have_a_champion(self):
+        teams = [self._team(f"T{i}") for i in range(4)]
+        wb_nodes = self.helperObj.buildBracket(teams)
+        lb_nodes, lb_rounds, _ = self.helperObj.buildLosersBracket(wb_nodes)
+        tournament = Tournament("Cup", 1, 4, True)
+        tournament.set_bracket(wb_nodes)
+        tournament.set_losers_bracket(lb_nodes, lb_rounds)
+
+        text = self.helperObj.renderBracketText(tournament, GUILD_ID)
+        self.assertNotIn("Grand Finals", text)
+
+        wb_champion_node = self.helperObj._bracketRounds(wb_nodes)[-1][0]
+        wb_champion_node.team = teams[0]
+        lb_rounds[-1][0].team = teams[1]
+
+        text2 = self.helperObj.renderBracketText(tournament, GUILD_ID)
+        self.assertIn("Grand Finals", text2)
+        self.assertIn("T0 (winners bracket) vs T1 (losers bracket)", text2)
+
+    def test_omits_grand_finals_section_without_a_guild_id(self):
+        # /test (the throwaway bracket-preview command) never creates real
+        # tournament_matches rows, so it deliberately doesn't pass a
+        # guild_id — passing a real one could pick up an unrelated
+        # tournament's actual Grand Finals history for this guild.
+        teams = [self._team(f"T{i}") for i in range(4)]
+        wb_nodes = self.helperObj.buildBracket(teams)
+        lb_nodes, lb_rounds, _ = self.helperObj.buildLosersBracket(wb_nodes)
+        tournament = Tournament("Cup", 1, 4, True)
+        tournament.set_bracket(wb_nodes)
+        tournament.set_losers_bracket(lb_nodes, lb_rounds)
+
+        self.helperObj._bracketRounds(wb_nodes)[-1][0].team = teams[0]
+        lb_rounds[-1][0].team = teams[1]
+
+        text = self.helperObj.renderBracketText(tournament)
+        self.assertNotIn("Grand Finals", text)
+
+
+class TournamentChampionNameTests(HelperTestCase):
+    def _team(self, name):
+        team = Team()
+        team.set_name(name)
+        return team
+
+    def _double_elim_setup(self):
+        teams = [self._team(n) for n in ["Red", "Blue", "Cleo", "Dan"]]
+        wb_nodes = self.helperObj.buildBracket(teams)
+        lb_nodes, lb_rounds, _ = self.helperObj.buildLosersBracket(wb_nodes)
+        tournament = Tournament("Cup", 1, 4, True)
+        tournament.set_bracket(wb_nodes)
+        tournament.set_losers_bracket(lb_nodes, lb_rounds)
+        self.helperObj._bracketRounds(wb_nodes)[-1][0].team = teams[0]  # Red
+        lb_rounds[-1][0].team = teams[1]  # Blue
+        return tournament, teams
+
+    def _insert_finals_row(self, round_index, teams, winner):
+        self.cursor.execute(
+            "INSERT INTO tournament_matches(guildId, roundIndex, nodeIndex, team1, team2, state, mode, "
+            "messageId, channelId, winner, bracketType) "
+            "VALUES(?, ?, -1, ?, ?, 'RESOLVED', 'simultaneous', NULL, NULL, ?, 'finals')",
+            (GUILD_ID, round_index, teams[0].serializeTeam(), teams[1].serializeTeam(), winner)
+        )
+        self.db.commit()
+
+    def test_single_elimination_returns_none_until_final_resolves(self):
+        teams = [self._team(n) for n in ["Red", "Blue"]]
+        tournament = Tournament("Cup", 1, 2, False)
+        tournament.set_bracket(self.helperObj.buildBracket(teams))
+        self.assertIsNone(self.helperObj._tournamentChampionName(GUILD_ID, tournament))
+
+    def test_single_elimination_returns_champion_name_once_decided(self):
+        teams = [self._team(n) for n in ["Red", "Blue"]]
+        wb_nodes = self.helperObj.buildBracket(teams)
+        tournament = Tournament("Cup", 1, 2, False)
+        tournament.set_bracket(wb_nodes)
+        self.helperObj._bracketRounds(wb_nodes)[-1][0].team = teams[0]
+        self.assertEqual(self.helperObj._tournamentChampionName(GUILD_ID, tournament), "Red")
+
+    def test_double_elimination_returns_none_before_grand_finals_played(self):
+        tournament, _ = self._double_elim_setup()
+        self.assertIsNone(self.helperObj._tournamentChampionName(GUILD_ID, tournament))
+
+    def test_double_elimination_returns_winners_champion_when_game_one_settles_it(self):
+        tournament, teams = self._double_elim_setup()
+        self._insert_finals_row(0, teams, winner=1)  # Red (winners bracket) won
+        self.assertEqual(self.helperObj._tournamentChampionName(GUILD_ID, tournament), "Red")
+
+    def test_double_elimination_returns_none_after_losers_champion_wins_game_one(self):
+        tournament, teams = self._double_elim_setup()
+        self._insert_finals_row(0, teams, winner=2)  # Blue (losers bracket) won — reset needed
+        self.assertIsNone(self.helperObj._tournamentChampionName(GUILD_ID, tournament))
+
+    def test_double_elimination_reset_winner_is_champion_regardless(self):
+        tournament, teams = self._double_elim_setup()
+        self._insert_finals_row(0, teams, winner=2)  # Blue forces a reset
+        self._insert_finals_row(1, teams, winner=2)  # Blue also wins the reset
+        self.assertEqual(self.helperObj._tournamentChampionName(GUILD_ID, tournament), "Blue")
+
+
+class DoubleEliminationMatchFlowTests(HelperTestCase):
+    def setUp(self):
+        super().setUp()
+        self.channel = FakeChannel("tourney-chat", guild=self.guild)
+        self.channel.send = AsyncMock(side_effect=lambda *a, **k: FakeMessage())
+        self.helperObj.client = FakeClient(channels=[self.channel], guilds=[self.guild])
+
+    def _ctx(self):
+        return FakeInteraction(self.guild, FakeMember("Alice", id=901), channel=self.channel)
+
+    def _double_elim_tournament(self, *teams, team_size=1):
+        tournament = Tournament("Cup", team_size, len(teams), double_elimination=True)
+        for team in teams:
+            tournament.register_team(team)
+            self.helperObj._saveNewTeam(GUILD_ID, team)
+        wb_nodes = self.helperObj.buildBracket(list(teams))
+        lb_nodes, lb_rounds, _ = self.helperObj.buildLosersBracket(wb_nodes)
+        tournament.set_bracket(wb_nodes)
+        tournament.set_losers_bracket(lb_nodes, lb_rounds)
+        self.helperObj.saveTournament(GUILD_ID, tournament)
+        return tournament
+
+    # Resolves every AWAITING_RESULT simultaneous-mode match, repeatedly,
+    # until the WHOLE tournament (winners bracket, losers bracket, and
+    # Grand Finals — including a reset, if `winner_of` forces one) has an
+    # overall champion. `winner_of(team1, team2, bracket_type, round_index)`
+    # picks 1 or 2.
+    async def _play_out_simultaneous(self, winner_of):
+        tournament = self.helperObj.getTournament(GUILD_ID)
+        for _ in range(50):
+            if self.helperObj._tournamentChampionName(GUILD_ID, tournament) is not None:
+                return
+            self.cursor.execute(
+                "SELECT id, messageId, team1, team2, bracketType, roundIndex FROM tournament_matches "
+                "WHERE guildId=? AND state='AWAITING_RESULT'",
+                (GUILD_ID,)
+            )
+            rows = self.cursor.fetchall()
+            if not rows:
+                self.fail("no matches in progress but the tournament isn't finished")
+            for match_id, message_id, team1_ser, team2_ser, bracket_type, round_index in rows:
+                team1, team2 = Team(), Team()
+                team1.deserializeTeam(team1_ser)
+                team2.deserializeTeam(team2_ser)
+                winning_team = winner_of(team1, team2, bracket_type, round_index)
+                payload = FakePayload(
+                    GUILD_ID, message_id, self.channel.id, helper_module.TEAM_EMOJIS[winning_team], user_id=555
+                )
+                await self.helperObj.handleTournamentReaction(payload)
+            tournament = self.helperObj.getTournament(GUILD_ID)
+        self.fail("tournament never reached a champion")
+
+    # Same idea, but for sequential mode — drives each match through the
+    # real ready-check (as its own captain) + recordResult cycle.
+    async def _play_out_sequential(self, winner_of):
+        tournament = self.helperObj.getTournament(GUILD_ID)
+        for _ in range(50):
+            if self.helperObj._tournamentChampionName(GUILD_ID, tournament) is not None:
+                return
+            self.cursor.execute(
+                "SELECT id, messageId, team1, team2, bracketType, roundIndex FROM tournament_matches "
+                "WHERE guildId=? AND state='PENDING_READY'",
+                (GUILD_ID,)
+            )
+            row = self.cursor.fetchone()
+            if row is None:
+                self.fail("no match awaiting ready-check but the tournament isn't finished")
+            match_id, message_id, team1_ser, team2_ser, bracket_type, round_index = row
+            team1, team2 = Team(), Team()
+            team1.deserializeTeam(team1_ser)
+            team2.deserializeTeam(team2_ser)
+
+            captain_id = team1.get_captain().get_id()
+            ready_payload = FakePayload(
+                GUILD_ID, message_id, self.channel.id, helper_module.TOURNAMENT_READY_EMOJI,
+                user_id=captain_id
+            )
+            await self.helperObj.handleTournamentReaction(ready_payload)
+
+            winning_team = winner_of(team1, team2, bracket_type, round_index)
+            await self.helperObj.recordResult(GUILD_ID, winning_team, self.channel)
+            tournament = self.helperObj.getTournament(GUILD_ID)
+        self.fail("tournament never reached a champion")
+
+    async def test_simultaneous_flow_reaches_an_overall_champion(self):
+        red = _captained_team("Red", 901, "Alice")
+        blue = _captained_team("Blue", 902, "Bob")
+        cleo = _captained_team("Cleo Team", 903, "Cleo")
+        dan = _captained_team("Dan Team", 904, "Dan")
+        self._double_elim_tournament(red, blue, cleo, dan)
+
+        ctx = self._ctx()
+        await self.helperObj.startTournamentHelper(ctx, "simultaneous")
+
+        await self._play_out_simultaneous(lambda t1, t2, bt, ri: 1)
+
+        tournament = self.helperObj.getTournament(GUILD_ID)
+        champion_name = self.helperObj._tournamentChampionName(GUILD_ID, tournament)
+        self.assertIsNotNone(champion_name)
+
+        messages = [c.args[0] for c in self.channel.send.call_args_list if c.args]
+        self.assertTrue(any("Losers Bracket Round" in m for m in messages))
+        self.assertTrue(any("Grand Finals" in m for m in messages))
+        self.assertTrue(any("is complete!" in m and champion_name in m for m in messages))
+
+        embeds = [c.kwargs["embed"] for c in self.channel.send.call_args_list if "embed" in c.kwargs]
+        self.assertTrue(any("Results" in e.title for e in embeds))
+
+    async def test_tournament_completion_sends_the_grand_finals_bracket_image(self):
+        # _resolveFinalsMatch used to skip reprinting the bracket entirely
+        # on tournament completion — every other match-resolution path
+        # (_resolveTournamentMatch, _resolveLosersMatch) already does this
+        # after every single match, so the last bracket image anyone saw
+        # was whatever the losers bracket looked like before Grand Finals
+        # even started, never the actual finals result.
+        red = _captained_team("Red", 901, "Alice")
+        blue = _captained_team("Blue", 902, "Bob")
+        cleo = _captained_team("Cleo Team", 903, "Cleo")
+        dan = _captained_team("Dan Team", 904, "Dan")
+        self._double_elim_tournament(red, blue, cleo, dan)
+
+        ctx = self._ctx()
+        await self.helperObj.startTournamentHelper(ctx, "simultaneous")
+        await self._play_out_simultaneous(lambda t1, t2, bt, ri: 1)
+
+        file_calls = [c for c in self.channel.send.call_args_list if "files" in c.kwargs]
+        all_filenames = [f.filename for c in file_calls for f in c.kwargs["files"]]
+        self.assertIn("grand_finals.png", all_filenames)
+
+        # ...and it has to come from AFTER the completion announcement, not
+        # some earlier round's bracket reprint that happened to also carry
+        # a (pre-finals) losers-bracket image.
+        all_calls = self.channel.send.call_args_list
+        completion_index = next(
+            i for i, c in enumerate(all_calls) if c.args and "is complete!" in c.args[0]
+        )
+        finals_image_index = next(
+            i for i, c in enumerate(all_calls)
+            if "files" in c.kwargs and any(f.filename == "grand_finals.png" for f in c.kwargs["files"])
+        )
+        self.assertGreater(finals_image_index, completion_index)
+
+    async def test_match_results_update_each_teams_persisted_win_loss_record(self):
+        # Every one of _resolveTournamentMatch/_resolveLosersMatch/
+        # _resolveFinalsMatch's paths needs to record its result against
+        # the PERSISTED team row (see _recordMatchResult) for the
+        # leaderboard to ever show anything but 0W-0L — this exercises all
+        # three (winners bracket, losers bracket, and Grand Finals all get
+        # played out here) in one pass.
+        red = _captained_team("Red", 901, "Alice")
+        blue = _captained_team("Blue", 902, "Bob")
+        cleo = _captained_team("Cleo Team", 903, "Cleo")
+        dan = _captained_team("Dan Team", 904, "Dan")
+        self._double_elim_tournament(red, blue, cleo, dan)
+
+        ctx = self._ctx()
+        await self.helperObj.startTournamentHelper(ctx, "simultaneous")
+        await self._play_out_simultaneous(lambda t1, t2, bt, ri: 1)
+
+        tournament = self.helperObj.getTournament(GUILD_ID)
+        champion_name = self.helperObj._tournamentChampionName(GUILD_ID, tournament)
+        self.assertIsNotNone(champion_name)
+
+        persisted = {team.get_name(): team for _, team in self.helperObj.getTeamsForGuild(GUILD_ID)}
+        total_wins = sum(team.wins for team in persisted.values())
+        total_losses = sum(team.losses for team in persisted.values())
+        # Every resolved match records exactly one win and one loss.
+        self.assertGreater(total_wins, 0)
+        self.assertEqual(total_wins, total_losses)
+
+        champion = persisted[champion_name]
+        self.assertGreater(champion.wins, 0)
+        self.assertGreaterEqual(champion.wins, champion.losses)
+
+    async def test_sequential_flow_reaches_an_overall_champion(self):
+        red = _captained_team("Red", 901, "Alice")
+        blue = _captained_team("Blue", 902, "Bob")
+        cleo = _captained_team("Cleo Team", 903, "Cleo")
+        dan = _captained_team("Dan Team", 904, "Dan")
+        self._double_elim_tournament(red, blue, cleo, dan)
+
+        ctx = self._ctx()
+        await self.helperObj.startTournamentHelper(ctx, "sequential")
+
+        await self._play_out_sequential(lambda t1, t2, bt, ri: 1)
+
+        tournament = self.helperObj.getTournament(GUILD_ID)
+        self.assertIsNotNone(self.helperObj._tournamentChampionName(GUILD_ID, tournament))
+
+    async def test_bracket_reset_when_losers_champion_wins_game_one(self):
+        red = _captained_team("Red", 901, "Alice")
+        blue = _captained_team("Blue", 902, "Bob")
+        cleo = _captained_team("Cleo Team", 903, "Cleo")
+        dan = _captained_team("Dan Team", 904, "Dan")
+        self._double_elim_tournament(red, blue, cleo, dan)
+
+        ctx = self._ctx()
+        await self.helperObj.startTournamentHelper(ctx, "simultaneous")
+
+        def winner_of(team1, team2, bracket_type, round_index):
+            if bracket_type == "finals" and round_index == 0:
+                # let the losers-bracket side take game 1, forcing a reset
+                return 1 if team1.get_name() != "Red" else 2
+            # everywhere else (including the reset match), Red always wins
+            # — stays undefeated through the winners bracket, then takes
+            # the reset to become champion after dropping game 1.
+            if team1.get_name() == "Red":
+                return 1
+            if team2.get_name() == "Red":
+                return 2
+            return 1
+
+        await self._play_out_simultaneous(winner_of)
+
+        self.cursor.execute(
+            "SELECT COUNT(*) FROM tournament_matches WHERE guildId=? AND bracketType='finals'",
+            (GUILD_ID,)
+        )
+        self.assertEqual(self.cursor.fetchone()[0], 2)  # game 1 + the reset
+
+        tournament = self.helperObj.getTournament(GUILD_ID)
+        self.assertEqual(self.helperObj._tournamentChampionName(GUILD_ID, tournament), "Red")
+
+        messages = [c.args[0] for c in self.channel.send.call_args_list if c.args]
+        self.assertTrue(any("decider match settles" in m for m in messages))
+
+    async def test_two_team_double_elimination_skips_straight_to_grand_finals(self):
+        # The degenerate case: with only 2 teams, the single winners-
+        # bracket match's loser has nobody to play in the losers bracket —
+        # they go straight to Grand Finals as the "losers bracket champion".
+        red = _captained_team("Red", 901, "Alice")
+        blue = _captained_team("Blue", 902, "Bob")
+        self._double_elim_tournament(red, blue)
+
+        ctx = self._ctx()
+        await self.helperObj.startTournamentHelper(ctx, "simultaneous")
+
+        await self._play_out_simultaneous(lambda t1, t2, bt, ri: 1)
+
+        tournament = self.helperObj.getTournament(GUILD_ID)
+        self.assertIsNotNone(self.helperObj._tournamentChampionName(GUILD_ID, tournament))
+
+        messages = [c.args[0] for c in self.channel.send.call_args_list if c.args]
+        self.assertTrue(any("Grand Finals" in m for m in messages))
+        # no losers-bracket ROUND ever plays — there's nothing to queue
+        self.assertFalse(any("Losers Bracket Round" in m for m in messages))
+
+
+class InterleavedLosersBracketTimingTests(HelperTestCase):
+    def setUp(self):
+        super().setUp()
+        self.channel = FakeChannel("tourney-chat", guild=self.guild)
+        self.channel.send = AsyncMock(side_effect=lambda *a, **k: FakeMessage())
+        self.helperObj.client = FakeClient(channels=[self.channel], guilds=[self.guild])
+
+    def _ctx(self):
+        return FakeInteraction(self.guild, FakeMember("Alice", id=901), channel=self.channel)
+
+    def _interleaved_tournament(self, *teams):
+        tournament = Tournament("Cup", 1, len(teams), double_elimination=True)
+        for team in teams:
+            tournament.register_team(team)
+            self.helperObj._saveNewTeam(GUILD_ID, team)
+        wb_nodes = self.helperObj.buildBracket(list(teams))
+        lb_nodes, lb_rounds, wb_dependency = self.helperObj.buildLosersBracket(wb_nodes)
+        tournament.set_bracket(wb_nodes)
+        tournament.set_losers_bracket(lb_nodes, lb_rounds, wb_dependency)
+        tournament.set_losers_bracket_timing("interleaved")
+        self.helperObj.saveTournament(GUILD_ID, tournament)
+        return tournament
+
+    def _matches(self, bracket_type=None, round_index=None):
+        query = "SELECT id, team1, team2 FROM tournament_matches WHERE guildId=?"
+        params = [GUILD_ID]
+        if bracket_type is not None:
+            query += " AND bracketType=?"
+            params.append(bracket_type)
+        if round_index is not None:
+            query += " AND roundIndex=?"
+            params.append(round_index)
+        self.cursor.execute(query, params)
+        return self.cursor.fetchall()
+
+    async def _resolve(self, match_id, winning_team=1):
+        await self.helperObj._resolveTournamentMatch(GUILD_ID, match_id, winning_team, self.channel.id)
+
+    # 4 teams means one losers round (index 0) unlocked by winners round 0,
+    # and a second (index 1) unlocked by winners round 1 (the final) — see
+    # buildLosersBracket's wb_dependency comment. Once winners round 0
+    # finishes, interleaved timing should start losers round 0 right away,
+    # instead of moving straight on to the winners final.
+    async def test_losers_round_starts_before_next_winners_round_once_unlocked(self):
+        red = _captained_team("Red", 901, "Alice")
+        blue = _captained_team("Blue", 902, "Bob")
+        cleo = _captained_team("Cleo Team", 903, "Cleo")
+        dan = _captained_team("Dan Team", 904, "Dan")
+        self._interleaved_tournament(red, blue, cleo, dan)
+
+        ctx = self._ctx()
+        await self.helperObj.startTournamentHelper(ctx, "simultaneous")
+
+        wb_round0 = self._matches(bracket_type="winners", round_index=0)
+        self.assertEqual(len(wb_round0), 2)
+        for match_id, _, _ in wb_round0:
+            await self._resolve(match_id, 1)
+
+        self.assertEqual(len(self._matches(bracket_type="losers", round_index=0)), 1)
+        # winners round 1 (the final) must NOT have started yet — it's
+        # paused behind the now-unlocked losers round.
+        self.assertEqual(len(self._matches(bracket_type="winners", round_index=1)), 0)
+
+    # Once losers round 0 finishes, losers round 1 isn't ready yet (it
+    # needs winners round 1, the final, which hasn't been played) — so the
+    # scheduler should resume the winners bracket instead of stalling.
+    async def test_winners_resumes_once_the_unlocked_losers_round_finishes(self):
+        red = _captained_team("Red", 901, "Alice")
+        blue = _captained_team("Blue", 902, "Bob")
+        cleo = _captained_team("Cleo Team", 903, "Cleo")
+        dan = _captained_team("Dan Team", 904, "Dan")
+        self._interleaved_tournament(red, blue, cleo, dan)
+
+        ctx = self._ctx()
+        await self.helperObj.startTournamentHelper(ctx, "simultaneous")
+        for match_id, _, _ in self._matches(bracket_type="winners", round_index=0):
+            await self._resolve(match_id, 1)
+
+        losers_round0 = self._matches(bracket_type="losers", round_index=0)
+        self.assertEqual(len(losers_round0), 1)
+        for match_id, _, _ in losers_round0:
+            await self._resolve(match_id, 1)
+
+        # winners final should now be underway...
+        self.assertEqual(len(self._matches(bracket_type="winners", round_index=1)), 1)
+        # ...and losers round 1 still shouldn't have started (it depends on
+        # the winners final, which just started but hasn't resolved).
+        self.assertEqual(len(self._matches(bracket_type="losers", round_index=1)), 0)
+
+    # Full playthrough: confirms interleaved mode still reaches an overall
+    # champion, posts the "winners bracket complete" announcement exactly
+    # once (the entry-guard / _advanceInterleavedTournament redesign in
+    # _startRound risked re-triggering it), and creates exactly one Grand
+    # Finals match row (guards against _startGrandFinals firing more than
+    # once now that multiple code paths can reach it).
+    async def test_full_playthrough_reaches_champion_without_duplicate_announcements(self):
+        red = _captained_team("Red", 901, "Alice")
+        blue = _captained_team("Blue", 902, "Bob")
+        cleo = _captained_team("Cleo Team", 903, "Cleo")
+        dan = _captained_team("Dan Team", 904, "Dan")
+        self._interleaved_tournament(red, blue, cleo, dan)
+
+        ctx = self._ctx()
+        await self.helperObj.startTournamentHelper(ctx, "simultaneous")
+
+        for _ in range(50):
+            tournament = self.helperObj.getTournament(GUILD_ID)
+            if self.helperObj._tournamentChampionName(GUILD_ID, tournament) is not None:
+                break
+            self.cursor.execute(
+                "SELECT id FROM tournament_matches WHERE guildId=? AND state != 'RESOLVED'", (GUILD_ID,)
+            )
+            rows = self.cursor.fetchall()
+            if not rows:
+                self.fail("no matches in progress but the tournament isn't finished")
+            for (match_id,) in rows:
+                await self._resolve(match_id, 1)
+        else:
+            self.fail("tournament never reached a champion")
+
+        messages = [c.args[0] for c in self.channel.send.call_args_list if c.args]
+        self.assertEqual(sum("winners bracket complete" in m for m in messages), 1)
+
+        self.cursor.execute(
+            "SELECT COUNT(*) FROM tournament_matches WHERE guildId=? AND bracketType='finals'", (GUILD_ID,)
+        )
+        self.assertEqual(self.cursor.fetchone()[0], 1)
+
+    # after_winners is still the default — an interleaved-mode helper
+    # wasn't accidentally wired in as the new default for every double
+    # elimination bracket.
+    async def test_after_winners_is_still_the_default_timing(self):
+        tournament = Tournament("Cup", 1, 4, double_elimination=True)
+        self.assertEqual(tournament.get_losers_bracket_timing(), "after_winners")
 
 
 class RandomRoleHelperTests(HelperTestCase):
@@ -3166,8 +4778,8 @@ class StartBettingHelperTests(HelperTestCase):
         await asyncio.wait([task])
 
     async def test_full_timer_flow_opens_reports_and_awaits_result(self):
-        with patch.object(helper_module, "BETTING_DURATION_SECONDS", 0), \
-             patch.object(helper_module, "WINNER_REPORT_DELAY_SECONDS", 0):
+        self.helperObj.update(GUILD_ID, "betting_timer_seconds", 0)
+        with patch.object(helper_module, "WINNER_REPORT_DELAY_SECONDS", 0):
             channel = FakeChannel("game-chat")
             channel.send = AsyncMock(return_value=FakeMessage(id=12345))
             ctx = FakeInteraction(self.guild, FakeMember("Caller"), channel=channel)
@@ -3179,39 +4791,312 @@ class StartBettingHelperTests(HelperTestCase):
         self.assertEqual(self.helperObj.get(GUILD_ID, "betting_message_id"), 12345)
         self.assertEqual(channel.send.await_count, 3)  # open, closed, report-winner
         last_message = channel.send.return_value
-        last_message.add_reaction.assert_any_await("1️⃣")
-        last_message.add_reaction.assert_any_await("2️⃣")
+        last_message.add_reaction.assert_any_await(helper_module.TEAM_EMOJIS[1])
+        last_message.add_reaction.assert_any_await(helper_module.TEAM_EMOJIS[2])
         self.assertNotIn(GUILD_ID, self.helperObj.bettingTasks)
 
     async def test_restarting_mid_round_cancels_and_refunds_previous_round(self):
-        with patch.object(helper_module, "BETTING_DURATION_SECONDS", 100):
-            channel = FakeChannel("game-chat")
-            ctx = FakeInteraction(self.guild, FakeMember("Caller"), channel=channel)
+        # Long enough that the timer can't possibly fire before this test's
+        # own assertions run.
+        self.helperObj.update(GUILD_ID, "betting_timer_seconds", 100)
+        channel = FakeChannel("game-chat")
+        ctx = FakeInteraction(self.guild, FakeMember("Caller"), channel=channel)
 
-            await self.helperObj.startBettingHelper(ctx)
+        await self.helperObj.startBettingHelper(ctx)
 
-            self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
-            self.cursor.execute(
-                "UPDATE economy SET balance=1000 WHERE guildId=? AND userId=?", (GUILD_ID, 901)
-            )
-            self.db.commit()
-            bet_ctx = FakeInteraction(self.guild, FakeMember("Alice", id=901))
-            await self.helperObj.wagerHelper(bet_ctx, 400, 1)
+        self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.cursor.execute(
+            "UPDATE economy SET balance=1000 WHERE guildId=? AND userId=?", (GUILD_ID, 901)
+        )
+        self.db.commit()
+        bet_ctx = FakeInteraction(self.guild, FakeMember("Alice", id=901))
+        await self.helperObj.wagerHelper(bet_ctx, 400, 1)
 
-            first_task = self.helperObj.bettingTasks[GUILD_ID]
+        first_task = self.helperObj.bettingTasks[GUILD_ID]
 
-            await self.helperObj.startBettingHelper(ctx)
-            await asyncio.sleep(0)  # let the requested cancellation propagate
+        await self.helperObj.startBettingHelper(ctx)
+        await asyncio.sleep(0)  # let the requested cancellation propagate
 
-            self.assertTrue(first_task.cancelled())
-            self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "balance"), 1000)
-            self.assertEqual(self.helperObj.get(GUILD_ID, "betting_state"), "OPEN")
+        self.assertTrue(first_task.cancelled())
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "balance"), 1000)
+        self.assertEqual(self.helperObj.get(GUILD_ID, "betting_state"), "OPEN")
 
-            # clean up the second (still-open) round's timer task so it
-            # doesn't leak past the end of the test
-            second_task = self.helperObj.bettingTasks[GUILD_ID]
-            second_task.cancel()
-            await asyncio.wait([second_task])
+        # clean up the second (still-open) round's timer task so it
+        # doesn't leak past the end of the test
+        second_task = self.helperObj.bettingTasks[GUILD_ID]
+        second_task.cancel()
+        await asyncio.wait([second_task])
+
+
+class SetBettingTimerHelperTests(HelperTestCase):
+    def _ctx(self):
+        return FakeInteraction(self.guild, FakeMember("Caller"))
+
+    async def test_rejects_non_positive_seconds(self):
+        ctx = self._ctx()
+        await self.helperObj.setBettingTimerHelper(ctx, 0)
+        ctx.response.send_message.assert_awaited_once_with(
+            "Betting timer must be greater than 0 seconds."
+        )
+        self.assertEqual(
+            self.helperObj.get(GUILD_ID, "betting_timer_seconds"),
+            helper_module.BETTING_DURATION_SECONDS,
+        )
+
+    async def test_rejects_seconds_over_the_cap(self):
+        ctx = self._ctx()
+        await self.helperObj.setBettingTimerHelper(ctx, 601)
+        ctx.response.send_message.assert_awaited_once_with(
+            "Betting timer can't be more than 600 seconds (10 minutes)."
+        )
+
+    async def test_updates_the_configured_duration(self):
+        ctx = self._ctx()
+        await self.helperObj.setBettingTimerHelper(ctx, 30)
+        self.assertEqual(self.helperObj.get(GUILD_ID, "betting_timer_seconds"), 30)
+        ctx.response.send_message.assert_awaited_once()
+        self.assertIn("30 seconds", ctx.response.send_message.call_args.args[0])
+
+
+class GetBettingTimerSecondsTests(HelperTestCase):
+    def test_returns_the_configured_value(self):
+        self.helperObj.update(GUILD_ID, "betting_timer_seconds", 45)
+        self.assertEqual(self.helperObj._getBettingTimerSeconds(GUILD_ID), 45)
+
+    def test_falls_back_to_the_default_when_the_column_is_null(self):
+        self.helperObj.update(GUILD_ID, "betting_timer_seconds", None)
+        self.assertEqual(
+            self.helperObj._getBettingTimerSeconds(GUILD_ID),
+            helper_module.BETTING_DURATION_SECONDS,
+        )
+
+    def test_falls_back_to_the_default_when_the_guild_has_no_row_at_all(self):
+        # A guild with no `servers` row at all (not just a null column) —
+        # /test's simulated tournament is one such case — shouldn't crash
+        # just because it wants a betting duration.
+        self.assertEqual(
+            self.helperObj._getBettingTimerSeconds(999999),
+            helper_module.BETTING_DURATION_SECONDS,
+        )
+
+
+class OpenConcurrentTournamentBettingTests(HelperTestCase):
+    def _insert_match(self, match_id, channel_id):
+        self.cursor.execute(
+            "INSERT INTO tournament_matches(id, guildId, roundIndex, nodeIndex, team1, team2, state, "
+            "mode, messageId, channelId, winner, bracketType) "
+            "VALUES(?, ?, 0, 0, '', '', 'AWAITING_RESULT', 'simultaneous', NULL, ?, NULL, 'winners')",
+            (match_id, GUILD_ID, channel_id)
+        )
+        self.db.commit()
+
+    async def test_scales_duration_by_match_count_and_opens_betting(self):
+        self.helperObj.update(GUILD_ID, "betting_timer_seconds", 10)
+        channel = FakeChannel("bracket-chat")
+
+        await self.helperObj._openConcurrentTournamentBetting(GUILD_ID, [1, 2, 3], channel)
+
+        channel.send.assert_awaited_once()
+        message = channel.send.call_args.args[0]
+        self.assertIn("3 matches", message)
+        self.assertIn("#1", message)
+        self.assertIn("#2", message)
+        self.assertIn("#3", message)
+        self.assertIn("30 seconds", message)  # 10 * 3 matches
+
+    async def test_caps_duration_at_the_configured_maximum(self):
+        self.helperObj.update(GUILD_ID, "betting_timer_seconds", 600)
+        channel = FakeChannel("bracket-chat")
+
+        await self.helperObj._openConcurrentTournamentBetting(GUILD_ID, [1, 2, 3, 4], channel)
+
+        message = channel.send.call_args.args[0]
+        self.assertIn(f"{helper_module.MAX_CONCURRENT_BETTING_SECONDS} seconds", message)
+
+    async def test_singular_match_uses_singular_wording(self):
+        channel = FakeChannel("bracket-chat")
+        await self.helperObj._openConcurrentTournamentBetting(GUILD_ID, [7], channel)
+        message = channel.send.call_args.args[0]
+        self.assertIn("1 match ", message)
+
+    async def test_timer_closes_betting_on_the_listed_matches(self):
+        self.helperObj.update(GUILD_ID, "betting_timer_seconds", 0)
+        channel = FakeChannel("bracket-chat")
+        self._insert_match(1, channel.id)
+
+        before = asyncio.all_tasks()
+        await self.helperObj._openConcurrentTournamentBetting(GUILD_ID, [1], channel)
+        timer_task = (asyncio.all_tasks() - before).pop()
+        await timer_task
+
+        self.cursor.execute("SELECT bettingClosed FROM tournament_matches WHERE id=1")
+        self.assertEqual(self.cursor.fetchone()[0], 1)
+        self.assertEqual(channel.send.await_count, 2)  # open, then closed
+
+
+class PlaceTournamentWagerTests(HelperTestCase):
+    def _ctx(self, user_id=901, name="Alice"):
+        return FakeInteraction(self.guild, FakeMember(name, id=user_id))
+
+    def _insert_match(self, match_id, team1=None, team2=None, state="AWAITING_RESULT", betting_closed=0):
+        team1 = team1 or Team()
+        team2 = team2 or Team()
+        team1.name = team1.name or "Team 1"
+        team2.name = team2.name or "Team 2"
+        self.cursor.execute(
+            "INSERT INTO tournament_matches(id, guildId, roundIndex, nodeIndex, team1, team2, state, "
+            "mode, messageId, channelId, winner, bracketType, bettingClosed) "
+            "VALUES(?, ?, 0, 0, ?, ?, ?, 'simultaneous', NULL, NULL, NULL, 'winners', ?)",
+            (match_id, GUILD_ID, team1.serializeTeam(), team2.serializeTeam(), state, betting_closed)
+        )
+        self.db.commit()
+
+    def _give_gold(self, user_id, name, amount):
+        self.helperObj.ensureEconomyRow(GUILD_ID, user_id, name)
+        self.cursor.execute(
+            "UPDATE economy SET balance=? WHERE guildId=? AND userId=?", (amount, GUILD_ID, user_id)
+        )
+        self.db.commit()
+
+    async def test_rejects_unknown_match_id(self):
+        ctx = self._ctx()
+        await self.helperObj.wagerHelper(ctx, 100, 1, match_id=42)
+        ctx.response.send_message.assert_awaited_once_with(
+            "No tournament match with id 42 in this server."
+        )
+
+    async def test_rejects_when_match_is_resolved(self):
+        self._insert_match(1, state="RESOLVED")
+        ctx = self._ctx()
+        await self.helperObj.wagerHelper(ctx, 100, 1, match_id=1)
+        ctx.response.send_message.assert_awaited_once_with("Betting is closed for match #1.")
+
+    async def test_rejects_when_the_betting_closed_flag_is_set(self):
+        self._insert_match(1, betting_closed=1)
+        ctx = self._ctx()
+        await self.helperObj.wagerHelper(ctx, 100, 1, match_id=1)
+        ctx.response.send_message.assert_awaited_once_with("Betting is closed for match #1.")
+
+    async def test_rejects_a_rostered_player(self):
+        team1 = Team()
+        team1.name = "Team 1"
+        team1.add_player(Player(901, "Alice"))
+        self._insert_match(1, team1=team1)
+        ctx = self._ctx()
+        await self.helperObj.wagerHelper(ctx, 100, 1, match_id=1)
+        ctx.response.send_message.assert_awaited_once_with(
+            "You can't wager on a match you're playing in!"
+        )
+
+    async def test_rejects_insufficient_balance(self):
+        self._insert_match(1)
+        ctx = self._ctx()
+        await self.helperObj.wagerHelper(ctx, 100, 1, match_id=1)
+        ctx.response.send_message.assert_awaited_once_with(
+            "You don't have enough gold for that! Your balance is 0."
+        )
+
+    async def test_rejects_duplicate_bet_on_the_same_match(self):
+        self._insert_match(1)
+        self._give_gold(901, "Alice", 1000)
+
+        await self.helperObj.wagerHelper(self._ctx(), 100, 1, match_id=1)
+        ctx2 = self._ctx()
+        await self.helperObj.wagerHelper(ctx2, 50, 2, match_id=1)
+
+        ctx2.response.send_message.assert_awaited_once_with(
+            "You've already placed a bet on match #1."
+        )
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "balance"), 900)
+
+    async def test_successful_wager_escrows_gold(self):
+        self._insert_match(1)
+        self._give_gold(901, "Alice", 1000)
+
+        ctx = self._ctx()
+        await self.helperObj.wagerHelper(ctx, 250, 2, match_id=1)
+
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "balance"), 750)
+        self.cursor.execute(
+            "SELECT team, amount FROM tournament_wagers WHERE matchId=? AND userId=?", (1, 901)
+        )
+        self.assertEqual(self.cursor.fetchone(), (2, 250))
+        ctx.response.send_message.assert_awaited_once_with(
+            "You wagered 250 gold on Team 2 for match #1!"
+        )
+
+    async def test_a_user_can_bet_on_multiple_concurrent_matches_independently(self):
+        self._insert_match(1)
+        self._insert_match(2)
+        self._give_gold(901, "Alice", 1000)
+
+        await self.helperObj.wagerHelper(self._ctx(), 100, 1, match_id=1)
+        await self.helperObj.wagerHelper(self._ctx(), 200, 2, match_id=2)
+
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "balance"), 700)
+        self.cursor.execute("SELECT COUNT(*) FROM tournament_wagers WHERE userId=901")
+        self.assertEqual(self.cursor.fetchone()[0], 2)
+
+
+class SettleMatchWagersTests(HelperTestCase):
+    def _bet(self, match_id, user_id, name, team, amount):
+        # Mirrors only the state _settleMatchWagers reads/needs — a wager
+        # row plus an economy row. The real wagerHelper flow debits `amount`
+        # from balance up front and settlement only ever credits winnings
+        # back, so starting from balance=0 lets a settled balance be
+        # compared directly against the expected payout.
+        self.helperObj.ensureEconomyRow(GUILD_ID, user_id, name)
+        self.cursor.execute(
+            "INSERT INTO tournament_wagers(matchId, guildId, userId, username, team, amount) "
+            "VALUES(?, ?, ?, ?, ?, ?)",
+            (match_id, GUILD_ID, user_id, name, team, amount)
+        )
+        self.db.commit()
+
+    async def test_winners_split_the_losing_pool_pari_mutuel(self):
+        self._bet(1, 901, "Alice", 1, 100)
+        self._bet(1, 902, "Bob", 1, 300)
+        self._bet(1, 903, "Carol", 2, 200)
+        channel = FakeChannel("bracket-chat")
+
+        await self.helperObj._settleMatchWagers(GUILD_ID, 1, 1, channel)
+
+        # Alice: 100 + (100/400)*200 = 150; Bob: 300 + (300/400)*200 = 450
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "balance"), 150)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 902, "balance"), 450)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 903, "balance"), 0)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "wins"), 1)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 903, "losses"), 1)
+
+        self.cursor.execute("SELECT COUNT(*) FROM tournament_wagers WHERE matchId=1")
+        self.assertEqual(self.cursor.fetchone()[0], 0)
+        channel.send.assert_awaited_once()
+        message = channel.send.call_args.args[0]
+        self.assertIn("Alice won 150 gold", message)
+        self.assertIn("Bob won 450 gold", message)
+
+    async def test_a_winner_just_gets_their_wager_back_when_no_one_bet_the_losing_side(self):
+        self._bet(1, 901, "Alice", 1, 100)
+        channel = FakeChannel("bracket-chat")
+
+        await self.helperObj._settleMatchWagers(GUILD_ID, 1, 1, channel)
+
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "balance"), 100)
+
+    async def test_does_nothing_when_no_one_bet_on_the_match(self):
+        channel = FakeChannel("bracket-chat")
+        await self.helperObj._settleMatchWagers(GUILD_ID, 1, 1, channel)
+        channel.send.assert_not_awaited()
+
+    async def test_only_settles_the_named_match(self):
+        self._bet(1, 901, "Alice", 1, 100)
+        self._bet(2, 902, "Bob", 1, 100)
+        channel = FakeChannel("bracket-chat")
+
+        await self.helperObj._settleMatchWagers(GUILD_ID, 1, 1, channel)
+
+        self.cursor.execute("SELECT COUNT(*) FROM tournament_wagers WHERE matchId=2")
+        self.assertEqual(self.cursor.fetchone()[0], 1)
 
 
 class HandleWinnerReactionTests(HelperTestCase):
@@ -3231,19 +5116,19 @@ class HandleWinnerReactionTests(HelperTestCase):
     async def test_ignores_when_not_awaiting_result(self):
         self.helperObj.update(GUILD_ID, "betting_state", "OPEN")
         with patch.object(self.helperObj, "recordResult", AsyncMock()) as mock:
-            payload = FakePayload(GUILD_ID, 555, self.channel.id, "1️⃣")
+            payload = FakePayload(GUILD_ID, 555, self.channel.id, helper_module.TEAM_EMOJIS[1])
             await self.helperObj.handleWinnerReaction(payload)
         mock.assert_not_awaited()
 
     async def test_ignores_mismatched_message_id(self):
         with patch.object(self.helperObj, "recordResult", AsyncMock()) as mock:
-            payload = FakePayload(GUILD_ID, 999, self.channel.id, "1️⃣")
+            payload = FakePayload(GUILD_ID, 999, self.channel.id, helper_module.TEAM_EMOJIS[1])
             await self.helperObj.handleWinnerReaction(payload)
         mock.assert_not_awaited()
 
     async def test_valid_reaction_flips_state_and_calls_record_result(self):
         with patch.object(self.helperObj, "recordResult", AsyncMock()) as mock:
-            payload = FakePayload(GUILD_ID, 555, self.channel.id, "1️⃣")
+            payload = FakePayload(GUILD_ID, 555, self.channel.id, helper_module.TEAM_EMOJIS[1])
             await self.helperObj.handleWinnerReaction(payload)
 
         # the guild gets looked up and forwarded so recordResult can move
@@ -3255,8 +5140,8 @@ class HandleWinnerReactionTests(HelperTestCase):
 
     async def test_concurrent_reactions_only_process_once(self):
         with patch.object(self.helperObj, "recordResult", AsyncMock()) as mock:
-            payload1 = FakePayload(GUILD_ID, 555, self.channel.id, "1️⃣")
-            payload2 = FakePayload(GUILD_ID, 555, self.channel.id, "2️⃣")
+            payload1 = FakePayload(GUILD_ID, 555, self.channel.id, helper_module.TEAM_EMOJIS[1])
+            payload2 = FakePayload(GUILD_ID, 555, self.channel.id, helper_module.TEAM_EMOJIS[2])
             await asyncio.gather(
                 self.helperObj.handleWinnerReaction(payload1),
                 self.helperObj.handleWinnerReaction(payload2),
@@ -3592,6 +5477,250 @@ class LeaderboardHelperTests(HelperTestCase):
         self.assertNotIn("Balance:", lines[0])
 
 
+class HandleTeamListReactionTests(HelperTestCase):
+    def _ctx(self, user_id=901, name="Alice"):
+        return FakeInteraction(self.guild, FakeMember(name, id=user_id))
+
+    async def asyncSetUp(self):
+        self.channel = FakeChannel("team-list-chat")
+        self.helperObj.client = FakeClient(channels=[self.channel], guilds=[self.guild])
+
+        for name in ("Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel", "India", "Juliet",
+                     "Kilo", "Lima"):
+            await self.helperObj.createTeamHelper(self._ctx(), name, 5)
+
+        self.message = FakeMessage(id=7777)
+        self.channel.fetch_message = AsyncMock(return_value=self.message)
+        self.cursor.execute(
+            "INSERT INTO team_list_views"
+            "(messageId, guildId, channelId, search, recruitingOnly, sort, sort_order, page) "
+            "VALUES(7777, ?, ?, NULL, 0, 'name', 'asc', 0)",
+            (GUILD_ID, self.channel.id)
+        )
+        self.db.commit()
+
+    def _page(self):
+        self.cursor.execute("SELECT page FROM team_list_views WHERE messageId=7777")
+        return self.cursor.fetchone()[0]
+
+    async def test_ignores_unrelated_emoji(self):
+        payload = FakePayload(GUILD_ID, 7777, self.channel.id, "🎉", user_id=1)
+        await self.helperObj.handleTeamListReaction(payload)
+        self.message.edit.assert_not_awaited()
+
+    async def test_ignores_unknown_message(self):
+        payload = FakePayload(
+            GUILD_ID, 12345, self.channel.id, helper_module.LEADERBOARD_NEXT_EMOJI, user_id=1
+        )
+        await self.helperObj.handleTeamListReaction(payload)
+        self.message.edit.assert_not_awaited()
+
+    async def test_next_advances_page_and_edits_message(self):
+        payload = FakePayload(
+            GUILD_ID, 7777, self.channel.id, helper_module.LEADERBOARD_NEXT_EMOJI, user_id=1
+        )
+        await self.helperObj.handleTeamListReaction(payload)
+
+        self.assertEqual(self._page(), 1)
+        self.message.edit.assert_awaited_once()
+        embed = self.message.edit.call_args.kwargs["embed"]
+        self.assertIn("Page 2/2", embed.footer.text)
+        self.assertIn("Kilo", embed.description)
+
+    async def test_last_jumps_to_final_page(self):
+        payload = FakePayload(
+            GUILD_ID, 7777, self.channel.id, helper_module.LEADERBOARD_LAST_EMOJI, user_id=1
+        )
+        await self.helperObj.handleTeamListReaction(payload)
+        self.assertEqual(self._page(), 1)  # 12 teams / 10 per page = 2 pages (0, 1)
+
+    async def test_next_at_last_page_is_a_noop(self):
+        self.cursor.execute("UPDATE team_list_views SET page=1 WHERE messageId=7777")
+        self.db.commit()
+        payload = FakePayload(
+            GUILD_ID, 7777, self.channel.id, helper_module.LEADERBOARD_NEXT_EMOJI, user_id=1
+        )
+        await self.helperObj.handleTeamListReaction(payload)
+        self.assertEqual(self._page(), 1)
+        self.message.edit.assert_not_awaited()
+
+    async def test_preserves_sort_order_across_a_page_flip(self):
+        # sort_order='desc' with sort='name' reverses the alphabet — all 12
+        # fake teams stay eligible (no search/recruiting_only filter here),
+        # so there's still a real second page to flip to.
+        self.cursor.execute(
+            "UPDATE team_list_views SET sort_order='desc' WHERE messageId=7777"
+        )
+        self.db.commit()
+        payload = FakePayload(
+            GUILD_ID, 7777, self.channel.id, helper_module.LEADERBOARD_NEXT_EMOJI, user_id=1
+        )
+        await self.helperObj.handleTeamListReaction(payload)
+
+        embed = self.message.edit.call_args.kwargs["embed"]
+        self.assertIn("Descending", embed.footer.text)
+        # descending by name: Lima..Charlie fill page 0, page 1 (this one)
+        # holds whatever's left — Bravo, Alpha — proving sort_order='desc'
+        # carried over rather than resetting to ascending
+        self.assertIn("Alpha", embed.description)
+
+    async def test_advancing_a_page_clears_the_reactors_own_reaction(self):
+        reactor = FakeMember("Someone", id=1)
+        payload = FakePayload(
+            GUILD_ID, 7777, self.channel.id, helper_module.LEADERBOARD_NEXT_EMOJI, member=reactor
+        )
+        await self.helperObj.handleTeamListReaction(payload)
+        self.message.remove_reaction.assert_awaited_once_with(
+            helper_module.LEADERBOARD_NEXT_EMOJI, reactor
+        )
+
+
+class HandleMyTeamsReactionTests(_FakeLogoDirTestCase):
+    def _ctx(self, user_id=901, name="Alice"):
+        return FakeInteraction(self.guild, FakeMember(name, id=user_id))
+
+    async def asyncSetUp(self):
+        # _FakeLogoDirTestCase.setUp (sync) already ran by this point —
+        # IsolatedAsyncioTestCase calls setUp() then asyncSetUp() — so this
+        # only needs to handle the parts that require awaiting.
+        self.channel = FakeChannel("my-teams-chat")
+        self.helperObj.client = FakeClient(channels=[self.channel], guilds=[self.guild])
+
+        await self.helperObj.createTeamHelper(self._ctx(), "Alpha", 5)
+        await self.helperObj.createTeamHelper(self._ctx(), "Bravo", 5)
+        await self.helperObj.createTeamHelper(self._ctx(), "Charlie", 5)
+
+        self.message = FakeMessage(id=8888)
+        self.channel.fetch_message = AsyncMock(return_value=self.message)
+        self.cursor.execute(
+            "INSERT INTO my_team_views(messageId, guildId, channelId, userId, page) "
+            "VALUES(8888, ?, ?, 901, 1)",
+            (GUILD_ID, self.channel.id)
+        )
+        self.db.commit()
+
+    def _page(self):
+        self.cursor.execute("SELECT page FROM my_team_views WHERE messageId=8888")
+        return self.cursor.fetchone()[0]
+
+    async def test_ignores_unrelated_emoji(self):
+        payload = FakePayload(GUILD_ID, 8888, self.channel.id, "🎉", user_id=1)
+        await self.helperObj.handleMyTeamsReaction(payload)
+        self.message.edit.assert_not_awaited()
+
+    async def test_ignores_unknown_message(self):
+        payload = FakePayload(
+            GUILD_ID, 12345, self.channel.id, helper_module.LEADERBOARD_NEXT_EMOJI, user_id=1
+        )
+        await self.helperObj.handleMyTeamsReaction(payload)
+        self.message.edit.assert_not_awaited()
+
+    async def test_next_advances_to_the_next_team_and_edits_message(self):
+        payload = FakePayload(
+            GUILD_ID, 8888, self.channel.id, helper_module.LEADERBOARD_NEXT_EMOJI, user_id=1
+        )
+        await self.helperObj.handleMyTeamsReaction(payload)
+
+        self.assertEqual(self._page(), 2)
+        self.message.edit.assert_awaited_once()
+        embed = self.message.edit.call_args.kwargs["embed"]
+        self.assertEqual(embed.title, "Charlie Stats")
+        self.assertIn("Team 3/3", embed.footer.text)
+        attachments = self.message.edit.call_args.kwargs["attachments"]
+        for f in attachments:
+            f.close()
+
+    async def test_prev_goes_back_a_team(self):
+        payload = FakePayload(
+            GUILD_ID, 8888, self.channel.id, helper_module.LEADERBOARD_PREV_EMOJI, user_id=1
+        )
+        await self.helperObj.handleMyTeamsReaction(payload)
+        self.assertEqual(self._page(), 0)
+        for f in self.message.edit.call_args.kwargs["attachments"]:
+            f.close()
+
+    async def test_first_jumps_to_page_zero(self):
+        payload = FakePayload(
+            GUILD_ID, 8888, self.channel.id, helper_module.LEADERBOARD_FIRST_EMOJI, user_id=1
+        )
+        await self.helperObj.handleMyTeamsReaction(payload)
+        self.assertEqual(self._page(), 0)
+        for f in self.message.edit.call_args.kwargs["attachments"]:
+            f.close()
+
+    async def test_last_jumps_to_final_team(self):
+        payload = FakePayload(
+            GUILD_ID, 8888, self.channel.id, helper_module.LEADERBOARD_LAST_EMOJI, user_id=1
+        )
+        await self.helperObj.handleMyTeamsReaction(payload)
+        self.assertEqual(self._page(), 2)
+        for f in self.message.edit.call_args.kwargs["attachments"]:
+            f.close()
+
+    async def test_next_at_last_team_is_a_noop(self):
+        self.cursor.execute("UPDATE my_team_views SET page=2 WHERE messageId=8888")
+        self.db.commit()
+        payload = FakePayload(
+            GUILD_ID, 8888, self.channel.id, helper_module.LEADERBOARD_NEXT_EMOJI, user_id=1
+        )
+        await self.helperObj.handleMyTeamsReaction(payload)
+        self.assertEqual(self._page(), 2)
+        self.message.edit.assert_not_awaited()
+
+    async def test_reaction_from_a_different_user_still_pages_the_owners_view(self):
+        # Matches /leaderboard's existing behavior: paging a shared view
+        # isn't restricted to whoever posted it. handleMyTeamsReaction
+        # re-derives the team list from the view's stored userId (901,
+        # Alice), not from payload.user_id (a stranger here), so the page
+        # still steps through ALICE's teams either way.
+        payload = FakePayload(
+            GUILD_ID, 8888, self.channel.id, helper_module.LEADERBOARD_NEXT_EMOJI, user_id=999
+        )
+        await self.helperObj.handleMyTeamsReaction(payload)
+        embed = self.message.edit.call_args.kwargs["embed"]
+        self.assertEqual(embed.title, "Charlie Stats")
+        for f in self.message.edit.call_args.kwargs["attachments"]:
+            f.close()
+
+    async def test_advancing_a_page_clears_the_reactors_own_reaction(self):
+        reactor = FakeMember("Someone", id=1)
+        payload = FakePayload(
+            GUILD_ID, 8888, self.channel.id, helper_module.LEADERBOARD_NEXT_EMOJI, member=reactor
+        )
+        await self.helperObj.handleMyTeamsReaction(payload)
+
+        self.message.remove_reaction.assert_awaited_once_with(
+            helper_module.LEADERBOARD_NEXT_EMOJI, reactor
+        )
+        for f in self.message.edit.call_args.kwargs["attachments"]:
+            f.close()
+
+    async def test_a_noop_page_flip_does_not_clear_the_reaction(self):
+        self.cursor.execute("UPDATE my_team_views SET page=2 WHERE messageId=8888")
+        self.db.commit()
+        reactor = FakeMember("Someone", id=1)
+        payload = FakePayload(
+            GUILD_ID, 8888, self.channel.id, helper_module.LEADERBOARD_NEXT_EMOJI, member=reactor
+        )
+        await self.helperObj.handleMyTeamsReaction(payload)
+        self.message.remove_reaction.assert_not_awaited()
+
+    async def test_reaction_removal_failure_is_swallowed(self):
+        # The bot needs Manage Messages to strip someone else's reaction —
+        # a server that hasn't granted it shouldn't break paging itself.
+        self.message.remove_reaction = AsyncMock(
+            side_effect=discord.Forbidden(SimpleNamespace(status=403, reason="Forbidden"), "no perms")
+        )
+        reactor = FakeMember("Someone", id=1)
+        payload = FakePayload(
+            GUILD_ID, 8888, self.channel.id, helper_module.LEADERBOARD_NEXT_EMOJI, member=reactor
+        )
+        await self.helperObj.handleMyTeamsReaction(payload)  # must not raise
+        self.assertEqual(self._page(), 2)
+        for f in self.message.edit.call_args.kwargs["attachments"]:
+            f.close()
+
+
 class HandleLeaderboardReactionTests(HelperTestCase):
     def setUp(self):
         super().setUp()
@@ -3692,6 +5821,40 @@ class HandleLeaderboardReactionTests(HelperTestCase):
         self.message.edit.assert_awaited_once()
         self.channel.send.assert_not_awaited()
 
+    async def test_advancing_a_page_clears_the_reactors_own_reaction(self):
+        # Consistent with /my-teams's paging (see HandleMyTeamsReactionTests):
+        # the reactor's own click is cleared after a successful page flip so
+        # they can press the same emoji again right away.
+        reactor = FakeMember("Someone", id=1)
+        payload = FakePayload(
+            GUILD_ID, 9999, self.channel.id, helper_module.LEADERBOARD_NEXT_EMOJI, member=reactor
+        )
+        await self.helperObj.handleLeaderboardReaction(payload)
+        self.message.remove_reaction.assert_awaited_once_with(
+            helper_module.LEADERBOARD_NEXT_EMOJI, reactor
+        )
+
+    async def test_a_noop_page_flip_does_not_clear_the_reaction(self):
+        self.cursor.execute("UPDATE leaderboards SET page=2 WHERE messageId=9999")
+        self.db.commit()
+        reactor = FakeMember("Someone", id=1)
+        payload = FakePayload(
+            GUILD_ID, 9999, self.channel.id, helper_module.LEADERBOARD_NEXT_EMOJI, member=reactor
+        )
+        await self.helperObj.handleLeaderboardReaction(payload)
+        self.message.remove_reaction.assert_not_awaited()
+
+    async def test_reaction_removal_failure_is_swallowed(self):
+        self.message.remove_reaction = AsyncMock(
+            side_effect=discord.Forbidden(SimpleNamespace(status=403, reason="Forbidden"), "no perms")
+        )
+        reactor = FakeMember("Someone", id=1)
+        payload = FakePayload(
+            GUILD_ID, 9999, self.channel.id, helper_module.LEADERBOARD_NEXT_EMOJI, member=reactor
+        )
+        await self.helperObj.handleLeaderboardReaction(payload)  # must not raise
+        self.assertEqual(self._page(), 2)
+
 
 # ===========================================================================
 # bot.py — import with DB/token side effects redirected away from the real
@@ -3716,13 +5879,23 @@ def _import_bot_module():
 class BotModuleTestCase(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.bot = _import_bot_module()
+        # tree.sync() makes a real Discord API call — commands are global
+        # definitions now (see syncCommandsToGuild in bot.py), copied/synced
+        # to a guild dynamically on_ready/on_guild_join rather than one
+        # hardcoded testing guild id, so on_guild_join (called throughout
+        # these tests via _insert_guild_row) would otherwise try to hit the
+        # network. copy_global_to() is pure in-memory bookkeeping and safe
+        # to leave real.
+        self._sync_patch = patch.object(self.bot.tree, "sync", AsyncMock())
+        self._sync_patch.start()
 
     def tearDown(self):
+        self._sync_patch.stop()
         self.bot.mainDB.close()
         sys.modules.pop("bot", None)
 
     def _command(self, name):
-        for c in self.bot.tree.get_commands(guild=discord.Object(id=COMMAND_GUILD_ID)):
+        for c in self.bot.tree.get_commands():
             if c.name == name:
                 return c
         raise AssertionError(f"command {name!r} is not registered")
@@ -3738,20 +5911,72 @@ class BotModuleTestCase(unittest.IsolatedAsyncioTestCase):
 
 class CommandRegistrationTests(BotModuleTestCase):
     def test_all_expected_commands_registered(self):
-        names = {c.name for c in self.bot.tree.get_commands(guild=discord.Object(id=COMMAND_GUILD_ID))}
+        names = {c.name for c in self.bot.tree.get_commands()}
         expected = {
             "team-set-size", "team-set-channels", "start", "wager", "wager-against", "daily",
-            "stats", "leaderboard", "help", "make-teams", "ranked", "return", "report-correct-winner",
-            "captains", "ranked-captains", "choose", "clear", "notify", "notify-role",
+            "stats", "leaderboard", "help", "make-teams", "return", "report-correct-winner",
+            "captains", "choose", "clear", "notify",
             "roll", "randomize-roles", "tournament-create", "team-create", "team-set-voice-channel",
-            "team-invite", "team-stats", "team-leaderboard", "tournament-register", "tournament-create-bracket",
+            "team-invite", "team-set-logo", "team-stats", "team-list", "my-teams",
+            "tournament-register", "tournament-create-bracket",
             "tournament-print-bracket", "tournament-start", "wager-set-channel", "team-use",
+            "set-betting-timer",
+            "test",  # TEMP: bracket-renderer preview command, see bot.py
         }
         self.assertEqual(names, expected)
 
     def test_move_is_not_a_registered_command_name(self):
-        names = {c.name for c in self.bot.tree.get_commands(guild=discord.Object(id=COMMAND_GUILD_ID))}
+        names = {c.name for c in self.bot.tree.get_commands()}
         self.assertNotIn("move", names)
+
+    async def test_on_guild_join_publishes_commands_to_the_new_guild(self):
+        await self.bot.on_guild_join(SimpleNamespace(id=999, name="New Guild"))
+        self.bot.tree.sync.assert_awaited_once()
+        synced_guild = self.bot.tree.sync.call_args.kwargs["guild"]
+        self.assertEqual(synced_guild.id, 999)
+
+    async def test_on_ready_syncs_to_every_guild_the_bot_is_in(self):
+        guild_a = SimpleNamespace(id=1)
+        guild_b = SimpleNamespace(id=2)
+        # discord.Client.guilds is a read-only property backed by internal
+        # connection state — patch it at the class level via PropertyMock
+        # rather than trying to assign the instance attribute directly.
+        with patch.object(type(self.bot.client), "guilds", new_callable=PropertyMock) as mock_guilds:
+            mock_guilds.return_value = [guild_a, guild_b]
+            await self.bot.on_ready()
+        self.assertEqual(self.bot.tree.sync.await_count, 2)
+        synced_ids = {c.kwargs["guild"].id for c in self.bot.tree.sync.call_args_list}
+        self.assertEqual(synced_ids, {1, 2})
+
+
+class LogoAutocompleteTests(BotModuleTestCase):
+    def setUp(self):
+        super().setUp()
+        self._logo_dir = tempfile.TemporaryDirectory()
+        for name in ("Demacia", "Noxus", "Dragon", "Freljord"):
+            open(os.path.join(self._logo_dir.name, f"{name}.png"), "wb").close()
+        self._logo_dir_patch = patch.object(helper_module, "TEAM_LOGO_DIR", self._logo_dir.name)
+        self._logo_dir_patch.start()
+
+    def tearDown(self):
+        self._logo_dir_patch.stop()
+        self._logo_dir.cleanup()
+        super().tearDown()
+
+    async def test_filters_by_current_input_case_insensitively(self):
+        choices = await self.bot.logoAutocomplete(None, "dra")
+        self.assertEqual([c.value for c in choices], ["Dragon"])
+
+    async def test_empty_input_returns_everything(self):
+        choices = await self.bot.logoAutocomplete(None, "")
+        self.assertEqual(sorted(c.value for c in choices), ["Demacia", "Dragon", "Freljord", "Noxus"])
+
+    async def test_caps_results_at_25(self):
+        with patch.object(helper_module, "TEAM_LOGO_DIR", self._logo_dir.name):
+            for i in range(30):
+                open(os.path.join(self._logo_dir.name, f"Extra{i}.png"), "wb").close()
+            choices = await self.bot.logoAutocomplete(None, "")
+        self.assertLessEqual(len(choices), 25)
 
 
 class GuildLifecycleEventTests(BotModuleTestCase):
@@ -3774,7 +5999,8 @@ class GuildLifecycleEventTests(BotModuleTestCase):
 class ReactionEventTests(BotModuleTestCase):
     HANDLER_NAMES = (
         "handleWinnerReaction", "handleDuelReaction", "handleLeaderboardReaction",
-        "handleTeamInviteReaction", "handleTournamentReaction",
+        "handleMyTeamsReaction", "handleTeamListReaction", "handleTeamInviteReaction",
+        "handleTournamentReaction",
     )
 
     def _patch_all_handlers(self, stack):
@@ -3821,12 +6047,16 @@ class CommandDelegationTests(BotModuleTestCase):
         ctx = self._ctx()
         order = []
         with patch.object(self.bot.helperObj, "movefunc", AsyncMock(side_effect=lambda c: order.append("move"))), \
+             patch.object(
+                 self.bot.helperObj, "sendCurrentMatchupImage",
+                 AsyncMock(side_effect=lambda c: order.append("matchup"))
+             ), \
              patch.object(self.bot.helperObj, "startBettingHelper", AsyncMock(side_effect=lambda c: order.append("bet"))):
             await self._command("start").callback(ctx)
 
         ctx.response.defer.assert_awaited_once()
         ctx.followup.send.assert_awaited_once_with("Moved!")
-        self.assertEqual(order, ["move", "bet"])
+        self.assertEqual(order, ["move", "matchup", "bet"])
 
     async def test_wager_passes_resolved_team_value(self):
         ctx = self._ctx()
@@ -3834,7 +6064,7 @@ class CommandDelegationTests(BotModuleTestCase):
         with patch.object(self.bot.helperObj, "wagerHelper", mock):
             choice = app_commands.Choice(name="Team 2", value=2)
             await self._command("wager").callback(ctx, 250, choice)
-        mock.assert_awaited_once_with(ctx, 250, 2)
+        mock.assert_awaited_once_with(ctx, 250, 2, None)
 
     async def test_wager_against_delegates(self):
         ctx = self._ctx()
@@ -3894,7 +6124,7 @@ class CommandDelegationTests(BotModuleTestCase):
         with patch.object(self.bot.helperObj, "createBracketHelper", mock):
             choice = app_commands.Choice(name="Double elimination", value="double")
             await self._command("tournament-create-bracket").callback(ctx, elimination_type=choice)
-        mock.assert_awaited_once_with(ctx, True)
+        mock.assert_awaited_once_with(ctx, True, "after_winners")
 
     async def test_create_bracket_single_elimination_resolves_to_false(self):
         ctx = self._ctx()
@@ -3902,7 +6132,7 @@ class CommandDelegationTests(BotModuleTestCase):
         with patch.object(self.bot.helperObj, "createBracketHelper", mock):
             choice = app_commands.Choice(name="Single elimination", value="single")
             await self._command("tournament-create-bracket").callback(ctx, elimination_type=choice)
-        mock.assert_awaited_once_with(ctx, False)
+        mock.assert_awaited_once_with(ctx, False, "after_winners")
 
     async def test_print_bracket_delegates(self):
         ctx = self._ctx()
@@ -3955,7 +6185,18 @@ class CommandDelegationTests(BotModuleTestCase):
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "teamInviteHelper", mock):
             await self._command("team-invite").callback(ctx, "Red", target)
-        mock.assert_awaited_once_with(ctx, "Red", target)
+        mock.assert_awaited_once_with(ctx, "Red", [target])
+
+    async def test_team_invite_delegates_multiple_members_and_drops_unset_slots(self):
+        ctx = self._ctx()
+        bob = FakeMember("Bob", id=902)
+        cleo = FakeMember("Cleo", id=903)
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "teamInviteHelper", mock):
+            await self._command("team-invite").callback(
+                ctx, "Red", member_1=bob, member_2=cleo, member_3=None, member_4=None, member_5=None
+            )
+        mock.assert_awaited_once_with(ctx, "Red", [bob, cleo])
 
     async def test_team_stats_delegates(self):
         ctx = self._ctx()
@@ -3963,13 +6204,6 @@ class CommandDelegationTests(BotModuleTestCase):
         with patch.object(self.bot.helperObj, "teamStatsHelper", mock):
             await self._command("team-stats").callback(ctx, "Red")
         mock.assert_awaited_once_with(ctx, "Red")
-
-    async def test_team_leaderboard_delegates(self):
-        ctx = self._ctx()
-        mock = AsyncMock()
-        with patch.object(self.bot.helperObj, "teamLeaderboardHelper", mock):
-            await self._command("team-leaderboard").callback(ctx)
-        mock.assert_awaited_once_with(ctx)
 
     async def test_use_teams_defaults_ranked_to_false(self):
         ctx = self._ctx()
@@ -4021,10 +6255,197 @@ class CommandDelegationTests(BotModuleTestCase):
             await self._command("choose").callback(ctx, member=None, use_random=True)
         mock.assert_awaited_once_with(ctx)
 
-    async def test_help_sends_message(self):
+class HelpCommandTests(BotModuleTestCase):
+    def _ctx(self, guild_id=GUILD_ID, channel=None):
+        guild = FakeGuild(id=guild_id)
+        user = FakeMember("Caller", id=1)
+        return FakeInteraction(guild, user, channel=channel)
+
+    async def test_no_command_links_to_the_site(self):
         ctx = self._ctx()
-        await self._command("help").callback(ctx)
+        await self._command("help").callback(ctx, command=None)
+        message = ctx.response.send_message.call_args.args[0]
+        self.assertIn("shockwave.netlify.app", message)
+
+    async def test_known_command_describes_it_with_usage(self):
+        ctx = self._ctx()
+        await self._command("help").callback(ctx, command="wager")
+        message = ctx.response.send_message.call_args.args[0]
+        self.assertIn("/wager", message)
+        self.assertIn("<amount>", message)
+        self.assertIn("<team>", message)
+        self.assertIn(self.bot.COMMAND_HELP["wager"], message)
+
+    async def test_optional_parameters_are_marked_in_usage(self):
+        ctx = self._ctx()
+        await self._command("help").callback(ctx, command="stats")
+        message = ctx.response.send_message.call_args.args[0]
+        self.assertIn("<member?>", message)
+
+    async def test_command_lookup_ignores_case_and_a_leading_slash(self):
+        ctx = self._ctx()
+        await self._command("help").callback(ctx, command="/Wager")
+        message = ctx.response.send_message.call_args.args[0]
+        self.assertIn("/wager", message)
+
+    async def test_unknown_command_points_to_the_site(self):
+        ctx = self._ctx()
+        await self._command("help").callback(ctx, command="not-a-real-command")
+        message = ctx.response.send_message.call_args.args[0]
+        self.assertIn("not-a-real-command", message)
+        self.assertIn("shockwave.netlify.app", message)
+
+    def test_every_registered_command_has_an_entry(self):
+        # "test" is a TEMP debug command (see bot.py) — deliberately left
+        # out of COMMAND_HELP since it's not a real, documented command.
+        names = {c.name for c in self.bot.tree.get_commands()} - {"test"}
+        self.assertEqual(names, set(self.bot.COMMAND_HELP.keys()))
+
+
+# TEMP: smoke tests for the throwaway /test command — delete alongside it
+# once the real tournament flow is confirmed to work end to end. Unlike
+# every other command tested in this file, /test drives itself entirely
+# (no reactions to simulate) — resolving a match requires helperObj.client
+# to be able to look the channel back up by id (see
+# _resolveTournamentMatch), so every test here wires up a FakeClient
+# pointed at its own channel first, same as DoubleEliminationMatchFlowTests
+# does for the real reaction-driven flow.
+class TestCommandTests(BotModuleTestCase):
+    def _wired_ctx(self, guild_id=GUILD_ID):
+        guild = FakeGuild(id=guild_id)
+        channel = FakeChannel("test-channel", guild=guild)
+        channel.send = AsyncMock(side_effect=lambda *a, **k: FakeMessage())
+        self.bot.helperObj.client = FakeClient(channels=[channel], guilds=[guild])
+        return FakeInteraction(guild, FakeMember("Caller", id=1), channel=channel)
+
+    async def test_runs_a_full_tournament_through_the_real_pipeline(self):
+        # A small team count keeps this fast — the point is exercising the
+        # real state machine (winners bracket -> losers bracket -> Grand
+        # Finals -> completion -> leaderboard) end to end, not stress-
+        # testing bracket size (that's covered separately by
+        # BracketImageTests).
+        ctx = self._wired_ctx()
+        await self._command("test").callback(ctx, teams=4)
+
+        tournament = self.bot.helperObj.getTournament(GUILD_ID)
+        self.assertIsNotNone(tournament)
+        self.assertTrue(tournament.is_double_elimination())
+        self.assertEqual(len(tournament.get_teams()), 4)
+
+        persisted_teams = self.bot.helperObj.getTeamsForGuild(GUILD_ID)
+        self.assertEqual(len(persisted_teams), 4)
+        self.assertTrue(all(team.get_name().startswith("TEST Team") for _, team in persisted_teams))
+
+        # Fully played out — nothing left open in any bracket.
+        self.bot.cursor.execute(
+            "SELECT COUNT(*) FROM tournament_matches WHERE guildId=? AND state != 'RESOLVED'", (GUILD_ID,)
+        )
+        self.assertEqual(self.bot.cursor.fetchone()[0], 0)
+
+        champion_name = self.bot.helperObj._tournamentChampionName(GUILD_ID, tournament)
+        self.assertIsNotNone(champion_name)
+
         ctx.response.send_message.assert_awaited_once()
+        intro_message = ctx.response.send_message.call_args.args[0]
+        self.assertIn("4-team", intro_message)
+
+        # _resolveFinalsMatch posts the completion announcement (and,
+        # right after it, the team leaderboard) once Grand Finals resolves
+        # — proof the real completion path actually ran, not just that the
+        # match rows all ended up RESOLVED some other way.
+        sent_messages = [c.args[0] for c in ctx.channel.send.call_args_list if c.args]
+        self.assertTrue(any("is complete!" in m and champion_name in m for m in sent_messages))
+        embeds = [c.kwargs["embed"] for c in ctx.channel.send.call_args_list if "embed" in c.kwargs]
+        self.assertTrue(any("Results" in e.title for e in embeds))
+
+        # One "Betting on Match #" post and one payout post per resolved
+        # match — entirely separate from the real wagers/economy tables
+        # (see _postSimulatedWagers), so this doesn't touch getEconomy at
+        # all; just confirming the messages themselves show up.
+        betting_posts = [m for m in sent_messages if "Betting on Match #" in m]
+        payout_posts = [m for m in sent_messages if "won the bet" in m]
+        self.assertGreater(len(betting_posts), 0)
+        self.assertEqual(len(betting_posts), len(payout_posts))
+
+    async def test_warns_when_it_overwrites_an_existing_tournament(self):
+        ctx = self._wired_ctx()
+        self.bot.helperObj.saveTournament(GUILD_ID, Tournament("Old Cup", 1, 2, False))
+
+        await self._command("test").callback(ctx, teams=2)
+
+        intro_message = ctx.response.send_message.call_args.args[0]
+        self.assertIn("Old Cup", intro_message)
+
+    async def test_rejects_an_out_of_range_team_count(self):
+        ctx = self._wired_ctx()
+
+        await self._command("test").callback(ctx, teams=1)
+
+        ctx.response.send_message.assert_awaited_once_with("Pick a team count between 2 and 64.")
+        self.assertIsNone(self.bot.helperObj.getTournament(GUILD_ID))
+
+    async def test_rerunning_does_not_leave_stale_teams_from_the_previous_run(self):
+        # Previously each /test run added a fresh batch of identically-
+        # named "TEST Team N" rows on top of whatever the last run left
+        # behind — old teams (with their old win/loss counts) piling up
+        # and cluttering /team-leaderboard instead of the round starting
+        # clean like the tournament bracket itself already did.
+        await self._command("test").callback(self._wired_ctx(), teams=4)
+        await self._command("test").callback(self._wired_ctx(), teams=6)
+
+        # Exactly the second run's 6 teams — none of the first run's 4
+        # left behind, and no name collisions between the two batches.
+        persisted_teams = self.bot.helperObj.getTeamsForGuild(GUILD_ID)
+        self.assertEqual(len(persisted_teams), 6)
+        names = [team.get_name() for _, team in persisted_teams]
+        self.assertEqual(len(names), len(set(names)))
+
+    async def test_a_real_team_named_like_a_test_team_survives_a_rerun(self):
+        real_team = Team()
+        real_team.set_name("TEST Team Alpha's Real Squad")
+        self.bot.helperObj._saveNewTeam(GUILD_ID, real_team)
+
+        await self._command("test").callback(self._wired_ctx(), teams=2)
+
+        names = [team.get_name() for _, team in self.bot.helperObj.getTeamsForGuild(GUILD_ID)]
+        self.assertIn("TEST Team Alpha's Real Squad", names)
+
+    async def test_rerunning_restarts_match_numbering_at_1(self):
+        await self._command("test").callback(self._wired_ctx(), teams=4)
+        await self._command("test").callback(self._wired_ctx(), teams=4)
+
+        self.bot.cursor.execute(
+            "SELECT MIN(id) FROM tournament_matches WHERE guildId=?", (GUILD_ID,)
+        )
+        self.assertEqual(self.bot.cursor.fetchone()[0], 1)
+
+    async def test_defaults_to_after_winners_timing(self):
+        ctx = self._wired_ctx()
+        await self._command("test").callback(ctx, teams=4)
+
+        tournament = self.bot.helperObj.getTournament(GUILD_ID)
+        self.assertEqual(tournament.get_losers_bracket_timing(), "after_winners")
+        intro_message = ctx.response.send_message.call_args.args[0]
+        self.assertIn("losers bracket after winners finishes", intro_message)
+
+    async def test_interleaved_timing_option_plays_out_the_whole_tournament(self):
+        ctx = self._wired_ctx()
+        choice = app_commands.Choice(name="Interleaved — as soon as each round unlocks it", value="interleaved")
+        await self._command("test").callback(ctx, teams=4, losers_bracket_timing=choice)
+
+        tournament = self.bot.helperObj.getTournament(GUILD_ID)
+        self.assertEqual(tournament.get_losers_bracket_timing(), "interleaved")
+        intro_message = ctx.response.send_message.call_args.args[0]
+        self.assertIn("losers bracket interleaved with the winners bracket", intro_message)
+
+        # Still fully played out end to end — the coin-flip loop drives
+        # interleaved scheduling exactly the same way it drives the
+        # default timing.
+        self.bot.cursor.execute(
+            "SELECT COUNT(*) FROM tournament_matches WHERE guildId=? AND state != 'RESOLVED'", (GUILD_ID,)
+        )
+        self.assertEqual(self.bot.cursor.fetchone()[0], 0)
+        self.assertIsNotNone(self.bot.helperObj._tournamentChampionName(GUILD_ID, tournament))
 
 
 class SetTeamSizeCommandTests(BotModuleTestCase):
@@ -4227,6 +6648,46 @@ class ClearCommandTests(BotModuleTestCase):
         self.assertEqual(self.bot.helperObj.getEconomy(guild_id, 901, "balance"), 1000)
 
 
+class SetBettingTimerCommandTests(BotModuleTestCase):
+    def test_requires_manage_guild_permission(self):
+        cmd = self._command("set-betting-timer")
+        denied = SimpleNamespace(permissions=discord.Permissions.none())
+
+        with self.assertRaises(app_commands.MissingPermissions):
+            for check in cmd.checks:
+                check(denied)
+
+    def test_manage_guild_permission_is_sufficient(self):
+        cmd = self._command("set-betting-timer")
+        allowed = SimpleNamespace(permissions=discord.Permissions(manage_guild=True))
+
+        for check in cmd.checks:
+            self.assertTrue(check(allowed))
+
+    async def test_error_handler_gives_a_friendly_denial_message(self):
+        cmd = self._command("set-betting-timer")
+        ctx = self._ctx()
+
+        await cmd.on_error(ctx, app_commands.MissingPermissions(["manage_guild"]))
+
+        ctx.response.send_message.assert_awaited_once()
+        self.assertIn("Manage Server", ctx.response.send_message.call_args.args[0])
+
+    async def test_error_handler_reraises_unrelated_errors(self):
+        cmd = self._command("set-betting-timer")
+        ctx = self._ctx()
+
+        with self.assertRaises(ValueError):
+            await cmd.on_error(ctx, ValueError("boom"))
+
+    async def test_delegates_to_helper(self):
+        ctx = self._ctx()
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "setBettingTimerHelper", mock):
+            await self._command("set-betting-timer").callback(ctx, seconds=30)
+        mock.assert_awaited_once_with(ctx, 30)
+
+
 class NotifyCommandTests(BotModuleTestCase):
     async def test_notify_reports_team_size(self):
         guild_id = 904
@@ -4251,10 +6712,25 @@ class NotifyCommandTests(BotModuleTestCase):
 
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "notifyHelper", mock):
-            await self._command("notify-role").callback(ctx, role=role)
+            await self._command("notify").callback(ctx, role=role)
 
         self.assertEqual(mock.await_count, 2)
         ctx.response.send_message.assert_awaited_once_with("Sent an invite for the 10 man!")
+
+    async def test_notify_rejects_when_neither_member_nor_role_given(self):
+        guild_id = 905
+        await self._insert_guild_row(guild_id)
+        ctx = self._ctx(guild_id=guild_id)
+        await self._command("notify").callback(ctx)
+        ctx.response.send_message.assert_awaited_once_with("Mention a member or a role to invite.")
+
+    async def test_notify_rejects_when_both_member_and_role_given(self):
+        guild_id = 905
+        await self._insert_guild_row(guild_id)
+        ctx = self._ctx(guild_id=guild_id)
+        role = SimpleNamespace(members=[FakeMember("A")])
+        await self._command("notify").callback(ctx, member=FakeMember("Target"), role=role)
+        ctx.response.send_message.assert_awaited_once_with("Give a member or a role, not both.")
 
 
 class RandomizeRolesCommandTests(BotModuleTestCase):
@@ -4371,12 +6847,23 @@ class MakeTeamsCommandTests(BotModuleTestCase):
 
 
 class RankedCommandTests(BotModuleTestCase):
-    async def test_delegates_to_ranked_team_helper(self):
+    async def test_make_teams_ranked_delegates_to_ranked_team_helper(self):
         ctx = self._ctx()
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "rankedTeamHelper", mock):
-            await self._command("ranked").callback(ctx)
+            await self._command("make-teams").callback(ctx, use_roles=False, ranked=True)
         mock.assert_awaited_once_with(ctx)
+
+    async def test_make_teams_ranked_ignores_use_roles(self):
+        # ranked=True short-circuits before the random-split/use_roles flow
+        # even runs — randomizeTeamHelper/both must never be touched.
+        ctx = self._ctx()
+        with patch.object(self.bot.helperObj, "rankedTeamHelper", AsyncMock()), \
+             patch.object(self.bot.helperObj, "randomizeTeamHelper", AsyncMock()) as random_mock, \
+             patch.object(self.bot.helperObj, "both", AsyncMock()) as both_mock:
+            await self._command("make-teams").callback(ctx, use_roles=True, ranked=True)
+        random_mock.assert_not_awaited()
+        both_mock.assert_not_awaited()
 
 
 class CaptainsCommandTests(BotModuleTestCase):
@@ -4422,8 +6909,8 @@ class CaptainsCommandTests(BotModuleTestCase):
 
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "captainsHelper", mock):
-            await self._command("ranked-captains").callback(
-                ctx, captain_1=cap1, captain_2=cap2, use_random=False
+            await self._command("captains").callback(
+                ctx, captain_1=cap1, captain_2=cap2, use_random=False, ranked=True
             )
 
         mock.assert_awaited_once_with(ctx, cap1, cap2, ranked=True)
