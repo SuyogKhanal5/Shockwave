@@ -78,6 +78,17 @@ commands, so the countdown runs as its own `asyncio.create_task`
 or a fresh `/start` can cancel it instead of leaving it to fire later
 against a game that no longer exists.
 
+Right after the move (and before betting opens), `/start` also posts the
+same matchup graphic a tournament match gets (`sendCurrentMatchupImage` →
+`_sendMatchupImage` → the tournament path's own `_renderMatchupImage`, just
+with no match id or tournament name in the subtitle) — deliberately only
+here, not at `/make-teams`/`/captains`/`/team-use` time, since those just
+form or load a roster and `/start` is the actual "this game is beginning"
+moment. The headline text comes from whichever `mode` string
+(`"Normal"`/`"Ranked"`/`"Captains"`/`"Ranked Captains"`) the most recent
+team-forming command left in `servers` (`_matchupLabelForMode`), so it
+reads correctly no matter how the two teams got there.
+
 ### Resolving a winner
 
 Betting state for a guild is a finite state machine stored in the
@@ -407,6 +418,18 @@ thumbnail via Discord's `attachment://<filename>` scheme (the file has to
 be attached to the same message the embed references it from); the
 matchup graphic (above) pastes it directly into the rendered image
 instead.
+
+`_ensureLogo` only ever runs for *persistent* teams (it needs a `team_id`
+row to write the pick back to) — the ad-hoc `Team` objects `/make-teams`,
+`/captains`, and ranked team formation build on the fly for a casual game
+never go through it, so `team.get_logo_path()` is still `None` for them by
+the time `/start`'s matchup graphic renders. Rather than draw a bare
+accent-colored ring for those, `_drawMatchupColumn` picks a random
+built-in logo right at render time and uses that instead — not persisted
+anywhere (there's no stable row to persist it against), so a re-render can
+land on a different one, which is fine for a team with no identity to keep
+consistent in the first place. Falls back to the ring only if the
+built-in set itself is unavailable.
 
 `/report-correct-winner` fixes a specific tournament match via its
 optional `match_id` — a narrower, separate path from the economy
