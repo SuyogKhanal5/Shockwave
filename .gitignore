@@ -3,3 +3,4 @@ token.txt
 __pycache__/
 .vscode/
 .claude/
+data/guildData/serverInfo/main.db

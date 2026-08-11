@@ -431,6 +431,39 @@ land on a different one, which is fine for a team with no identity to keep
 consistent in the first place. Falls back to the ring only if the
 built-in set itself is unavailable.
 
+### Trading cards
+
+`/stats` posts two reactions alongside the embed (see `handleStatsReaction`):
+🖼️ toggles the thumbnail between the player's real Discord avatar and
+Discord's own generic default avatar (comparing the embed's current
+thumbnail URL against `STATS_PLACEHOLDER_AVATAR_URL` to know which
+direction to flip), and 🎴 throws the whole embed away and replaces it with
+a rendered trading card (`_renderTradingCardImage`) — Shockwave's logo and
+the server's name across the top (the exact same `_drawBracketHeader` every
+other rendered image uses), the player's live avatar as a circular
+centerpiece, a customizable title underneath it, elo/record/gold in a
+three-column stat block, and (if they're rostered on any) their persistent
+teams. Unlike the avatar toggle, this is one-way — `handleStatsReaction`
+sets `stats_views.cardShown` and outright removes the 🖼️ reaction from the
+message once it fires, since a trading card isn't shaped like a normal
+`/stats` embed anymore and toggling a "thumbnail" that no longer exists
+would just corrupt it.
+
+A card's look lives in `trading_cards` (one row per (guild, player), same
+self-healing "insert defaults on first read" shape `ensureEconomyRow` uses
+for the economy table) — `title`, `accent_color`/`background_color`/
+`text_color` as `"#RRGGBB"` hex, and `font_style` (a named preset
+`_cardFontPaths` resolves to actual bundled font files; only `"default"` —
+Chakra Petch + IBM Plex Sans, the same pairing every other image already
+uses — exists today, but the column means more presets can be added later
+with no schema change). Defaults are Shockwave's own site palette, "Rookie"
+as a placeholder title, and that default font pairing. There's no
+`/customize-card`-style command yet — the table is meant to be edited
+directly (or through a future command) — but `_renderTradingCardImage`
+always reads through `getCardSettings` rather than hardcoding anything, so
+a changed row shows up on the next card rendered with no code changes
+needed.
+
 `/report-correct-winner` fixes a specific tournament match via its
 optional `match_id` — a narrower, separate path from the economy
 correction described above. It flips the match's recorded winner and

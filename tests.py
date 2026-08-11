@@ -22,6 +22,7 @@ Layout:
 
 import asyncio
 import contextlib
+import io
 import itertools
 import os
 import random
@@ -30,11 +31,11 @@ import sys
 import tempfile
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, PropertyMock, mock_open, patch
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, mock_open, patch
 
 import discord
 from discord import app_commands
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from TourneyClasses import (
     Player, Team, Tournament, BracketNode, serialize_bracket, deserialize_bracket,
@@ -61,6 +62,7 @@ SERVERS_SCHEMA = (
 ECONOMY_SCHEMA = (
     "CREATE TABLE economy(guildId, userId, username, balance, wins, losses, "
     "gold_wagered, gold_won, gold_lost, game_wins, game_losses, elo, last_daily, "
+    "ranked_wins DEFAULT 0, ranked_losses DEFAULT 0, "
     "PRIMARY KEY(guildId, userId))"
 )
 WAGERS_SCHEMA = (
@@ -83,6 +85,14 @@ TEAM_LIST_VIEWS_SCHEMA = (
     "CREATE TABLE team_list_views(messageId INTEGER PRIMARY KEY, guildId, channelId, "
     "search, recruitingOnly, sort, sort_order, page)"
 )
+STATS_VIEWS_SCHEMA = (
+    "CREATE TABLE stats_views(messageId INTEGER PRIMARY KEY, guildId, targetUserId, "
+    "cardShown INTEGER DEFAULT 0)"
+)
+TRADING_CARDS_SCHEMA = (
+    "CREATE TABLE trading_cards(guildId, userId, title, accent_color, background_color, "
+    "text_color, font_style, PRIMARY KEY(guildId, userId))"
+)
 TEAMS_SCHEMA = "CREATE TABLE teams(id INTEGER PRIMARY KEY AUTOINCREMENT, guildId, name, data)"
 TOURNAMENTS_SCHEMA = (
     "CREATE TABLE tournaments(guildId PRIMARY KEY, name, team_size, num_teams, "
@@ -95,7 +105,7 @@ TEAM_INVITES_SCHEMA = (
 TOURNAMENT_MATCHES_SCHEMA = (
     "CREATE TABLE tournament_matches(id INTEGER PRIMARY KEY AUTOINCREMENT, guildId, roundIndex, "
     "nodeIndex, team1, team2, state, mode, messageId, channelId, winner, bracketType, "
-    "bettingClosed DEFAULT 0)"
+    "bettingClosed DEFAULT 0, settledWagers)"
 )
 TOURNAMENT_WAGERS_SCHEMA = (
     "CREATE TABLE tournament_wagers(matchId, guildId, userId, username, team, amount, "
@@ -114,6 +124,8 @@ def make_db():
     cursor.execute(LEADERBOARDS_SCHEMA)
     cursor.execute(MY_TEAM_VIEWS_SCHEMA)
     cursor.execute(TEAM_LIST_VIEWS_SCHEMA)
+    cursor.execute(STATS_VIEWS_SCHEMA)
+    cursor.execute(TRADING_CARDS_SCHEMA)
     cursor.execute(TEAMS_SCHEMA)
     cursor.execute(TOURNAMENTS_SCHEMA)
     cursor.execute(TEAM_INVITES_SCHEMA)
@@ -153,6 +165,29 @@ class FakeDMChannel:
         self.send = AsyncMock()
 
 
+# Mimics just enough of discord.Asset for display_avatar — a .url plus a
+# .with_format() that swaps the extension, same as the real thing (see
+# statsHelper's with_format("png") call, which needs to work whether the
+# starting asset is already static or (like a GIF profile picture) animated).
+def _fake_avatar_bytes():
+    buffer = io.BytesIO()
+    Image.new("RGBA", (8, 8), (200, 50, 50, 255)).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+class FakeAsset:
+    def __init__(self, url):
+        self.url = url
+        # A real, decodable PNG by default — the trading card (see
+        # _swapStatsForTradingCard) actually opens this with PIL, same
+        # reason the fake logo files elsewhere had to stop being empty.
+        self.read = AsyncMock(return_value=_fake_avatar_bytes())
+
+    def with_format(self, fmt):
+        stem = self.url.rsplit(".", 1)[0]
+        return FakeAsset(f"{stem}.{fmt}")
+
+
 class FakeMember:
     def __init__(self, name, id=None, bot=False, manage_guild=True):
         self.id = id if id is not None else next_id()
@@ -164,6 +199,7 @@ class FakeMember:
         self.mention = f"<@{self.id}>"
         self.move_to = AsyncMock()
         self.create_dm = AsyncMock(return_value=FakeDMChannel())
+        self.display_avatar = FakeAsset(f"https://cdn.discordapp.com/embed/avatars/{self.id}.png")
         # Defaults to True so existing tests that don't care about
         # permissions aren't affected — pass manage_guild=False to test
         # the insufficient-permission path.
@@ -175,6 +211,7 @@ class FakeMessage:
         self.id = id if id is not None else next_id()
         self.add_reaction = AsyncMock()
         self.remove_reaction = AsyncMock()
+        self.clear_reaction = AsyncMock()
         self.edit = AsyncMock()
 
 
@@ -214,6 +251,15 @@ class FakeGuild:
         channel = FakeChannel(name, kind="text")
         self.channels.append(channel)
         return channel
+
+    def get_member(self, user_id):
+        return next((m for m in self.members if m.id == user_id), None)
+
+    async def fetch_member(self, user_id):
+        member = self.get_member(user_id)
+        if member is None:
+            raise LookupError(f"no member {user_id} in this fake guild")
+        return member
 
 
 class FakeInteraction:
@@ -2429,6 +2475,113 @@ class BracketImageTests(HelperTestCase):
         self.assertGreater(image.height, 0)
 
 
+class BracketNodeTextColorTests(HelperTestCase):
+    def _team(self, name):
+        team = Team()
+        team.set_name(name)
+        return team
+
+    # BUG FIX: _bracketNodeTextColor used to dim the node whose team WON
+    # and advanced (treating its old slot as a "stale waypoint"), leaving
+    # the team that actually lost there in full brightness — backwards
+    # from what a bracket reader expects (the winner should stand out).
+    def test_winner_node_is_not_dimmed(self):
+        red, blue = self._team("Red"), self._team("Blue")
+        winner_node = BracketNode(team=red)
+        next_node = BracketNode(team=red)  # Red's name repeats — they won
+        winner_node.next = next_node
+
+        self.assertEqual(self.helperObj._bracketNodeTextColor(winner_node), helper_module.BRACKET_TEXT_COLOR)
+
+    def test_loser_node_is_dimmed(self):
+        red, blue = self._team("Red"), self._team("Blue")
+        loser_node = BracketNode(team=blue)
+        next_node = BracketNode(team=red)  # Red's name shows up instead — Blue lost
+        loser_node.next = next_node
+
+        self.assertEqual(self.helperObj._bracketNodeTextColor(loser_node), helper_module.BRACKET_LINE_COLOR)
+
+    def test_undecided_match_is_not_dimmed(self):
+        node = BracketNode(team=self._team("Red"))
+        node.next = BracketNode(team=None)  # match hasn't resolved yet
+
+        self.assertEqual(self.helperObj._bracketNodeTextColor(node), helper_module.BRACKET_TEXT_COLOR)
+
+    def test_champion_node_is_not_dimmed(self):
+        champion_node = BracketNode(team=self._team("Red"))  # no .next at all
+
+        self.assertEqual(self.helperObj._bracketNodeTextColor(champion_node), helper_module.BRACKET_TEXT_COLOR)
+
+    def test_empty_node_is_not_dimmed(self):
+        self.assertEqual(self.helperObj._bracketNodeTextColor(BracketNode()), helper_module.BRACKET_TEXT_COLOR)
+
+
+class GrandFinalsImageDimmingTests(HelperTestCase):
+    def _team(self, name):
+        team = Team()
+        team.set_name(name)
+        return team
+
+    # Intercepts every draw.text(...) call the real render makes (wraps the
+    # actual method so the image still renders normally) and returns
+    # {label_text: fill_color}, so the fix can be checked against what
+    # actually got drawn instead of re-deriving the same formula the
+    # implementation uses.
+    def _drawn_colors(self, *args, **kwargs):
+        calls = {}
+        original = ImageDraw.ImageDraw.text
+
+        def recording_text(self_draw, xy, text, *a, fill=None, **kw):
+            calls[text] = fill
+            return original(self_draw, xy, text, *a, fill=fill, **kw)
+
+        with patch.object(ImageDraw.ImageDraw, "text", recording_text):
+            image = self.helperObj._buildGrandFinalsImage(*args, **kwargs)
+        return image, calls
+
+    # BUG FIX: neither Grand Finals stage used to dim its loser at all —
+    # "top"/"bottom" always drew in the same plain color no matter who won,
+    # unlike the main bracket images (see BracketNodeTextColorTests above).
+    def test_game_one_dims_the_loser_only(self):
+        wb_champion, lb_champion = self._team("Red"), self._team("Blue")
+        image, calls = self._drawn_colors(
+            Tournament("Cup", 1, 4, True), wb_champion, lb_champion,
+            game1_winner_name="Red", reset_winner_name=None,
+        )
+        self.assertGreater(image.width, 0)
+
+        top_label = "Red (winners bracket)"
+        bottom_label = "Blue (losers bracket)"
+        self.assertEqual(calls[top_label], helper_module.BRACKET_TEXT_COLOR)  # won game 1
+        self.assertEqual(calls[bottom_label], helper_module.BRACKET_LINE_COLOR)  # lost
+
+    def test_reset_stage_dims_whichever_side_lost_the_decider(self):
+        wb_champion, lb_champion = self._team("Red"), self._team("Blue")
+        # lb_champion won game 1 (forcing a reset), then wb_champion wins
+        # the decider — the reset stage's top is lb_champion, bottom is
+        # wb_champion (see _buildGrandFinalsImage's stage construction).
+        image, calls = self._drawn_colors(
+            Tournament("Cup", 1, 4, True), wb_champion, lb_champion,
+            game1_winner_name="Blue", reset_winner_name="Red",
+        )
+        self.assertGreater(image.width, 0)
+
+        reset_top_label = "Blue (won Game 1)"
+        reset_bottom_label = "Red (elimination game)"
+        self.assertEqual(calls[reset_top_label], helper_module.BRACKET_LINE_COLOR)  # lost the decider
+        self.assertEqual(calls[reset_bottom_label], helper_module.BRACKET_TEXT_COLOR)  # won it
+
+    def test_undecided_stage_dims_neither_side(self):
+        wb_champion, lb_champion = self._team("Red"), self._team("Blue")
+        image, calls = self._drawn_colors(
+            Tournament("Cup", 1, 4, True), wb_champion, lb_champion,
+            game1_winner_name=None, reset_winner_name=None,
+        )
+        self.assertGreater(image.width, 0)
+        self.assertEqual(calls["Red (winners bracket)"], helper_module.BRACKET_TEXT_COLOR)
+        self.assertEqual(calls["Blue (losers bracket)"], helper_module.BRACKET_TEXT_COLOR)
+
+
 class PrintBracketHelperTests(HelperTestCase):
     def _ctx(self, user_id=901, name="Alice"):
         return FakeInteraction(self.guild, FakeMember(name, id=user_id))
@@ -3012,6 +3165,64 @@ class CorrectTournamentMatchHelperTests(HelperTestCase):
         tournament = self.helperObj.getTournament(GUILD_ID)
         champion = tournament.get_bracket()[-1]
         self.assertEqual(champion.team.get_name(), team2.get_name())
+
+    # BUG FIX: correcting a tournament match used to only fix the bracket —
+    # any bets already settled against the wrong winner (see
+    # _settleMatchWagers) just stayed that way forever, since
+    # tournament_wagers' own rows are deleted the moment a match resolves.
+    async def test_correcting_a_match_reverses_and_reapplies_wager_payouts(self):
+        red = _captained_team("Red", 901, "Alice")
+        blue = _captained_team("Blue", 902, "Bob")
+        tournament = Tournament("Cup", 1, 2)
+        tournament.register_team(red)
+        tournament.register_team(blue)
+        tournament.set_bracket(self.helperObj.buildBracket([red, blue]))
+        self.helperObj.saveTournament(GUILD_ID, tournament)
+
+        ctx0 = FakeInteraction(self.guild, FakeMember("Alice", id=901), channel=self.channel)
+        await self.helperObj.startTournamentHelper(ctx0, "simultaneous")
+        self.cursor.execute("SELECT id, messageId FROM tournament_matches WHERE guildId=?", (GUILD_ID,))
+        match_id, message_id = self.cursor.fetchone()
+
+        for user_id, name, team in ((903, "Cleo", 1), (904, "Dan", 2)):
+            self.helperObj.ensureEconomyRow(GUILD_ID, user_id, name)
+            self.cursor.execute(
+                "UPDATE economy SET balance=1000 WHERE guildId=? AND userId=?", (GUILD_ID, user_id)
+            )
+            self.db.commit()
+            bettor_ctx = FakeInteraction(self.guild, FakeMember(name, id=user_id), channel=self.channel)
+            await self.helperObj.wagerHelper(bettor_ctx, 100, team, match_id)
+
+        # Resolved (wrongly) as Team 1 — Cleo wins the pot, Dan loses her bet.
+        payload = FakePayload(
+            GUILD_ID, message_id, self.channel.id, helper_module.TEAM_EMOJIS[1], user_id=555
+        )
+        await self.helperObj.handleTournamentReaction(payload)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 903, "balance"), 1100)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 904, "balance"), 900)
+
+        ctx = self._ctx()
+        await self.helperObj.reportCorrectWinnerHelper(ctx, 2, match_id=match_id)
+
+        self.assertIn("reversed and reapplied", ctx.response.send_message.call_args.args[0])
+        # Corrected: Dan actually won, Cleo actually lost.
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 903, "balance"), 900)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 904, "balance"), 1100)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 903, "wins"), 0)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 903, "losses"), 1)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 904, "wins"), 1)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 904, "losses"), 0)
+        # gold_wagered reflects each bettor's one real 100-gold bet — the
+        # reverse-then-reapply round trip doesn't double (or zero) it out.
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 903, "gold_wagered"), 100)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 904, "gold_wagered"), 100)
+
+    async def test_correcting_a_match_with_no_wagers_has_no_wager_note(self):
+        match_id = await self._resolved_match(winner=1)
+        ctx = self._ctx()
+        await self.helperObj.reportCorrectWinnerHelper(ctx, 2, match_id=match_id)
+        message = ctx.response.send_message.call_args.args[0]
+        self.assertNotIn("reversed", message)
 
     async def test_rejects_correcting_a_losers_bracket_match(self):
         self.cursor.execute(
@@ -4412,6 +4623,28 @@ class RecordResultTests(HelperTestCase):
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 701, "game_wins"), 1)
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 702, "game_losses"), 1)
         self.assertNotIn("Elo:", channel.send.call_args.args[0])
+        # a casual game bumps the combined game_wins/game_losses total but
+        # never the ranked-only subset — see getLeaderboardEntries's
+        # casual = game_wins - ranked_wins derivation.
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 701, "ranked_wins"), 0)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 702, "ranked_losses"), 0)
+
+    async def test_ranked_game_bumps_both_the_combined_and_ranked_only_record(self):
+        team1 = Team(); team1.name = "Team 1"
+        team1.add_player(Player(701, "P1"))
+        team2 = Team(); team2.name = "Team 2"
+        team2.add_player(Player(702, "P2"))
+        self.helperObj.update(GUILD_ID, "team1", team1.serializeTeam())
+        self.helperObj.update(GUILD_ID, "team2", team2.serializeTeam())
+        self.helperObj.update(GUILD_ID, "is_ranked", 1)
+
+        channel = FakeChannel("game-chat")
+        await self.helperObj.recordResult(GUILD_ID, 1, channel)
+
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 701, "game_wins"), 1)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 701, "ranked_wins"), 1)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 702, "game_losses"), 1)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 702, "ranked_losses"), 1)
 
 
 class ComputeGameDeltasTests(HelperTestCase):
@@ -4426,6 +4659,16 @@ class ComputeGameDeltasTests(HelperTestCase):
         self.assertEqual(deltas[2]["game_losses"], 1)
         self.assertEqual(summary["elo_changes"], [("Team 1", 16), ("Team 2", -16)])
 
+    def test_ranked_game_also_bumps_ranked_wins_losses(self):
+        deltas, _summary = self.helperObj.computeGameDeltas(
+            wagers=[], team1_roster=[(1, "A")], team2_roster=[(2, "B")],
+            elo_lookup={1: 1000, 2: 1000}, winning_team=1, is_ranked=True,
+        )
+        self.assertEqual(deltas[1]["ranked_wins"], 1)
+        self.assertEqual(deltas[1]["ranked_losses"], 0)
+        self.assertEqual(deltas[2]["ranked_wins"], 0)
+        self.assertEqual(deltas[2]["ranked_losses"], 1)
+
     def test_unranked_games_never_touch_elo(self):
         deltas, summary = self.helperObj.computeGameDeltas(
             wagers=[], team1_roster=[(1, "A")], team2_roster=[(2, "B")],
@@ -4437,6 +4680,14 @@ class ComputeGameDeltasTests(HelperTestCase):
         self.assertEqual(deltas[1]["game_wins"], 1)
         self.assertEqual(deltas[2]["game_losses"], 1)
         self.assertEqual(summary["elo_changes"], [])
+
+    def test_casual_games_never_touch_ranked_wins_losses(self):
+        deltas, _summary = self.helperObj.computeGameDeltas(
+            wagers=[], team1_roster=[(1, "A")], team2_roster=[(2, "B")],
+            elo_lookup={1: 800, 2: 1200}, winning_team=1, is_ranked=False,
+        )
+        self.assertEqual(deltas[1]["ranked_wins"], 0)
+        self.assertEqual(deltas[2]["ranked_losses"], 0)
 
     def test_applying_then_reversing_deltas_is_a_no_op(self):
         # this is exactly what /report-correct-winner relies on: reversing
@@ -4458,7 +4709,8 @@ class ComputeGameDeltasTests(HelperTestCase):
         def snapshot():
             self.cursor.execute(
                 "SELECT userId, balance, wins, losses, gold_wagered, gold_won, gold_lost, "
-                "game_wins, game_losses, elo FROM economy WHERE guildId=? ORDER BY userId",
+                "game_wins, game_losses, ranked_wins, ranked_losses, elo FROM economy "
+                "WHERE guildId=? ORDER BY userId",
                 (GUILD_ID,),
             )
             return self.cursor.fetchall()
@@ -4606,16 +4858,16 @@ class StatsHelperTests(HelperTestCase):
         embed = ctx.response.send_message.call_args.kwargs["embed"]
         values = {f.name: f.value for f in embed.fields}
         self.assertEqual(values["Elo"], "1000 (\U0001f537 Platinum IV)")
-        self.assertEqual(values["Game Record"], "0W - 0L")
-        self.assertEqual(values["Game Win Rate"], "N/A")
-        self.assertEqual(values["Bet Win Rate"], "N/A")
+        self.assertEqual(values["Game Record"], "0W - 0L (N/A)")
+        self.assertEqual(values["Bet Record"], "0W - 0L (N/A)")
         self.assertEqual(values["Balance"], "0 gold")
 
     async def test_reports_populated_stats(self):
         self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
         self.cursor.execute(
             "UPDATE economy SET balance=500, wins=2, losses=1, gold_wagered=300, "
-            "gold_won=150, gold_lost=50, game_wins=7, game_losses=3, elo=1123 "
+            "gold_won=150, gold_lost=50, game_wins=7, game_losses=3, "
+            "ranked_wins=4, ranked_losses=1, elo=1123 "
             "WHERE guildId=? AND userId=?",
             (GUILD_ID, 901),
         )
@@ -4627,11 +4879,46 @@ class StatsHelperTests(HelperTestCase):
         embed = ctx.response.send_message.call_args.kwargs["embed"]
         values = {f.name: f.value for f in embed.fields}
         self.assertEqual(values["Elo"], "1123 (\U0001f537 Platinum III)")
-        self.assertEqual(values["Game Record"], "7W - 3L")
-        self.assertEqual(values["Game Win Rate"], "70.0%")
-        self.assertEqual(values["Bet Record"], "2W - 1L")
-        self.assertEqual(values["Bet Win Rate"], "66.7%")
+        self.assertEqual(values["Game Record"], "7W - 3L (70.0%)")
+        # ranked: 4W-1L (from the columns above); casual is the remainder
+        # of the combined 7W-3L total, i.e. 3W-2L.
+        self.assertEqual(values["Ranked Wins"], "4W - 1L")
+        self.assertEqual(values["Ranked Win Rate"], "80.0%")
+        self.assertEqual(values["Casual Record"], "3W - 2L (60.0%)")
+        self.assertEqual(values["Bet Record"], "2W - 1L (66.7%)")
         self.assertEqual(values["Net Gold Won/Lost"], "+100 gold")
+
+    async def test_stats_shows_na_for_ranked_and_casual_rate_with_no_games(self):
+        ctx = self._ctx()
+        await self.helperObj.statsHelper(ctx)
+        embed = ctx.response.send_message.call_args.kwargs["embed"]
+        values = {f.name: f.value for f in embed.fields}
+        self.assertEqual(values["Ranked Wins"], "0W - 0L")
+        self.assertEqual(values["Ranked Win Rate"], "N/A")
+        self.assertEqual(values["Casual Record"], "0W - 0L (N/A)")
+
+    async def test_fields_are_grouped_ranked_then_casual_then_gold(self):
+        # regression test: a blank inline=False spacer field used to force
+        # the line break after the ranked row, but it still renders its
+        # own (invisible) name+value line — a big empty gap in the actual
+        # embed, not the clean break it looked like. Elo joining the
+        # ranked row instead (rounding it out to a full 3 wide, same as
+        # the other two rows) avoids needing a spacer at all.
+        ctx = self._ctx()
+        await self.helperObj.statsHelper(ctx)
+        embed = ctx.response.send_message.call_args.kwargs["embed"]
+        names = [f.name for f in embed.fields]
+
+        self.assertTrue(all(f.inline for f in embed.fields))
+
+        # Row 1 (ranked, exactly 3 wide).
+        self.assertEqual(names[0:3], ["Elo", "Ranked Wins", "Ranked Win Rate"])
+
+        # Row 2 (casual + bet, exactly 3 wide).
+        self.assertEqual(names[3:6], ["Game Record", "Casual Record", "Bet Record"])
+
+        # Row 3 (gold, exactly 3 wide).
+        self.assertEqual(names[6:9], ["Balance", "Net Gold Won/Lost", "Gold Wagered"])
 
     async def test_looks_up_another_members_stats(self):
         other = FakeMember("Bob", id=902)
@@ -4648,6 +4935,330 @@ class StatsHelperTests(HelperTestCase):
         self.assertIn("Bob", embed.title)
         values = {f.name: f.value for f in embed.fields}
         self.assertEqual(values["Elo"], "1200 (\U0001f537 Platinum I)")
+
+    async def test_embed_thumbnail_is_the_targets_avatar(self):
+        ctx = self._ctx()  # caller is Alice (901)
+        await self.helperObj.statsHelper(ctx)
+        embed = ctx.response.send_message.call_args.kwargs["embed"]
+        self.assertEqual(embed.thumbnail.url, ctx.user.display_avatar.url)
+
+    async def test_embed_thumbnail_follows_the_looked_up_member_not_the_caller(self):
+        other = FakeMember("Bob", id=902)
+        ctx = self._ctx()  # caller is Alice (901)
+        await self.helperObj.statsHelper(ctx, other)
+        embed = ctx.response.send_message.call_args.kwargs["embed"]
+        self.assertEqual(embed.thumbnail.url, other.display_avatar.url)
+        self.assertNotEqual(embed.thumbnail.url, ctx.user.display_avatar.url)
+
+    async def test_animated_avatar_thumbnail_is_forced_to_a_static_format(self):
+        # BUG FIX: a GIF profile picture's thumbnail used to just never
+        # attach to the embed at all — Discord doesn't reliably unfurl an
+        # animated .gif in the embed thumbnail slot. Forcing a static
+        # format (see statsHelper's with_format("png") call) is what fixes
+        # that, at the cost of losing the animation.
+        ctx = self._ctx()
+        ctx.user.display_avatar = FakeAsset("https://cdn.discordapp.com/avatars/901/a_deadbeef.gif")
+
+        await self.helperObj.statsHelper(ctx)
+
+        embed = ctx.response.send_message.call_args.kwargs["embed"]
+        self.assertEqual(embed.thumbnail.url, "https://cdn.discordapp.com/avatars/901/a_deadbeef.png")
+
+
+class HandleStatsReactionTests(HelperTestCase):
+    def setUp(self):
+        super().setUp()
+        self.channel = FakeChannel("stats-chat", guild=self.guild)
+        self.helperObj.client = FakeClient(channels=[self.channel], guilds=[self.guild])
+
+    def _ctx(self):
+        return FakeInteraction(self.guild, FakeMember("Alice", id=901), channel=self.channel)
+
+    async def test_posting_stats_reacts_with_both_emoji_and_tracks_the_view(self):
+        ctx = self._ctx()
+        await self.helperObj.statsHelper(ctx)
+
+        msg = await ctx.original_response()
+        msg.add_reaction.assert_any_await(helper_module.STATS_PLACEHOLDER_EMOJI)
+        msg.add_reaction.assert_any_await(helper_module.STATS_CARD_EMOJI)
+        self.assertEqual(msg.add_reaction.await_count, 2)
+
+        self.cursor.execute("SELECT guildId, targetUserId FROM stats_views WHERE messageId=?", (msg.id,))
+        self.assertEqual(self.cursor.fetchone(), (GUILD_ID, 901))
+
+    async def test_reaction_swaps_thumbnail_to_placeholder_and_clears_the_reactors_click(self):
+        ctx = self._ctx()
+        await self.helperObj.statsHelper(ctx)
+        msg = await ctx.original_response()
+        original_embed = ctx.response.send_message.call_args.kwargs["embed"]
+
+        fetched_message = FakeMessage(id=msg.id)
+        fetched_message.embeds = [original_embed]
+        self.channel.fetch_message = AsyncMock(return_value=fetched_message)
+
+        payload = FakePayload(
+            GUILD_ID, msg.id, self.channel.id, helper_module.STATS_PLACEHOLDER_EMOJI,
+            member=FakeMember("Bob", id=902), user_id=902
+        )
+        await self.helperObj.handleStatsReaction(payload)
+
+        fetched_message.edit.assert_awaited_once()
+        edited_embed = fetched_message.edit.call_args.kwargs["embed"]
+        self.assertEqual(edited_embed.thumbnail.url, helper_module.STATS_PLACEHOLDER_AVATAR_URL)
+        # everything else on the embed is untouched
+        self.assertEqual(edited_embed.title, original_embed.title)
+        self.assertEqual(edited_embed.fields, original_embed.fields)
+        # the reactor's own click is cleared so the emoji stays clickable
+        # for someone else too (see _clearPagingReaction).
+        fetched_message.remove_reaction.assert_awaited_once_with(
+            payload.emoji, payload.member
+        )
+
+    async def test_ignores_reactions_on_a_message_that_is_not_a_stats_embed(self):
+        self.channel.fetch_message = AsyncMock()
+        payload = FakePayload(
+            GUILD_ID, 999999, self.channel.id, helper_module.STATS_PLACEHOLDER_EMOJI, user_id=902
+        )
+        await self.helperObj.handleStatsReaction(payload)
+        self.channel.fetch_message.assert_not_awaited()
+
+    async def test_ignores_unrelated_emoji_on_a_real_stats_message(self):
+        ctx = self._ctx()
+        await self.helperObj.statsHelper(ctx)
+        msg = await ctx.original_response()
+        self.channel.fetch_message = AsyncMock()
+
+        payload = FakePayload(GUILD_ID, msg.id, self.channel.id, "🎉", user_id=902)
+        await self.helperObj.handleStatsReaction(payload)
+        self.channel.fetch_message.assert_not_awaited()
+
+    async def test_ignores_dm_reactions(self):
+        payload = FakePayload(None, 12345, self.channel.id, helper_module.STATS_PLACEHOLDER_EMOJI, user_id=902)
+        await self.helperObj.handleStatsReaction(payload)
+        # no crash despite guild_id=None is the assertion here
+
+    async def test_toggles_back_to_the_real_avatar_on_a_second_click(self):
+        alice = FakeMember("Alice", id=901)
+        self.guild.members = [alice]
+        ctx = FakeInteraction(self.guild, alice, channel=self.channel)
+        await self.helperObj.statsHelper(ctx)
+        msg = await ctx.original_response()
+        real_avatar_url = alice.display_avatar.with_format("png").url
+
+        embed_showing_placeholder = ctx.response.send_message.call_args.kwargs["embed"]
+        embed_showing_placeholder.set_thumbnail(url=helper_module.STATS_PLACEHOLDER_AVATAR_URL)
+        fetched_message = FakeMessage(id=msg.id)
+        fetched_message.embeds = [embed_showing_placeholder]
+        self.channel.fetch_message = AsyncMock(return_value=fetched_message)
+
+        payload = FakePayload(
+            GUILD_ID, msg.id, self.channel.id, helper_module.STATS_PLACEHOLDER_EMOJI,
+            member=FakeMember("Bob", id=902), user_id=902
+        )
+        await self.helperObj.handleStatsReaction(payload)
+
+        fetched_message.edit.assert_awaited_once()
+        edited_embed = fetched_message.edit.call_args.kwargs["embed"]
+        self.assertEqual(edited_embed.thumbnail.url, real_avatar_url)
+
+    async def test_toggle_back_leaves_the_placeholder_if_the_member_left_the_guild(self):
+        # Alice deliberately NOT added to self.guild.members — simulates
+        # her having left, so neither get_member nor fetch_member can
+        # resolve a real avatar to switch back to.
+        ctx = self._ctx()
+        await self.helperObj.statsHelper(ctx)
+        msg = await ctx.original_response()
+
+        embed_showing_placeholder = ctx.response.send_message.call_args.kwargs["embed"]
+        embed_showing_placeholder.set_thumbnail(url=helper_module.STATS_PLACEHOLDER_AVATAR_URL)
+        fetched_message = FakeMessage(id=msg.id)
+        fetched_message.embeds = [embed_showing_placeholder]
+        self.channel.fetch_message = AsyncMock(return_value=fetched_message)
+
+        payload = FakePayload(
+            GUILD_ID, msg.id, self.channel.id, helper_module.STATS_PLACEHOLDER_EMOJI,
+            member=FakeMember("Bob", id=902), user_id=902
+        )
+        await self.helperObj.handleStatsReaction(payload)
+
+        fetched_message.edit.assert_not_awaited()
+
+    async def test_card_reaction_replaces_the_whole_embed_with_a_trading_card(self):
+        alice = FakeMember("Alice", id=901)
+        self.guild.members = [alice]
+        ctx = FakeInteraction(self.guild, alice, channel=self.channel)
+        await self.helperObj.statsHelper(ctx)
+        msg = await ctx.original_response()
+        original_embed = ctx.response.send_message.call_args.kwargs["embed"]
+
+        fetched_message = FakeMessage(id=msg.id)
+        fetched_message.embeds = [original_embed]
+        self.channel.fetch_message = AsyncMock(return_value=fetched_message)
+
+        payload = FakePayload(
+            GUILD_ID, msg.id, self.channel.id, helper_module.STATS_CARD_EMOJI,
+            member=FakeMember("Bob", id=902), user_id=902
+        )
+        await self.helperObj.handleStatsReaction(payload)
+
+        fetched_message.edit.assert_awaited_once()
+        new_embed = fetched_message.edit.call_args.kwargs["embed"]
+        # the stats content is gone entirely — this is a full replacement,
+        # not just another field/thumbnail tweak like the avatar toggle.
+        self.assertEqual(len(new_embed.fields), 0)
+        self.assertIsNotNone(new_embed.image.url)
+        self.assertTrue(new_embed.image.url.startswith("attachment://"))
+
+        attached_files = fetched_message.edit.call_args.kwargs["attachments"]
+        self.assertEqual(len(attached_files), 1)
+        self.assertTrue(new_embed.image.url.endswith(attached_files[0].filename))
+        attached_files[0].close()
+
+        # cardShown is recorded, and the now-irrelevant avatar-toggle
+        # reaction is removed from the message outright.
+        self.cursor.execute("SELECT cardShown FROM stats_views WHERE messageId=?", (msg.id,))
+        self.assertEqual(self.cursor.fetchone(), (1,))
+        fetched_message.clear_reaction.assert_awaited_once_with(helper_module.STATS_PLACEHOLDER_EMOJI)
+
+    async def test_avatar_toggle_is_disabled_once_the_card_reaction_has_fired(self):
+        alice = FakeMember("Alice", id=901)
+        self.guild.members = [alice]
+        ctx = FakeInteraction(self.guild, alice, channel=self.channel)
+        await self.helperObj.statsHelper(ctx)
+        msg = await ctx.original_response()
+
+        fetched_message = FakeMessage(id=msg.id)
+        fetched_message.embeds = [ctx.response.send_message.call_args.kwargs["embed"]]
+        self.channel.fetch_message = AsyncMock(return_value=fetched_message)
+        bob = FakeMember("Bob", id=902)
+
+        card_payload = FakePayload(GUILD_ID, msg.id, self.channel.id, helper_module.STATS_CARD_EMOJI, member=bob, user_id=902)
+        await self.helperObj.handleStatsReaction(card_payload)
+        fetched_message.edit.reset_mock()
+
+        toggle_payload = FakePayload(
+            GUILD_ID, msg.id, self.channel.id, helper_module.STATS_PLACEHOLDER_EMOJI, member=bob, user_id=902
+        )
+        await self.helperObj.handleStatsReaction(toggle_payload)
+
+        fetched_message.edit.assert_not_awaited()
+
+    async def test_card_falls_back_to_a_plain_tile_if_the_avatar_cant_be_fetched(self):
+        alice = FakeMember("Alice", id=901)
+        alice.display_avatar.read = AsyncMock(side_effect=Exception("network hiccup"))
+        self.guild.members = [alice]
+        ctx = FakeInteraction(self.guild, alice, channel=self.channel)
+        await self.helperObj.statsHelper(ctx)
+        msg = await ctx.original_response()
+
+        fetched_message = FakeMessage(id=msg.id)
+        fetched_message.embeds = [ctx.response.send_message.call_args.kwargs["embed"]]
+        self.channel.fetch_message = AsyncMock(return_value=fetched_message)
+
+        payload = FakePayload(
+            GUILD_ID, msg.id, self.channel.id, helper_module.STATS_CARD_EMOJI,
+            member=FakeMember("Bob", id=902), user_id=902
+        )
+        await self.helperObj.handleStatsReaction(payload)
+
+        # still renders and posts a card despite the failed avatar fetch
+        fetched_message.edit.assert_awaited_once()
+        fetched_message.edit.call_args.kwargs["attachments"][0].close()
+
+
+class TradingCardSettingsTests(HelperTestCase):
+    def test_ensure_creates_shockwave_default_settings(self):
+        self.helperObj.ensureCardSettings(GUILD_ID, 901)
+        self.cursor.execute(
+            "SELECT title, accent_color, background_color, text_color, font_style "
+            "FROM trading_cards WHERE guildId=? AND userId=?",
+            (GUILD_ID, 901)
+        )
+        self.assertEqual(
+            self.cursor.fetchone(),
+            (
+                helper_module.CARD_DEFAULT_TITLE, helper_module.CARD_DEFAULT_ACCENT_COLOR,
+                helper_module.CARD_DEFAULT_BACKGROUND_COLOR, helper_module.CARD_DEFAULT_TEXT_COLOR,
+                helper_module.CARD_DEFAULT_FONT_STYLE,
+            )
+        )
+
+    def test_ensure_does_not_overwrite_an_existing_customization(self):
+        self.helperObj.ensureCardSettings(GUILD_ID, 901)
+        self.cursor.execute(
+            "UPDATE trading_cards SET title=?, accent_color=? WHERE guildId=? AND userId=?",
+            ("Legend", "#FF0000", GUILD_ID, 901)
+        )
+        self.db.commit()
+
+        self.helperObj.ensureCardSettings(GUILD_ID, 901)
+
+        settings = self.helperObj.getCardSettings(GUILD_ID, 901)
+        self.assertEqual(settings["title"], "Legend")
+        self.assertEqual(settings["accent_color"], "#FF0000")
+
+    def test_get_card_settings_creates_defaults_for_a_brand_new_player(self):
+        settings = self.helperObj.getCardSettings(GUILD_ID, 902)
+        self.assertEqual(settings["title"], helper_module.CARD_DEFAULT_TITLE)
+        self.assertEqual(settings["accent_color"], helper_module.CARD_DEFAULT_ACCENT_COLOR)
+        self.assertEqual(settings["font_style"], helper_module.CARD_DEFAULT_FONT_STYLE)
+
+
+class HexToRgbTests(HelperTestCase):
+    def test_parses_a_valid_hex_color(self):
+        self.assertEqual(self.helperObj._hexToRgb("#EDC643", (0, 0, 0)), (237, 198, 67))
+
+    def test_falls_back_for_invalid_input(self):
+        fallback = (1, 2, 3)
+        self.assertEqual(self.helperObj._hexToRgb("not-a-color", fallback), fallback)
+        self.assertEqual(self.helperObj._hexToRgb(None, fallback), fallback)
+        self.assertEqual(self.helperObj._hexToRgb("#ZZZZZZ", fallback), fallback)
+
+
+class RenderTradingCardImageTests(HelperTestCase):
+    def test_renders_without_crashing_with_default_settings_and_no_teams(self):
+        settings = {
+            "title": helper_module.CARD_DEFAULT_TITLE, "accent_color": helper_module.CARD_DEFAULT_ACCENT_COLOR,
+            "background_color": helper_module.CARD_DEFAULT_BACKGROUND_COLOR,
+            "text_color": helper_module.CARD_DEFAULT_TEXT_COLOR, "font_style": helper_module.CARD_DEFAULT_FONT_STYLE,
+        }
+        stats = {"balance": 500, "game_wins": 7, "game_losses": 3, "elo": 1123, "elo_rank": "Platinum III"}
+        avatar = Image.new("RGBA", (64, 64), (255, 0, 0, 255))
+
+        image = self.helperObj._renderTradingCardImage("Test Guild", "Alice", avatar, settings, stats, [])
+
+        self.assertEqual(image.width, helper_module.CARD_WIDTH)
+        self.assertGreater(image.height, 0)
+
+    def test_grows_taller_to_fit_team_names(self):
+        settings = {
+            "title": "X", "accent_color": "#EDC643", "background_color": "#150B22",
+            "text_color": "#F3EFFA", "font_style": "default",
+        }
+        stats = {"balance": 0, "game_wins": 0, "game_losses": 0, "elo": 1000, "elo_rank": "Platinum IV"}
+        avatar = Image.new("RGBA", (64, 64), (255, 0, 0, 255))
+
+        without_teams = self.helperObj._renderTradingCardImage("Guild", "Alice", avatar, settings, stats, [])
+        with_teams = self.helperObj._renderTradingCardImage(
+            "Guild", "Alice", avatar, settings, stats, ["Red Dragons", "Blue Phoenixes", "Green Giants"]
+        )
+        self.assertGreater(with_teams.height, without_teams.height)
+
+    def test_custom_colors_are_respected(self):
+        # A hand-picked accent color should show up as the frame's outline
+        # pixel color — the simplest observable proof the setting actually
+        # reached the renderer instead of silently falling back to default.
+        settings = {
+            "title": "X", "accent_color": "#00FF00", "background_color": "#000000",
+            "text_color": "#FFFFFF", "font_style": "default",
+        }
+        stats = {"balance": 0, "game_wins": 0, "game_losses": 0, "elo": 1000, "elo_rank": "Platinum IV"}
+        avatar = Image.new("RGBA", (64, 64), (255, 0, 0, 255))
+
+        image = self.helperObj._renderTradingCardImage("Guild", "Alice", avatar, settings, stats, [])
+        mid_y = image.height // 2
+        border_pixel = image.convert("RGB").getpixel((helper_module.BRACKET_LINE_WIDTH, mid_y))
+        self.assertEqual(border_pixel, (0, 255, 0))
 
 
 class EloRankLabelTests(HelperTestCase):
@@ -4683,6 +5294,17 @@ class EloRankLabelTests(HelperTestCase):
         for elo, expected in cases:
             with self.subTest(elo=elo):
                 self.assertEqual(self.helperObj.eloRankLabel(elo), expected)
+
+    def test_plain_label_omits_the_leading_emoji(self):
+        # eloRankLabelPlain is what the trading card uses (see
+        # _swapStatsForTradingCard) — PIL's bundled TTF fonts can't render
+        # these emoji, so the card needs the tier text without one.
+        self.assertEqual(self.helperObj.eloRankLabelPlain(1123), "Platinum III")
+        self.assertEqual(self.helperObj.eloRankLabelPlain(1600), "Master")
+        self.assertEqual(
+            self.helperObj.eloRankLabel(1123),
+            f"\U0001f537 {self.helperObj.eloRankLabelPlain(1123)}"
+        )
 
 
 class CancelBettingHelperTests(HelperTestCase):
@@ -5415,6 +6037,33 @@ class LeaderboardHelperTests(HelperTestCase):
         self.assertEqual(by_id[901]["net_gold"], 200)
         self.assertIsNone(by_id[903]["bet_win_rate"])
         self.assertIsNone(by_id[903]["game_win_rate"])
+        # nobody in _seed_players has any ranked-tagged games, so the
+        # entire game_wins/game_losses total should read as casual, and
+        # ranked_win_rate stays None the same way an empty game_win_rate does.
+        self.assertEqual(by_id[901]["casual_wins"], 5)
+        self.assertEqual(by_id[901]["casual_losses"], 2)
+        self.assertAlmostEqual(by_id[901]["casual_win_rate"], 5 / 7)
+        self.assertIsNone(by_id[901]["ranked_win_rate"])
+
+    def test_get_leaderboard_entries_splits_ranked_from_casual(self):
+        self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.cursor.execute(
+            "UPDATE economy SET game_wins=5, game_losses=2, ranked_wins=3, ranked_losses=1 "
+            "WHERE guildId=? AND userId=901", (GUILD_ID,)
+        )
+        self.db.commit()
+
+        entries = self.helperObj.getLeaderboardEntries(GUILD_ID)
+        entry = entries[0]
+
+        self.assertEqual(entry["ranked_wins"], 3)
+        self.assertEqual(entry["ranked_losses"], 1)
+        self.assertAlmostEqual(entry["ranked_win_rate"], 3 / 4)
+        # casual = the remainder of game_wins/game_losses after ranked is
+        # taken out — 5-3 wins, 2-1 losses.
+        self.assertEqual(entry["casual_wins"], 2)
+        self.assertEqual(entry["casual_losses"], 1)
+        self.assertAlmostEqual(entry["casual_win_rate"], 2 / 3)
 
     def test_sort_descending_by_elo_puts_highest_first(self):
         self._seed_players()
@@ -6000,7 +6649,7 @@ class ReactionEventTests(BotModuleTestCase):
     HANDLER_NAMES = (
         "handleWinnerReaction", "handleDuelReaction", "handleLeaderboardReaction",
         "handleMyTeamsReaction", "handleTeamListReaction", "handleTeamInviteReaction",
-        "handleTournamentReaction",
+        "handleTournamentReaction", "handleStatsReaction",
     )
 
     def _patch_all_handlers(self, stack):
@@ -6040,6 +6689,74 @@ class ReactionEventTests(BotModuleTestCase):
             await self.bot.on_raw_reaction_add(payload)
         for mock in mocks.values():
             mock.assert_awaited_once_with(payload)
+
+    async def test_one_handler_raising_does_not_block_the_rest(self):
+        # regression: these used to run as one unguarded sequence of
+        # awaits — an exception from an earlier handler (here,
+        # handleWinnerReaction, first in the list) used to skip every
+        # handler after it for that same reaction, with nothing telling
+        # the user their click didn't do anything.
+        payload = SimpleNamespace(member=FakeMember("User"), guild_id=1)
+        with contextlib.ExitStack() as stack:
+            mocks = self._patch_all_handlers(stack)
+            mocks["handleWinnerReaction"].side_effect = ValueError("boom")
+            await self.bot.on_raw_reaction_add(payload)
+        for name, mock in mocks.items():
+            mock.assert_awaited_once_with(payload)
+
+
+class GlobalErrorHandlerTests(BotModuleTestCase):
+    def _ctx_with_response_done(self, done):
+        ctx = self._ctx()
+        # discord.py's real InteractionResponse.is_done() is a plain sync
+        # method, not a coroutine — ctx.response is an AsyncMock, whose
+        # attributes default to AsyncMock too, so it has to be overridden
+        # explicitly here rather than just awaited like everything else on it.
+        ctx.response.is_done = MagicMock(return_value=done)
+        return ctx
+
+    async def test_missing_permissions_gets_a_specific_message(self):
+        ctx = self._ctx_with_response_done(False)
+        error = app_commands.MissingPermissions(["manage_guild"])
+
+        await self.bot.tree.on_error(ctx, error)
+
+        ctx.response.send_message.assert_awaited_once_with(
+            "You don't have permission to use this command.", ephemeral=True
+        )
+
+    async def test_unexpected_error_gets_a_generic_message(self):
+        ctx = self._ctx_with_response_done(False)
+        error = ValueError("boom")
+
+        await self.bot.tree.on_error(ctx, error)
+
+        ctx.response.send_message.assert_awaited_once()
+        message = ctx.response.send_message.call_args.args[0]
+        self.assertIn("Something went wrong", message)
+        self.assertTrue(ctx.response.send_message.call_args.kwargs.get("ephemeral"))
+
+    async def test_skips_the_generic_message_if_a_local_handler_already_responded(self):
+        # setBettingTimer_error/reportCorrectWinner_error/clearAll_error
+        # already send their own MissingPermissions message and return —
+        # discord.py calls this tree-wide handler right afterward
+        # regardless (CommandTree._dispatch_error always calls both), so
+        # without this check every permission error would get a second,
+        # redundant message stacked on top of the specific one.
+        ctx = self._ctx_with_response_done(True)
+        error = app_commands.MissingPermissions(["manage_guild"])
+
+        await self.bot.tree.on_error(ctx, error)
+
+        ctx.response.send_message.assert_not_awaited()
+
+    async def test_skips_the_generic_message_for_unexpected_errors_too_once_already_responded(self):
+        ctx = self._ctx_with_response_done(True)
+        error = ValueError("boom")
+
+        await self.bot.tree.on_error(ctx, error)
+
+        ctx.response.send_message.assert_not_awaited()
 
 
 class CommandDelegationTests(BotModuleTestCase):
@@ -6505,8 +7222,7 @@ class ClearCommandTests(BotModuleTestCase):
         guild_id = 903
         await self._insert_guild_row(guild_id)
         self.bot.helperObj.update(guild_id, "channel1", "Red")
-        self.bot.helperObj.update(guild_id, "tournament", "Spring Cup")
-        self.bot.helperObj.update(guild_id, "elo", "1200")
+        self.bot.helperObj.saveTournament(guild_id, Tournament("Spring Cup", 2, 4))
         ctx = self._ctx(guild_id=guild_id)
 
         await self._command("clear").callback(
@@ -6514,9 +7230,31 @@ class ClearCommandTests(BotModuleTestCase):
         )
 
         self.assertEqual(self.bot.helperObj.get(guild_id, "channel1"), "")
-        self.assertEqual(self.bot.helperObj.get(guild_id, "tournament"), "")
-        self.assertEqual(self.bot.helperObj.get(guild_id, "elo"), "")
+        # regression: clear_tournament used to write to a dead servers.tournament
+        # column and never actually touch a real /tournament-create tournament.
+        self.assertIsNone(self.bot.helperObj.getTournament(guild_id))
         ctx.response.send_message.assert_awaited_once_with("Cleared!")
+
+    async def test_clear_tournament_also_wipes_its_match_history(self):
+        guild_id = 9037
+        await self._insert_guild_row(guild_id)
+        self.bot.helperObj.saveTournament(guild_id, Tournament("Spring Cup", 2, 4))
+        self.bot.cursor.execute(
+            "INSERT INTO tournament_matches"
+            "(guildId, roundIndex, nodeIndex, team1, team2, state, mode, messageId, channelId, winner, bracketType) "
+            "VALUES(?, 0, 0, '', '', 'RESOLVED', 'simultaneous', NULL, NULL, NULL, 'winners')",
+            (guild_id,)
+        )
+        self.bot.mainDB.commit()
+        ctx = self._ctx(guild_id=guild_id)
+
+        await self._command("clear").callback(ctx, clear_tournament=True)
+
+        self.assertIsNone(self.bot.helperObj.getTournament(guild_id))
+        self.bot.cursor.execute(
+            "SELECT COUNT(*) FROM tournament_matches WHERE guildId=?", (guild_id,)
+        )
+        self.assertEqual(self.bot.cursor.fetchone()[0], 0)
 
     async def test_leaves_optional_fields_alone_by_default(self):
         guild_id = 9031
@@ -6582,9 +7320,7 @@ class ClearCommandTests(BotModuleTestCase):
 
         await self._command("clear").callback(ctx, clear_elo=True)
 
-        # the legacy servers.elo field clears immediately; real per-player
-        # elo does not, until the reset is confirmed.
-        self.assertEqual(self.bot.helperObj.get(guild_id, "elo"), "")
+        # real per-player elo doesn't change until the reset is confirmed.
         self.assertEqual(self.bot.helperObj.getEconomy(guild_id, 901, "elo"), 1500)
 
         view = ctx.followup.send.call_args.kwargs["view"]

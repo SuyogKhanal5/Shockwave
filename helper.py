@@ -167,6 +167,47 @@ TEAM_INVITE_ACCEPT_EMOJI = "✅"
 # tournament_matches row instead of the guild's single betting_message_id.
 TOURNAMENT_READY_EMOJI = "✅"
 
+# /stats: react to toggle the shown avatar between the player's real one
+# and a generic placeholder (see handleStatsReaction) — same reaction
+# either direction, flipping based on whichever's currently showing.
+# Discord's own "embed/avatars/0.png" is one of its built-in default-avatar
+# images (0-5, no real user tied to it), so this needs no locally-hosted
+# asset for the placeholder half of the toggle.
+STATS_PLACEHOLDER_EMOJI = "\U0001f5bc️"  # 🖼️
+STATS_PLACEHOLDER_AVATAR_URL = "https://cdn.discordapp.com/embed/avatars/0.png"
+# /stats: react to blow the whole embed away and replace it with the
+# player's trading card (see _renderTradingCardImage) — a one-way swap, not
+# part of the avatar toggle above, and it disables that toggle afterward
+# (see handleStatsReaction) since a card isn't shaped like a normal /stats
+# embed anymore.
+STATS_CARD_EMOJI = "\U0001f3b4"  # 🎴
+
+# Trading-card layout (see _renderTradingCardImage) — a portrait card
+# roughly the shape of a real trading card, reusing the same canvas/header
+# building blocks (_createBracketCanvas, _drawBracketHeader) every other
+# rendered image in this file already uses, so it reads as the same
+# product rather than a bolted-on fourth visual style.
+CARD_WIDTH = 360 * BRACKET_SUPERSAMPLE
+CARD_AVATAR_SIZE = 176 * BRACKET_SUPERSAMPLE
+CARD_AVATAR_BORDER = 3 * BRACKET_SUPERSAMPLE
+CARD_NAME_FONT_SIZE = 20 * BRACKET_SUPERSAMPLE
+CARD_TITLE_FONT_SIZE = 14 * BRACKET_SUPERSAMPLE
+CARD_STAT_LABEL_FONT_SIZE = 11 * BRACKET_SUPERSAMPLE
+CARD_STAT_VALUE_FONT_SIZE = 15 * BRACKET_SUPERSAMPLE
+CARD_STAT_ROW_HEIGHT = 40 * BRACKET_SUPERSAMPLE
+
+# trading_cards' defaults — Shockwave's own site palette (see BRACKET_*
+# above) and font pairing, so a player who's never customized their card
+# gets exactly the same look every other rendered image already has,
+# rather than something generic. Colors are stored as "#RRGGBB" hex in the
+# table (portable, human-editable) and converted back to RGB tuples at
+# render time (see _hexToRgb).
+CARD_DEFAULT_TITLE = "Rookie"
+CARD_DEFAULT_ACCENT_COLOR = "#EDC643"      # --gold, same as BRACKET_TITLE_COLOR
+CARD_DEFAULT_BACKGROUND_COLOR = "#150B22"  # --ink, same as BRACKET_BACKGROUND
+CARD_DEFAULT_TEXT_COLOR = "#F3EFFA"        # --text, same as BRACKET_TEXT_COLOR
+CARD_DEFAULT_FONT_STYLE = "default"        # Chakra Petch + IBM Plex Sans — see _cardFontPaths
+
 # League-style rank tiers for /stats. Each tier spans 250 elo, with
 # DEFAULT_ELO (1000) landing every new player in the middle at Platinum —
 # ascending order, (elo threshold, tier name, emoji).
@@ -230,6 +271,12 @@ LEADERBOARD_STAT_LABELS = {
     "game_wins": "Game Wins",
     "game_losses": "Game Losses",
     "game_win_rate": "Game Win Rate",
+    "ranked_wins": "Ranked Wins",
+    "ranked_losses": "Ranked Losses",
+    "ranked_win_rate": "Ranked Win Rate",
+    "casual_wins": "Casual Wins",
+    "casual_losses": "Casual Losses",
+    "casual_win_rate": "Casual Win Rate",
     "bet_wins": "Bet Wins",
     "bet_losses": "Bet Losses",
     "bet_win_rate": "Bet Win Rate",
@@ -540,12 +587,12 @@ class helpers():
             return DEFAULT_ELO
         return round(sum(elo_by_id[m.id] for m in members) / len(members))
 
-    # Maps a raw elo number to a League-style "emoji tier division" label,
-    # e.g. "\U0001f537 Platinum III" or "\U0001f7e3 Master" once divisions
-    # stop applying. ELO_TIERS is sorted ascending, so the last threshold
-    # at or below elo wins — e.g. exactly 1000 is Platinum, not Gold;
-    # anything above the top tier's threshold is still Challenger.
-    def eloRankLabel(self, elo):
+    # The (emoji, plain-text label) behind eloRankLabel/eloRankLabelPlain —
+    # e.g. ("\U0001f537", "Platinum III") or ("\U0001f7e3", "Master") once
+    # divisions stop applying. ELO_TIERS is sorted ascending, so the last
+    # threshold at or below elo wins — e.g. exactly 1000 is Platinum, not
+    # Gold; anything above the top tier's threshold is still Challenger.
+    def _eloRankParts(self, elo):
         tier_index = 0
         for i, (threshold, _name, _emoji) in enumerate(ELO_TIERS):
             if elo >= threshold:
@@ -556,14 +603,30 @@ class helpers():
         threshold, name, emoji = ELO_TIERS[tier_index]
 
         if tier_index >= ELO_DIVISIONED_TIER_COUNT:
-            return f"{emoji} {name}"
+            return emoji, name
 
         span = ELO_TIERS[tier_index + 1][0] - threshold
         offset = max(elo - threshold, 0)
         segment_size = span / len(ELO_DIVISIONS)
         division_index = min(int(offset // segment_size), len(ELO_DIVISIONS) - 1)
 
-        return f"{emoji} {name} {ELO_DIVISIONS[division_index]}"
+        return emoji, f"{name} {ELO_DIVISIONS[division_index]}"
+
+    # Maps a raw elo number to a League-style "emoji tier division" label,
+    # e.g. "\U0001f537 Platinum III" — what /stats and /leaderboard show,
+    # since Discord's own client renders the emoji fine in embed text.
+    def eloRankLabel(self, elo):
+        emoji, label = self._eloRankParts(elo)
+        return f"{emoji} {label}"
+
+    # Same tier/division text, without the leading emoji — for the trading
+    # card (_renderTradingCardImage), which draws its stats with PIL and
+    # the bundled TTF fonts don't have these glyphs (same class of issue
+    # the roster's captain star and the matchup header's bullet separator
+    # ran into) — Discord's client-side emoji rendering isn't available
+    # there the way it is for a normal embed field.
+    def eloRankLabelPlain(self, elo):
+        return self._eloRankParts(elo)[1]
 
     # Forms elo-balanced teams from the caller's voice channel and marks
     # the game as ranked, so elo actually gets updated when the winner is
@@ -1483,6 +1546,18 @@ class helpers():
                 self.cursor.execute("DELETE FROM sqlite_sequence WHERE name='tournament_matches'")
         self.db.commit()
 
+    # Deletes this guild's tournament entirely (see /tournament-create) —
+    # /clear's clear_tournament flag. Leaves the persistent `teams` rows
+    # themselves untouched, since those exist independently of any one
+    # tournament and can just be registered into a new one; this only
+    # clears the tournament shell/bracket/registration state and its match
+    # history (_clearTournamentMatchesForGuild), same as starting over with
+    # a fresh /tournament-create.
+    def deleteTournamentHelper(self, guild_id):
+        self.cursor.execute("DELETE FROM tournaments WHERE guildId=?", (guild_id,))
+        self.db.commit()
+        self._clearTournamentMatchesForGuild(guild_id)
+
     async def createBracketHelper(self, ctx, double_elimination, losers_bracket_timing="after_winners"):
         guild_id = ctx.guild.id
 
@@ -1646,20 +1721,27 @@ class helpers():
         subtitle_width = measurer.textlength(subtitle, font=subtitle_font) if subtitle else 0
         return max(title_width, subtitle_width)
 
-    # A fresh bracket-image canvas: a soft radial vignette (BRACKET_
-    # BACKGROUND_CENTER fading out to BRACKET_BACKGROUND at the corners,
-    # computed with numpy since a plain flat fill at these pixel counts
-    # would otherwise mean a per-pixel Python loop) inside a thin rounded
-    # frame in `accent_color`. Returns (image, draw) — every caller needs
-    # both anyway, and creating them together keeps that pairing from ever
-    # drifting apart.
-    def _createBracketCanvas(self, width, height, accent_color=BRACKET_LINE_COLOR):
+    # A fresh bracket-image canvas: a soft radial vignette (`background_
+    # center` fading out to `background` at the corners, computed with
+    # numpy since a plain flat fill at these pixel counts would otherwise
+    # mean a per-pixel Python loop) inside a thin rounded frame in
+    # `accent_color`. Returns (image, draw) — every caller needs both
+    # anyway, and creating them together keeps that pairing from ever
+    # drifting apart. `background`/`background_center` default to
+    # Shockwave's own site palette so every existing caller (bracket,
+    # matchup, Grand Finals images) is unaffected — only the trading card
+    # (see _renderTradingCardImage) actually overrides them, for a
+    # player's customized background color.
+    def _createBracketCanvas(
+        self, width, height, accent_color=BRACKET_LINE_COLOR,
+        background=BRACKET_BACKGROUND, background_center=BRACKET_BACKGROUND_CENTER,
+    ):
         yy, xx = np.mgrid[0:height, 0:width]
         cx, cy = width / 2, height / 2
         max_dist = math.hypot(max(cx, width - cx), max(cy, height - cy))
         t = np.clip(np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2) / max_dist, 0, 1)[..., None]
-        center = np.array(BRACKET_BACKGROUND_CENTER, dtype=np.float64)
-        edge = np.array(BRACKET_BACKGROUND, dtype=np.float64)
+        center = np.array(background_center, dtype=np.float64)
+        edge = np.array(background, dtype=np.float64)
         image = Image.fromarray((center * (1 - t) + edge * t).astype(np.uint8), "RGB")
 
         draw = ImageDraw.Draw(image)
@@ -1677,19 +1759,22 @@ class helpers():
             return node.team.get_name()
         return "BYE" if round_index == 0 else "TBD"
 
-    # Whether `node`'s own label is still "current" (its team's latest known
-    # position) or just a waypoint a still-advancing team already passed
-    # through on the way to somewhere else — dimmed in the second case, so a
-    # glance at the tree shows who's still alive without having to trace
-    # every name all the way to its last appearance. A node is a waypoint
-    # exactly when the same team's name is about to repeat one round later
-    # (node.next) — that later label already carries the same story further.
+    # Whether `node`'s own label is still live (still in it, or the match it
+    # fed hasn't been decided yet) or eliminated — dimmed in the second
+    # case, so a glance at the tree shows who's still alive at a glance.
+    # BUG FIX: this used to dim the OPPOSITE case — a node whose team WON
+    # and advanced (node.next.team matching this node's own team) got
+    # dimmed as a "stale waypoint", while the team that actually LOST here
+    # was left in full brightness, backwards from what anyone reading the
+    # bracket expects (the winner should stand out, not fade). A node is
+    # eliminated exactly when the match it feeds into (node.next) has
+    # resolved to someone ELSE'S name.
     def _bracketNodeTextColor(self, node):
         if node.team is None:
             return BRACKET_TEXT_COLOR
         if (
             node.next is not None and node.next.team is not None
-            and node.next.team.get_name() == node.team.get_name()
+            and node.next.team.get_name() != node.team.get_name()
         ):
             return BRACKET_LINE_COLOR
         return BRACKET_TEXT_COLOR
@@ -2327,11 +2412,19 @@ class helpers():
         subtitle = f"for {guild_name}" if guild_name else None
 
         game1_label = game1_winner_name if game1_winner_name is not None else "TBD"
+        # BUG FIX: neither stage used to dim its loser at all once a stage
+        # resolved — both "top"/"bottom" labels always drew in the same
+        # plain color, unlike the main bracket images where a decided
+        # match dims the side that lost (see _bracketNodeTextColor). Stays
+        # False (no dimming) for whichever side hasn't lost yet — either
+        # the stage isn't decided, or that side is the one who won.
         stages = [{
             "top": f"{wb_champion.get_name()} (winners bracket)",
             "bottom": f"{lb_champion.get_name()} (losers bracket)",
             "result": game1_label,
             "gold": game1_winner_name is not None and not needs_reset,
+            "top_dim": game1_winner_name is not None and game1_winner_name != wb_champion.get_name(),
+            "bottom_dim": game1_winner_name is not None and game1_winner_name != lb_champion.get_name(),
         }]
         if needs_reset:
             stages.append({
@@ -2339,6 +2432,8 @@ class helpers():
                 "bottom": f"{wb_champion.get_name()} (elimination game)",
                 "result": reset_winner_name if reset_winner_name is not None else "TBD",
                 "gold": reset_winner_name is not None,
+                "top_dim": reset_winner_name is not None and reset_winner_name != lb_champion.get_name(),
+                "bottom_dim": reset_winner_name is not None and reset_winner_name != wb_champion.get_name(),
             })
 
         # Two-pass layout, same approach as the rest of this file: measure
@@ -2377,9 +2472,11 @@ class helpers():
         self._drawBracketHeader(image, draw, title, subtitle, BRACKET_TITLE_COLOR, width)
 
         for stage in layout:
-            draw.text((stage["x"], stage["top_y"]), stage["top"], font=font, fill=BRACKET_TEXT_COLOR, anchor="lm")
+            top_color = BRACKET_LINE_COLOR if stage["top_dim"] else BRACKET_TEXT_COLOR
+            bottom_color = BRACKET_LINE_COLOR if stage["bottom_dim"] else BRACKET_TEXT_COLOR
+            draw.text((stage["x"], stage["top_y"]), stage["top"], font=font, fill=top_color, anchor="lm")
             draw.text(
-                (stage["x"], stage["bottom_y"]), stage["bottom"], font=font, fill=BRACKET_TEXT_COLOR, anchor="lm"
+                (stage["x"], stage["bottom_y"]), stage["bottom"], font=font, fill=bottom_color, anchor="lm"
             )
             merge_point = (stage["connector_x"], stage["mid_y"])
             self._drawRoundedElbow(
@@ -2828,16 +2925,41 @@ class helpers():
         self.db.commit()
         await channel.send("\U0001f512 Betting is now closed for this round's matches!")
 
-    # Real-money settlement for one tournament match's wagers — same pari-
-    # mutuel formula as computeGameDeltas's casual-game payouts (winners
-    # split the losing pool proportional to their own wager, on top of
-    # getting it back), just applied directly against `economy` rather than
-    # going through the deltas/summary indirection that exists there so
-    # /report-correct-winner can reverse a casual game's result — a
-    # tournament match's winner is corrected differently (see
-    # _correctTournamentMatchHelper) and doesn't reopen betting on itself.
-    # Scoped to exactly this match_id's rows, so settling one concurrent
-    # match never touches another's still-open bets.
+    # Pure computation of one match's pari-mutuel payouts (winners split the
+    # losing pool proportional to their own wager, on top of getting it
+    # back) as a deltas dict in the exact shape applyGameDeltas expects —
+    # shared by _settleMatchWagers (the normal path) and
+    # _correctTournamentMatchHelper, which reverses this against the
+    # original winner and reapplies it against the corrected one.
+    def _matchWagerDeltas(self, wagers, winning_team):
+        deltas = {}
+
+        def bump(user_id, username, **kwargs):
+            entry = deltas.setdefault(user_id, {
+                "username": username, "balance": 0, "wins": 0, "losses": 0,
+                "gold_wagered": 0, "gold_won": 0, "gold_lost": 0,
+                "game_wins": 0, "game_losses": 0, "ranked_wins": 0, "ranked_losses": 0, "elo": 0,
+            })
+            for key, value in kwargs.items():
+                entry[key] += value
+
+        winning_bets = [w for w in wagers if w[2] == winning_team]
+        losing_bets = [w for w in wagers if w[2] != winning_team]
+        winning_pool = sum(w[3] for w in winning_bets)
+        losing_pool = sum(w[3] for w in losing_bets)
+
+        for user_id, username, _team, amount in winning_bets:
+            payout = round(amount + (amount / winning_pool) * losing_pool) if winning_pool > 0 else amount
+            bump(user_id, username, balance=payout, wins=1, gold_wagered=amount, gold_won=payout - amount)
+        for user_id, username, _team, amount in losing_bets:
+            bump(user_id, username, losses=1, gold_wagered=amount, gold_lost=amount)
+
+        return deltas
+
+    # Real-money settlement for one tournament match's wagers, via the same
+    # deltas/applyGameDeltas machinery /report-correct-winner's casual-game
+    # path uses. Scoped to exactly this match_id's rows, so settling one
+    # concurrent match never touches another's still-open bets.
     async def _settleMatchWagers(self, guild_id, match_id, winning_team, channel):
         self.cursor.execute(
             "SELECT userId, username, team, amount FROM tournament_wagers WHERE matchId=?", (match_id,)
@@ -2846,27 +2968,21 @@ class helpers():
         if not wagers:
             return
 
-        winning_bets = [w for w in wagers if w[2] == winning_team]
-        losing_bets = [w for w in wagers if w[2] != winning_team]
-        winning_pool = sum(w[3] for w in winning_bets)
-        losing_pool = sum(w[3] for w in losing_bets)
+        deltas = self._matchWagerDeltas(wagers, winning_team)
+        self.applyGameDeltas(guild_id, deltas)
 
         lines = [f"\U0001f4b0 **Match #{match_id} payouts:**"]
-        for user_id, username, _team, amount in winning_bets:
-            payout = round(amount + (amount / winning_pool) * losing_pool) if winning_pool > 0 else amount
-            self.cursor.execute(
-                "UPDATE economy SET balance = balance + ?, wins = wins + 1, "
-                "gold_wagered = gold_wagered + ?, gold_won = gold_won + ? WHERE guildId=? AND userId=?",
-                (payout, amount, payout - amount, guild_id, user_id)
-            )
-            lines.append(f"{username} won {payout} gold (bet {amount})")
-        for user_id, username, _team, amount in losing_bets:
-            self.cursor.execute(
-                "UPDATE economy SET losses = losses + 1, gold_wagered = gold_wagered + ?, "
-                "gold_lost = gold_lost + ? WHERE guildId=? AND userId=?",
-                (amount, amount, guild_id, user_id)
-            )
+        for user_id, username, team, amount in wagers:
+            if team == winning_team:
+                lines.append(f"{username} won {deltas[user_id]['balance']} gold (bet {amount})")
 
+        # Snapshotted before the rows disappear — see _correctTournamentMatchHelper,
+        # which needs to know exactly who bet what on THIS match if it's
+        # ever corrected after the fact, once tournament_wagers itself is gone.
+        self.cursor.execute(
+            "UPDATE tournament_matches SET settledWagers=? WHERE id=?",
+            (json.dumps(wagers), match_id)
+        )
         self.cursor.execute("DELETE FROM tournament_wagers WHERE matchId=?", (match_id,))
         self.db.commit()
 
@@ -3522,24 +3638,29 @@ class helpers():
         await self._postTournamentLeaderboard(channel, guild_id, tournament)
 
     # /report-correct-winner's match_id path: fixes a specific tournament
-    # match's recorded winner and re-propagates the bracket, independent
-    # of the guild-wide last_result correction (which only ever covers the
-    # single most-recently-resolved team game). Refuses once the next
-    # round has already started, rather than risk silently corrupting a
-    # bracket that's already moved on.
+    # match's recorded winner, re-propagates the bracket, and — if anyone
+    # had money on it — reverses the payouts _settleMatchWagers already made
+    # against the wrong winner and reapplies them against the right one
+    # (using the settledWagers snapshot _settleMatchWagers leaves behind,
+    # since tournament_wagers' own rows are long gone by the time a match
+    # is old enough to need correcting). Independent of the guild-wide
+    # last_result correction (which only ever covers the single
+    # most-recently-resolved team game). Refuses once the next round has
+    # already started, rather than risk silently corrupting a bracket
+    # that's already moved on.
     async def _correctTournamentMatchHelper(self, ctx, match_id, correct_team):
         guild_id = ctx.guild.id
 
         self.cursor.execute(
-            "SELECT roundIndex, nodeIndex, state, winner, bracketType FROM tournament_matches "
-            "WHERE guildId=? AND id=?",
+            "SELECT roundIndex, nodeIndex, state, winner, bracketType, settledWagers "
+            "FROM tournament_matches WHERE guildId=? AND id=?",
             (guild_id, match_id)
         )
         row = self.cursor.fetchone()
         if row is None:
             await ctx.response.send_message(f"No tournament match with id {match_id} in this server.")
             return
-        round_index, node_index, state, winner, bracket_type = row
+        round_index, node_index, state, winner, bracket_type, settled_wagers_json = row
 
         if bracket_type != "winners":
             await ctx.response.send_message(
@@ -3580,10 +3701,18 @@ class helpers():
         self.saveTournament(guild_id, tournament)
 
         self.cursor.execute("UPDATE tournament_matches SET winner=? WHERE id=?", (correct_team, match_id))
+
+        wager_note = ""
+        if settled_wagers_json:
+            wagers = json.loads(settled_wagers_json)
+            self.applyGameDeltas(guild_id, self._matchWagerDeltas(wagers, winner), sign=-1)
+            self.applyGameDeltas(guild_id, self._matchWagerDeltas(wagers, correct_team))
+            wager_note = " Bet payouts on this match have been reversed and reapplied."
+
         self.db.commit()
 
         await ctx.response.send_message(
-            f"Match #{match_id} corrected: **{correct_winner_node.team.get_name()}** actually won."
+            f"Match #{match_id} corrected: **{correct_winner_node.team.get_name()}** actually won.{wager_note}"
         )
         await self._sendBracketText(ctx.channel, tournament, guild_id)
 
@@ -4403,6 +4532,125 @@ class helpers():
             lines.append("(nobody bet on the winning side!)")
         await channel.send("\n".join(lines))
 
+    # /test's whole implementation — a full double-elimination tournament
+    # run through the REAL pipeline (_startRound, _resolveTournamentMatch,
+    # ...) instead of faking a result in memory. Every message that follows
+    # is exactly what a real tournament posts: per-match results with
+    # updated bracket images, round transitions, Grand Finals, the
+    # completion announcement, and the team leaderboard (see
+    # _resolveFinalsMatch) — a genuine, scrollable trace of a tournament in
+    # chat. Winners are picked randomly and resolved directly instead of
+    # waiting on reactions (_resolveTournamentMatch works from any
+    # unresolved state, so there's no need to simulate a ready-check
+    # reaction first), which is what makes it finish in seconds instead of
+    # requiring real people to click through it.
+    #
+    # This DOES touch real data: it persists `teams` rows (named "TEST Team
+    # N") and overwrites whatever tournament this server already has set up
+    # with its own. Neither is cleaned up afterward — see /test in bot.py
+    # for the caller-facing warning about that.
+    async def runSimulatedTournamentHelper(self, ctx, teams, timing_value):
+        guild_id = ctx.guild.id
+        existing = self.getTournament(guild_id)
+
+        # A previous /test run's fake teams are never cleaned up, so
+        # without this a repeat run just adds another batch of
+        # identically-named "TEST Team N" rows on top of the old ones —
+        # both cluttering /team-leaderboard with stale entries and leaving
+        # their old win/loss counts intact instead of starting fresh.
+        # GLOB'd to the exact "TEST Team <number>" shape this generates
+        # below (rather than a looser LIKE prefix match) so a real team a
+        # user happened to name e.g. "TEST Team Alpha's Squad" can't get
+        # caught up in it.
+        self.cursor.execute(
+            "DELETE FROM teams WHERE guildId=? AND name GLOB 'TEST Team [0-9]*'", (guild_id,)
+        )
+        self.db.commit()
+
+        # 3 fake players per team (the first as captain) rather than empty
+        # rosters — /test's whole point is showing what a real tournament
+        # looks like end to end, and an empty roster meant the matchup
+        # graphic's captain-first roster list (see _orderedRoster) never
+        # actually had anything to demonstrate.
+        fake_teams = []
+        for i in range(teams):
+            team = Team()
+            team.set_name(f"TEST Team {i + 1}")
+            team.set_team_size(3)
+            for j in range(3):
+                player = Player(1000000 + i * 10 + j, f"P{i + 1}-{j + 1}")
+                team.add_player(player)
+                if j == 0:
+                    team.set_captain(player)
+            self._saveNewTeam(guild_id, team)
+            fake_teams.append(team)
+
+        tournament = Tournament("TEST Tournament", 1, teams, double_elimination=True)
+        for team in fake_teams:
+            tournament.register_team(team)
+
+        wb_nodes = self.buildBracket(fake_teams)
+        lb_nodes, lb_rounds, lb_wb_dependency = self.buildLosersBracket(wb_nodes)
+        tournament.set_bracket(wb_nodes)
+        tournament.set_losers_bracket(lb_nodes, lb_rounds, lb_wb_dependency)
+        tournament.set_losers_bracket_timing(timing_value)
+
+        # Same guard createBracketHelper uses when building a fresh
+        # bracket: without it, a resolved Grand Finals row left over from a
+        # previous /test run would make _tournamentChampionName think THIS
+        # tournament already finished before a single match has been
+        # played. Also resets Match #N back to #1 when it's safe to (see
+        # _clearTournamentMatchesForGuild).
+        self._clearTournamentMatchesForGuild(guild_id)
+        self.saveTournament(guild_id, tournament)
+
+        overwrite_note = (
+            f"\n⚠️ This replaced **{existing.get_name()}**, which was already set up here."
+            if existing is not None else ""
+        )
+        timing_note = (
+            "losers bracket interleaved with the winners bracket"
+            if timing_value == "interleaved" else "losers bracket after winners finishes"
+        )
+        await ctx.response.send_message(
+            f"\U0001f9ea Running a {teams}-team double-elimination tournament ({timing_note}) through the real "
+            f"pipeline — everything below is exactly what a live tournament posts, with results auto-picked "
+            f"instead of waiting on reactions.{overwrite_note}"
+        )
+
+        await self._startRound(guild_id, tournament, 0, "simultaneous", ctx.channel)
+
+        # Drives the tournament to completion: find whatever's currently
+        # unresolved and resolve it with a coin flip, which — via
+        # _resolveTournamentMatch's own cascade — queues up whatever comes
+        # next (the rest of the round, the next round, the losers bracket,
+        # Grand Finals, a bracket reset...) until nothing's left open.
+        # Re-queried every pass rather than collected once up front, since
+        # resolving the last open match of a round is exactly what creates
+        # the next round's rows. The 500-iteration cap is a safety net, not
+        # an expected outcome — even a 64-team bracket resolves in well
+        # under 200.
+        for _ in range(500):
+            self.cursor.execute(
+                "SELECT id FROM tournament_matches WHERE guildId=? AND state != 'RESOLVED'", (guild_id,)
+            )
+            open_ids = [row[0] for row in self.cursor.fetchall()]
+            if not open_ids:
+                break
+            for match_id in open_ids:
+                winning_team = random.choice([1, 2])
+                # A handful of fake bettors wager on the match, then get
+                # paid out once it resolves — same pari-mutuel math a real
+                # bet uses (see _postSimulatedWagers), just entirely
+                # separate from the real wagers/economy tables so it can't
+                # collide with an actual game running elsewhere in this
+                # server.
+                wagers, team1, team2 = await self._postSimulatedWagers(match_id, ctx.channel)
+                await self._resolveTournamentMatch(guild_id, match_id, winning_team, ctx.channel.id)
+                await self._postSimulatedPayout(ctx.channel, wagers, team1, team2, winning_team)
+        else:
+            await ctx.channel.send("⚠️ Hit the safety cap before the simulated tournament finished.")
+
     # Loads two persistent teams straight into team1/team2 for a casual or
     # ranked game — the "quickly reuse a tournament team" path, skipping
     # /make-teams'/`/ranked`'s random-split-or-draft entirely. Same
@@ -4985,8 +5233,13 @@ class helpers():
     #
     # Returns (deltas, summary):
     #   deltas: user_id -> {username, balance, wins, losses, gold_wagered,
-    #           gold_won, gold_lost, game_wins, game_losses, elo} — all
-    #           values are deltas to ADD to that user's economy row.
+    #           gold_won, gold_lost, game_wins, game_losses, ranked_wins,
+    #           ranked_losses, elo} — all values are deltas to ADD to that
+    #           user's economy row. ranked_wins/ranked_losses are the
+    #           RANKED subset of game_wins/game_losses (0 for a casual
+    #           game) — a casual win/loss count is just game_wins minus
+    #           ranked_wins (see getLeaderboardEntries), so there's nothing
+    #           separate to track for that side.
     #   summary: display-only info for formatResultMessage().
     def computeGameDeltas(self, wagers, team1_roster, team2_roster, elo_lookup, winning_team, is_ranked=False):
         deltas = {}
@@ -4995,7 +5248,7 @@ class helpers():
             entry = deltas.setdefault(user_id, {
                 "username": username, "balance": 0, "wins": 0, "losses": 0,
                 "gold_wagered": 0, "gold_won": 0, "gold_lost": 0,
-                "game_wins": 0, "game_losses": 0, "elo": 0,
+                "game_wins": 0, "game_losses": 0, "ranked_wins": 0, "ranked_losses": 0, "elo": 0,
             })
             for key, value in kwargs.items():
                 entry[key] += value
@@ -5038,12 +5291,16 @@ class helpers():
                     user_id, username, elo=elo_delta1,
                     game_wins=1 if winning_team == 1 else 0,
                     game_losses=0 if winning_team == 1 else 1,
+                    ranked_wins=(1 if winning_team == 1 else 0) if is_ranked else 0,
+                    ranked_losses=(0 if winning_team == 1 else 1) if is_ranked else 0,
                 )
             for user_id, username in team2_roster:
                 bump(
                     user_id, username, elo=elo_delta2,
                     game_wins=1 if winning_team == 2 else 0,
                     game_losses=0 if winning_team == 2 else 1,
+                    ranked_wins=(1 if winning_team == 2 else 0) if is_ranked else 0,
+                    ranked_losses=(0 if winning_team == 2 else 1) if is_ranked else 0,
                 )
 
             if is_ranked:
@@ -5068,12 +5325,14 @@ class helpers():
             self.cursor.execute(
                 "UPDATE economy SET balance = balance + ?, wins = wins + ?, losses = losses + ?, "
                 "gold_wagered = gold_wagered + ?, gold_won = gold_won + ?, gold_lost = gold_lost + ?, "
-                "game_wins = game_wins + ?, game_losses = game_losses + ?, elo = elo + ? "
+                "game_wins = game_wins + ?, game_losses = game_losses + ?, "
+                "ranked_wins = ranked_wins + ?, ranked_losses = ranked_losses + ?, elo = elo + ? "
                 "WHERE guildId=? AND userId=?",
                 (
                     sign * d["balance"], sign * d["wins"], sign * d["losses"],
                     sign * d["gold_wagered"], sign * d["gold_won"], sign * d["gold_lost"],
-                    sign * d["game_wins"], sign * d["game_losses"], sign * d["elo"],
+                    sign * d["game_wins"], sign * d["game_losses"],
+                    sign * d["ranked_wins"], sign * d["ranked_losses"], sign * d["elo"],
                     guild_id, user_id,
                 )
             )
@@ -5190,11 +5449,11 @@ class helpers():
 
         self.cursor.execute(
             "SELECT balance, wins, losses, gold_wagered, gold_won, gold_lost, "
-            "game_wins, game_losses, elo FROM economy WHERE guildId=? AND userId=?",
+            "game_wins, game_losses, ranked_wins, ranked_losses, elo FROM economy WHERE guildId=? AND userId=?",
             (guild_id, user_id)
         )
-        balance, bet_wins, bet_losses, gold_wagered, gold_won, gold_lost, game_wins, game_losses, elo = \
-            self.cursor.fetchone()
+        (balance, bet_wins, bet_losses, gold_wagered, gold_won, gold_lost, game_wins, game_losses,
+         ranked_wins, ranked_losses, elo) = self.cursor.fetchone()
 
         net_gold = gold_won - gold_lost
 
@@ -5204,21 +5463,364 @@ class helpers():
         games_played = game_wins + game_losses
         game_win_rate = f"{(game_wins / games_played) * 100:.1f}%" if games_played > 0 else "N/A"
 
+        # casual = the non-ranked slice of game_wins/game_losses — see
+        # getLeaderboardEntries's identical derivation.
+        casual_wins = game_wins - ranked_wins
+        casual_losses = game_losses - ranked_losses
+        casual_games = casual_wins + casual_losses
+        ranked_games = ranked_wins + ranked_losses
+        casual_win_rate = f"{(casual_wins / casual_games) * 100:.1f}%" if casual_games > 0 else "N/A"
+        ranked_win_rate = f"{(ranked_wins / ranked_games) * 100:.1f}%" if ranked_games > 0 else "N/A"
+
         elo_rank = self.eloRankLabel(elo)
 
         embed = discord.Embed(
             title=f"{target.display_name}'s Stats", color=discord.Color.gold()
         )
+        # display_avatar (not the possibly-None .avatar) always resolves to
+        # something — the member's own custom avatar if they have one, or
+        # Discord's default avatar for their account otherwise.
+        # BUG FIX: an animated (GIF) avatar's .url pointed at the .gif
+        # asset, which Discord's embed thumbnail slot doesn't reliably
+        # unfurl — the thumbnail just silently failed to attach at all.
+        # with_format("png") forces a static snapshot for animated avatars
+        # too (a no-op for already-static ones), trading the animation for
+        # actually showing up every time.
+        embed.set_thumbnail(url=target.display_avatar.with_format("png").url)
+        # Exactly 3 inline fields per row (Discord wraps at 3), grouped
+        # ranked / casual+bet / gold top to bottom, with nothing left over
+        # to force a row break with — a blank spacer field looks like a
+        # good way to end a short row early, but it still renders its own
+        # (invisible) name+value line and shows up as a big empty gap
+        # instead of a clean break. Elo joins the ranked row (rather than
+        # being merged into a record field like the others) specifically
+        # to round that row out to 3 — Game/Casual/Bet Record fold their
+        # win rate into the same field (see the comment on those below),
+        # so 3 fields already covers all of them without needing a filler.
         embed.add_field(name="Elo", value=f"{elo} ({elo_rank})", inline=True)
-        embed.add_field(name="Game Record", value=f"{game_wins}W - {game_losses}L", inline=True)
-        embed.add_field(name="Game Win Rate", value=game_win_rate, inline=True)
+        embed.add_field(name="Ranked Wins", value=f"{ranked_wins}W - {ranked_losses}L", inline=True)
+        embed.add_field(name="Ranked Win Rate", value=ranked_win_rate, inline=True)
+        # Record and win rate folded into one field each here (rather than
+        # two separate ones) so a pair can't straddle a row boundary the
+        # way splitting them would risk.
+        embed.add_field(name="Game Record", value=f"{game_wins}W - {game_losses}L ({game_win_rate})", inline=True)
+        embed.add_field(
+            name="Casual Record", value=f"{casual_wins}W - {casual_losses}L ({casual_win_rate})", inline=True
+        )
+        embed.add_field(name="Bet Record", value=f"{bet_wins}W - {bet_losses}L ({bet_win_rate})", inline=True)
         embed.add_field(name="Balance", value=f"{balance} gold", inline=True)
-        embed.add_field(name="Bet Record", value=f"{bet_wins}W - {bet_losses}L", inline=True)
-        embed.add_field(name="Bet Win Rate", value=bet_win_rate, inline=True)
         embed.add_field(name="Net Gold Won/Lost", value=f"{net_gold:+d} gold", inline=True)
         embed.add_field(name="Gold Wagered", value=str(gold_wagered), inline=True)
 
         await ctx.response.send_message(embed=embed)
+        msg = await ctx.original_response()
+        await msg.add_reaction(STATS_PLACEHOLDER_EMOJI)
+        await msg.add_reaction(STATS_CARD_EMOJI)
+
+        self.cursor.execute(
+            "INSERT OR REPLACE INTO stats_views(messageId, guildId, targetUserId, cardShown) "
+            "VALUES(?, ?, ?, 0)",
+            (msg.id, guild_id, user_id)
+        )
+        self.db.commit()
+
+    # Resolves `user_id` to a live discord.Member of `guild_id` — cache
+    # first, then a real API fetch if they're not cached — or None if they
+    # can't be resolved at all (left the guild, or some other API hiccup).
+    # Shared by the avatar toggle and the trading card, both of which need
+    # to look someone back up well after /stats itself first ran.
+    async def _resolveGuildMember(self, guild_id, user_id):
+        guild = self.client.get_guild(guild_id)
+        if guild is None:
+            return None
+        member = guild.get_member(user_id)
+        if member is not None:
+            return member
+        try:
+            return await guild.fetch_member(user_id)
+        except Exception:
+            return None
+
+    # The real avatar half of handleStatsReaction's toggle — re-fetched
+    # live (rather than snapshotted at /stats time) so a player who
+    # changes their avatar later and toggles back off the placeholder sees
+    # their current one, same as a fresh /stats would. None if the member
+    # can't be resolved at all — the caller just leaves the placeholder
+    # showing rather than erroring out over what's ultimately a cosmetic
+    # toggle.
+    async def _resolveMemberAvatarUrl(self, guild_id, user_id):
+        member = await self._resolveGuildMember(guild_id, user_id)
+        if member is None:
+            return None
+        return member.display_avatar.with_format("png").url
+
+    # Converts a "#RRGGBB" hex string (trading_cards' own storage format —
+    # portable and human-editable, unlike a raw RGB tuple) back to the
+    # (r, g, b) tuple PIL wants. Falls back to `fallback` for anything that
+    # doesn't parse — a hand-edited or otherwise corrupted value shouldn't
+    # take card rendering down with it.
+    def _hexToRgb(self, hex_color, fallback):
+        if not isinstance(hex_color, str) or len(hex_color) != 7 or not hex_color.startswith("#"):
+            return fallback
+        try:
+            return tuple(int(hex_color[i:i + 2], 16) for i in (1, 3, 5))
+        except ValueError:
+            return fallback
+
+    # A lighter shade of `color`, blended toward white by `amount` (0-1) —
+    # used to turn a single customizable background_color into the
+    # matching (center, edge) pair _createBracketCanvas's vignette wants,
+    # without needing a second color column just for that.
+    def _lightenColor(self, color, amount):
+        return tuple(round(c + (255 - c) * amount) for c in color)
+
+    # Resolves a trading_cards.font_style key to the actual bundled font
+    # files to use — (display font for the name, subtitle font for the
+    # title/epithet, body font for the stat labels/values). Only
+    # "default" (Shockwave's own Chakra Petch + IBM Plex Sans pairing)
+    # exists today; anything else falls back to it rather than erroring,
+    # the same "unknown preset degrades to the default" approach
+    # _hexToRgb takes for a bad color.
+    def _cardFontPaths(self, font_style):
+        return (CHAKRA_PETCH_BOLD, CHAKRA_PETCH_SEMIBOLD, IBM_PLEX_SANS)
+
+    # A player's trading_cards row, created with Shockwave's own defaults
+    # (CARD_DEFAULT_*) the first time it's needed — same self-healing
+    # "insert if missing, read either way" shape ensureEconomyRow uses,
+    # so a card can be customized (by hand in the database today; a future
+    # /card-customize-style command could write the same columns) without
+    # ever needing a one-off migration for players who predate that.
+    def ensureCardSettings(self, guild_id, user_id):
+        self.cursor.execute(
+            "INSERT OR IGNORE INTO trading_cards"
+            "(guildId, userId, title, accent_color, background_color, text_color, font_style) "
+            "VALUES(?, ?, ?, ?, ?, ?, ?)",
+            (
+                guild_id, user_id, CARD_DEFAULT_TITLE, CARD_DEFAULT_ACCENT_COLOR,
+                CARD_DEFAULT_BACKGROUND_COLOR, CARD_DEFAULT_TEXT_COLOR, CARD_DEFAULT_FONT_STYLE,
+            )
+        )
+        self.db.commit()
+
+    def getCardSettings(self, guild_id, user_id):
+        self.ensureCardSettings(guild_id, user_id)
+        self.cursor.execute(
+            "SELECT title, accent_color, background_color, text_color, font_style "
+            "FROM trading_cards WHERE guildId=? AND userId=?",
+            (guild_id, user_id)
+        )
+        title, accent_color, background_color, text_color, font_style = self.cursor.fetchone()
+        return {
+            "title": title, "accent_color": accent_color, "background_color": background_color,
+            "text_color": text_color, "font_style": font_style,
+        }
+
+    # Pure rendering: a portrait trading card built entirely from already-
+    # fetched data (no DB/network access here — see _swapStatsForTradingCard
+    # for the async half that gathers all of this). `avatar_image` is a
+    # already-opened PIL image (the player's real avatar, or a plain
+    # fallback tile if it couldn't be fetched); `settings` is a
+    # getCardSettings()-shaped dict; `stats` is
+    # {balance, game_wins, game_losses, elo, elo_rank}; `team_names` is
+    # every persistent team (see getTeamsForPlayer) this player is
+    # rostered on in this guild, most relevant first.
+    def _renderTradingCardImage(self, guild_name, display_name, avatar_image, settings, stats, team_names):
+        accent_color = self._hexToRgb(settings["accent_color"], BRACKET_TITLE_COLOR)
+        text_color = self._hexToRgb(settings["text_color"], BRACKET_TEXT_COLOR)
+        background_color = self._hexToRgb(settings["background_color"], BRACKET_BACKGROUND)
+        name_font_path, title_font_path, body_font_path = self._cardFontPaths(settings["font_style"])
+
+        name_font = self._loadFont(name_font_path, CARD_NAME_FONT_SIZE)
+        title_font = self._loadFont(title_font_path, CARD_TITLE_FONT_SIZE)
+        label_font = self._loadFont(body_font_path, CARD_STAT_LABEL_FONT_SIZE, "Regular")
+        value_font = self._loadFont(body_font_path, CARD_STAT_VALUE_FONT_SIZE, "SemiBold")
+
+        header_height = self._bracketHeaderHeight(None)
+        avatar_top = header_height + BRACKET_PADDING * 2
+        avatar_cx = CARD_WIDTH / 2
+        name_y = avatar_top + CARD_AVATAR_SIZE + BRACKET_PADDING * 2
+        title_y = name_y + CARD_NAME_FONT_SIZE + BRACKET_PADDING
+        rule_y = title_y + CARD_TITLE_FONT_SIZE + BRACKET_PADDING * 2
+        stats_top = rule_y + BRACKET_PADDING * 2
+        stats_bottom = stats_top + CARD_STAT_ROW_HEIGHT
+        team_y = stats_bottom + BRACKET_PADDING * 2
+        height = int((team_y + CARD_STAT_LABEL_FONT_SIZE if team_names else stats_bottom) + BRACKET_MARGIN)
+
+        # background_color is the one customizable color, standing in for
+        # the vignette's "edge" shade — _lightenColor derives a matching
+        # lighter "center" from it, the same relationship
+        # BRACKET_BACKGROUND_CENTER has to BRACKET_BACKGROUND by default.
+        background_center = self._lightenColor(background_color, 0.3)
+        image, draw = self._createBracketCanvas(
+            CARD_WIDTH, height, accent_color, background=background_color, background_center=background_center
+        )
+        self._drawBracketHeader(image, draw, guild_name, None, accent_color, CARD_WIDTH, bold_title=True)
+
+        # Avatar: circular crop via a mask (paste() only respects alpha on
+        # the SOURCE image being pasted, hence converting to RGBA first),
+        # ringed in the card's accent color.
+        avatar = avatar_image.convert("RGBA").resize((CARD_AVATAR_SIZE, CARD_AVATAR_SIZE), Image.LANCZOS)
+        mask = Image.new("L", (CARD_AVATAR_SIZE, CARD_AVATAR_SIZE), 0)
+        ImageDraw.Draw(mask).ellipse([0, 0, CARD_AVATAR_SIZE, CARD_AVATAR_SIZE], fill=255)
+        avatar_x = int(avatar_cx - CARD_AVATAR_SIZE / 2)
+        image.paste(avatar, (avatar_x, int(avatar_top)), mask)
+        draw.ellipse(
+            [
+                avatar_x - CARD_AVATAR_BORDER, avatar_top - CARD_AVATAR_BORDER,
+                avatar_x + CARD_AVATAR_SIZE + CARD_AVATAR_BORDER, avatar_top + CARD_AVATAR_SIZE + CARD_AVATAR_BORDER,
+            ],
+            outline=accent_color, width=CARD_AVATAR_BORDER
+        )
+
+        draw.text((avatar_cx, name_y), display_name, font=name_font, fill=text_color, anchor="ma")
+        draw.text(
+            (avatar_cx, title_y), f"“{settings['title']}”", font=title_font, fill=accent_color, anchor="ma"
+        )
+
+        draw.line(
+            [(BRACKET_MARGIN, rule_y), (CARD_WIDTH - BRACKET_MARGIN, rule_y)],
+            fill=accent_color, width=BRACKET_RULE_WIDTH
+        )
+
+        stat_entries = [
+            ("ELO", f"{stats['elo']} ({stats['elo_rank']})"),
+            ("RECORD", f"{stats['game_wins']}W - {stats['game_losses']}L"),
+            ("GOLD", str(stats['balance'])),
+        ]
+        col_width = CARD_WIDTH / len(stat_entries)
+        for i, (label, value) in enumerate(stat_entries):
+            cx = col_width * i + col_width / 2
+            draw.text((cx, stats_top), label, font=label_font, fill=BRACKET_LINE_COLOR, anchor="ma")
+            draw.text(
+                (cx, stats_top + CARD_STAT_LABEL_FONT_SIZE + BRACKET_PADDING / 2), value, font=value_font,
+                fill=text_color, anchor="ma"
+            )
+
+        if team_names:
+            shown = ", ".join(team_names[:2])
+            if len(team_names) > 2:
+                shown += f" +{len(team_names) - 2}"
+            label = "Teams: " if len(team_names) > 1 else "Team: "
+            draw.text((avatar_cx, team_y), label + shown, font=label_font, fill=BRACKET_LINE_COLOR, anchor="ma")
+
+        return image
+
+    # The async half of the trading card: gathers everything
+    # _renderTradingCardImage needs (a live member for the avatar/display
+    # name, fresh economy stats, persistent teams, and card_settings) and
+    # posts the result in place of the /stats embed. A missing/unfetchable
+    # avatar falls back to a plain tile rather than failing the whole card
+    # over one image request.
+    async def _swapStatsForTradingCard(self, message, guild_id, guild_name, target_user_id):
+        member = await self._resolveGuildMember(guild_id, target_user_id)
+        display_name = member.display_name if member is not None else f"Player {target_user_id}"
+
+        self.ensureEconomyRow(guild_id, target_user_id, display_name)
+        self.cursor.execute(
+            "SELECT balance, game_wins, game_losses, elo FROM economy WHERE guildId=? AND userId=?",
+            (guild_id, target_user_id)
+        )
+        balance, game_wins, game_losses, elo = self.cursor.fetchone()
+        stats = {
+            "balance": balance, "game_wins": game_wins, "game_losses": game_losses,
+            "elo": elo, "elo_rank": self.eloRankLabelPlain(elo),
+        }
+
+        team_names = [team.get_name() for _, team in self.getTeamsForPlayer(guild_id, target_user_id)]
+        settings = self.getCardSettings(guild_id, target_user_id)
+
+        avatar_image = None
+        if member is not None:
+            try:
+                avatar_bytes = await member.display_avatar.with_format("png").read()
+                avatar_image = Image.open(io.BytesIO(avatar_bytes))
+            except Exception:
+                avatar_image = None
+        if avatar_image is None:
+            avatar_image = Image.new("RGBA", (CARD_AVATAR_SIZE, CARD_AVATAR_SIZE), BRACKET_BACKGROUND_CENTER)
+
+        card_image = self._renderTradingCardImage(guild_name, display_name, avatar_image, settings, stats, team_names)
+        file = self._imageToFile(card_image, "trading_card.png")
+
+        embed = discord.Embed(color=discord.Color.gold())
+        embed.set_image(url=f"attachment://{file.filename}")
+        await message.edit(embed=embed, attachments=[file])
+
+    # Called from bot.py's on_raw_reaction_add for every reaction — no-ops
+    # unless the emoji/message match a /stats embed still tracked in
+    # stats_views. STATS_CARD_EMOJI hands off to _swapStatsForTradingCard
+    # above and marks cardShown so the avatar toggle refuses to run on this
+    # message afterward (a trading card isn't shaped like a normal /stats
+    # embed, so toggling its "thumbnail" would just corrupt it).
+    # STATS_PLACEHOLDER_EMOJI toggles the thumbnail based on whichever's
+    # currently showing (comparing against STATS_PLACEHOLDER_AVATAR_URL
+    # exactly, set by this same handler or by statsHelper's own
+    # real-avatar URL) — leaving everything else on the embed untouched
+    # either way.
+    async def handleStatsReaction(self, payload):
+        guild_id = payload.guild_id
+        if guild_id is None:
+            return
+
+        emoji = str(payload.emoji)
+        if emoji not in (STATS_PLACEHOLDER_EMOJI, STATS_CARD_EMOJI):
+            return
+
+        self.cursor.execute(
+            "SELECT targetUserId, cardShown FROM stats_views WHERE guildId=? AND messageId=?",
+            (guild_id, payload.message_id)
+        )
+        row = self.cursor.fetchone()
+        if row is None:
+            return
+        target_user_id, card_shown = row
+
+        if emoji == STATS_PLACEHOLDER_EMOJI and card_shown:
+            return
+
+        channel = self.client.get_channel(payload.channel_id)
+        if channel is None:
+            channel = await self.client.fetch_channel(payload.channel_id)
+        message = await channel.fetch_message(payload.message_id)
+        if not message.embeds:
+            return
+
+        if emoji == STATS_CARD_EMOJI:
+            guild_name = channel.guild.name if channel.guild is not None else ""
+            await self._swapStatsForTradingCard(message, guild_id, guild_name, target_user_id)
+            self.cursor.execute(
+                "UPDATE stats_views SET cardShown=1 WHERE guildId=? AND messageId=?",
+                (guild_id, payload.message_id)
+            )
+            self.db.commit()
+            # The avatar toggle no longer applies to this message at all
+            # once it's a trading card — remove it outright rather than
+            # leaving a reaction sitting there that just silently no-ops
+            # when clicked. Tolerates missing Manage Messages the same way
+            # _clearPagingReaction does; the cardShown check above is what
+            # actually enforces the disable either way.
+            try:
+                await message.clear_reaction(STATS_PLACEHOLDER_EMOJI)
+            except discord.HTTPException:
+                pass
+            await self._clearPagingReaction(message, payload)
+            return
+
+        embed = message.embeds[0]
+        currently_placeholder = (
+            embed.thumbnail is not None and embed.thumbnail.url == STATS_PLACEHOLDER_AVATAR_URL
+        )
+
+        if currently_placeholder:
+            new_url = await self._resolveMemberAvatarUrl(guild_id, target_user_id)
+            if new_url is None:
+                return
+        else:
+            new_url = STATS_PLACEHOLDER_AVATAR_URL
+
+        embed.set_thumbnail(url=new_url)
+        await message.edit(embed=embed)
+        await self._clearPagingReaction(message, payload)
 
     # ---------------- Leaderboard ----------------
 
@@ -5231,14 +5833,22 @@ class helpers():
     def getLeaderboardEntries(self, guild_id):
         self.cursor.execute(
             "SELECT userId, username, balance, wins, losses, gold_wagered, gold_won, gold_lost, "
-            "game_wins, game_losses, elo FROM economy WHERE guildId=?",
+            "game_wins, game_losses, ranked_wins, ranked_losses, elo FROM economy WHERE guildId=?",
             (guild_id,)
         )
         entries = []
         for (user_id, username, balance, bet_wins, bet_losses, gold_wagered,
-             gold_won, gold_lost, game_wins, game_losses, elo) in self.cursor.fetchall():
+             gold_won, gold_lost, game_wins, game_losses, ranked_wins, ranked_losses,
+             elo) in self.cursor.fetchall():
             bet_games = bet_wins + bet_losses
             game_games = game_wins + game_losses
+            ranked_games = ranked_wins + ranked_losses
+            # casual = the non-ranked slice of game_wins/game_losses — every
+            # reported game is either ranked or not, so there's nothing
+            # separate to store for this side (see computeGameDeltas).
+            casual_wins = game_wins - ranked_wins
+            casual_losses = game_losses - ranked_losses
+            casual_games = casual_wins + casual_losses
             entries.append({
                 "user_id": user_id,
                 "username": username,
@@ -5249,9 +5859,15 @@ class helpers():
                 "net_gold": gold_won - gold_lost,
                 "game_wins": game_wins,
                 "game_losses": game_losses,
+                "ranked_wins": ranked_wins,
+                "ranked_losses": ranked_losses,
+                "casual_wins": casual_wins,
+                "casual_losses": casual_losses,
                 "elo": elo,
                 "bet_win_rate": (bet_wins / bet_games) if bet_games > 0 else None,
                 "game_win_rate": (game_wins / game_games) if game_games > 0 else None,
+                "ranked_win_rate": (ranked_wins / ranked_games) if ranked_games > 0 else None,
+                "casual_win_rate": (casual_wins / casual_games) if casual_games > 0 else None,
             })
         return entries
 
@@ -5270,7 +5886,7 @@ class helpers():
 
     def _formatLeaderboardStat(self, entry, stat):
         value = entry[stat]
-        if stat in ("game_win_rate", "bet_win_rate"):
+        if stat in ("game_win_rate", "bet_win_rate", "ranked_win_rate", "casual_win_rate"):
             return f"{value * 100:.1f}%" if value is not None else "N/A"
         if stat == "elo":
             return f"{value} ({self.eloRankLabel(value)})"

@@ -58,6 +58,11 @@
         <div class="nav-label">Running your own</div>
         <a class="nav-link" href="self-hosting.html">Self-hosting guide</a>
       </div>
+      <div class="nav-group">
+        <div class="nav-label">Legal</div>
+        <a class="nav-link" href="privacy.html">Privacy Policy</a>
+        <a class="nav-link" href="terms.html">Terms of Service</a>
+      </div>
     </nav>
 
     <div class="sidebar-foot">v3.0 · docs</div>
@@ -115,16 +120,20 @@
           <table class="params">
             <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
             <tr><td class="param-name">clear_channels</td><td class="param-type">boolean, optional</td><td>Also forget the saved team channel names.</td></tr>
-            <tr><td class="param-name">clear_tournament</td><td class="param-type">boolean, optional</td><td>Legacy/unused field, kept for backwards compatibility — doesn't touch a tournament created with <code class="inline">/tournament-create</code>.</td></tr>
+            <tr><td class="param-name">clear_tournament</td><td class="param-type">boolean, optional</td><td>Deletes this server's tournament entirely — bracket, registrations, and match history. Runs immediately, no confirmation. Registered/persistent teams (<code class="inline">/team-create</code>) aren't touched.</td></tr>
             <tr><td class="param-name">clear_elo</td><td class="param-type">boolean, optional</td><td>Resets every player's elo back to 1000 for this server — balance, wins/losses, and gold are untouched. Server-wide, so it asks for confirmation before it runs (see below).</td></tr>
             <tr><td class="param-name">clear_economy</td><td class="param-type">boolean, optional</td><td>Wipes every member's stats for this server entirely — balance, elo, game record, betting record, and gold wagered/won/lost. Also server-wide and confirmation-gated; if both this and <code class="inline">clear_elo</code> are set, this one wins since it already includes an elo reset.</td></tr>
           </table>
           <div class="cmd-note">
-            <strong>Both flags require confirmation.</strong> Since <code class="inline">clear_elo</code> and
-            <code class="inline">clear_economy</code> reset data for <em>every player</em> in the server, neither
-            runs immediately — Shockwave posts a warning with "Confirm reset" / "Cancel" buttons, and only the
-            member who ran <code class="inline">/clear</code> can click them. The prompt expires after 30
-            seconds with nothing changed if it's ignored.
+            <strong>clear_tournament can't be undone.</strong> Unlike <code class="inline">clear_elo</code>/
+            <code class="inline">clear_economy</code> below, it doesn't ask for confirmation first — it deletes
+            the tournament the moment the command runs.
+          </div>
+          <div class="cmd-note">
+            <strong>clear_elo/clear_economy require confirmation.</strong> Since they reset data for
+            <em>every player</em> in the server, neither runs immediately — Shockwave posts a warning with
+            "Confirm reset" / "Cancel" buttons, and only the member who ran <code class="inline">/clear</code>
+            can click them. The prompt expires after 30 seconds with nothing changed if it's ignored.
           </div>
         </div>
       </section>
@@ -465,11 +474,27 @@
             <span class="cmd-name"><span class="slash">/</span>stats</span>
             <span class="cmd-badge">betting</span>
           </div>
-          <p class="cmd-desc">The full picture for one player: elo (shown with a League-style rank), actual in-game win/loss record (separate from betting), betting record, balance, and net gold won or lost overall — all in one embed.</p>
+          <p class="cmd-desc">The full picture for one player: elo (shown with a League-style rank), actual in-game win/loss record — combined, and broken out separately for ranked and casual games — betting record, balance, and net gold won or lost overall, all in one embed. Shows their Discord avatar as the embed thumbnail.</p>
           <table class="params">
             <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
             <tr><td class="param-name">member</td><td class="param-type">member, optional</td><td>Whose stats to look up. Defaults to you.</td></tr>
           </table>
+          <div class="cmd-note">
+            <strong>🖼️ toggles the avatar on and off.</strong> React with it and the embed's thumbnail
+            switches from the player's own Discord avatar to Discord's plain default avatar; react again and
+            it switches back to their real one — same reaction either direction, and anyone can click it, not
+            just the player it's about. Stops working once 🎴 (below) has been used on the same message.
+          </div>
+          <div class="cmd-note">
+            <strong>🎴 turns the embed into a trading card.</strong> React with it and the whole
+            embed — stats, fields, avatar, all of it — is replaced with a portrait-style trading card:
+            Shockwave's logo and this server's name across the top, the player's own Discord avatar as the
+            centerpiece, a customizable title underneath it, then elo/record/gold and (if they're rostered on
+            any) their persistent teams. One-way — there's no undo, and 🖼️ above stops doing anything once
+            this fires. Colors, title, and font are stored per player in the database
+            (<code class="inline">trading_cards</code>) and default to Shockwave's own palette and a plain
+            "Rookie" title until something changes them.
+          </div>
           <div class="cmd-note">
             <strong>Elo is ranked-only, per-server.</strong> Every player starts at 1000. Elo only changes for
             games formed with <code class="inline">ranked:true</code>
@@ -477,6 +502,14 @@
             update the Game Record above but never touch elo. When it does update, the size of the change is
             based on the average rating on each side — beating a higher-rated team gains more than beating a
             lower-rated one.
+          </div>
+          <div class="cmd-note">
+            <strong>Game Record is ranked + casual combined;</strong> Ranked and Casual split it out
+            separately. Fields are grouped in three rows — Elo/Ranked Wins/Ranked Win Rate, then Game/Casual/Bet
+            Record (each showing its win rate right alongside the W-L count, e.g.
+            <code class="inline">4W - 1L (80.0%)</code>), then Balance/Net Gold/Gold Wagered — a player with
+            no games in one of those categories yet shows <code class="inline">0W - 0L</code> and
+            <code class="inline">N/A</code>.
           </div>
           <div class="cmd-note">
             <strong>Elo shows an emoji rank alongside the number,</strong> the same way League does — nine
@@ -507,7 +540,7 @@
           <p class="cmd-desc">Ranks every player in the server who has stats to show. Leave both options out for an overview sorted by elo, showing just the raw elo number and game record; pick a specific stat to rank by just that instead.</p>
           <table class="params">
             <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
-            <tr><td class="param-name">filter</td><td class="param-type">choice, optional</td><td>Elo, Balance, Game Wins, Game Losses, Game Win Rate, Bet Wins, Bet Losses, Bet Win Rate, Net Gold, or Gold Wagered. Omit for the elo-sorted overview.</td></tr>
+            <tr><td class="param-name">filter</td><td class="param-type">choice, optional</td><td>Elo, Balance, Game Wins, Game Losses, Game Win Rate, Ranked Wins, Ranked Losses, Ranked Win Rate, Casual Wins, Casual Losses, Casual Win Rate, Bet Wins, Bet Losses, Bet Win Rate, Net Gold, or Gold Wagered. Omit for the elo-sorted overview.</td></tr>
             <tr><td class="param-name">order</td><td class="param-type">choice, optional</td><td>Descending (highest first) or Ascending (lowest first). Defaults to Descending.</td></tr>
           </table>
           <div class="cmd-note">
