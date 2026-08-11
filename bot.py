@@ -166,16 +166,41 @@ ensure_column("stats_views", "targetUserId")
 ensure_column("stats_views", "cardShown", "INTEGER", "0")
 # A player's trading-card look (see /stats' \U0001f3b4 reaction and
 # _renderTradingCardImage) — one row per (guild, player), created with
-# Shockwave's own defaults the first time it's needed and left alone until
-# something explicitly changes it. Colors are stored as "#RRGGBB" hex,
-# font_style is a named preset _cardFontPaths knows how to resolve (only
-# "default" — Shockwave's own Chakra Petch/IBM Plex Sans pairing — exists
-# today, but the column exists so more presets can be added later without
-# a schema change).
+# Shockwave's own defaults the first time it's needed. Colors are stored as
+# "#RRGGBB" hex, font_style is a named preset _cardFontPaths knows how to
+# resolve (only "default" — Shockwave's own Chakra Petch/IBM Plex Sans
+# pairing — exists today, but the column exists so more presets can be
+# added later without a schema change). `customized` (see ensureCardSettings)
+# tracks whether a row still just reflects Shockwave's own defaults (0) or
+# was explicitly changed by something other than that self-healing insert
+# (1) — there's no /card-customize command yet, so today every row is
+# always 0, and /stats keeps it in sync with CARD_DEFAULT_* on every call
+# rather than freezing at whatever they were the day the row was created.
 cursor.execute(
     "CREATE TABLE IF NOT EXISTS trading_cards("
     "guildId, userId, title, accent_color, background_color, text_color, font_style, "
     "PRIMARY KEY(guildId, userId))"
+)
+ensure_column("trading_cards", "customized", "INTEGER", "0")
+# Permanent record of which trading-card cosmetics (a title, a color
+# scheme — see CARD_TIER_REWARD_TITLES) each player has unlocked in each
+# guild, by reaching Diamond/Master/Grandmaster/Challenger at least once
+# (see _checkTierRewardUnlocks). Nothing ever deletes a row here, so a
+# reward stays unlocked even after the player deranks back below the tier
+# that earned it — itemKey is a tier name ("Diamond", ...), itemType is
+# "title" or "color_scheme" (both unlock together per tier, see
+# _unlockCardReward), so the same key appears twice per reward.
+cursor.execute(
+    "CREATE TABLE IF NOT EXISTS card_unlocks("
+    "guildId, userId, itemType, itemKey, PRIMARY KEY(guildId, userId, itemType, itemKey))"
+)
+# One row per posted /team-stats message — recognizes that a reaction
+# landed on a real /team-stats embed (see handleTeamStatsReaction), same
+# idea as stats_views above but scoped to a team (teamId) rather than a
+# player.
+cursor.execute(
+    "CREATE TABLE IF NOT EXISTS team_stats_views("
+    "messageId INTEGER PRIMARY KEY, guildId, teamId, cardShown INTEGER DEFAULT 0)"
 )
 # One row per posted /team-list message — same paging idea as leaderboards
 # above, plus the filter/sort options it was posted with, so a page flip
@@ -349,7 +374,7 @@ async def on_guild_remove(ctx):
 REACTION_HANDLERS = (
     "handleWinnerReaction", "handleDuelReaction", "handleLeaderboardReaction",
     "handleMyTeamsReaction", "handleTeamListReaction", "handleTeamInviteReaction",
-    "handleTournamentReaction", "handleStatsReaction",
+    "handleTournamentReaction", "handleStatsReaction", "handleTeamStatsReaction",
 )
 
 
@@ -519,6 +544,45 @@ async def stats(ctx, member: discord.Member = None):
     await helperObj.statsHelper(ctx, member)
 
 
+# The caller's own available titles only (CARD_DEFAULT_TITLE plus whatever
+# they've unlocked, see getAvailableCardTitles) — unlike logoAutocomplete's
+# static list, this one depends on who's typing.
+async def cardTitleAutocomplete(ctx, current: str):
+    current = current.lower()
+    titles = helperObj.getAvailableCardTitles(ctx.guild.id, ctx.user.id)
+    matches = [t for t in titles if current in t.lower()]
+    return [app_commands.Choice(name=t, value=t) for t in matches[:25]]
+
+
+@tree.command(
+    name="card-set-title",
+    description="Equip one of your unlocked trading-card titles"
+)
+@app_commands.describe(title="Which title to equip — pick from your unlocked ones")
+@app_commands.autocomplete(title=cardTitleAutocomplete)
+async def cardSetTitle(ctx, title: str):
+    await helperObj.cardSetTitleHelper(ctx, title)
+
+
+# Same shape as cardTitleAutocomplete above — the caller's own available
+# schemes only (CARD_DEFAULT_SCHEME_NAME plus whatever they've unlocked).
+async def cardColorSchemeAutocomplete(ctx, current: str):
+    current = current.lower()
+    schemes = helperObj.getAvailableCardColorSchemes(ctx.guild.id, ctx.user.id)
+    matches = [s["name"] for s in schemes if current in s["name"].lower()]
+    return [app_commands.Choice(name=n, value=n) for n in matches[:25]]
+
+
+@tree.command(
+    name="card-set-color-scheme",
+    description="Equip one of your unlocked trading-card color schemes"
+)
+@app_commands.describe(scheme="Which color scheme to equip — pick from your unlocked ones")
+@app_commands.autocomplete(scheme=cardColorSchemeAutocomplete)
+async def cardSetColorScheme(ctx, scheme: str):
+    await helperObj.cardSetColorSchemeHelper(ctx, scheme)
+
+
 @tree.command(
     name="leaderboard",
     description="Rank the server by a stat — react to page through it"
@@ -579,7 +643,9 @@ COMMAND_HELP = {
     "wager": "Bets gold on one team winning the current game — or, with a match id, on a specific tournament match. Only while betting is open, one bet per player per game/match.",
     "wager-against": "Challenges another player to a heads-up gold wager — separate from team-game betting, no /start required.",
     "daily": "Claims 1000 free gold. Once per calendar day, per player.",
-    "stats": "Shows a player's elo, ranked/casual/game record, betting record, balance, and net gold — defaults to you. React with \U0001f5bc️ to toggle the avatar between their real one and a generic placeholder, or \U0001f3b4 to replace the whole embed with a customizable trading card (one-way).",
+    "stats": "Shows a player's elo, ranked/casual/game record, betting record, balance, and net gold — defaults to you. React with \U0001f5bc️ to toggle the avatar between their real one and a generic placeholder, or \U0001f3b4 to replace the whole embed with a customizable trading card; \U0001faaa swaps back.",
+    "card-set-title": "Equips one of your unlocked trading-card titles (see /stats' \U0001f3b4 reaction). Reaching Diamond, Master, Grandmaster, or Challenger permanently unlocks that tier's own title, even if you derank afterward.",
+    "card-set-color-scheme": "Equips one of your unlocked trading-card color schemes (see /stats' \U0001f3b4 reaction). Reaching Diamond, Master, Grandmaster, or Challenger permanently unlocks that tier's own scheme (colors matching its emoji), even if you derank afterward. \"Default\" (Shockwave's own palette) is always available.",
     "leaderboard": "Ranks the server by a stat, including ranked-only and casual-only wins/losses/win rate. Omit filter for an elo-sorted overview. Reactions page through the results.",
     "report-correct-winner": "Fixes a misreported winner — undoes and reapplies the payouts, records, and elo. Requires Manage Server.",
     "team-create": "Creates a persistent team with you as its captain.",
@@ -587,7 +653,7 @@ COMMAND_HELP = {
     "team-invite": "Invites one or more members (up to 5 per call) to a team you captain. Captain-only — each invitee must accept before joining.",
     "team-set-logo": "Sets a persistent team's logo to one of the built-in Clash logos. Captain-only.",
     "my-teams": "Lists the teams you're a rostered player on in this server, with paging to flip through each one's full stats card.",
-    "team-stats": "Shows a persistent team's captain, roster, voice channel, and win/loss record.",
+    "team-stats": "Shows a persistent team's captain, roster, voice channel, and win/loss record. React with \U0001f6e1️ to swap it for a team card — its logo as the focal point, colors sampled from that logo, captain/roster/record/win rate. ↩️ swaps back.",
     "team-list": "Browse every team in the server with filtering (name search, recruiting-only) and sorting (name, wins, losses, win rate, roster size — sort:\"Win Rate\" order:\"Descending\" for the old /team-leaderboard ranking). React to page through it.",
     "team-use": "Loads two persistent teams straight into a casual or ranked game, skipping the random-split-or-draft step.",
     "tournament-create": "Creates an empty tournament shell for this server — name, team size, and bracket size. One tournament per server.",

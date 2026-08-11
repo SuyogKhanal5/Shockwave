@@ -489,11 +489,14 @@
             <strong>🎴 turns the embed into a trading card.</strong> React with it and the whole
             embed — stats, fields, avatar, all of it — is replaced with a portrait-style trading card:
             Shockwave's logo and this server's name across the top, the player's own Discord avatar as the
-            centerpiece, a customizable title underneath it, then elo/record/gold and (if they're rostered on
-            any) their persistent teams. One-way — there's no undo, and 🖼️ above stops doing anything once
-            this fires. Colors, title, and font are stored per player in the database
-            (<code class="inline">trading_cards</code>) and default to Shockwave's own palette and a plain
-            "Rookie" title until something changes them.
+            centerpiece, a customizable title underneath it, then a colored rank badge with elo, ranked
+            record, and ranked win rate (each its own line), and finally — if they're rostered on any — their
+            persistent teams, each with its own logo. 🖼️ and 🎴 both disappear once this fires and are
+            replaced with a single 🪪 — react with that to swap back to the plain stats embed, which restores
+            🖼️ and 🎴 in turn, so it's a real toggle rather than a one-way trip. Colors, title, and font are
+            stored per player in the database (<code class="inline">trading_cards</code>) and default to
+            Shockwave's own palette (a deep purple background) and a plain "Rookie" title until something
+            changes them.
           </div>
           <div class="cmd-note">
             <strong>Elo is ranked-only, per-server.</strong> Every player starts at 1000. Elo only changes for
@@ -529,6 +532,43 @@
               <tr><td class="param-name">1750 – 1999</td><td>🔴 Grandmaster</td><td>—</td></tr>
               <tr><td class="param-name">2000+</td><td>👑 Challenger</td><td>—</td></tr>
             </table>
+          </div>
+        </div>
+
+        <div class="cmd-card" id="card-set-title">
+          <div class="cmd-head">
+            <span class="cmd-name"><span class="slash">/</span>card-set-title</span>
+            <span class="cmd-badge">betting</span>
+          </div>
+          <p class="cmd-desc">Equips one of your unlocked trading-card titles as the epithet shown under your name on the card (see /stats' 🎴 reaction).</p>
+          <table class="params">
+            <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+            <tr><td class="param-name">title</td><td class="param-type">string, autocomplete</td><td>Which title to equip. Autocomplete only offers titles you've actually unlocked — "Rookie" (the default, always available) plus anything you've earned.</td></tr>
+          </table>
+          <div class="cmd-note">
+            <strong>Reaching Diamond, Master, Grandmaster, or Challenger permanently unlocks that tier's own
+            title</strong> ("Diamond Mind", "Mastermind", "Grandmaster", "The Challenger") the moment you first
+            get there — it stays unlocked forever after, even if your elo drops back down below the tier that
+            earned it. Picking one here doesn't require currently being at that rank, just having reached it
+            once.
+          </div>
+        </div>
+
+        <div class="cmd-card" id="card-set-color-scheme">
+          <div class="cmd-head">
+            <span class="cmd-name"><span class="slash">/</span>card-set-color-scheme</span>
+            <span class="cmd-badge">betting</span>
+          </div>
+          <p class="cmd-desc">Equips one of your unlocked trading-card color schemes — accent and background — on your card (see /stats' 🎴 reaction).</p>
+          <table class="params">
+            <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+            <tr><td class="param-name">scheme</td><td class="param-type">string, autocomplete</td><td>Which color scheme to equip. Autocomplete only offers schemes you've actually unlocked — "Default" (Shockwave's own palette, always available) plus anything you've earned.</td></tr>
+          </table>
+          <div class="cmd-note">
+            <strong>Reaching Diamond, Master, Grandmaster, or Challenger permanently unlocks that tier's own
+            color scheme</strong> alongside its title — the accent is that tier's own rank-badge color,
+            automatically brightened just enough to stay readable against the card's own background if the raw
+            badge color would otherwise be too dark there. Stays unlocked forever after, the same as the title.
           </div>
         </div>
 
@@ -646,6 +686,17 @@
             <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
             <tr><td class="param-name">team</td><td class="param-type">string</td><td>Name of the team.</td></tr>
           </table>
+          <div class="cmd-note">
+            <strong>🛡️ turns the embed into a team card.</strong> React with it and the whole embed is
+            replaced with a portrait-style card built around the team's own logo as the centerpiece — colors
+            (frame, header, labels, background) are all sampled straight from that logo, not a stored setting,
+            so every team's card automatically matches its own crest. A dark logo color gets automatically
+            lightened just enough to stay easily readable against the card's own background, so text is never
+            sacrificed for the sake of matching the crest exactly. Below the logo: the team's name, then
+            its captain, record, and win rate, then its full roster with the captain starred. ↩️ replaces 🛡️
+            once the card is up and swaps back to the plain embed, restoring 🛡️ in turn — a real toggle, not a
+            one-way trip. A team with no logo set falls back to Shockwave's own gold.
+          </div>
         </div>
 
         <div class="cmd-card" id="team-set-logo">

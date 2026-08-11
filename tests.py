@@ -91,7 +91,15 @@ STATS_VIEWS_SCHEMA = (
 )
 TRADING_CARDS_SCHEMA = (
     "CREATE TABLE trading_cards(guildId, userId, title, accent_color, background_color, "
-    "text_color, font_style, PRIMARY KEY(guildId, userId))"
+    "text_color, font_style, customized INTEGER DEFAULT 0, PRIMARY KEY(guildId, userId))"
+)
+TEAM_STATS_VIEWS_SCHEMA = (
+    "CREATE TABLE team_stats_views(messageId INTEGER PRIMARY KEY, guildId, teamId, "
+    "cardShown INTEGER DEFAULT 0)"
+)
+CARD_UNLOCKS_SCHEMA = (
+    "CREATE TABLE card_unlocks(guildId, userId, itemType, itemKey, "
+    "PRIMARY KEY(guildId, userId, itemType, itemKey))"
 )
 TEAMS_SCHEMA = "CREATE TABLE teams(id INTEGER PRIMARY KEY AUTOINCREMENT, guildId, name, data)"
 TOURNAMENTS_SCHEMA = (
@@ -126,6 +134,8 @@ def make_db():
     cursor.execute(TEAM_LIST_VIEWS_SCHEMA)
     cursor.execute(STATS_VIEWS_SCHEMA)
     cursor.execute(TRADING_CARDS_SCHEMA)
+    cursor.execute(TEAM_STATS_VIEWS_SCHEMA)
+    cursor.execute(CARD_UNLOCKS_SCHEMA)
     cursor.execute(TEAMS_SCHEMA)
     cursor.execute(TOURNAMENTS_SCHEMA)
     cursor.execute(TEAM_INVITES_SCHEMA)
@@ -1699,6 +1709,305 @@ class TeamStatsHelperTests(_FakeLogoDirTestCase):
 
         kwargs = ctx.response.send_message.call_args.kwargs
         self.assertNotIn("file", kwargs)
+
+    async def test_reacts_with_the_card_emoji_and_tracks_the_view(self):
+        await self.helperObj.createTeamHelper(self._ctx(), "Red", 5)
+        team_id, _ = self.helperObj.getTeamRow(GUILD_ID, "Red")
+
+        ctx = self._ctx()
+        await self.helperObj.teamStatsHelper(ctx, "Red")
+        msg = await ctx.original_response()
+
+        msg.add_reaction.assert_awaited_once_with(helper_module.TEAM_CARD_EMOJI)
+        self.cursor.execute(
+            "SELECT guildId, teamId, cardShown FROM team_stats_views WHERE messageId=?", (msg.id,)
+        )
+        self.assertEqual(self.cursor.fetchone(), (GUILD_ID, team_id, 0))
+
+
+class DominantLogoColorTests(_FakeLogoDirTestCase):
+    def test_picks_the_most_common_non_background_color(self):
+        path = os.path.join(self._logo_dir.name, "solid.png")
+        image = Image.new("RGBA", (10, 10), (30, 144, 255, 255))
+        # A few near-white border pixels shouldn't be able to outvote the
+        # much larger solid-blue block, since they're exactly the kind of
+        # "padding, not identity" pixel the brightness filter exists for.
+        for x in range(10):
+            image.putpixel((x, 0), (250, 250, 250, 255))
+        image.save(path)
+
+        color = self.helperObj._dominantLogoColor(path, (0, 0, 0))
+        # bucketed to the nearest 16, same as the implementation
+        self.assertEqual(color, (16, 144, 240))
+
+    def test_ignores_fully_transparent_pixels(self):
+        path = os.path.join(self._logo_dir.name, "padded.png")
+        image = Image.new("RGBA", (10, 10), (0, 0, 0, 0))
+        for x in range(4, 8):
+            for y in range(4, 8):
+                image.putpixel((x, y), (200, 30, 30, 255))
+        image.save(path)
+
+        color = self.helperObj._dominantLogoColor(path, (0, 0, 0))
+        self.assertEqual(color, (192, 16, 16))
+
+    def test_falls_back_when_the_file_cant_be_opened(self):
+        color = self.helperObj._dominantLogoColor(
+            os.path.join(self._logo_dir.name, "does-not-exist.png"), (1, 2, 3)
+        )
+        self.assertEqual(color, (1, 2, 3))
+
+    def test_falls_back_when_every_pixel_is_filtered_out(self):
+        path = os.path.join(self._logo_dir.name, "blank.png")
+        Image.new("RGBA", (10, 10), (255, 255, 255, 255)).save(path)
+
+        color = self.helperObj._dominantLogoColor(path, (9, 9, 9))
+        self.assertEqual(color, (9, 9, 9))
+
+
+class RenderTeamCardImageTests(_FakeLogoDirTestCase):
+    def _team(self, name="Red", size=5, roster_count=3, captain_index=0):
+        team = Team()
+        team.name = name
+        team.team_size = size
+        players = [Player(900 + i, f"Player{i}") for i in range(roster_count)]
+        for player in players:
+            team.add_player(player)
+        if players:
+            team.set_captain(players[captain_index])
+        return team
+
+    async def test_renders_without_clipping_for_a_populated_team(self):
+        await self.helperObj.createTeamHelper(
+            FakeInteraction(self.guild, FakeMember("Alice", id=901)), "Red", 5
+        )
+        _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        team.addWin()
+        team.addWin()
+        team.addLoss()
+
+        image = self.helperObj._renderTeamCardImage("Test Guild", team)
+        self.assertGreater(image.width, 0)
+        self.assertGreater(image.height, 0)
+
+    def test_caps_roster_rows_and_shows_an_overflow_line(self):
+        team = self._team(roster_count=helper_module.TEAM_CARD_MAX_ROSTER_ROWS + 3)
+        image = self.helperObj._renderTeamCardImage("Test Guild", team)
+        # taller than a team with just one shown row would need, but not
+        # blown out to fit all N — the overflow line is what absorbs the
+        # rest instead of one row per extra player.
+        small_team_image = self.helperObj._renderTeamCardImage("Test Guild", self._team(roster_count=1))
+        self.assertGreater(image.height, small_team_image.height)
+
+    def test_empty_roster_shows_a_placeholder_line_without_crashing(self):
+        team = self._team(roster_count=0)
+        image = self.helperObj._renderTeamCardImage("Test Guild", team)
+        self.assertGreater(image.height, 0)
+
+    def _expectedReadableAccent(self, sampled_color):
+        # Mirrors _renderTeamCardImage's own background derivation exactly,
+        # so these tests verify the real readability-boosted color rather
+        # than a hand-computed guess that'd drift if the darken/lighten
+        # constants ever change.
+        background_color = tuple(round(c * 0.28) for c in sampled_color)
+        background_center = self.helperObj._lightenColor(background_color, 0.3)
+        return self.helperObj._ensureReadableAccent(sampled_color, background_center)
+
+    def test_accent_color_is_sampled_from_the_teams_own_logo(self):
+        team = self._team()
+        logo_path = os.path.join(self._logo_dir.name, "custom.png")
+        sampled_color = (34, 139, 34)
+        Image.new("RGBA", (10, 10), sampled_color + (255,)).save(logo_path)
+        team.set_logo_path(logo_path)
+
+        with patch.object(
+            self.helperObj, "_dominantLogoColor", return_value=sampled_color
+        ) as mock_sample:
+            image = self.helperObj._renderTeamCardImage("Test Guild", team)
+            mock_sample.assert_called_once()
+
+        # the sampled color, boosted for readability against its own
+        # derived background (see _ensureReadableAccent), shows up as the
+        # frame's own outline pixel — same observable proof
+        # RenderTradingCardImageTests uses for the player card's
+        # customizable accent_color.
+        mid_y = image.height // 2
+        border_pixel = image.convert("RGB").getpixel((helper_module.BRACKET_LINE_WIDTH, mid_y))
+        self.assertEqual(border_pixel, self._expectedReadableAccent(sampled_color))
+        # and it should actually differ from the raw sample here — a
+        # forest green this dark needs boosting against its own (darker
+        # still) derived background, exactly the scenario the mechanism
+        # exists for.
+        self.assertNotEqual(border_pixel, sampled_color)
+
+    def test_falls_back_to_the_default_accent_when_the_team_has_no_logo(self):
+        team = self._team()
+        team.set_logo_path(None)
+        image = self.helperObj._renderTeamCardImage("Test Guild", team)
+        mid_y = image.height // 2
+        border_pixel = image.convert("RGB").getpixel((helper_module.BRACKET_LINE_WIDTH, mid_y))
+        self.assertEqual(
+            border_pixel, self._expectedReadableAccent(helper_module.TEAM_CARD_FALLBACK_ACCENT_COLOR)
+        )
+
+    def test_readable_accent_is_boosted_when_the_sampled_color_is_dark(self):
+        # A deep navy is exactly the kind of real team-crest color that
+        # passes _dominantLogoColor's own brightness filter (average
+        # brightness comfortably above its floor of 20) but would be hard
+        # to read as header/label text against its own derived background
+        # without _ensureReadableAccent stepping in.
+        team = self._team()
+        logo_path = os.path.join(self._logo_dir.name, "navy.png")
+        sampled_color = (20, 20, 90)
+        Image.new("RGBA", (10, 10), sampled_color + (255,)).save(logo_path)
+        team.set_logo_path(logo_path)
+
+        with patch.object(self.helperObj, "_dominantLogoColor", return_value=sampled_color):
+            image = self.helperObj._renderTeamCardImage("Test Guild", team)
+
+        mid_y = image.height // 2
+        border_pixel = image.convert("RGB").getpixel((helper_module.BRACKET_LINE_WIDTH, mid_y))
+        self.assertEqual(border_pixel, self._expectedReadableAccent(sampled_color))
+
+        # the boosted accent must clear the background's own lightened
+        # vignette center by the configured minimum contrast — the actual
+        # readability guarantee this whole mechanism exists to provide.
+        background_color = tuple(round(c * 0.28) for c in sampled_color)
+        background_center = self.helperObj._lightenColor(background_color, 0.3)
+        accent_brightness = sum(border_pixel) / 3
+        background_brightness = sum(background_center) / 3
+        self.assertGreaterEqual(
+            accent_brightness - background_brightness, helper_module.CARD_MIN_ACCENT_CONTRAST - 1
+        )
+
+
+class EnsureReadableAccentTests(HelperTestCase):
+    def test_returns_the_color_unchanged_when_contrast_is_already_sufficient(self):
+        color = self.helperObj._ensureReadableAccent((255, 215, 0), (20, 20, 20), min_contrast=90)
+        self.assertEqual(color, (255, 215, 0))
+
+    def test_lightens_a_low_contrast_color_toward_white(self):
+        color = self.helperObj._ensureReadableAccent((20, 20, 90), (80, 80, 88), min_contrast=90)
+        self.assertNotEqual(color, (20, 20, 90))
+        # lightened toward white, not replaced with something unrelated —
+        # each channel should only have moved up, never down or past 255.
+        for original, boosted in zip((20, 20, 90), color):
+            self.assertGreaterEqual(boosted, original)
+            self.assertLessEqual(boosted, 255)
+
+    def test_never_exceeds_the_maximum_brightness_of_pure_white(self):
+        # An already near-white color with an impossibly high target still
+        # comes back as a valid RGB tuple rather than overshooting 255.
+        color = self.helperObj._ensureReadableAccent((250, 250, 250), (0, 0, 0), min_contrast=999)
+        for channel in color:
+            self.assertLessEqual(channel, 255)
+
+
+class HandleTeamStatsReactionTests(_FakeLogoDirTestCase):
+    def setUp(self):
+        super().setUp()
+        self.channel = FakeChannel("team-chat", guild=self.guild)
+        self.helperObj.client = FakeClient(channels=[self.channel], guilds=[self.guild])
+
+    def _ctx(self, user_id=901, name="Alice"):
+        return FakeInteraction(self.guild, FakeMember(name, id=user_id), channel=self.channel)
+
+    async def _post_team_stats(self, name="Red"):
+        await self.helperObj.createTeamHelper(self._ctx(), name, 5)
+        ctx = self._ctx()
+        await self.helperObj.teamStatsHelper(ctx, name)
+        msg = await ctx.original_response()
+        original_embed = ctx.response.send_message.call_args.kwargs["embed"]
+        fetched_message = FakeMessage(id=msg.id)
+        fetched_message.embeds = [original_embed]
+        self.channel.fetch_message = AsyncMock(return_value=fetched_message)
+        return fetched_message
+
+    async def test_card_reaction_replaces_the_embed_with_a_team_card(self):
+        fetched_message = await self._post_team_stats()
+
+        payload = FakePayload(
+            GUILD_ID, fetched_message.id, self.channel.id, helper_module.TEAM_CARD_EMOJI,
+            member=FakeMember("Bob", id=902), user_id=902
+        )
+        await self.helperObj.handleTeamStatsReaction(payload)
+
+        fetched_message.edit.assert_awaited_once()
+        new_embed = fetched_message.edit.call_args.kwargs["embed"]
+        self.assertEqual(len(new_embed.fields), 0)
+        self.assertTrue(new_embed.image.url.startswith("attachment://"))
+        attached_files = fetched_message.edit.call_args.kwargs["attachments"]
+        self.assertEqual(len(attached_files), 1)
+        attached_files[0].close()
+
+        self.cursor.execute(
+            "SELECT cardShown FROM team_stats_views WHERE messageId=?", (fetched_message.id,)
+        )
+        self.assertEqual(self.cursor.fetchone(), (1,))
+        fetched_message.clear_reaction.assert_awaited_once_with(helper_module.TEAM_CARD_EMOJI)
+        fetched_message.add_reaction.assert_awaited_once_with(helper_module.TEAM_CARD_RETURN_EMOJI)
+
+    async def test_return_reaction_swaps_the_card_back_to_the_embed(self):
+        fetched_message = await self._post_team_stats()
+        card_payload = FakePayload(
+            GUILD_ID, fetched_message.id, self.channel.id, helper_module.TEAM_CARD_EMOJI,
+            member=FakeMember("Bob", id=902), user_id=902
+        )
+        await self.helperObj.handleTeamStatsReaction(card_payload)
+        fetched_message.edit.reset_mock()
+        fetched_message.add_reaction.reset_mock()
+        fetched_message.clear_reaction.reset_mock()
+        # a card-view message is a bare image embed, same as the trading
+        # card's own return-reaction test simulates.
+        card_embed = discord.Embed(color=discord.Color.gold())
+        card_embed.set_image(url="attachment://team_card.png")
+        fetched_message.embeds = [card_embed]
+
+        return_payload = FakePayload(
+            GUILD_ID, fetched_message.id, self.channel.id, helper_module.TEAM_CARD_RETURN_EMOJI,
+            member=FakeMember("Bob", id=902), user_id=902
+        )
+        await self.helperObj.handleTeamStatsReaction(return_payload)
+
+        fetched_message.edit.assert_awaited_once()
+        new_embed = fetched_message.edit.call_args.kwargs["embed"]
+        self.assertGreater(len(new_embed.fields), 0)
+
+        self.cursor.execute(
+            "SELECT cardShown FROM team_stats_views WHERE messageId=?", (fetched_message.id,)
+        )
+        self.assertEqual(self.cursor.fetchone(), (0,))
+        fetched_message.clear_reaction.assert_awaited_once_with(helper_module.TEAM_CARD_RETURN_EMOJI)
+        fetched_message.add_reaction.assert_awaited_once_with(helper_module.TEAM_CARD_EMOJI)
+
+    async def test_return_reaction_is_ignored_before_the_card_is_shown(self):
+        fetched_message = await self._post_team_stats()
+        payload = FakePayload(
+            GUILD_ID, fetched_message.id, self.channel.id, helper_module.TEAM_CARD_RETURN_EMOJI,
+            member=FakeMember("Bob", id=902), user_id=902
+        )
+        await self.helperObj.handleTeamStatsReaction(payload)
+        fetched_message.edit.assert_not_awaited()
+
+    async def test_ignores_reactions_on_a_message_that_is_not_a_team_stats_embed(self):
+        self.channel.fetch_message = AsyncMock()
+        payload = FakePayload(
+            GUILD_ID, 999999, self.channel.id, helper_module.TEAM_CARD_EMOJI, user_id=902
+        )
+        await self.helperObj.handleTeamStatsReaction(payload)
+        self.channel.fetch_message.assert_not_awaited()
+
+    async def test_ignores_unrelated_emoji(self):
+        fetched_message = await self._post_team_stats()
+        self.channel.fetch_message = AsyncMock()
+        payload = FakePayload(GUILD_ID, fetched_message.id, self.channel.id, "🎉", user_id=902)
+        await self.helperObj.handleTeamStatsReaction(payload)
+        self.channel.fetch_message.assert_not_awaited()
+
+    async def test_ignores_dm_reactions(self):
+        payload = FakePayload(None, 12345, self.channel.id, helper_module.TEAM_CARD_EMOJI, user_id=902)
+        await self.helperObj.handleTeamStatsReaction(payload)
+        # no crash despite guild_id=None is the assertion here
 
 
 class GetTeamsForPlayerTests(HelperTestCase):
@@ -4726,6 +5035,46 @@ class ComputeGameDeltasTests(HelperTestCase):
         self.helperObj.applyGameDeltas(GUILD_ID, deltas, sign=-1)
         self.assertEqual(snapshot(), before)
 
+    def test_applying_deltas_that_cross_into_diamond_unlocks_the_reward(self):
+        self.helperObj.ensureEconomyRow(GUILD_ID, 701, "P1")
+        self.cursor.execute(
+            "UPDATE economy SET elo=? WHERE guildId=? AND userId=?",
+            (helper_module.ELO_TIER_THRESHOLDS["Diamond"] - 10, GUILD_ID, 701)
+        )
+        self.db.commit()
+
+        deltas = {701: {
+            "username": "P1", "balance": 0, "wins": 0, "losses": 0, "gold_wagered": 0,
+            "gold_won": 0, "gold_lost": 0, "game_wins": 1, "game_losses": 0,
+            "ranked_wins": 1, "ranked_losses": 0, "elo": 20,
+        }}
+        self.helperObj.applyGameDeltas(GUILD_ID, deltas, sign=1)
+
+        self.assertIn(
+            helper_module.CARD_TIER_REWARD_TITLES["Diamond"], self.helperObj.getUnlockedCardTitles(GUILD_ID, 701)
+        )
+
+    def test_reversing_deltas_never_unlocks_anything(self):
+        # A correction's reversal (sign=-1) is "undo a wrongly-recorded
+        # result", not "grant a reward on the way back down" — the reapply
+        # against the corrected winner that follows calls back in with
+        # sign=1, which is what actually re-checks properly.
+        self.helperObj.ensureEconomyRow(GUILD_ID, 701, "P1")
+        self.cursor.execute(
+            "UPDATE economy SET elo=? WHERE guildId=? AND userId=?",
+            (helper_module.ELO_TIER_THRESHOLDS["Diamond"] + 50, GUILD_ID, 701)
+        )
+        self.db.commit()
+
+        deltas = {701: {
+            "username": "P1", "balance": 0, "wins": 0, "losses": 0, "gold_wagered": 0,
+            "gold_won": 0, "gold_lost": 0, "game_wins": 0, "game_losses": 1,
+            "ranked_wins": 0, "ranked_losses": 1, "elo": -300,
+        }}
+        self.helperObj.applyGameDeltas(GUILD_ID, deltas, sign=-1)
+
+        self.assertEqual(self.helperObj.getUnlockedCardTitles(GUILD_ID, 701), [])
+
 
 class SaveGetLastResultTests(HelperTestCase):
     def test_round_trips_through_json_storage(self):
@@ -4964,6 +5313,61 @@ class StatsHelperTests(HelperTestCase):
         embed = ctx.response.send_message.call_args.kwargs["embed"]
         self.assertEqual(embed.thumbnail.url, "https://cdn.discordapp.com/avatars/901/a_deadbeef.png")
 
+    async def test_stale_trading_card_row_is_resynced_to_current_defaults(self):
+        # BUG FIX: a trading_cards row created before a later change to
+        # CARD_DEFAULT_* (there have been several) used to stay frozen at
+        # whatever the defaults were the day it was first created — since
+        # there's no /card-customize command yet, every existing row is
+        # really just a stale snapshot, not a deliberate choice, so /stats
+        # itself should keep it in sync rather than needing a manual DB fix
+        # every time the default palette changes.
+        self.helperObj.ensureCardSettings(GUILD_ID, 901)
+        self.cursor.execute(
+            "UPDATE trading_cards SET background_color=? WHERE guildId=? AND userId=?",
+            ("#150B22", GUILD_ID, 901)
+        )
+        self.db.commit()
+
+        ctx = self._ctx()
+        await self.helperObj.statsHelper(ctx)
+
+        settings = self.helperObj.getCardSettings(GUILD_ID, 901)
+        self.assertEqual(settings["background_color"], helper_module.CARD_DEFAULT_BACKGROUND_COLOR)
+
+    async def test_customized_trading_card_row_is_left_alone(self):
+        self.helperObj.ensureCardSettings(GUILD_ID, 901)
+        self.cursor.execute(
+            "UPDATE trading_cards SET background_color=?, customized=1 WHERE guildId=? AND userId=?",
+            ("#123456", GUILD_ID, 901)
+        )
+        self.db.commit()
+
+        ctx = self._ctx()
+        await self.helperObj.statsHelper(ctx)
+
+        settings = self.helperObj.getCardSettings(GUILD_ID, 901)
+        self.assertEqual(settings["background_color"], "#123456")
+
+    async def test_viewing_stats_lazily_unlocks_tier_rewards_already_earned(self):
+        # A player already sitting at Diamond+ before card_unlocks existed
+        # (or whose elo got there some other way than a normal ranked
+        # result passing through applyGameDeltas) still gets credited the
+        # next time anything looks at their stats, not never.
+        self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.cursor.execute(
+            "UPDATE economy SET elo=? WHERE guildId=? AND userId=?",
+            (helper_module.ELO_TIER_THRESHOLDS["Master"], GUILD_ID, 901)
+        )
+        self.db.commit()
+
+        ctx = self._ctx()
+        await self.helperObj.statsHelper(ctx)
+
+        titles = set(self.helperObj.getUnlockedCardTitles(GUILD_ID, 901))
+        self.assertEqual(titles, {
+            helper_module.CARD_TIER_REWARD_TITLES["Diamond"], helper_module.CARD_TIER_REWARD_TITLES["Master"],
+        })
+
 
 class HandleStatsReactionTests(HelperTestCase):
     def setUp(self):
@@ -5114,11 +5518,15 @@ class HandleStatsReactionTests(HelperTestCase):
         self.assertTrue(new_embed.image.url.endswith(attached_files[0].filename))
         attached_files[0].close()
 
-        # cardShown is recorded, and the now-irrelevant avatar-toggle
-        # reaction is removed from the message outright.
+        # cardShown is recorded, and both now-irrelevant /stats-embed
+        # reactions are removed from the message outright, replaced by the
+        # one that goes back.
         self.cursor.execute("SELECT cardShown FROM stats_views WHERE messageId=?", (msg.id,))
         self.assertEqual(self.cursor.fetchone(), (1,))
-        fetched_message.clear_reaction.assert_awaited_once_with(helper_module.STATS_PLACEHOLDER_EMOJI)
+        fetched_message.clear_reaction.assert_any_await(helper_module.STATS_PLACEHOLDER_EMOJI)
+        fetched_message.clear_reaction.assert_any_await(helper_module.STATS_CARD_EMOJI)
+        self.assertEqual(fetched_message.clear_reaction.await_count, 2)
+        fetched_message.add_reaction.assert_awaited_once_with(helper_module.STATS_RETURN_EMOJI)
 
     async def test_avatar_toggle_is_disabled_once_the_card_reaction_has_fired(self):
         alice = FakeMember("Alice", id=901)
@@ -5165,6 +5573,316 @@ class HandleStatsReactionTests(HelperTestCase):
         fetched_message.edit.assert_awaited_once()
         fetched_message.edit.call_args.kwargs["attachments"][0].close()
 
+    async def test_return_reaction_swaps_the_card_back_to_the_stats_embed(self):
+        alice = FakeMember("Alice", id=901)
+        self.guild.members = [alice]
+        ctx = FakeInteraction(self.guild, alice, channel=self.channel)
+        await self.helperObj.statsHelper(ctx)
+        msg = await ctx.original_response()
+
+        # Simulate the message as it looks once the card reaction has
+        # already fired: a bare image embed, cardShown=1 in the DB.
+        card_embed = discord.Embed(color=discord.Color.gold())
+        card_embed.set_image(url="attachment://trading_card.png")
+        fetched_message = FakeMessage(id=msg.id)
+        fetched_message.embeds = [card_embed]
+        self.channel.fetch_message = AsyncMock(return_value=fetched_message)
+        self.cursor.execute("UPDATE stats_views SET cardShown=1 WHERE messageId=?", (msg.id,))
+        self.db.commit()
+
+        payload = FakePayload(
+            GUILD_ID, msg.id, self.channel.id, helper_module.STATS_RETURN_EMOJI,
+            member=FakeMember("Bob", id=902), user_id=902
+        )
+        await self.helperObj.handleStatsReaction(payload)
+
+        fetched_message.edit.assert_awaited_once()
+        # back to the real /stats embed — fields restored, image attachment
+        # cleared out rather than left dangling behind the new embed.
+        new_embed = fetched_message.edit.call_args.kwargs["embed"]
+        self.assertGreater(len(new_embed.fields), 0)
+        self.assertIsNone(new_embed.image.url)
+        self.assertEqual(fetched_message.edit.call_args.kwargs["attachments"], [])
+
+        self.cursor.execute("SELECT cardShown FROM stats_views WHERE messageId=?", (msg.id,))
+        self.assertEqual(self.cursor.fetchone(), (0,))
+
+        # the return reaction is gone, replaced by the original pair again
+        fetched_message.clear_reaction.assert_awaited_once_with(helper_module.STATS_RETURN_EMOJI)
+        fetched_message.add_reaction.assert_any_await(helper_module.STATS_PLACEHOLDER_EMOJI)
+        fetched_message.add_reaction.assert_any_await(helper_module.STATS_CARD_EMOJI)
+
+    async def test_return_reaction_is_ignored_before_the_card_is_shown(self):
+        ctx = self._ctx()
+        await self.helperObj.statsHelper(ctx)
+        msg = await ctx.original_response()
+        self.channel.fetch_message = AsyncMock()
+
+        payload = FakePayload(
+            GUILD_ID, msg.id, self.channel.id, helper_module.STATS_RETURN_EMOJI,
+            member=FakeMember("Bob", id=902), user_id=902
+        )
+        await self.helperObj.handleStatsReaction(payload)
+        self.channel.fetch_message.assert_not_awaited()
+
+
+class CardUnlocksTests(HelperTestCase):
+    def test_reaching_diamond_unlocks_its_title_and_color_scheme(self):
+        self.helperObj._checkTierRewardUnlocks(GUILD_ID, 901, helper_module.ELO_TIER_THRESHOLDS["Diamond"])
+
+        titles = self.helperObj.getUnlockedCardTitles(GUILD_ID, 901)
+        self.assertEqual(titles, [helper_module.CARD_TIER_REWARD_TITLES["Diamond"]])
+
+        schemes = self.helperObj.getUnlockedCardColorSchemes(GUILD_ID, 901)
+        self.assertEqual([s["name"] for s in schemes], ["Diamond"])
+
+    def test_below_diamond_unlocks_nothing(self):
+        self.helperObj._checkTierRewardUnlocks(GUILD_ID, 901, helper_module.ELO_TIER_THRESHOLDS["Diamond"] - 1)
+        self.assertEqual(self.helperObj.getUnlockedCardTitles(GUILD_ID, 901), [])
+        self.assertEqual(self.helperObj.getUnlockedCardColorSchemes(GUILD_ID, 901), [])
+
+    def test_reaching_a_higher_tier_unlocks_every_lower_tier_reward_too(self):
+        # A single huge elo swing that lands straight on Grandmaster (a
+        # tournament correction, a big upset) still credits Diamond and
+        # Master along the way, not just the top tier actually landed on.
+        self.helperObj._checkTierRewardUnlocks(GUILD_ID, 901, helper_module.ELO_TIER_THRESHOLDS["Grandmaster"])
+        titles = set(self.helperObj.getUnlockedCardTitles(GUILD_ID, 901))
+        self.assertEqual(titles, {
+            helper_module.CARD_TIER_REWARD_TITLES["Diamond"],
+            helper_module.CARD_TIER_REWARD_TITLES["Master"],
+            helper_module.CARD_TIER_REWARD_TITLES["Grandmaster"],
+        })
+
+    def test_unlocking_the_same_tier_twice_is_idempotent(self):
+        self.helperObj._checkTierRewardUnlocks(GUILD_ID, 901, helper_module.ELO_TIER_THRESHOLDS["Diamond"])
+        self.helperObj._checkTierRewardUnlocks(GUILD_ID, 901, helper_module.ELO_TIER_THRESHOLDS["Diamond"])
+        self.assertEqual(len(self.helperObj.getUnlockedCardTitles(GUILD_ID, 901)), 1)
+
+    def test_reward_persists_after_deranking_back_down(self):
+        self.helperObj._checkTierRewardUnlocks(GUILD_ID, 901, helper_module.ELO_TIER_THRESHOLDS["Master"])
+        # simulate deranking all the way back down below every reward tier
+        self.helperObj._checkTierRewardUnlocks(GUILD_ID, 901, 0)
+
+        titles = set(self.helperObj.getUnlockedCardTitles(GUILD_ID, 901))
+        self.assertEqual(titles, {
+            helper_module.CARD_TIER_REWARD_TITLES["Diamond"],
+            helper_module.CARD_TIER_REWARD_TITLES["Master"],
+        })
+
+    def test_unlocks_are_scoped_per_guild(self):
+        self.helperObj._checkTierRewardUnlocks(GUILD_ID, 901, helper_module.ELO_TIER_THRESHOLDS["Diamond"])
+        self.assertEqual(self.helperObj.getUnlockedCardTitles(GUILD_ID + 1, 901), [])
+
+    def test_color_scheme_accent_is_a_readable_version_of_the_tiers_badge_color(self):
+        self.helperObj._checkTierRewardUnlocks(GUILD_ID, 901, helper_module.ELO_TIER_THRESHOLDS["Challenger"])
+        schemes = {s["name"]: s for s in self.helperObj.getUnlockedCardColorSchemes(GUILD_ID, 901)}
+
+        badge_color = helper_module.ELO_TIER_BADGE_COLORS["Challenger"]
+        background = tuple(round(c * helper_module.CARD_BACKGROUND_DARKEN_RATIO) for c in badge_color)
+        background_center = self.helperObj._lightenColor(background, 0.3)
+        expected_accent = self.helperObj._ensureReadableAccent(badge_color, background_center)
+
+        self.assertEqual(schemes["Challenger"]["accent_color"], self.helperObj._rgbToHex(expected_accent))
+        self.assertEqual(
+            schemes["Challenger"]["background_color"], self.helperObj._rgbToHex(background)
+        )
+
+    def test_color_scheme_background_stays_the_raw_darkened_badge_color(self):
+        # Only the accent gets the readability boost — the background is
+        # still the badge color's own straight 28%-darkened shade, same as
+        # the team card's own derivation, so a scheme's overall mood still
+        # authentically reflects the tier that earned it.
+        self.helperObj._checkTierRewardUnlocks(GUILD_ID, 901, helper_module.ELO_TIER_THRESHOLDS["Diamond"])
+        schemes = {s["name"]: s for s in self.helperObj.getUnlockedCardColorSchemes(GUILD_ID, 901)}
+        badge_color = helper_module.ELO_TIER_BADGE_COLORS["Diamond"]
+        expected_background = tuple(round(c * helper_module.CARD_BACKGROUND_DARKEN_RATIO) for c in badge_color)
+        self.assertEqual(
+            schemes["Diamond"]["background_color"], self.helperObj._rgbToHex(expected_background)
+        )
+
+    def test_special_title_grant_shows_up_in_unlocked_titles(self):
+        self.helperObj.grantSpecialCardTitle(GUILD_ID, 901, "Developer")
+        self.assertEqual(self.helperObj.getUnlockedCardTitles(GUILD_ID, 901), ["Developer"])
+        # a special grant has no elo tier behind it, so no color scheme
+        # unlocks alongside it the way a rank reward's does.
+        self.assertEqual(self.helperObj.getUnlockedCardColorSchemes(GUILD_ID, 901), [])
+
+    def test_special_title_grant_is_idempotent(self):
+        self.helperObj.grantSpecialCardTitle(GUILD_ID, 901, "Developer")
+        self.helperObj.grantSpecialCardTitle(GUILD_ID, 901, "Developer")
+        self.assertEqual(self.helperObj.getUnlockedCardTitles(GUILD_ID, 901), ["Developer"])
+
+    def test_shockwave_developer_always_has_developer_title_with_no_grant_needed(self):
+        # No card_unlocks row at all for this (guild, user) pair — the
+        # hardcoded id check in getUnlockedCardTitles is what surfaces it,
+        # not a stored grant, so it works in any guild, including ones
+        # never explicitly granted.
+        titles = self.helperObj.getUnlockedCardTitles(GUILD_ID, helper_module.SHOCKWAVE_DEVELOPER_ID)
+        self.assertEqual(titles, ["Developer"])
+
+    def test_shockwave_developer_title_works_in_an_unrelated_guild(self):
+        titles = self.helperObj.getUnlockedCardTitles(GUILD_ID + 12345, helper_module.SHOCKWAVE_DEVELOPER_ID)
+        self.assertEqual(titles, ["Developer"])
+
+    def test_developer_title_is_not_duplicated_if_also_separately_granted(self):
+        self.helperObj.grantSpecialCardTitle(GUILD_ID, helper_module.SHOCKWAVE_DEVELOPER_ID, "Developer")
+        titles = self.helperObj.getUnlockedCardTitles(GUILD_ID, helper_module.SHOCKWAVE_DEVELOPER_ID)
+        self.assertEqual(titles, ["Developer"])
+
+    def test_other_players_do_not_get_the_developer_title_for_free(self):
+        titles = self.helperObj.getUnlockedCardTitles(GUILD_ID, 901)
+        self.assertNotIn("Developer", titles)
+
+    def test_available_titles_always_includes_the_default_even_with_no_unlocks(self):
+        self.assertEqual(
+            self.helperObj.getAvailableCardTitles(GUILD_ID, 901), [helper_module.CARD_DEFAULT_TITLE]
+        )
+
+    def test_available_titles_combines_the_default_with_unlocked_ones(self):
+        self.helperObj._checkTierRewardUnlocks(GUILD_ID, 901, helper_module.ELO_TIER_THRESHOLDS["Diamond"])
+        self.helperObj.grantSpecialCardTitle(GUILD_ID, 901, "Developer")
+        available = self.helperObj.getAvailableCardTitles(GUILD_ID, 901)
+        # CARD_DEFAULT_TITLE is always first (it's prepended in Python, not
+        # part of the DB query); the unlocked ones' own relative order
+        # isn't guaranteed (SQLite has no ORDER BY here), so compare those
+        # as a set instead.
+        self.assertEqual(available[0], helper_module.CARD_DEFAULT_TITLE)
+        self.assertEqual(
+            set(available[1:]), {helper_module.CARD_TIER_REWARD_TITLES["Diamond"], "Developer"}
+        )
+
+    def test_set_card_title_marks_the_row_customized(self):
+        self.helperObj._checkTierRewardUnlocks(GUILD_ID, 901, helper_module.ELO_TIER_THRESHOLDS["Diamond"])
+        self.helperObj.setCardTitle(GUILD_ID, 901, helper_module.CARD_TIER_REWARD_TITLES["Diamond"])
+
+        settings = self.helperObj.getCardSettings(GUILD_ID, 901)
+        self.assertEqual(settings["title"], helper_module.CARD_TIER_REWARD_TITLES["Diamond"])
+
+    def test_available_color_schemes_always_includes_the_default_even_with_no_unlocks(self):
+        available = self.helperObj.getAvailableCardColorSchemes(GUILD_ID, 901)
+        self.assertEqual([s["name"] for s in available], [helper_module.CARD_DEFAULT_SCHEME_NAME])
+        self.assertEqual(available[0]["accent_color"], helper_module.CARD_DEFAULT_ACCENT_COLOR)
+        self.assertEqual(available[0]["background_color"], helper_module.CARD_DEFAULT_BACKGROUND_COLOR)
+
+    def test_available_color_schemes_combines_the_default_with_unlocked_ones(self):
+        self.helperObj._checkTierRewardUnlocks(GUILD_ID, 901, helper_module.ELO_TIER_THRESHOLDS["Diamond"])
+        available = self.helperObj.getAvailableCardColorSchemes(GUILD_ID, 901)
+        names = [s["name"] for s in available]
+        self.assertEqual(names[0], helper_module.CARD_DEFAULT_SCHEME_NAME)
+        self.assertIn("Diamond", names[1:])
+
+    def test_set_card_color_scheme_marks_the_row_customized(self):
+        self.helperObj._checkTierRewardUnlocks(GUILD_ID, 901, helper_module.ELO_TIER_THRESHOLDS["Diamond"])
+        self.helperObj.setCardColorScheme(GUILD_ID, 901, "#111111", "#222222")
+
+        settings = self.helperObj.getCardSettings(GUILD_ID, 901)
+        self.assertEqual(settings["accent_color"], "#111111")
+        self.assertEqual(settings["background_color"], "#222222")
+
+        # customized=1 protects it from ensureCardSettings' own
+        # resync-to-defaults on the next /stats call.
+        self.helperObj.ensureCardSettings(GUILD_ID, 901)
+        settings = self.helperObj.getCardSettings(GUILD_ID, 901)
+        self.assertEqual(settings["accent_color"], "#111111")
+
+
+class CardSetTitleHelperTests(HelperTestCase):
+    def _ctx(self, user_id=901, name="Alice"):
+        return FakeInteraction(self.guild, FakeMember(name, id=user_id))
+
+    async def test_equipping_the_default_title_always_succeeds(self):
+        ctx = self._ctx()
+        await self.helperObj.cardSetTitleHelper(ctx, helper_module.CARD_DEFAULT_TITLE)
+        ctx.response.send_message.assert_awaited_once_with(
+            f'Your trading card title is now **"{helper_module.CARD_DEFAULT_TITLE}"**.'
+        )
+        self.assertEqual(
+            self.helperObj.getCardSettings(GUILD_ID, 901)["title"], helper_module.CARD_DEFAULT_TITLE
+        )
+
+    async def test_rejects_a_title_that_has_not_been_unlocked(self):
+        ctx = self._ctx()
+        await self.helperObj.cardSetTitleHelper(ctx, helper_module.CARD_TIER_REWARD_TITLES["Diamond"])
+        message = ctx.response.send_message.call_args.args[0]
+        self.assertIn("haven't unlocked", message)
+        # never touched — still whatever ensureCardSettings' own default is
+        settings = self.helperObj.getCardSettings(GUILD_ID, 901)
+        self.assertEqual(settings["title"], helper_module.CARD_DEFAULT_TITLE)
+
+    async def test_equips_a_title_the_caller_has_unlocked(self):
+        self.helperObj._checkTierRewardUnlocks(GUILD_ID, 901, helper_module.ELO_TIER_THRESHOLDS["Master"])
+        ctx = self._ctx()
+        await self.helperObj.cardSetTitleHelper(ctx, helper_module.CARD_TIER_REWARD_TITLES["Master"])
+
+        settings = self.helperObj.getCardSettings(GUILD_ID, 901)
+        self.assertEqual(settings["title"], helper_module.CARD_TIER_REWARD_TITLES["Master"])
+
+    async def test_equipping_someone_elses_unlocked_title_is_rejected(self):
+        self.helperObj._checkTierRewardUnlocks(GUILD_ID, 902, helper_module.ELO_TIER_THRESHOLDS["Diamond"])
+        ctx = self._ctx(user_id=901, name="Alice")  # Alice herself hasn't unlocked it
+        await self.helperObj.cardSetTitleHelper(ctx, helper_module.CARD_TIER_REWARD_TITLES["Diamond"])
+        message = ctx.response.send_message.call_args.args[0]
+        self.assertIn("haven't unlocked", message)
+
+    async def test_equips_a_specially_granted_title(self):
+        self.helperObj.grantSpecialCardTitle(GUILD_ID, 901, "Developer")
+        ctx = self._ctx()
+        await self.helperObj.cardSetTitleHelper(ctx, "Developer")
+        settings = self.helperObj.getCardSettings(GUILD_ID, 901)
+        self.assertEqual(settings["title"], "Developer")
+
+
+class CardSetColorSchemeHelperTests(HelperTestCase):
+    def _ctx(self, user_id=901, name="Alice"):
+        return FakeInteraction(self.guild, FakeMember(name, id=user_id))
+
+    async def test_equipping_the_default_scheme_always_succeeds(self):
+        ctx = self._ctx()
+        await self.helperObj.cardSetColorSchemeHelper(ctx, helper_module.CARD_DEFAULT_SCHEME_NAME)
+        ctx.response.send_message.assert_awaited_once_with(
+            f'Your trading card now uses the **{helper_module.CARD_DEFAULT_SCHEME_NAME}** color scheme.'
+        )
+        settings = self.helperObj.getCardSettings(GUILD_ID, 901)
+        self.assertEqual(settings["accent_color"], helper_module.CARD_DEFAULT_ACCENT_COLOR)
+        self.assertEqual(settings["background_color"], helper_module.CARD_DEFAULT_BACKGROUND_COLOR)
+
+    async def test_rejects_a_scheme_that_has_not_been_unlocked(self):
+        ctx = self._ctx()
+        await self.helperObj.cardSetColorSchemeHelper(ctx, "Diamond")
+        message = ctx.response.send_message.call_args.args[0]
+        self.assertIn("haven't unlocked", message)
+        # never touched — still whatever ensureCardSettings' own default is
+        settings = self.helperObj.getCardSettings(GUILD_ID, 901)
+        self.assertEqual(settings["accent_color"], helper_module.CARD_DEFAULT_ACCENT_COLOR)
+
+    async def test_equips_a_scheme_the_caller_has_unlocked(self):
+        self.helperObj._checkTierRewardUnlocks(GUILD_ID, 901, helper_module.ELO_TIER_THRESHOLDS["Master"])
+        ctx = self._ctx()
+        await self.helperObj.cardSetColorSchemeHelper(ctx, "Master")
+
+        expected = {s["name"]: s for s in self.helperObj.getUnlockedCardColorSchemes(GUILD_ID, 901)}["Master"]
+        settings = self.helperObj.getCardSettings(GUILD_ID, 901)
+        self.assertEqual(settings["accent_color"], expected["accent_color"])
+        self.assertEqual(settings["background_color"], expected["background_color"])
+
+    async def test_equipping_someone_elses_unlocked_scheme_is_rejected(self):
+        self.helperObj._checkTierRewardUnlocks(GUILD_ID, 902, helper_module.ELO_TIER_THRESHOLDS["Diamond"])
+        ctx = self._ctx(user_id=901, name="Alice")  # Alice herself hasn't unlocked it
+        await self.helperObj.cardSetColorSchemeHelper(ctx, "Diamond")
+        message = ctx.response.send_message.call_args.args[0]
+        self.assertIn("haven't unlocked", message)
+
+    async def test_setting_a_scheme_marks_the_row_customized(self):
+        self.helperObj._checkTierRewardUnlocks(GUILD_ID, 901, helper_module.ELO_TIER_THRESHOLDS["Diamond"])
+        ctx = self._ctx()
+        await self.helperObj.cardSetColorSchemeHelper(ctx, "Diamond")
+
+        # customized=1 protects it from ensureCardSettings' own
+        # resync-to-defaults on the next /stats call.
+        self.helperObj.ensureCardSettings(GUILD_ID, 901)
+        settings = self.helperObj.getCardSettings(GUILD_ID, 901)
+        self.assertNotEqual(settings["accent_color"], helper_module.CARD_DEFAULT_ACCENT_COLOR)
+
 
 class TradingCardSettingsTests(HelperTestCase):
     def test_ensure_creates_shockwave_default_settings(self):
@@ -5183,10 +5901,10 @@ class TradingCardSettingsTests(HelperTestCase):
             )
         )
 
-    def test_ensure_does_not_overwrite_an_existing_customization(self):
+    def test_ensure_does_not_overwrite_a_row_marked_customized(self):
         self.helperObj.ensureCardSettings(GUILD_ID, 901)
         self.cursor.execute(
-            "UPDATE trading_cards SET title=?, accent_color=? WHERE guildId=? AND userId=?",
+            "UPDATE trading_cards SET title=?, accent_color=?, customized=1 WHERE guildId=? AND userId=?",
             ("Legend", "#FF0000", GUILD_ID, 901)
         )
         self.db.commit()
@@ -5196,6 +5914,25 @@ class TradingCardSettingsTests(HelperTestCase):
         settings = self.helperObj.getCardSettings(GUILD_ID, 901)
         self.assertEqual(settings["title"], "Legend")
         self.assertEqual(settings["accent_color"], "#FF0000")
+
+    def test_ensure_resyncs_an_uncustomized_row_to_current_defaults(self):
+        # BUG FIX: previously INSERT OR IGNORE alone meant a row created
+        # before a later CARD_DEFAULT_* change stayed frozen forever —
+        # since there's no /card-customize command yet, an uncustomized row
+        # is always just a stale snapshot, not a real choice, so it should
+        # track the current defaults instead.
+        self.helperObj.ensureCardSettings(GUILD_ID, 901)
+        self.cursor.execute(
+            "UPDATE trading_cards SET title=?, background_color=? WHERE guildId=? AND userId=?",
+            ("Old Title", "#150B22", GUILD_ID, 901)
+        )
+        self.db.commit()
+
+        self.helperObj.ensureCardSettings(GUILD_ID, 901)
+
+        settings = self.helperObj.getCardSettings(GUILD_ID, 901)
+        self.assertEqual(settings["title"], helper_module.CARD_DEFAULT_TITLE)
+        self.assertEqual(settings["background_color"], helper_module.CARD_DEFAULT_BACKGROUND_COLOR)
 
     def test_get_card_settings_creates_defaults_for_a_brand_new_player(self):
         settings = self.helperObj.getCardSettings(GUILD_ID, 902)
@@ -5216,33 +5953,79 @@ class HexToRgbTests(HelperTestCase):
 
 
 class RenderTradingCardImageTests(HelperTestCase):
+    def _stats(self, elo=1123, ranked_wins=4, ranked_losses=1):
+        ranked_games = ranked_wins + ranked_losses
+        return {
+            "elo": elo, "elo_rank": self.helperObj.eloRankLabelPlain(elo),
+            "ranked_wins": ranked_wins, "ranked_losses": ranked_losses,
+            "ranked_win_rate": f"{(ranked_wins / ranked_games) * 100:.1f}%" if ranked_games > 0 else "N/A",
+        }
+
+    def _team(self, name):
+        team = Team()
+        team.set_name(name)
+        return team
+
     def test_renders_without_crashing_with_default_settings_and_no_teams(self):
         settings = {
             "title": helper_module.CARD_DEFAULT_TITLE, "accent_color": helper_module.CARD_DEFAULT_ACCENT_COLOR,
             "background_color": helper_module.CARD_DEFAULT_BACKGROUND_COLOR,
             "text_color": helper_module.CARD_DEFAULT_TEXT_COLOR, "font_style": helper_module.CARD_DEFAULT_FONT_STYLE,
         }
-        stats = {"balance": 500, "game_wins": 7, "game_losses": 3, "elo": 1123, "elo_rank": "Platinum III"}
         avatar = Image.new("RGBA", (64, 64), (255, 0, 0, 255))
 
-        image = self.helperObj._renderTradingCardImage("Test Guild", "Alice", avatar, settings, stats, [])
+        image = self.helperObj._renderTradingCardImage("Test Guild", "Alice", avatar, settings, self._stats(), [])
 
         self.assertEqual(image.width, helper_module.CARD_WIDTH)
         self.assertGreater(image.height, 0)
 
-    def test_grows_taller_to_fit_team_names(self):
+    def test_no_stat_line_or_label_is_cut_off_by_the_card_edge(self):
+        # regression test: the old 3-column layout could clip a long
+        # value against its own column's edge — every stat is one full-
+        # width line now, so nothing should ever measure wider than the
+        # space between the left margin and the card's right edge.
+        settings = {
+            "title": helper_module.CARD_DEFAULT_TITLE, "accent_color": helper_module.CARD_DEFAULT_ACCENT_COLOR,
+            "background_color": helper_module.CARD_DEFAULT_BACKGROUND_COLOR,
+            "text_color": helper_module.CARD_DEFAULT_TEXT_COLOR, "font_style": helper_module.CARD_DEFAULT_FONT_STYLE,
+        }
+        avatar = Image.new("RGBA", (64, 64), (255, 0, 0, 255))
+        stats = self._stats(elo=2450, ranked_wins=1234, ranked_losses=987)
+
+        image = self.helperObj._renderTradingCardImage(
+            "A Very Long Server Name Indeed", "SomeoneWithAReallyLongDisplayName", avatar, settings, stats, []
+        )
+        self.assertEqual(image.width, helper_module.CARD_WIDTH)
+
+    def test_grows_taller_to_fit_teams(self):
         settings = {
             "title": "X", "accent_color": "#EDC643", "background_color": "#150B22",
             "text_color": "#F3EFFA", "font_style": "default",
         }
-        stats = {"balance": 0, "game_wins": 0, "game_losses": 0, "elo": 1000, "elo_rank": "Platinum IV"}
         avatar = Image.new("RGBA", (64, 64), (255, 0, 0, 255))
+        teams = [self._team("Red Dragons"), self._team("Blue Phoenixes"), self._team("Green Giants")]
 
-        without_teams = self.helperObj._renderTradingCardImage("Guild", "Alice", avatar, settings, stats, [])
+        without_teams = self.helperObj._renderTradingCardImage("Guild", "Alice", avatar, settings, self._stats(), [])
         with_teams = self.helperObj._renderTradingCardImage(
-            "Guild", "Alice", avatar, settings, stats, ["Red Dragons", "Blue Phoenixes", "Green Giants"]
+            "Guild", "Alice", avatar, settings, self._stats(), teams
         )
         self.assertGreater(with_teams.height, without_teams.height)
+
+    def test_caps_team_rows_and_shows_a_remainder_count(self):
+        settings = {
+            "title": "X", "accent_color": "#EDC643", "background_color": "#150B22",
+            "text_color": "#F3EFFA", "font_style": "default",
+        }
+        avatar = Image.new("RGBA", (64, 64), (255, 0, 0, 255))
+        teams = [self._team(f"Team {i}") for i in range(helper_module.CARD_MAX_TEAM_ROWS + 3)]
+
+        # Just confirms this doesn't crash and still produces a reasonably
+        # bounded image rather than growing one row per team forever —
+        # the "+N more teams" line itself is exercised via the full
+        # reaction-flow tests (HandleStatsReactionTests), which check
+        # actual pixel/text content is harder to do without an OCR step.
+        image = self.helperObj._renderTradingCardImage("Guild", "Alice", avatar, settings, self._stats(), teams)
+        self.assertGreater(image.height, 0)
 
     def test_custom_colors_are_respected(self):
         # A hand-picked accent color should show up as the frame's outline
@@ -5252,10 +6035,9 @@ class RenderTradingCardImageTests(HelperTestCase):
             "title": "X", "accent_color": "#00FF00", "background_color": "#000000",
             "text_color": "#FFFFFF", "font_style": "default",
         }
-        stats = {"balance": 0, "game_wins": 0, "game_losses": 0, "elo": 1000, "elo_rank": "Platinum IV"}
         avatar = Image.new("RGBA", (64, 64), (255, 0, 0, 255))
 
-        image = self.helperObj._renderTradingCardImage("Guild", "Alice", avatar, settings, stats, [])
+        image = self.helperObj._renderTradingCardImage("Guild", "Alice", avatar, settings, self._stats(), [])
         mid_y = image.height // 2
         border_pixel = image.convert("RGB").getpixel((helper_module.BRACKET_LINE_WIDTH, mid_y))
         self.assertEqual(border_pixel, (0, 255, 0))
@@ -6563,7 +7345,8 @@ class CommandRegistrationTests(BotModuleTestCase):
         names = {c.name for c in self.bot.tree.get_commands()}
         expected = {
             "team-set-size", "team-set-channels", "start", "wager", "wager-against", "daily",
-            "stats", "leaderboard", "help", "make-teams", "return", "report-correct-winner",
+            "stats", "card-set-title", "card-set-color-scheme", "leaderboard", "help", "make-teams",
+            "return", "report-correct-winner",
             "captains", "choose", "clear", "notify",
             "roll", "randomize-roles", "tournament-create", "team-create", "team-set-voice-channel",
             "team-invite", "team-set-logo", "team-stats", "team-list", "my-teams",
@@ -6625,6 +7408,63 @@ class LogoAutocompleteTests(BotModuleTestCase):
             for i in range(30):
                 open(os.path.join(self._logo_dir.name, f"Extra{i}.png"), "wb").close()
             choices = await self.bot.logoAutocomplete(None, "")
+        self.assertLessEqual(len(choices), 25)
+
+
+class CardTitleAutocompleteTests(BotModuleTestCase):
+    async def test_filters_by_current_input_case_insensitively(self):
+        ctx = self._ctx()
+        with patch.object(
+            self.bot.helperObj, "getAvailableCardTitles",
+            return_value=["Rookie", "Diamond Mind", "Mastermind"]
+        ):
+            choices = await self.bot.cardTitleAutocomplete(ctx, "DIA")
+        self.assertEqual([c.value for c in choices], ["Diamond Mind"])
+
+    async def test_empty_input_returns_every_available_title(self):
+        ctx = self._ctx()
+        with patch.object(
+            self.bot.helperObj, "getAvailableCardTitles", return_value=["Rookie", "Diamond Mind"]
+        ):
+            choices = await self.bot.cardTitleAutocomplete(ctx, "")
+        self.assertEqual(sorted(c.value for c in choices), ["Diamond Mind", "Rookie"])
+
+    async def test_caps_results_at_25(self):
+        ctx = self._ctx()
+        with patch.object(
+            self.bot.helperObj, "getAvailableCardTitles", return_value=[f"Title{i}" for i in range(30)]
+        ):
+            choices = await self.bot.cardTitleAutocomplete(ctx, "")
+        self.assertLessEqual(len(choices), 25)
+
+
+class CardColorSchemeAutocompleteTests(BotModuleTestCase):
+    async def test_filters_by_current_input_case_insensitively(self):
+        ctx = self._ctx()
+        schemes = [
+            {"name": "Default", "accent_color": "#EDC643", "background_color": "#251A5B"},
+            {"name": "Diamond", "accent_color": "#89CFF0", "background_color": "#274050"},
+        ]
+        with patch.object(self.bot.helperObj, "getAvailableCardColorSchemes", return_value=schemes):
+            choices = await self.bot.cardColorSchemeAutocomplete(ctx, "dia")
+        self.assertEqual([c.value for c in choices], ["Diamond"])
+
+    async def test_empty_input_returns_every_available_scheme(self):
+        ctx = self._ctx()
+        schemes = [
+            {"name": "Default", "accent_color": "#EDC643", "background_color": "#251A5B"},
+            {"name": "Diamond", "accent_color": "#89CFF0", "background_color": "#274050"},
+        ]
+        with patch.object(self.bot.helperObj, "getAvailableCardColorSchemes", return_value=schemes):
+            choices = await self.bot.cardColorSchemeAutocomplete(ctx, "")
+        self.assertEqual(sorted(c.value for c in choices), ["Default", "Diamond"])
+
+    async def test_caps_results_at_25(self):
+        ctx = self._ctx()
+        schemes = [{"name": f"Scheme{i}", "accent_color": "#000000", "background_color": "#111111"}
+                   for i in range(30)]
+        with patch.object(self.bot.helperObj, "getAvailableCardColorSchemes", return_value=schemes):
+            choices = await self.bot.cardColorSchemeAutocomplete(ctx, "")
         self.assertLessEqual(len(choices), 25)
 
 

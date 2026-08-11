@@ -176,25 +176,44 @@ TOURNAMENT_READY_EMOJI = "✅"
 STATS_PLACEHOLDER_EMOJI = "\U0001f5bc️"  # 🖼️
 STATS_PLACEHOLDER_AVATAR_URL = "https://cdn.discordapp.com/embed/avatars/0.png"
 # /stats: react to blow the whole embed away and replace it with the
-# player's trading card (see _renderTradingCardImage) — a one-way swap, not
-# part of the avatar toggle above, and it disables that toggle afterward
-# (see handleStatsReaction) since a card isn't shaped like a normal /stats
-# embed anymore.
+# player's trading card (see _renderTradingCardImage). Both this and the
+# avatar toggle above only make sense on the plain /stats embed, so
+# handleStatsReaction removes both reactions the moment the card goes up
+# and replaces them with STATS_RETURN_EMOJI below — a card isn't shaped
+# like a normal /stats embed, so neither toggle applies to it anymore.
 STATS_CARD_EMOJI = "\U0001f3b4"  # 🎴
+# Shown only once the trading card is up in place of STATS_PLACEHOLDER_EMOJI
+# / STATS_CARD_EMOJI — the one action that makes sense from the card view,
+# swapping back to the plain /stats embed (which then gets its own two
+# reactions restored, so the whole thing is a real back-and-forth toggle
+# rather than a one-way trip).
+STATS_RETURN_EMOJI = "\U0001faaa"  # 🪪
 
 # Trading-card layout (see _renderTradingCardImage) — a portrait card
 # roughly the shape of a real trading card, reusing the same canvas/header
 # building blocks (_createBracketCanvas, _drawBracketHeader) every other
 # rendered image in this file already uses, so it reads as the same
 # product rather than a bolted-on fourth visual style.
-CARD_WIDTH = 360 * BRACKET_SUPERSAMPLE
+CARD_WIDTH = 420 * BRACKET_SUPERSAMPLE
 CARD_AVATAR_SIZE = 176 * BRACKET_SUPERSAMPLE
 CARD_AVATAR_BORDER = 3 * BRACKET_SUPERSAMPLE
 CARD_NAME_FONT_SIZE = 20 * BRACKET_SUPERSAMPLE
 CARD_TITLE_FONT_SIZE = 14 * BRACKET_SUPERSAMPLE
-CARD_STAT_LABEL_FONT_SIZE = 11 * BRACKET_SUPERSAMPLE
+CARD_STAT_LABEL_FONT_SIZE = 12 * BRACKET_SUPERSAMPLE
 CARD_STAT_VALUE_FONT_SIZE = 15 * BRACKET_SUPERSAMPLE
-CARD_STAT_ROW_HEIGHT = 40 * BRACKET_SUPERSAMPLE
+# One stacked stat line (label + value, see _renderTradingCardImage) —
+# every stat gets its own row now instead of sharing a 3-column line, so
+# a long value (e.g. a full elo/rank string) has the card's whole width to
+# work with instead of a third of it.
+CARD_STAT_LINE_HEIGHT = 30 * BRACKET_SUPERSAMPLE
+CARD_ELO_BADGE_RADIUS = 6 * BRACKET_SUPERSAMPLE
+CARD_TEAM_LOGO_SIZE = 28 * BRACKET_SUPERSAMPLE
+CARD_TEAM_ROW_HEIGHT = 34 * BRACKET_SUPERSAMPLE
+CARD_TEAM_ROW_GAP = 4 * BRACKET_SUPERSAMPLE
+# How many of a player's teams get their own row before the rest just add
+# to a "+N more" line — a card is only so tall, and a player stacked on a
+# dozen teams shouldn't turn it into a scroll.
+CARD_MAX_TEAM_ROWS = 4
 
 # trading_cards' defaults — Shockwave's own site palette (see BRACKET_*
 # above) and font pairing, so a player who's never customized their card
@@ -204,23 +223,89 @@ CARD_STAT_ROW_HEIGHT = 40 * BRACKET_SUPERSAMPLE
 # render time (see _hexToRgb).
 CARD_DEFAULT_TITLE = "Rookie"
 CARD_DEFAULT_ACCENT_COLOR = "#EDC643"      # --gold, same as BRACKET_TITLE_COLOR
-CARD_DEFAULT_BACKGROUND_COLOR = "#150B22"  # --ink, same as BRACKET_BACKGROUND
+# A dark indigo — between the earlier purple family (#2A1245, #4A148C,
+# #5B21B6, #4C2287) and pure navy blue (#1A2B5B), landing on a dark
+# blue-purple rather than committing fully to either. Deliberately its own
+# shade rather than reused from the site's own near-black --ink
+# (assets/styles.css), so a default-looking card still reads as its own
+# distinct background rather than just "dark".
+CARD_DEFAULT_BACKGROUND_COLOR = "#251A5B"
 CARD_DEFAULT_TEXT_COLOR = "#F3EFFA"        # --text, same as BRACKET_TEXT_COLOR
 CARD_DEFAULT_FONT_STYLE = "default"        # Chakra Petch + IBM Plex Sans — see _cardFontPaths
+# /card-set-color-scheme's name for reverting to the palette above — always
+# offered (see getAvailableCardColorSchemes) the same way CARD_DEFAULT_
+# TITLE always is for /card-set-title, since it needs no unlocking either.
+CARD_DEFAULT_SCHEME_NAME = "Default"
+
+# /team-stats: react to swap the embed for a team card (see
+# _renderTeamCardImage), the team's own counterpart to /stats' trading
+# card — same one-card-view-with-a-way-back shape as STATS_CARD_EMOJI/
+# STATS_RETURN_EMOJI, tracked in its own team_stats_views table rather than
+# reusing stats_views (a team, not a player, is what's shown on the card).
+TEAM_CARD_EMOJI = "\U0001f6e1️"    # 🛡️
+TEAM_CARD_RETURN_EMOJI = "↩️"  # ↩️
+
+# Team-card layout (see _renderTeamCardImage) — same card shape/width as
+# the player trading card above (CARD_WIDTH, CARD_NAME_FONT_SIZE, CARD_
+# STAT_*), just with the team's own logo as the focal point in place of a
+# player's avatar, so the two read as the same product rather than two
+# unrelated visual styles.
+TEAM_CARD_LOGO_SIZE = 200 * BRACKET_SUPERSAMPLE
+TEAM_CARD_LOGO_BORDER = CARD_AVATAR_BORDER
+TEAM_CARD_LOGO_RADIUS = 20 * BRACKET_SUPERSAMPLE
+TEAM_CARD_ROSTER_ROW_HEIGHT = 26 * BRACKET_SUPERSAMPLE
+TEAM_CARD_STAR_RADIUS = 5 * BRACKET_SUPERSAMPLE
+# How many roster rows get their own line before the rest just add to a
+# "+N more" line — same reasoning as CARD_MAX_TEAM_ROWS, just sized for a
+# team roster (typically bigger than one player's team list) rather than
+# a player's own team memberships.
+TEAM_CARD_MAX_ROSTER_ROWS = 8
+# Fallback accent when a team has no usable logo file to sample a color
+# from at all (see _dominantLogoColor) — every persistent team gets a logo
+# assigned on load (_ensureLogo), so this only matters if the assets
+# folder itself went missing since. Same gold as the player card's own
+# default accent, for the same "still recognizably Shockwave" reason.
+TEAM_CARD_FALLBACK_ACCENT_COLOR = (237, 198, 67)
+# How much brighter (0-255 average-channel "brightness") a card's accent
+# needs to be than the background behind it — see _ensureReadableAccent.
+# Originally just for the team card, where a logo's sampled dominant color
+# has no readability guarantee at all (a deep navy or forest green passes
+# _dominantLogoColor's own brightness filter just fine) and that same
+# color also drives the background (see _renderTeamCardImage), so without
+# this a dark-logoed team's header title/stat labels could end up close in
+# brightness to the vignette's own lightened center — legible in the dark
+# corners, nearly invisible in the middle of the card. Reused by
+# getUnlockedCardColorSchemes for the same reason: those schemes' accents
+# are ELO_TIER_BADGE_COLORS entries, chosen for how they read as a small
+# emoji-stand-in badge, not vetted against the darkened-background card
+# they'd be driving once equipped as a full color scheme.
+CARD_MIN_ACCENT_CONTRAST = 90
 
 # League-style rank tiers for /stats. Each tier spans 250 elo, with
 # DEFAULT_ELO (1000) landing every new player in the middle at Platinum —
-# ascending order, (elo threshold, tier name, emoji).
+# ascending order, (elo threshold, tier name, emoji, badge color, badge
+# shape). The badge color+shape stand in for the emoji on the trading card
+# (see _drawEloBadge) — PIL's bundled TTF fonts can't render color emoji
+# glyphs (same class of issue the roster's captain star ran into), so the
+# card draws a small tier-colored shape instead of the literal character.
+# "circle" is the default (matches the medal/gear/circle emoji closely
+# enough); Platinum and Diamond get "diamond" instead since \U0001f537 and
+# \U0001f48e are both actually diamond/gem-cut shapes, not circles — a
+# round badge there read as a shape mismatch against the real emoji shown
+# in the embed, not just a color one.
 ELO_TIERS = [
-    (0, "Iron", "⚙️"),
-    (250, "Bronze", "\U0001f949"),
-    (500, "Silver", "\U0001f948"),
-    (750, "Gold", "\U0001f947"),
-    (1000, "Platinum", "\U0001f537"),
-    (1250, "Diamond", "\U0001f48e"),
-    (1500, "Master", "\U0001f7e3"),
-    (1750, "Grandmaster", "\U0001f534"),
-    (2000, "Challenger", "\U0001f451"),
+    (0, "Iron", "⚙️", (153, 170, 181), "circle"),
+    (250, "Bronze", "\U0001f949", (205, 127, 50), "circle"),
+    (500, "Silver", "\U0001f948", (192, 192, 192), "circle"),
+    (750, "Gold", "\U0001f947", (255, 204, 51), "circle"),
+    # BUG FIX: this used to be a cyan/teal (79, 209, 232) that read as
+    # "Diamond" at a glance — closer to the actual color of the large blue
+    # diamond emoji \U0001f537 itself, which is a clear blue, not cyan.
+    (1000, "Platinum", "\U0001f537", (41, 121, 255), "diamond"),
+    (1250, "Diamond", "\U0001f48e", (137, 207, 240), "diamond"),
+    (1500, "Master", "\U0001f7e3", (155, 60, 200), "circle"),
+    (1750, "Grandmaster", "\U0001f534", (221, 46, 68), "circle"),
+    (2000, "Challenger", "\U0001f451", (255, 199, 44), "circle"),
 ]
 
 # Divisions within a tier, lowest to highest — the same I/II/III/IV split
@@ -231,6 +316,54 @@ ELO_DIVISIONS = ["IV", "III", "II", "I"]
 # Master and above show just the tier, same as League showing raw LP
 # instead of I-IV once you hit Master.
 ELO_DIVISIONED_TIER_COUNT = 6
+
+# Derived, not duplicated, from ELO_TIERS itself — a tier's threshold/badge
+# color looked up by name rather than re-typed as separate constants, so
+# there's nothing here that can drift out of sync if ELO_TIERS' own values
+# ever change (the exact "stale duplicated constant" bug CARD_DEFAULT_*
+# ran into earlier is what this sidesteps).
+ELO_TIER_THRESHOLDS = {name: threshold for threshold, name, _emoji, _badge, _shape in ELO_TIERS}
+ELO_TIER_BADGE_COLORS = {name: badge for _threshold, name, _emoji, badge, _shape in ELO_TIERS}
+
+# Trading-card rewards permanently unlocked (see card_unlocks,
+# _checkTierRewardUnlocks) the first time a player reaches each of these
+# tiers — a title (equippable as the card's epithet) and a matching color
+# scheme (accent sampled from that tier's own ELO_TIERS badge color, same
+# "derive, don't duplicate" reasoning as the dicts above). Only Diamond and
+# up reward anything; Iron through Platinum are the "everyone passes
+# through these" tiers with nothing special to commemorate.
+CARD_TIER_REWARD_TITLES = {
+    "Diamond": "Diamond Mind",
+    "Master": "Mastermind",
+    "Grandmaster": "Grandmaster",
+    "Challenger": "The Challenger",
+}
+# Titles granted directly (see grantSpecialCardTitle) rather than earned by
+# reaching an elo tier — a manual admin action, not something
+# _checkTierRewardUnlocks ever awards on its own. Kept as its own small
+# catalog rather than folded into CARD_TIER_REWARD_TITLES since these have
+# no elo threshold backing them at all.
+CARD_SPECIAL_TITLES = {
+    "Developer": "Developer",
+}
+# Every card_unlocks itemKey that resolves to a real title, tier-earned or
+# specially-granted alike — the one place getUnlockedCardTitles and
+# /card-set-title's own validation both read from, so the two catalogs
+# above only ever need combining in one place.
+CARD_TITLE_CATALOG = {**CARD_TIER_REWARD_TITLES, **CARD_SPECIAL_TITLES}
+
+# Shockwave's own developer — always has the "Developer" title available
+# in every guild the bot is in (see getUnlockedCardTitles), not just ones
+# with a card_unlocks row for them. A single hardcoded id rather than a
+# per-guild grant, since the alternative would mean re-granting it by hand
+# every time the bot joins a new guild for something that should just
+# always be true, everywhere, for this one account.
+SHOCKWAVE_DEVELOPER_ID = 217743368959164416
+# Same darken-for-background ratio _renderTeamCardImage uses to derive a
+# team card's background from its sampled logo accent — reused here so a
+# reward scheme's background relates to its accent the same visual way
+# every other card's does.
+CARD_BACKGROUND_DARKEN_RATIO = 0.28
 
 # /wager-against: a heads-up gold wager between two specific players,
 # independent of the team-game betting above. The challenged player
@@ -594,29 +727,29 @@ class helpers():
     # Gold; anything above the top tier's threshold is still Challenger.
     def _eloRankParts(self, elo):
         tier_index = 0
-        for i, (threshold, _name, _emoji) in enumerate(ELO_TIERS):
+        for i, (threshold, _name, _emoji, _badge, _shape) in enumerate(ELO_TIERS):
             if elo >= threshold:
                 tier_index = i
             else:
                 break
 
-        threshold, name, emoji = ELO_TIERS[tier_index]
+        threshold, name, emoji, badge_color, badge_shape = ELO_TIERS[tier_index]
 
         if tier_index >= ELO_DIVISIONED_TIER_COUNT:
-            return emoji, name
+            return emoji, name, badge_color, badge_shape
 
         span = ELO_TIERS[tier_index + 1][0] - threshold
         offset = max(elo - threshold, 0)
         segment_size = span / len(ELO_DIVISIONS)
         division_index = min(int(offset // segment_size), len(ELO_DIVISIONS) - 1)
 
-        return emoji, f"{name} {ELO_DIVISIONS[division_index]}"
+        return emoji, f"{name} {ELO_DIVISIONS[division_index]}", badge_color, badge_shape
 
     # Maps a raw elo number to a League-style "emoji tier division" label,
     # e.g. "\U0001f537 Platinum III" — what /stats and /leaderboard show,
     # since Discord's own client renders the emoji fine in embed text.
     def eloRankLabel(self, elo):
-        emoji, label = self._eloRankParts(elo)
+        emoji, label, _badge, _shape = self._eloRankParts(elo)
         return f"{emoji} {label}"
 
     # Same tier/division text, without the leading emoji — for the trading
@@ -627,6 +760,14 @@ class helpers():
     # there the way it is for a normal embed field.
     def eloRankLabelPlain(self, elo):
         return self._eloRankParts(elo)[1]
+
+    # The tier's badge color/shape (see ELO_TIERS) — the trading card's
+    # stand-in for the emoji eloRankLabel shows in a real embed.
+    def eloRankBadgeColor(self, elo):
+        return self._eloRankParts(elo)[2]
+
+    def eloRankBadgeShape(self, elo):
+        return self._eloRankParts(elo)[3]
 
     # Forms elo-balanced teams from the caller's voice channel and marks
     # the game as ranked, so elo actually gets updated when the winner is
@@ -4282,13 +4423,286 @@ class helpers():
         if result is None:
             await ctx.response.send_message(f"No team named **{team_name}** in this server.")
             return
-        _, team = result
+        team_id, team = result
 
         embed, file = self._renderTeamStatsEmbed(team)
         if file is not None:
             await ctx.response.send_message(embed=embed, file=file)
         else:
             await ctx.response.send_message(embed=embed)
+
+        msg = await ctx.original_response()
+        await msg.add_reaction(TEAM_CARD_EMOJI)
+
+        self.cursor.execute(
+            "INSERT OR REPLACE INTO team_stats_views(messageId, guildId, teamId, cardShown) "
+            "VALUES(?, ?, ?, 0)",
+            (msg.id, ctx.guild.id, team_id)
+        )
+        self.db.commit()
+
+    # A representative color sampled straight from `logo_path`'s own
+    # artwork — the team card's accent color "matches the logo" (see
+    # _renderTeamCardImage) without needing a stored per-team setting the
+    # way the player card's customizable accent_color does. Near-
+    # transparent pixels (background) and near-white/near-black ones
+    # (padding, outlines) are excluded so a logo's actual identifying color
+    # wins out over whatever surrounds it; colors are bucketed to the
+    # nearest 16 to collapse anti-aliasing noise into one dominant group
+    # instead of splitting votes across dozens of near-identical shades.
+    def _dominantLogoColor(self, logo_path, fallback):
+        try:
+            image = Image.open(logo_path).convert("RGBA")
+        except Exception:
+            return fallback
+        image.thumbnail((64, 64))
+        counts = {}
+        for r, g, b, a in image.getdata():
+            if a < 128:
+                continue
+            brightness = (r + g + b) / 3
+            if brightness < 20 or brightness > 235:
+                continue
+            key = (r // 16 * 16, g // 16 * 16, b // 16 * 16)
+            counts[key] = counts.get(key, 0) + 1
+        if not counts:
+            return fallback
+        return max(counts, key=counts.get)
+
+    # `color` lightened toward white (see _lightenColor) just enough that
+    # it's at least `min_contrast` brighter, on average, than `background`
+    # — closed-form rather than searching, since _lightenColor's blend is
+    # linear in `amount`: brightness(lighten(color, amount)) is
+    # color_brightness + (255 - color_brightness) * amount, so the amount
+    # that hits the target brightness exactly is a straight division. A
+    # `color` already bright enough comes back unchanged — this only ever
+    # pulls a color TOWARD readable, never away from it, so a well-lit logo
+    # color renders exactly as sampled.
+    def _ensureReadableAccent(self, color, background, min_contrast=CARD_MIN_ACCENT_CONTRAST):
+        color_brightness = sum(color) / 3
+        background_brightness = sum(background) / 3
+        deficit = min_contrast - (color_brightness - background_brightness)
+        if deficit <= 0:
+            return color
+        headroom = 255 - color_brightness
+        if headroom <= 0:
+            return color
+        amount = min(deficit / headroom, 1.0)
+        return self._lightenColor(color, amount)
+
+    # Pure rendering: a portrait "team card" — the team's own counterpart
+    # to _renderTradingCardImage, with its logo as the focal point (same
+    # big-and-centered treatment _drawMatchupColumn gives it) instead of a
+    # player's avatar, and its accent/background colors sampled straight
+    # off that logo (_dominantLogoColor) rather than being a stored
+    # per-player customization — a team has no settings row of its own, so
+    # "match the logo" is derived fresh on every render instead.
+    def _renderTeamCardImage(self, guild_name, team):
+        logo_path = team.get_logo_path()
+        has_logo = logo_path is not None and os.path.isfile(logo_path)
+        accent_color = (
+            self._dominantLogoColor(logo_path, TEAM_CARD_FALLBACK_ACCENT_COLOR) if has_logo
+            else TEAM_CARD_FALLBACK_ACCENT_COLOR
+        )
+        # Same "darken the one distinguishing color into a background, then
+        # lighten it back up for the vignette center" relationship the
+        # player card's background_color has to its own center — here it's
+        # derived from the sampled accent instead of a stored setting.
+        background_color = tuple(round(c * CARD_BACKGROUND_DARKEN_RATIO) for c in accent_color)
+        background_center = self._lightenColor(background_color, 0.3)
+        text_color = self._hexToRgb(CARD_DEFAULT_TEXT_COLOR, BRACKET_TEXT_COLOR)
+        # The background itself is always derived from (and so stays true
+        # to) the logo's own sampled accent_color above — but a dark logo
+        # color (a deep navy, forest green, ...) drawn as TEXT against the
+        # background's own lightened vignette center can end up with poor
+        # contrast, especially toward the middle of the card. Every drawn
+        # element below uses this readability-boosted version instead of
+        # the raw sampled color, so the card still visibly carries the
+        # logo's color scheme without any of its text becoming hard to
+        # read — only the background derivation above uses the true,
+        # unboosted sample.
+        accent_color = self._ensureReadableAccent(accent_color, background_center)
+
+        name_font = self._loadFont(CHAKRA_PETCH_BOLD, CARD_NAME_FONT_SIZE)
+        label_font = self._loadFont(IBM_PLEX_SANS, CARD_STAT_LABEL_FONT_SIZE, "Bold")
+        value_font = self._loadFont(IBM_PLEX_SANS, CARD_STAT_VALUE_FONT_SIZE, "SemiBold")
+        roster_font = self._loadFont(IBM_PLEX_SANS, CARD_STAT_LABEL_FONT_SIZE, "Medium")
+
+        games = team.wins + team.losses
+        win_rate = f"{(team.wins / games) * 100:.1f}%" if games > 0 else "N/A"
+        captain = team.get_captain()
+        captain_name = captain.get_name() if isinstance(captain, Player) else "None"
+        captain_id = captain.get_id() if isinstance(captain, Player) else None
+        stat_rows = [
+            ("CAPTAIN", captain_name),
+            ("RECORD", f"{team.wins}W - {team.losses}L"),
+            ("WIN RATE", win_rate),
+        ]
+
+        # Captain-first (_orderedRoster), same as the matchup image's own
+        # roster columns, capped the same "N rows then a +count line" way
+        # the player card caps its team list.
+        roster = self._orderedRoster(team)
+        shown_roster = roster[:TEAM_CARD_MAX_ROSTER_ROWS]
+        extra_roster_count = len(roster) - len(shown_roster)
+
+        header_height = self._bracketHeaderHeight(None)
+        logo_top = header_height + BRACKET_PADDING * 2
+        logo_cx = CARD_WIDTH / 2
+        name_y = logo_top + TEAM_CARD_LOGO_SIZE + BRACKET_PADDING * 2
+        rule_y = name_y + CARD_NAME_FONT_SIZE + BRACKET_PADDING * 2
+        stats_top = rule_y + BRACKET_PADDING * 2
+        stats_bottom = stats_top + CARD_STAT_LINE_HEIGHT * len(stat_rows)
+
+        roster_top = stats_bottom + BRACKET_PADDING * 2
+        roster_rows = len(shown_roster) + (1 if extra_roster_count > 0 else 0) if shown_roster else 1
+        height = int(roster_top + roster_rows * TEAM_CARD_ROSTER_ROW_HEIGHT + BRACKET_MARGIN)
+
+        image, draw = self._createBracketCanvas(
+            CARD_WIDTH, height, accent_color, background=background_color, background_center=background_center
+        )
+        self._drawBracketHeader(image, draw, guild_name, None, accent_color, CARD_WIDTH, bold_title=True)
+
+        logo_x = int(logo_cx - TEAM_CARD_LOGO_SIZE / 2)
+        if has_logo:
+            logo = Image.open(logo_path).convert("RGBA")
+            logo.thumbnail((TEAM_CARD_LOGO_SIZE, TEAM_CARD_LOGO_SIZE), Image.LANCZOS)
+            paste_x = int(logo_cx - logo.width / 2)
+            paste_y = int(logo_top + (TEAM_CARD_LOGO_SIZE - logo.height) / 2)
+            image.paste(logo, (paste_x, paste_y), logo)
+        draw.rounded_rectangle(
+            [logo_x, logo_top, logo_x + TEAM_CARD_LOGO_SIZE, logo_top + TEAM_CARD_LOGO_SIZE],
+            radius=TEAM_CARD_LOGO_RADIUS, outline=accent_color, width=TEAM_CARD_LOGO_BORDER
+        )
+
+        draw.text((logo_cx, name_y), team.get_name(), font=name_font, fill=text_color, anchor="ma")
+
+        draw.line(
+            [(BRACKET_MARGIN, rule_y), (CARD_WIDTH - BRACKET_MARGIN, rule_y)],
+            fill=accent_color, width=BRACKET_RULE_WIDTH
+        )
+
+        measurer = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+        label_column_width = max(measurer.textlength(label, font=label_font) for label, _value in stat_rows)
+        value_x = BRACKET_MARGIN + label_column_width + BRACKET_PADDING * 2
+        for i, (label, value) in enumerate(stat_rows):
+            row_y = stats_top + i * CARD_STAT_LINE_HEIGHT + CARD_STAT_LINE_HEIGHT / 2
+            draw.text((BRACKET_MARGIN, row_y), label, font=label_font, fill=accent_color, anchor="lm")
+            draw.text((value_x, row_y), value, font=value_font, fill=text_color, anchor="lm")
+
+        if not shown_roster:
+            draw.text(
+                (BRACKET_MARGIN, roster_top + TEAM_CARD_ROSTER_ROW_HEIGHT / 2), "No players yet",
+                font=roster_font, fill=BRACKET_LINE_COLOR, anchor="lm"
+            )
+        for i, player in enumerate(shown_roster):
+            row_y = roster_top + i * TEAM_CARD_ROSTER_ROW_HEIGHT + TEAM_CARD_ROSTER_ROW_HEIGHT / 2
+            text_x = BRACKET_MARGIN
+            if captain_id is not None and player.get_id() == captain_id:
+                star_cx = BRACKET_MARGIN + TEAM_CARD_STAR_RADIUS
+                self._drawStar(draw, star_cx, row_y, TEAM_CARD_STAR_RADIUS, accent_color)
+                text_x = BRACKET_MARGIN + TEAM_CARD_STAR_RADIUS * 2 + BRACKET_PADDING / 2
+            draw.text((text_x, row_y), player.get_name(), font=roster_font, fill=text_color, anchor="lm")
+
+        if extra_roster_count > 0:
+            row_y = roster_top + len(shown_roster) * TEAM_CARD_ROSTER_ROW_HEIGHT + TEAM_CARD_ROSTER_ROW_HEIGHT / 2
+            draw.text(
+                (BRACKET_MARGIN, row_y), f"+{extra_roster_count} more player"
+                f"{'s' if extra_roster_count != 1 else ''}", font=roster_font, fill=accent_color, anchor="lm"
+            )
+
+        return image
+
+    # The card half of TEAM_CARD_EMOJI (see handleTeamStatsReaction) —
+    # re-fetches the team fresh (getTeamById) rather than trusting whatever
+    # was true when /team-stats first posted, same "always current"
+    # approach _swapStatsForTradingCard takes for a player's live stats.
+    async def _swapTeamStatsForCard(self, message, guild_id, guild_name, team_id):
+        team = self.getTeamById(guild_id, team_id)
+        if team is None:
+            return
+        card_image = self._renderTeamCardImage(guild_name, team)
+        file = self._imageToFile(card_image, "team_card.png")
+
+        embed = discord.Embed(color=discord.Color.gold())
+        embed.set_image(url=f"attachment://{file.filename}")
+        await message.edit(embed=embed, attachments=[file])
+
+    # The reverse: rebuilds the plain /team-stats embed
+    # (_renderTeamStatsEmbed, the same one teamStatsHelper itself posts) in
+    # place of the card image.
+    async def _swapTeamCardForStats(self, message, guild_id, team_id):
+        team = self.getTeamById(guild_id, team_id)
+        if team is None:
+            return
+        embed, file = self._renderTeamStatsEmbed(team)
+        if file is not None:
+            await message.edit(embed=embed, attachments=[file])
+        else:
+            await message.edit(embed=embed, attachments=[])
+
+    # Called from bot.py's on_raw_reaction_add for every reaction — mirrors
+    # handleStatsReaction's own emoji-swap shape, just for a team instead
+    # of a player: TEAM_CARD_EMOJI removes itself and hands off to
+    # _swapTeamStatsForCard, replacing itself with TEAM_CARD_RETURN_EMOJI;
+    # that swaps back via _swapTeamCardForStats and restores TEAM_CARD_EMOJI
+    # in turn, the same real back-and-forth toggle handleStatsReaction has.
+    async def handleTeamStatsReaction(self, payload):
+        guild_id = payload.guild_id
+        if guild_id is None:
+            return
+
+        emoji = str(payload.emoji)
+        if emoji not in (TEAM_CARD_EMOJI, TEAM_CARD_RETURN_EMOJI):
+            return
+
+        self.cursor.execute(
+            "SELECT teamId, cardShown FROM team_stats_views WHERE guildId=? AND messageId=?",
+            (guild_id, payload.message_id)
+        )
+        row = self.cursor.fetchone()
+        if row is None:
+            return
+        team_id, card_shown = row
+
+        if card_shown and emoji == TEAM_CARD_EMOJI:
+            return
+        if not card_shown and emoji == TEAM_CARD_RETURN_EMOJI:
+            return
+
+        channel = self.client.get_channel(payload.channel_id)
+        if channel is None:
+            channel = await self.client.fetch_channel(payload.channel_id)
+        message = await channel.fetch_message(payload.message_id)
+        if not message.embeds:
+            return
+
+        if emoji == TEAM_CARD_EMOJI:
+            guild_name = channel.guild.name if channel.guild is not None else ""
+            await self._swapTeamStatsForCard(message, guild_id, guild_name, team_id)
+            self.cursor.execute(
+                "UPDATE team_stats_views SET cardShown=1 WHERE guildId=? AND messageId=?",
+                (guild_id, payload.message_id)
+            )
+            self.db.commit()
+            try:
+                await message.clear_reaction(TEAM_CARD_EMOJI)
+            except discord.HTTPException:
+                pass
+            await message.add_reaction(TEAM_CARD_RETURN_EMOJI)
+            return
+
+        await self._swapTeamCardForStats(message, guild_id, team_id)
+        self.cursor.execute(
+            "UPDATE team_stats_views SET cardShown=0 WHERE guildId=? AND messageId=?",
+            (guild_id, payload.message_id)
+        )
+        self.db.commit()
+        try:
+            await message.clear_reaction(TEAM_CARD_RETURN_EMOJI)
+        except discord.HTTPException:
+            pass
+        await message.add_reaction(TEAM_CARD_EMOJI)
 
     # ---------------- /my-teams ----------------
 
@@ -5336,6 +5750,17 @@ class helpers():
                     guild_id, user_id,
                 )
             )
+            # Only on forward application, not a correction's reversal —
+            # unlocking a tier reward while UNDOING a wrongly-recorded
+            # result (see _correctTournamentMatchHelper) would be checking
+            # against elo on its way back down, not up. The reapply that
+            # follows a reversal calls back in here with sign=1 anyway, so
+            # a corrected winner still gets checked properly.
+            if sign > 0 and d["elo"] != 0:
+                self.cursor.execute(
+                    "SELECT elo FROM economy WHERE guildId=? AND userId=?", (guild_id, user_id)
+                )
+                self._checkTierRewardUnlocks(guild_id, user_id, self.cursor.fetchone()[0])
         self.db.commit()
 
     def formatResultMessage(self, winning_team, summary):
@@ -5440,12 +5865,22 @@ class helpers():
         )
         await ctx.channel.send(self.formatResultMessage(correct_team, summary))
 
-    async def statsHelper(self, ctx, member=None):
-        target = member if member is not None else ctx.user
-        guild_id = ctx.guild.id
+    # Builds the plain /stats embed for `target` (a discord.Member or
+    # discord.User — anything with .id/.name/.display_name/.display_avatar)
+    # in `guild_id`. Factored out of statsHelper so handleStatsReaction can
+    # rebuild the exact same embed when STATS_RETURN_EMOJI swaps a trading
+    # card back to it, without duplicating the field layout.
+    def _buildStatsEmbed(self, guild_id, target):
         user_id = target.id
 
         self.ensureEconomyRow(guild_id, user_id, target.name)
+        # Keeps this player's trading_cards row in sync with the current
+        # CARD_DEFAULT_* palette (see ensureCardSettings) every time /stats
+        # runs for them, not just the first time their card is ever
+        # rendered — so a later change to Shockwave's own defaults reaches
+        # them the next time they check their stats, with no manual DB fix
+        # needed.
+        self.ensureCardSettings(guild_id, user_id)
 
         self.cursor.execute(
             "SELECT balance, wins, losses, gold_wagered, gold_won, gold_lost, "
@@ -5454,6 +5889,13 @@ class helpers():
         )
         (balance, bet_wins, bet_losses, gold_wagered, gold_won, gold_lost, game_wins, game_losses,
          ranked_wins, ranked_losses, elo) = self.cursor.fetchone()
+        # Lazy self-heal, same idea as ensureCardSettings/ensureEconomyRow
+        # just above: a player already sitting at Diamond+ before
+        # card_unlocks existed (or one who reached a tier without their
+        # elo ever passing back through applyGameDeltas — a tournament
+        # correction, a manual DB edit) still gets credited the next time
+        # anything looks at their stats, not never.
+        self._checkTierRewardUnlocks(guild_id, user_id, elo)
 
         net_gold = gold_won - gold_lost
 
@@ -5512,6 +5954,15 @@ class helpers():
         embed.add_field(name="Net Gold Won/Lost", value=f"{net_gold:+d} gold", inline=True)
         embed.add_field(name="Gold Wagered", value=str(gold_wagered), inline=True)
 
+        return embed
+
+    async def statsHelper(self, ctx, member=None):
+        target = member if member is not None else ctx.user
+        guild_id = ctx.guild.id
+        user_id = target.id
+
+        embed = self._buildStatsEmbed(guild_id, target)
+
         await ctx.response.send_message(embed=embed)
         msg = await ctx.original_response()
         await msg.add_reaction(STATS_PLACEHOLDER_EMOJI)
@@ -5567,6 +6018,11 @@ class helpers():
         except ValueError:
             return fallback
 
+    # The reverse of _hexToRgb — an (r, g, b) tuple back to trading_cards'
+    # own "#RRGGBB" storage format.
+    def _rgbToHex(self, rgb):
+        return "#{:02X}{:02X}{:02X}".format(*rgb)
+
     # A lighter shade of `color`, blended toward white by `amount` (0-1) —
     # used to turn a single customizable background_color into the
     # matching (center, edge) pair _createBracketCanvas's vignette wants,
@@ -5586,18 +6042,39 @@ class helpers():
 
     # A player's trading_cards row, created with Shockwave's own defaults
     # (CARD_DEFAULT_*) the first time it's needed — same self-healing
-    # "insert if missing, read either way" shape ensureEconomyRow uses,
-    # so a card can be customized (by hand in the database today; a future
-    # /card-customize-style command could write the same columns) without
-    # ever needing a one-off migration for players who predate that.
+    # "insert if missing, read either way" shape ensureEconomyRow uses, so
+    # a card can be customized (by hand in the database today; a future
+    # /card-customize-style command could write the same columns, and
+    # should set customized=1 when it does) without ever needing a one-off
+    # migration for players who predate that.
+    #
+    # BUG FIX: INSERT OR IGNORE alone left existing rows frozen at whatever
+    # CARD_DEFAULT_* happened to be the day they were first created — every
+    # later tweak to the default palette (and there were several) needed a
+    # manual DB fix to actually show up for a player who'd already viewed
+    # their card once. Since there's no customization command yet, every
+    # existing row is really just a stale snapshot of the defaults, not a
+    # deliberate choice — so an uncustomized row (customized=0) is now
+    # re-synced to the current CARD_DEFAULT_* values on every call here,
+    # keeping it "following the defaults" instead of pinned to the past.
+    # Once real customization exists, setting customized=1 opts a row out
+    # of this and this UPDATE becomes a no-op for it.
     def ensureCardSettings(self, guild_id, user_id):
         self.cursor.execute(
             "INSERT OR IGNORE INTO trading_cards"
-            "(guildId, userId, title, accent_color, background_color, text_color, font_style) "
-            "VALUES(?, ?, ?, ?, ?, ?, ?)",
+            "(guildId, userId, title, accent_color, background_color, text_color, font_style, customized) "
+            "VALUES(?, ?, ?, ?, ?, ?, ?, 0)",
             (
                 guild_id, user_id, CARD_DEFAULT_TITLE, CARD_DEFAULT_ACCENT_COLOR,
                 CARD_DEFAULT_BACKGROUND_COLOR, CARD_DEFAULT_TEXT_COLOR, CARD_DEFAULT_FONT_STYLE,
+            )
+        )
+        self.cursor.execute(
+            "UPDATE trading_cards SET title=?, accent_color=?, background_color=?, text_color=?, "
+            "font_style=? WHERE guildId=? AND userId=? AND customized=0",
+            (
+                CARD_DEFAULT_TITLE, CARD_DEFAULT_ACCENT_COLOR, CARD_DEFAULT_BACKGROUND_COLOR,
+                CARD_DEFAULT_TEXT_COLOR, CARD_DEFAULT_FONT_STYLE, guild_id, user_id,
             )
         )
         self.db.commit()
@@ -5615,16 +6092,238 @@ class helpers():
             "text_color": text_color, "font_style": font_style,
         }
 
+    # Permanently records that `user_id` has unlocked `item_key` (a
+    # CARD_TIER_REWARD_TITLES key, e.g. "Diamond") for their trading card
+    # in this guild — a title and a matching color scheme unlock together
+    # as one reward (see _checkTierRewardUnlocks), so both go in under the
+    # same key with a different itemType. INSERT OR IGNORE makes this
+    # idempotent — re-unlocking something already unlocked is a no-op —
+    # and since nothing anywhere deletes from card_unlocks, whatever's
+    # unlocked here stays unlocked even if the player later deranks below
+    # the tier that earned it.
+    def _unlockCardReward(self, guild_id, user_id, item_key):
+        for item_type in ("title", "color_scheme"):
+            self.cursor.execute(
+                "INSERT OR IGNORE INTO card_unlocks(guildId, userId, itemType, itemKey) "
+                "VALUES(?, ?, ?, ?)",
+                (guild_id, user_id, item_type, item_key)
+            )
+        self.db.commit()
+
+    # Unlocks every CARD_TIER_REWARD_TITLES tier `elo` currently qualifies
+    # for — not just the single tier `elo` presently sits in, so a big
+    # enough one-time elo swing (a huge upset, or a manual/tournament
+    # correction) that jumps straight from, say, Platinum to Grandmaster
+    # still credits Diamond and Master along the way, not just the top one
+    # landed on. Called both right after a ranked result actually changes
+    # someone's elo (applyGameDeltas) and lazily whenever their card
+    # settings are read (getCardSettings) — the same "self-heal on the
+    # next read" idea ensureEconomyRow/_ensureLogo/stats_views' own resync
+    # already use elsewhere in this file, so a player who was already
+    # sitting at Diamond+ before this feature existed gets credited the
+    # first time anything touches their card, not never.
+    def _checkTierRewardUnlocks(self, guild_id, user_id, elo):
+        for tier_name in CARD_TIER_REWARD_TITLES:
+            if elo >= ELO_TIER_THRESHOLDS[tier_name]:
+                self._unlockCardReward(guild_id, user_id, tier_name)
+
+    # Every trading-card title `user_id` has permanently unlocked in this
+    # guild, as display-ready strings (CARD_TITLE_CATALOG's values, not the
+    # raw itemKeys stored in card_unlocks — a tier name for a rank reward,
+    # or a CARD_SPECIAL_TITLES key for a manually-granted one) — read by
+    # /card-set-title to offer as choices. CARD_DEFAULT_TITLE isn't
+    # included here since it needs no unlocking (see getAvailableCardTitles).
+    def getUnlockedCardTitles(self, guild_id, user_id):
+        self.cursor.execute(
+            "SELECT itemKey FROM card_unlocks WHERE guildId=? AND userId=? AND itemType='title'",
+            (guild_id, user_id)
+        )
+        titles = [
+            CARD_TITLE_CATALOG[key] for (key,) in self.cursor.fetchall() if key in CARD_TITLE_CATALOG
+        ]
+        # SHOCKWAVE_DEVELOPER_ID always has Developer, in every guild,
+        # regardless of whether a card_unlocks row exists for them here —
+        # see that constant's own comment for why this isn't just a
+        # per-guild grant instead.
+        if user_id == SHOCKWAVE_DEVELOPER_ID and CARD_SPECIAL_TITLES["Developer"] not in titles:
+            titles.append(CARD_SPECIAL_TITLES["Developer"])
+        return titles
+
+    # /card-set-title's own choice list: CARD_DEFAULT_TITLE (always
+    # available — it needs no unlocking, it's just the base title) plus
+    # whatever this player has actually unlocked.
+    def getAvailableCardTitles(self, guild_id, user_id):
+        return [CARD_DEFAULT_TITLE] + self.getUnlockedCardTitles(guild_id, user_id)
+
+    # A manual, one-off unlock — CARD_SPECIAL_TITLES' `title_key` (e.g.
+    # "Developer") rather than an elo-tier one, so this skips
+    # _checkTierRewardUnlocks/ELO_TIER_THRESHOLDS entirely and just records
+    # the itemType='title' row directly. No matching color_scheme unlock
+    # the way a tier reward gets one — a special title isn't paired with an
+    # ELO_TIERS badge color to derive a scheme from.
+    def grantSpecialCardTitle(self, guild_id, user_id, title_key):
+        self.cursor.execute(
+            "INSERT OR IGNORE INTO card_unlocks(guildId, userId, itemType, itemKey) "
+            "VALUES(?, ?, 'title', ?)",
+            (guild_id, user_id, title_key)
+        )
+        self.db.commit()
+
+    # Sets `user_id`'s equipped trading-card title. Trusts `title` is
+    # already validated (see cardSetTitleHelper, the command boundary that
+    # checks it against getAvailableCardTitles) — this is the internal
+    # write half only. Also marks the row customized=1, the same flag
+    # ensureCardSettings' own resync-to-defaults check respects; without
+    # it, the very next /stats call would silently reset this right back
+    # to CARD_DEFAULT_TITLE.
+    def setCardTitle(self, guild_id, user_id, title):
+        self.ensureCardSettings(guild_id, user_id)
+        self.cursor.execute(
+            "UPDATE trading_cards SET title=?, customized=1 WHERE guildId=? AND userId=?",
+            (title, guild_id, user_id)
+        )
+        self.db.commit()
+
+    # /card-set-title: equips any title the caller has unlocked (or the
+    # base CARD_DEFAULT_TITLE, always available) as their trading card's
+    # epithet. Rejects anything else rather than trusting free text here —
+    # unlike a raw hex color, a title is exactly the kind of thing
+    # card_unlocks exists to gate.
+    async def cardSetTitleHelper(self, ctx, title):
+        guild_id = ctx.guild.id
+        user_id = ctx.user.id
+
+        available = self.getAvailableCardTitles(guild_id, user_id)
+        if title not in available:
+            await ctx.response.send_message(
+                f"You haven't unlocked **{title}**. Pick one of your unlocked titles from the "
+                "autocomplete list, or check /stats to see what you've earned."
+            )
+            return
+
+        self.setCardTitle(guild_id, user_id, title)
+        await ctx.response.send_message(f'Your trading card title is now **"{title}"**.')
+
+    # Every trading-card color scheme `user_id` has permanently unlocked in
+    # this guild — {name, accent_color, background_color}, hex-encoded the
+    # same way trading_cards itself stores colors, ready to write straight
+    # into that table's own columns (see setCardColorScheme, /card-set-
+    # color-scheme). Colors are derived from ELO_TIER_BADGE_COLORS on every
+    # call rather than stored, so a scheme always matches whatever that
+    # tier's badge color currently is instead of freezing at whatever it
+    # was the day it was unlocked.
+    def getUnlockedCardColorSchemes(self, guild_id, user_id):
+        self.cursor.execute(
+            "SELECT itemKey FROM card_unlocks WHERE guildId=? AND userId=? AND itemType='color_scheme'",
+            (guild_id, user_id)
+        )
+        schemes = []
+        for (tier_name,) in self.cursor.fetchall():
+            badge_color = ELO_TIER_BADGE_COLORS.get(tier_name)
+            if badge_color is None:
+                continue
+            background = tuple(round(c * CARD_BACKGROUND_DARKEN_RATIO) for c in badge_color)
+            # _renderTradingCardImage trusts trading_cards' stored colors
+            # exactly as given (a player who hand-edits a custom hex value
+            # should see exactly that value, not something silently
+            # adjusted) — so the readability guarantee has to live here
+            # instead, in the catalog itself, before a scheme is ever
+            # offered or equipped. A badge color was picked for how it
+            # reads as a small circle/diamond standing in for an emoji
+            # (see ELO_TIERS), not for driving a whole card's header/label
+            # text against its own darkened background.
+            background_center = self._lightenColor(background, 0.3)
+            readable_accent = self._ensureReadableAccent(badge_color, background_center)
+            schemes.append({
+                "name": tier_name,
+                "accent_color": self._rgbToHex(readable_accent),
+                "background_color": self._rgbToHex(background),
+            })
+        return schemes
+
+    # /card-set-color-scheme's own choice list: CARD_DEFAULT_SCHEME_NAME
+    # (Shockwave's own palette, always available — needs no unlocking) plus
+    # whatever this player has actually unlocked, same shape
+    # getAvailableCardTitles has to getUnlockedCardTitles.
+    def getAvailableCardColorSchemes(self, guild_id, user_id):
+        default = {
+            "name": CARD_DEFAULT_SCHEME_NAME,
+            "accent_color": CARD_DEFAULT_ACCENT_COLOR,
+            "background_color": CARD_DEFAULT_BACKGROUND_COLOR,
+        }
+        return [default] + self.getUnlockedCardColorSchemes(guild_id, user_id)
+
+    # Sets `user_id`'s equipped trading-card accent/background colors.
+    # Trusts `accent_color`/`background_color` are already validated (see
+    # cardSetColorSchemeHelper, the command boundary that resolves a
+    # scheme name against getAvailableCardColorSchemes) — this is the
+    # internal write half only. Also marks the row customized=1, same
+    # reasoning setCardTitle's own comment gives: without it, the very
+    # next /stats call would silently resync these back to CARD_DEFAULT_*.
+    def setCardColorScheme(self, guild_id, user_id, accent_color, background_color):
+        self.ensureCardSettings(guild_id, user_id)
+        self.cursor.execute(
+            "UPDATE trading_cards SET accent_color=?, background_color=?, customized=1 "
+            "WHERE guildId=? AND userId=?",
+            (accent_color, background_color, guild_id, user_id)
+        )
+        self.db.commit()
+
+    # /card-set-color-scheme: equips any color scheme the caller has
+    # unlocked (or CARD_DEFAULT_SCHEME_NAME, always available) as their
+    # trading card's accent/background. `scheme` is looked up by name
+    # rather than taking raw hex directly — same "gate it, don't trust
+    # free text" reasoning cardSetTitleHelper's own comment gives, and it
+    # keeps the two customization commands symmetrical.
+    async def cardSetColorSchemeHelper(self, ctx, scheme):
+        guild_id = ctx.guild.id
+        user_id = ctx.user.id
+
+        available = {s["name"]: s for s in self.getAvailableCardColorSchemes(guild_id, user_id)}
+        if scheme not in available:
+            await ctx.response.send_message(
+                f"You haven't unlocked the **{scheme}** color scheme. Pick one of your unlocked "
+                "schemes from the autocomplete list, or check /stats to see what you've earned."
+            )
+            return
+
+        chosen = available[scheme]
+        self.setCardColorScheme(guild_id, user_id, chosen["accent_color"], chosen["background_color"])
+        await ctx.response.send_message(f'Your trading card now uses the **{scheme}** color scheme.')
+
+    # A small filled circle standing in for the elo tier emoji (see
+    # ELO_TIERS' own comment on why — PIL's bundled TTF fonts can't render
+    # color emoji glyphs), positioned to the left of wherever the ELO
+    # value text starts.
+    def _drawEloBadge(self, draw, x, y, elo):
+        badge_color = self.eloRankBadgeColor(elo)
+        badge_shape = self.eloRankBadgeShape(elo)
+        if badge_shape == "diamond":
+            draw.polygon(
+                [
+                    (x, y - CARD_ELO_BADGE_RADIUS), (x + CARD_ELO_BADGE_RADIUS, y),
+                    (x, y + CARD_ELO_BADGE_RADIUS), (x - CARD_ELO_BADGE_RADIUS, y),
+                ],
+                fill=badge_color
+            )
+        else:
+            draw.ellipse(
+                [x - CARD_ELO_BADGE_RADIUS, y - CARD_ELO_BADGE_RADIUS,
+                 x + CARD_ELO_BADGE_RADIUS, y + CARD_ELO_BADGE_RADIUS],
+                fill=badge_color
+            )
+
     # Pure rendering: a portrait trading card built entirely from already-
     # fetched data (no DB/network access here — see _swapStatsForTradingCard
-    # for the async half that gathers all of this). `avatar_image` is a
+    # for the async half that gathers all of this). `avatar_image` is an
     # already-opened PIL image (the player's real avatar, or a plain
     # fallback tile if it couldn't be fetched); `settings` is a
-    # getCardSettings()-shaped dict; `stats` is
-    # {balance, game_wins, game_losses, elo, elo_rank}; `team_names` is
-    # every persistent team (see getTeamsForPlayer) this player is
-    # rostered on in this guild, most relevant first.
-    def _renderTradingCardImage(self, guild_name, display_name, avatar_image, settings, stats, team_names):
+    # getCardSettings()-shaped dict; `stats` is {elo, elo_rank, ranked_wins,
+    # ranked_losses, ranked_win_rate}; `teams` is every persistent Team
+    # (see getTeamsForPlayer) this player is rostered on in this guild,
+    # most relevant first — each one's own logo (self-healing, see
+    # _ensureLogo) is pasted alongside its name.
+    def _renderTradingCardImage(self, guild_name, display_name, avatar_image, settings, stats, teams):
         accent_color = self._hexToRgb(settings["accent_color"], BRACKET_TITLE_COLOR)
         text_color = self._hexToRgb(settings["text_color"], BRACKET_TEXT_COLOR)
         background_color = self._hexToRgb(settings["background_color"], BRACKET_BACKGROUND)
@@ -5632,8 +6331,28 @@ class helpers():
 
         name_font = self._loadFont(name_font_path, CARD_NAME_FONT_SIZE)
         title_font = self._loadFont(title_font_path, CARD_TITLE_FONT_SIZE)
-        label_font = self._loadFont(body_font_path, CARD_STAT_LABEL_FONT_SIZE, "Regular")
+        label_font = self._loadFont(body_font_path, CARD_STAT_LABEL_FONT_SIZE, "Bold")
         value_font = self._loadFont(body_font_path, CARD_STAT_VALUE_FONT_SIZE, "SemiBold")
+        team_font = self._loadFont(body_font_path, CARD_STAT_LABEL_FONT_SIZE, "Medium")
+
+        stat_rows = [
+            ("ELO", f"{stats['elo']} ({stats['elo_rank']})"),
+            ("RANKED RECORD", f"{stats['ranked_wins']}W - {stats['ranked_losses']}L"),
+            ("RANKED WIN RATE", stats["ranked_win_rate"]),
+        ]
+        shown_teams = teams[:CARD_MAX_TEAM_ROWS]
+        extra_team_count = len(teams) - len(shown_teams)
+
+        # Two-pass layout: measure first (a throwaway Draw, same approach
+        # every other renderer in this file uses) so labels/values can be
+        # column-aligned without guessing at their widths ahead of time —
+        # the whole point of stacking one stat per line (see CARD_STAT_
+        # LINE_HEIGHT) is giving each one the full card width to avoid
+        # clipping, so getting that width measurement right matters here
+        # more than it did for the old 3-column layout.
+        measurer = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+        label_column_width = max(measurer.textlength(label, font=label_font) for label, _value in stat_rows)
+        value_x = BRACKET_MARGIN + label_column_width + BRACKET_PADDING * 2
 
         header_height = self._bracketHeaderHeight(None)
         avatar_top = header_height + BRACKET_PADDING * 2
@@ -5642,9 +6361,15 @@ class helpers():
         title_y = name_y + CARD_NAME_FONT_SIZE + BRACKET_PADDING
         rule_y = title_y + CARD_TITLE_FONT_SIZE + BRACKET_PADDING * 2
         stats_top = rule_y + BRACKET_PADDING * 2
-        stats_bottom = stats_top + CARD_STAT_ROW_HEIGHT
-        team_y = stats_bottom + BRACKET_PADDING * 2
-        height = int((team_y + CARD_STAT_LABEL_FONT_SIZE if team_names else stats_bottom) + BRACKET_MARGIN)
+        stats_bottom = stats_top + CARD_STAT_LINE_HEIGHT * len(stat_rows)
+
+        teams_top = stats_bottom + BRACKET_PADDING * 2
+        if shown_teams:
+            team_rows = len(shown_teams) + (1 if extra_team_count > 0 else 0)
+            bottom = teams_top + team_rows * (CARD_TEAM_ROW_HEIGHT + CARD_TEAM_ROW_GAP)
+        else:
+            bottom = stats_bottom
+        height = int(bottom + BRACKET_MARGIN)
 
         # background_color is the one customizable color, standing in for
         # the vignette's "edge" shade — _lightenColor derives a matching
@@ -5682,26 +6407,36 @@ class helpers():
             fill=accent_color, width=BRACKET_RULE_WIDTH
         )
 
-        stat_entries = [
-            ("ELO", f"{stats['elo']} ({stats['elo_rank']})"),
-            ("RECORD", f"{stats['game_wins']}W - {stats['game_losses']}L"),
-            ("GOLD", str(stats['balance'])),
-        ]
-        col_width = CARD_WIDTH / len(stat_entries)
-        for i, (label, value) in enumerate(stat_entries):
-            cx = col_width * i + col_width / 2
-            draw.text((cx, stats_top), label, font=label_font, fill=BRACKET_LINE_COLOR, anchor="ma")
+        for i, (label, value) in enumerate(stat_rows):
+            row_y = stats_top + i * CARD_STAT_LINE_HEIGHT + CARD_STAT_LINE_HEIGHT / 2
+            draw.text((BRACKET_MARGIN, row_y), label, font=label_font, fill=accent_color, anchor="lm")
+            text_x = value_x
+            if label == "ELO":
+                self._drawEloBadge(draw, value_x + CARD_ELO_BADGE_RADIUS, row_y, stats["elo"])
+                text_x = value_x + CARD_ELO_BADGE_RADIUS * 2 + BRACKET_PADDING / 2
+            draw.text((text_x, row_y), value, font=value_font, fill=text_color, anchor="lm")
+
+        for i, team in enumerate(shown_teams):
+            row_y = teams_top + i * (CARD_TEAM_ROW_HEIGHT + CARD_TEAM_ROW_GAP)
+            logo_path = team.get_logo_path()
+            text_x = BRACKET_MARGIN
+            if logo_path is not None and os.path.isfile(logo_path):
+                logo = Image.open(logo_path).convert("RGBA")
+                logo.thumbnail((CARD_TEAM_LOGO_SIZE, CARD_TEAM_LOGO_SIZE), Image.LANCZOS)
+                logo_y = int(row_y + (CARD_TEAM_ROW_HEIGHT - logo.height) / 2)
+                image.paste(logo, (BRACKET_MARGIN, logo_y), logo)
+                text_x = BRACKET_MARGIN + CARD_TEAM_LOGO_SIZE + BRACKET_PADDING
             draw.text(
-                (cx, stats_top + CARD_STAT_LABEL_FONT_SIZE + BRACKET_PADDING / 2), value, font=value_font,
-                fill=text_color, anchor="ma"
+                (text_x, row_y + CARD_TEAM_ROW_HEIGHT / 2), team.get_name(), font=team_font, fill=text_color,
+                anchor="lm"
             )
 
-        if team_names:
-            shown = ", ".join(team_names[:2])
-            if len(team_names) > 2:
-                shown += f" +{len(team_names) - 2}"
-            label = "Teams: " if len(team_names) > 1 else "Team: "
-            draw.text((avatar_cx, team_y), label + shown, font=label_font, fill=BRACKET_LINE_COLOR, anchor="ma")
+        if extra_team_count > 0:
+            row_y = teams_top + len(shown_teams) * (CARD_TEAM_ROW_HEIGHT + CARD_TEAM_ROW_GAP)
+            draw.text(
+                (BRACKET_MARGIN, row_y + CARD_TEAM_ROW_HEIGHT / 2), f"+{extra_team_count} more team"
+                f"{'s' if extra_team_count != 1 else ''}", font=label_font, fill=BRACKET_LINE_COLOR, anchor="lm"
+            )
 
         return image
 
@@ -5717,16 +6452,18 @@ class helpers():
 
         self.ensureEconomyRow(guild_id, target_user_id, display_name)
         self.cursor.execute(
-            "SELECT balance, game_wins, game_losses, elo FROM economy WHERE guildId=? AND userId=?",
+            "SELECT elo, ranked_wins, ranked_losses FROM economy WHERE guildId=? AND userId=?",
             (guild_id, target_user_id)
         )
-        balance, game_wins, game_losses, elo = self.cursor.fetchone()
+        elo, ranked_wins, ranked_losses = self.cursor.fetchone()
+        ranked_games = ranked_wins + ranked_losses
         stats = {
-            "balance": balance, "game_wins": game_wins, "game_losses": game_losses,
             "elo": elo, "elo_rank": self.eloRankLabelPlain(elo),
+            "ranked_wins": ranked_wins, "ranked_losses": ranked_losses,
+            "ranked_win_rate": f"{(ranked_wins / ranked_games) * 100:.1f}%" if ranked_games > 0 else "N/A",
         }
 
-        team_names = [team.get_name() for _, team in self.getTeamsForPlayer(guild_id, target_user_id)]
+        teams = [team for _, team in self.getTeamsForPlayer(guild_id, target_user_id)]
         settings = self.getCardSettings(guild_id, target_user_id)
 
         avatar_image = None
@@ -5739,31 +6476,45 @@ class helpers():
         if avatar_image is None:
             avatar_image = Image.new("RGBA", (CARD_AVATAR_SIZE, CARD_AVATAR_SIZE), BRACKET_BACKGROUND_CENTER)
 
-        card_image = self._renderTradingCardImage(guild_name, display_name, avatar_image, settings, stats, team_names)
+        card_image = self._renderTradingCardImage(guild_name, display_name, avatar_image, settings, stats, teams)
         file = self._imageToFile(card_image, "trading_card.png")
 
         embed = discord.Embed(color=discord.Color.gold())
         embed.set_image(url=f"attachment://{file.filename}")
         await message.edit(embed=embed, attachments=[file])
 
+    # The reverse of _swapStatsForTradingCard: rebuilds the plain /stats
+    # embed (via _buildStatsEmbed, the same one statsHelper itself posts)
+    # and puts it back in place of the trading card image. attachments=[]
+    # is required here, not just omitted — the message currently has the
+    # card's PNG attached, and message.edit() otherwise leaves existing
+    # attachments alone.
+    async def _swapTradingCardForStats(self, message, guild_id, target_user_id):
+        member = await self._resolveGuildMember(guild_id, target_user_id)
+        if member is None:
+            return
+        embed = self._buildStatsEmbed(guild_id, member)
+        await message.edit(embed=embed, attachments=[])
+
     # Called from bot.py's on_raw_reaction_add for every reaction — no-ops
     # unless the emoji/message match a /stats embed still tracked in
     # stats_views. STATS_CARD_EMOJI hands off to _swapStatsForTradingCard
-    # above and marks cardShown so the avatar toggle refuses to run on this
-    # message afterward (a trading card isn't shaped like a normal /stats
-    # embed, so toggling its "thumbnail" would just corrupt it).
-    # STATS_PLACEHOLDER_EMOJI toggles the thumbnail based on whichever's
-    # currently showing (comparing against STATS_PLACEHOLDER_AVATAR_URL
-    # exactly, set by this same handler or by statsHelper's own
-    # real-avatar URL) — leaving everything else on the embed untouched
-    # either way.
+    # and marks cardShown, swapping STATS_PLACEHOLDER_EMOJI/STATS_CARD_EMOJI
+    # out for STATS_RETURN_EMOJI (neither the avatar toggle nor "show card
+    # again" makes sense once the card is already up). STATS_RETURN_EMOJI
+    # does the reverse via _swapTradingCardForStats, restoring the original
+    # pair. STATS_PLACEHOLDER_EMOJI (only reachable pre-card) toggles the
+    # thumbnail based on whichever's currently showing (comparing against
+    # STATS_PLACEHOLDER_AVATAR_URL exactly, set by this same handler or by
+    # statsHelper's own real-avatar URL) — leaving everything else on the
+    # embed untouched either way.
     async def handleStatsReaction(self, payload):
         guild_id = payload.guild_id
         if guild_id is None:
             return
 
         emoji = str(payload.emoji)
-        if emoji not in (STATS_PLACEHOLDER_EMOJI, STATS_CARD_EMOJI):
+        if emoji not in (STATS_PLACEHOLDER_EMOJI, STATS_CARD_EMOJI, STATS_RETURN_EMOJI):
             return
 
         self.cursor.execute(
@@ -5775,7 +6526,13 @@ class helpers():
             return
         target_user_id, card_shown = row
 
-        if emoji == STATS_PLACEHOLDER_EMOJI and card_shown:
+        # Each emoji only applies on one side of the embed/card divide —
+        # the reactions themselves are swapped out below to enforce this
+        # in the UI, but a reaction click already in flight when that swap
+        # happens could still slip through, so check again here too.
+        if card_shown and emoji in (STATS_PLACEHOLDER_EMOJI, STATS_CARD_EMOJI):
+            return
+        if not card_shown and emoji == STATS_RETURN_EMOJI:
             return
 
         channel = self.client.get_channel(payload.channel_id)
@@ -5793,17 +6550,31 @@ class helpers():
                 (guild_id, payload.message_id)
             )
             self.db.commit()
-            # The avatar toggle no longer applies to this message at all
-            # once it's a trading card — remove it outright rather than
-            # leaving a reaction sitting there that just silently no-ops
-            # when clicked. Tolerates missing Manage Messages the same way
-            # _clearPagingReaction does; the cardShown check above is what
-            # actually enforces the disable either way.
+            # Neither /stats-embed-only reaction applies to a trading card
+            # — remove both outright rather than leaving a reaction sitting
+            # there that just silently no-ops when clicked, and offer the
+            # one action that does apply from here instead.
+            for stale_emoji in (STATS_PLACEHOLDER_EMOJI, STATS_CARD_EMOJI):
+                try:
+                    await message.clear_reaction(stale_emoji)
+                except discord.HTTPException:
+                    pass
+            await message.add_reaction(STATS_RETURN_EMOJI)
+            return
+
+        if emoji == STATS_RETURN_EMOJI:
+            await self._swapTradingCardForStats(message, guild_id, target_user_id)
+            self.cursor.execute(
+                "UPDATE stats_views SET cardShown=0 WHERE guildId=? AND messageId=?",
+                (guild_id, payload.message_id)
+            )
+            self.db.commit()
             try:
-                await message.clear_reaction(STATS_PLACEHOLDER_EMOJI)
+                await message.clear_reaction(STATS_RETURN_EMOJI)
             except discord.HTTPException:
                 pass
-            await self._clearPagingReaction(message, payload)
+            await message.add_reaction(STATS_PLACEHOLDER_EMOJI)
+            await message.add_reaction(STATS_CARD_EMOJI)
             return
 
         embed = message.embeds[0]

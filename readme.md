@@ -441,13 +441,28 @@ direction to flip), and 🎴 throws the whole embed away and replaces it with
 a rendered trading card (`_renderTradingCardImage`) — Shockwave's logo and
 the server's name across the top (the exact same `_drawBracketHeader` every
 other rendered image uses), the player's live avatar as a circular
-centerpiece, a customizable title underneath it, elo/record/gold in a
-three-column stat block, and (if they're rostered on any) their persistent
-teams. Unlike the avatar toggle, this is one-way — `handleStatsReaction`
-sets `stats_views.cardShown` and outright removes the 🖼️ reaction from the
-message once it fires, since a trading card isn't shaped like a normal
-`/stats` embed anymore and toggling a "thumbnail" that no longer exists
-would just corrupt it.
+centerpiece, a customizable title underneath it, then elo/ranked record/
+ranked win rate as three stacked lines (each stat gets the card's full
+width rather than sharing a column, so a long value never clips), and
+finally — if they're rostered on any — their persistent teams, each with
+its own logo pasted alongside its name (same self-healing `_ensureLogo`
+every other team-logo display already relies on). The elo line's tier
+"emoji" is actually a small filled shape in a per-tier color
+(`ELO_TIERS`' 4th/5th elements, `_drawEloBadge`) rather than the literal
+character `eloRankLabel` uses in a real embed — PIL's bundled TTF fonts
+can't render color emoji glyphs (`eloRankLabelPlain` strips it for exactly
+this reason). It's a circle for most tiers, but a diamond for Platinum
+(`\U0001f537`) and Diamond (`\U0001f48e`) — both of those are actually
+diamond/gem-cut shapes, not circles, in the real emoji, so a round badge
+there was a shape mismatch against the embed, not just a color one.
+Neither of those two reactions applies to a card once it's up
+(there's no "thumbnail" or "show the card again" to toggle), so
+`handleStatsReaction` removes both outright the moment 🎴 fires and adds a
+single 🪪 in their place; clicking that rebuilds the plain `/stats` embed
+(`_buildStatsEmbed`, the same code `statsHelper` itself calls) via
+`_swapTradingCardForStats`, sets `stats_views.cardShown` back to 0, and
+restores 🖼️/🎴 — so the whole thing is a real back-and-forth toggle rather
+than a one-way trip.
 
 A card's look lives in `trading_cards` (one row per (guild, player), same
 self-healing "insert defaults on first read" shape `ensureEconomyRow` uses
@@ -456,8 +471,10 @@ for the economy table) — `title`, `accent_color`/`background_color`/
 `_cardFontPaths` resolves to actual bundled font files; only `"default"` —
 Chakra Petch + IBM Plex Sans, the same pairing every other image already
 uses — exists today, but the column means more presets can be added later
-with no schema change). Defaults are Shockwave's own site palette, "Rookie"
-as a placeholder title, and that default font pairing. There's no
+with no schema change). Defaults are a deliberately more saturated purple
+background than the site's own near-black `--ink` (`CARD_DEFAULT_
+BACKGROUND_COLOR`, its own shade rather than reused from `BRACKET_*`),
+"Rookie" as a placeholder title, and that default font pairing. There's no
 `/customize-card`-style command yet — the table is meant to be edited
 directly (or through a future command) — but `_renderTradingCardImage`
 always reads through `getCardSettings` rather than hardcoding anything, so
@@ -472,6 +489,143 @@ started, rather than risk quietly corrupting a bracket that's moved on.
 It only supports winners-bracket matches for now — correcting a losers-
 bracket or Grand Finals match is refused with an explanatory message
 rather than silently doing the wrong thing.
+
+### Trading-card cosmetic unlocks
+
+`card_unlocks` (one row per unlocked item — `(guildId, userId, itemType,
+itemKey)`, `itemType` is `"title"` or `"color_scheme"`) permanently records
+which trading-card cosmetics a player has earned, separately from
+`trading_cards`' own currently-equipped settings — unlocking something and
+actually wearing it are different concerns, the same way a game's
+cosmetic inventory is separate from its loadout. `CARD_TIER_REWARD_TITLES`
+is the whole catalog today: reaching Diamond, Master, Grandmaster, or
+Challenger for the first time unlocks that tier's own title (e.g.
+Diamond → "Diamond Mind") and a matching color scheme whose accent is
+that tier's own `ELO_TIER_BADGE_COLORS` entry — looked up from `ELO_TIERS`
+itself rather than duplicated, so a reward automatically tracks whatever
+that tier's badge color currently is instead of freezing at whatever it
+was the day it was unlocked (same reasoning `CARD_DEFAULT_*`'s own history
+of stale-duplicate bugs already forced elsewhere in this file).
+`_checkTierRewardUnlocks` checks every reward tier `elo` currently
+qualifies for, not just whichever one it's presently sitting in — a big
+enough single swing that jumps straight from Platinum to Grandmaster still
+credits Diamond and Master along the way. `_unlockCardReward`'s `INSERT OR
+IGNORE` makes checking idempotent, and since nothing anywhere deletes from
+`card_unlocks`, a reward earned once stays unlocked even after the player
+deranks back below the tier that earned it.
+
+The unlock check runs from two places: `applyGameDeltas`, right after a
+ranked result actually changes someone's elo (guarded to `sign > 0` only —
+a tournament correction's reversal is "undo", not "grant a reward on the
+way down"; the reapply against the corrected winner that follows calls
+back in with `sign=1`, which checks properly), and lazily from
+`_buildStatsEmbed` every time `/stats` runs for someone — the same
+"self-heal on the next read" idea `ensureEconomyRow`/`ensureCardSettings`/
+`_ensureLogo` already use elsewhere, so a player who was already sitting
+at Diamond+ before this feature existed gets credited the first time
+anything looks at their stats rather than never. `getUnlockedCardTitles`/
+`getUnlockedCardColorSchemes` read back what's unlocked in
+customization-ready form (display strings for titles; `{name,
+accent_color, background_color}` hex dicts for schemes, background
+derived the same darken-the-accent way `_renderTeamCardImage`'s own
+background is).
+
+`/card-set-title` is the first (and so far only) command that actually
+consumes `getUnlockedCardTitles` — `cardTitleAutocomplete` offers each
+caller their own `getAvailableCardTitles` (`CARD_DEFAULT_TITLE` plus
+whatever they've personally unlocked, so the picker never shows a title
+they can't actually equip), and `cardSetTitleHelper` re-validates that
+same list at the command boundary before writing anything, rather than
+trusting whatever the client sent. `setCardTitle` itself is a trusting
+internal setter — it also flips `trading_cards.customized` to 1, the same
+flag `ensureCardSettings`'s own resync-to-defaults check respects, since
+without it the very next `/stats` call would silently revert an equipped
+title right back to `CARD_DEFAULT_TITLE`.
+
+`/card-set-color-scheme` is `/card-set-title`'s exact counterpart for
+colors — same shape end to end: `cardColorSchemeAutocomplete` offers each
+caller their own `getAvailableCardColorSchemes` (`CARD_DEFAULT_SCHEME_NAME`
+plus whatever they've unlocked), `cardSetColorSchemeHelper` re-validates
+against that same list at the command boundary and resolves the chosen
+name to its `{accent_color, background_color}` pair, and `setCardColorScheme`
+is the trusting internal setter that writes both plus `customized=1`. The
+one place this differs from titles: `getUnlockedCardColorSchemes` runs
+each scheme's `ELO_TIER_BADGE_COLORS` accent through `_ensureReadableAccent`
+(`CARD_MIN_ACCENT_CONTRAST`, the same helper and threshold
+`_renderTeamCardImage` uses for a team's sampled logo color) before ever
+offering it — a badge color was picked for how it reads as a small
+circle/diamond standing in for an emoji, not for driving a whole card's
+header/label text against its own darkened background, and Master's and
+Grandmaster's own badge colors are dim enough that offering them
+unboosted would have reintroduced the exact readability problem the team
+card already had to solve. Only the accent gets boosted; the background
+stays the badge color's raw 28%-darkened shade either way, so a scheme's
+overall mood still authentically reflects the tier that earned it —
+`_renderTradingCardImage` itself is untouched and still trusts whatever's
+stored in `trading_cards` exactly as given, whether that came from a
+scheme selection or a hand-edited custom hex value.
+
+`grantSpecialCardTitle` is the escape hatch for a title with no elo tier
+behind it at all (no matching color-scheme unlock alongside it, unlike a
+rank reward) — a per-(guild, player) `card_unlocks` row, same shape as a
+tier reward's own title unlock. Shockwave's own developer gets "Developer"
+a different way, though: `SHOCKWAVE_DEVELOPER_ID` is a hardcoded Discord
+user id `getUnlockedCardTitles` checks directly, so it's available in
+every guild the bot is in — including ones with no `card_unlocks` row for
+them at all, and future guilds the bot hasn't joined yet — rather than a
+grant that would need repeating by hand every time.
+
+### Team cards
+
+`/team-stats` gets the same card treatment as `/stats`, via its own single
+reaction (see `handleTeamStatsReaction`): `TEAM_CARD_EMOJI` (🛡️) throws the
+embed away for a portrait card (`_renderTeamCardImage`) built around the
+team's own logo as the focal point — big, framed, centered, right below
+the usual Shockwave-logo-and-server-name header every rendered image
+opens with. Unlike the player trading card, there's no `trading_cards`-
+style settings row backing this: "color scheme matches the logo" means
+sampling a color straight off the logo file itself on every render
+(`_dominantLogoColor`) rather than reading a stored customization — there's
+nothing to customize independently of the logo in the first place. That
+function buckets a downscaled copy of the logo into 16-value RGB groups
+and returns the most common one, skipping near-transparent pixels (the
+background) and near-white/near-black ones (padding/outlines), so a
+logo's actual identifying color wins out over whatever frames it. The
+sampled color becomes the card's accent (header title, frame, rule, stat
+labels); the background is that same color darkened to 28% and lightened
+back up 30% for the vignette center, the same darken-then-relighten
+relationship the player card's customizable `background_color` has to its
+own center, just derived instead of stored.
+
+A logo's dominant color has no readability guarantee at all — a deep navy
+or forest green passes `_dominantLogoColor`'s own brightness filter just
+fine, and since that same color also drives the background, drawing it
+as-is for header/label text risked it nearly disappearing against the
+vignette's own lightened center. `_ensureReadableAccent` fixes this: it
+lightens the sampled color toward white (closed-form, since
+`_lightenColor`'s blend is linear in its `amount` — no search needed) just
+enough to clear `TEAM_CARD_MIN_ACCENT_CONTRAST` average-brightness units
+above that center, and leaves an already-readable color untouched. Only
+the *background* derivation above uses the true, unboosted sample — every
+drawn accent element (header title, frame, rule, stat labels, captain
+star, roster overflow line) uses the boosted version, so the card still
+visibly carries the logo's hue without any of its text becoming hard to
+read. Below the logo: the team's
+name, then three stat rows (captain, record, win rate — same bolded-label
+layout the player card's own stat rows use), then its full roster
+(`_orderedRoster`, captain floated to the front) with the captain marked
+by the same drawn star `_drawMatchupColumn` uses, capped at
+`TEAM_CARD_MAX_ROSTER_ROWS` with a "+N more players" overflow line past
+that. A team with no logo file at all falls back to `TEAM_CARD_FALLBACK_
+ACCENT_COLOR` (the same gold the player card defaults to) rather than a
+bare/colorless frame. `TEAM_CARD_RETURN_EMOJI` (↩️) is the one action that
+applies once the card is up — swaps back to the plain embed
+(`_renderTeamStatsEmbed`, the same one `/team-stats` itself posts) via
+`_swapTeamCardForStats` and restores 🛡️, mirroring `STATS_RETURN_EMOJI`'s
+real back-and-forth toggle rather than `/stats`' card being a one-way
+trip. Tracked in its own `team_stats_views` table (`teamId` instead of a
+player's `targetUserId`) rather than reusing `stats_views`, since a team
+and a player are different things to look back up on a reaction.
 
 ### Double elimination: losers bracket and Grand Finals
 
