@@ -110,6 +110,12 @@ ensure_column("economy", "elo", "INTEGER", str(helper.DEFAULT_ELO))
 # combined total.
 ensure_column("economy", "ranked_wins", "INTEGER", "0")
 ensure_column("economy", "ranked_losses", "INTEGER", "0")
+# Consecutive game wins right now — an achievement (see the "on_fire" key
+# in helper.py's CARD_ACHIEVEMENT_TITLES), not a pure additive delta like
+# every other economy column, so applyGameDeltas updates it with its own
+# extra UPDATE (increment on a win, reset to 0 on a loss) rather than
+# folding it into computeGameDeltas' own delta dict.
+ensure_column("economy", "current_win_streak", "INTEGER", "0")
 # Active bets for the game currently in progress in a guild. Cleared out
 # (paid out or refunded) by the time the game resolves.
 cursor.execute(
@@ -664,6 +670,14 @@ async def shop(ctx):
     await helperObj.shopHelper(ctx)
 
 
+@tree.command(
+    name="achievements",
+    description="Browse gameplay achievements and their trading-card title rewards"
+)
+async def achievements(ctx):
+    await helperObj.achievementsHelper(ctx)
+
+
 # Unlike the three cardXAutocomplete functions above (which only ever
 # offer what's already unlocked), this one offers what's still buyable —
 # getShopCatalog's own "owned" flag is what filters an already-purchased
@@ -733,7 +747,7 @@ SITE_COMMANDS_URL = "https://shockwave.netlify.app/commands.html"
 COMMAND_HELP = {
     "team-set-channels": "Names the two voice channels teams get moved into. Creates them if they don't already exist.",
     "team-set-size": "Sets how many players make up one side.",
-    "clear": "Wipes the current teams/draft so you can start a fresh session. clear_tournament deletes this server's tournament entirely. clear_elo and clear_economy reset data for every player. Requires the Manage Server permission.",
+    "clear": "Wipes the current teams/draft so you can start a fresh session. clear_tournament deletes this server's tournament entirely. clear_elo and clear_economy reset data for every player; clear_achievements does too unless a user is given, which narrows it to just them. Requires the Manage Server permission.",
     "make-teams": "Randomly splits everyone in your voice channel into two even teams and posts the roster. Doesn't move anyone — run /start for that. ranked:true forms roughly elo-balanced teams instead, and tracks elo once a winner is reported.",
     "captains": "Starts a live captain draft. Name two captains, or use_random to pick two automatically; everyone else lands in a pool picked from with /choose. ranked:true tracks elo for the resulting game.",
     "choose": "Captains only. Picks one player from the draft pool onto your team, then passes the turn to the other captain.",
@@ -754,6 +768,7 @@ COMMAND_HELP = {
     "card-set-font": "Equips one of your purchased trading-card fonts (see /shop). \"Default\" (Shockwave's own Chakra Petch/IBM Plex Sans pairing) is always available.",
     "card-test": "Renders your trading card once per color scheme (Default plus the whole /shop catalog, regardless of what you own) so you can see what each one looks like before buying.",
     "shop": "Browse every trading-card title, color scheme, and font purchasable with gold, and what you already own.",
+    "achievements": "Browse every gameplay achievement, what it takes to earn it, and whether you already have. Earning one unlocks its title for /card-set-title and posts a one-time announcement in the channel.",
     "shop-buy": "Purchases a trading-card cosmetic with gold, permanently unlocking it for /card-set-title, /card-set-color-scheme, or /card-set-font. Refuses if you already own it or can't afford it.",
     "leaderboard": "Ranks the server by a stat, including ranked-only and casual-only wins/losses/win rate. Omit filter for an elo-sorted overview. Reactions page through the results.",
     "report-correct-winner": "Fixes a misreported winner — undoes and reapplies the payouts, records, and elo. Requires Manage Server.",
@@ -1009,6 +1024,8 @@ async def choose(ctx, member: discord.Member = None, use_random: bool = False):
     clear_tournament="Delete this server's tournament entirely — bracket, registrations, match history. Can't be undone",
     clear_elo="Reset every player's elo back to 1000 for this server (confirmation required)",
     clear_economy="Wipe every player's balance/elo/record/gold entirely for this server (confirmation required)",
+    clear_achievements="Reset earned achievements for this server, or just one player if `user` is set (confirmation required)",
+    user="With clear_achievements: only reset this player's achievements instead of everyone's",
 )
 @app_commands.checks.has_permissions(manage_guild=True)
 async def clearAll(
@@ -1017,7 +1034,13 @@ async def clearAll(
     clear_tournament: bool = False,
     clear_elo: bool = False,
     clear_economy: bool = False,
+    clear_achievements: bool = False,
+    user: discord.Member = None,
 ):
+    if user is not None and not clear_achievements:
+        await ctx.response.send_message("`user` only applies to `clear_achievements` — set that flag too.")
+        return
+
     await helperObj.clearTeamsHelper(ctx)
 
     if clear_channels:
@@ -1029,12 +1052,13 @@ async def clearAll(
 
     await ctx.response.send_message("Cleared!")
 
-    # clear_elo (reset every player's elo) and clear_economy (wipe every
-    # player's whole economy row) both act on every player in the server,
-    # so neither runs immediately — a confirm/cancel view goes out as a
-    # followup and the actual reset waits for that click.
-    if clear_economy or clear_elo:
-        await helperObj.confirmDestructiveClearHelper(ctx, clear_economy)
+    # clear_elo, clear_economy, and clear_achievements all act on every
+    # player in the server (clear_achievements only, if narrowed to a
+    # single `user`), so none of them run immediately — a confirm/cancel
+    # view goes out as a followup and the actual reset waits for that
+    # click.
+    if clear_economy or clear_elo or clear_achievements:
+        await helperObj.confirmDestructiveClearHelper(ctx, clear_economy, clear_elo, clear_achievements, user)
 
 
 @clearAll.error
@@ -1289,33 +1313,21 @@ async def randomizeRoles(ctx):
     await ctx.response.send_message(f"**Team 1**\n{result1}\n**Team 2**\n{result2}")
 
 
-# TEMP: throwaway command that runs a full double-elimination tournament
-# through the real match pipeline instead of faking a result in memory —
-# see runSimulatedTournamentHelper (helper.py) for how. This DOES touch
-# real data: it persists `teams` rows (named "TEST Team N") and overwrites
-# whatever tournament this server already has set up with its own. Neither
-# is cleaned up afterward — this is a debug tool for a test server, not
-# something to run against a server with a real tournament in progress.
-# Delete this once the real tournament flow is confirmed to work end to end.
+# TEMP: throwaway command that forces every achievement threshold for the
+# caller and then runs the REAL achievement check/unlock/announce pipeline
+# — see runSimulatedAchievementsHelper (helper.py) for how. This DOES touch
+# real data: it overwrites the caller's own economy row and card_unlocks,
+# and persists a couple of `teams` rows (named "TEST Team N"). Neither is
+# cleaned up afterward — this is a debug tool for a test server, not
+# something to run against a server with real achievement progress you
+# care about. Delete this once the achievement system is confirmed to work
+# end to end.
 @tree.command(
-    name="test",
-    description="TEMP: run a full simulated tournament through the real match pipeline"
+    name="test-achievements",
+    description="TEMP: force every achievement for yourself through the real check/unlock/announce pipeline"
 )
-@app_commands.describe(
-    teams="Number of teams to simulate (2-64, default 8)",
-    losers_bracket_timing="When the losers bracket plays — defaults to after the winners bracket finishes",
-)
-@app_commands.choices(losers_bracket_timing=[
-    app_commands.Choice(name="After the winners bracket finishes entirely", value="after_winners"),
-    app_commands.Choice(name="Interleaved — as soon as each round unlocks it", value="interleaved"),
-])
-async def test(ctx, teams: int = 8, losers_bracket_timing: app_commands.Choice[str] = None):
-    if teams < 2 or teams > 64:
-        await ctx.response.send_message("Pick a team count between 2 and 64.")
-        return
-
-    timing_value = losers_bracket_timing.value if losers_bracket_timing is not None else "after_winners"
-    await helperObj.runSimulatedTournamentHelper(ctx, teams, timing_value)
+async def testAchievements(ctx):
+    await helperObj.runSimulatedAchievementsHelper(ctx)
 
 
 # Guarded so tests.py can import this module (to exercise command callbacks

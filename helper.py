@@ -144,13 +144,6 @@ BETTING_DURATION_SECONDS = 60
 MAX_CONCURRENT_BETTING_SECONDS = 1800
 WINNER_REPORT_DELAY_SECONDS = 3
 DAILY_GOLD_AMOUNT = 1000
-# /test's simulated wagers (see _postSimulatedWagers) — clearly-fake names
-# so nobody mistakes these for real bettors, and a handful of round gold
-# amounts rather than anything trying to look like a "real" distribution.
-FAKE_BETTOR_NAMES = [
-    "Test Bettor 1", "Test Bettor 2", "Test Bettor 3", "Test Bettor 4", "Test Bettor 5", "Test Bettor 6",
-]
-FAKE_WAGER_AMOUNTS = [25, 50, 75, 100, 150, 200, 250]
 TEAM_EMOJIS = {1: "🔵", 2: "🔴"}   # blue for team 1, red for team 2 — matches TEAM1_ACCENT_COLOR/TEAM2_ACCENT_COLOR
 WINNER_EMOJIS = {emoji: team for team, emoji in TEAM_EMOJIS.items()}
 DEFAULT_ELO = 1000
@@ -444,8 +437,88 @@ CARD_SHOP_FONT_STYLES = {
 # no separate display text of their own (unlike a tier's flavor title),
 # so each just maps to itself.
 CARD_TITLE_CATALOG = {
-    **CARD_TIER_REWARD_TITLES, **CARD_SPECIAL_TITLES, **{name: name for name in CARD_SHOP_TITLES}
+    **CARD_TIER_REWARD_TITLES, **CARD_SPECIAL_TITLES, **{name: name for name in CARD_SHOP_TITLES},
 }
+
+# Achievements: a fourth path into card_unlocks (title only) alongside a
+# tier reward, a special grant, and a shop purchase — same table, same
+# itemType='title' shape (see _unlockAchievement), just a different set of
+# trigger conditions checked from gameplay itself (_checkAchievements,
+# applyGameDeltas) rather than earned by rank or bought with gold. Unlike
+# the other three, unlocking one also posts a Discord notification (see
+# _announceAchievements) — these are meant to feel like a moment worth
+# noticing, not just another option quietly waiting in /card-set-title's
+# own autocomplete.
+#
+# Gold-based achievements are deliberately keyed off a single
+# transaction (a single wager win), never a balance milestone — /daily
+# hands out DAILY_GOLD_AMOUNT (1000) for free every single day, so
+# "reach N gold saved" would just reward showing up, not anything skill-
+# or risk-related, no matter how big N is.
+CARD_ACHIEVEMENT_VETERAN_WINS = 10
+# Veteran's own ladder — same game_wins column, three further thresholds
+# each with their own distinct title (not just "Veteran II"/"III"/"IV")
+# so a card's epithet keeps meaning something as the number climbs instead
+# of just growing a suffix.
+CARD_ACHIEVEMENT_VETERAN_ELITE_WINS = 50
+CARD_ACHIEVEMENT_VETERAN_MASTER_WINS = 150
+CARD_ACHIEVEMENT_VETERAN_IMMORTAL_WINS = 500
+CARD_ACHIEVEMENT_ON_FIRE_STREAK = 5
+# On Fire's own ladder, same shape as Veteran's above.
+CARD_ACHIEVEMENT_ON_FIRE_UNSTOPPABLE_STREAK = 10
+CARD_ACHIEVEMENT_ON_FIRE_UNTOUCHABLE_STREAK = 20
+CARD_ACHIEVEMENT_HIGH_ROLLER_GOLD = 5000
+# Jackpot: same single-transaction reasoning as High Roller (see the module
+# comment above) — a payout ratio, not an absolute amount, so it's really
+# testing "won as a big underdog on the betting side" rather than anything
+# balance-related at all.
+CARD_ACHIEVEMENT_JACKPOT_PAYOUT_MULTIPLIER = 3
+CARD_ACHIEVEMENT_UNDERDOG_ELO_GAIN = 20
+CARD_ACHIEVEMENT_TEAM_PLAYER_TEAMS = 3
+CARD_ACHIEVEMENT_BIG_SPENDER_ITEMS = 3
+CARD_ACHIEVEMENT_GAMBLER_BETS = 25
+CARD_ACHIEVEMENT_IRON_WILL_LOSSES = 20
+CARD_ACHIEVEMENT_TITLES = {
+    "first_blood": "First Blood",
+    "veteran": "Veteran",
+    "veteran_elite": "Elite",
+    "veteran_master": "Battle-Hardened",
+    "veteran_immortal": "Immortal",
+    "on_fire": "On Fire",
+    "on_fire_unstoppable": "Unstoppable",
+    "on_fire_untouchable": "Untouchable",
+    "high_roller": "High Roller",
+    "jackpot": "Jackpot",
+    "underdog": "Giant Slayer",
+    "team_player": "Team Player",
+    "captain": "The Captain",
+    "big_spender": "Big Spender",
+    "gambler": "Frequent Bettor",
+    "iron_will": "Iron Will",
+    "tournament_champion": "Tournament Champion",
+}
+# /achievements' own descriptions — kept next to the thresholds above they
+# each read from, so the two can't drift out of sync with each other.
+CARD_ACHIEVEMENT_DESCRIPTIONS = {
+    "first_blood": "Win your first game.",
+    "veteran": f"Win {CARD_ACHIEVEMENT_VETERAN_WINS} games.",
+    "veteran_elite": f"Win {CARD_ACHIEVEMENT_VETERAN_ELITE_WINS} games.",
+    "veteran_master": f"Win {CARD_ACHIEVEMENT_VETERAN_MASTER_WINS} games.",
+    "veteran_immortal": f"Win {CARD_ACHIEVEMENT_VETERAN_IMMORTAL_WINS} games.",
+    "on_fire": f"Win {CARD_ACHIEVEMENT_ON_FIRE_STREAK} games in a row.",
+    "on_fire_unstoppable": f"Win {CARD_ACHIEVEMENT_ON_FIRE_UNSTOPPABLE_STREAK} games in a row.",
+    "on_fire_untouchable": f"Win {CARD_ACHIEVEMENT_ON_FIRE_UNTOUCHABLE_STREAK} games in a row.",
+    "high_roller": f"Win a single bet of {CARD_ACHIEVEMENT_HIGH_ROLLER_GOLD}+ gold.",
+    "jackpot": f"Win a single bet paying out {CARD_ACHIEVEMENT_JACKPOT_PAYOUT_MULTIPLIER}x+ your wager.",
+    "underdog": "Win a ranked game as a significant underdog (a big single-match elo swing).",
+    "team_player": f"Be rostered on {CARD_ACHIEVEMENT_TEAM_PLAYER_TEAMS}+ persistent teams at once.",
+    "captain": "Be the captain of a persistent team.",
+    "big_spender": f"Own {CARD_ACHIEVEMENT_BIG_SPENDER_ITEMS}+ items purchased from /shop.",
+    "gambler": f"Place {CARD_ACHIEVEMENT_GAMBLER_BETS}+ total bets.",
+    "iron_will": f"Rack up {CARD_ACHIEVEMENT_IRON_WILL_LOSSES}+ game losses without giving up.",
+    "tournament_champion": "Win a tournament.",
+}
+CARD_TITLE_CATALOG = {**CARD_TITLE_CATALOG, **CARD_ACHIEVEMENT_TITLES}
 
 # Shockwave's own developer — always has the "Developer" title available
 # in every guild the bot is in (see getUnlockedCardTitles), not just ones
@@ -526,17 +599,26 @@ roles = {
 }
 
 
-# Confirm/cancel buttons for /clear's clear_elo and clear_economy flags.
-# Both reset state for every player in the server, so neither runs until
+# Confirm/cancel buttons for /clear's clear_elo, clear_economy, and
+# clear_achievements flags. clear_elo/clear_economy always reset state for
+# every player in the server; clear_achievements normally does too, but
+# can be narrowed to a single `achievements_target` member instead (see
+# /clear's own `user` parameter) — none of the three actually run until
 # whoever ran the command clicks "Confirm reset" on this view.
 class ConfirmResetView(discord.ui.View):
-    def __init__(self, helperObj, guild_id, guild_name, invoker_id, clear_economy):
+    def __init__(
+        self, helperObj, guild_id, guild_name, invoker_id,
+        clear_economy, clear_elo, clear_achievements, achievements_target=None,
+    ):
         super().__init__(timeout=CLEAR_CONFIRM_TIMEOUT_SECONDS)
         self.helperObj = helperObj
         self.guild_id = guild_id
         self.guild_name = guild_name
         self.invoker_id = invoker_id
         self.clear_economy = clear_economy
+        self.clear_elo = clear_elo
+        self.clear_achievements = clear_achievements
+        self.achievements_target = achievements_target
         self.message = None
 
     async def interaction_check(self, interaction):
@@ -553,15 +635,26 @@ class ConfirmResetView(discord.ui.View):
 
     @discord.ui.button(label="Confirm reset", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction, button):
+        results = []
         if self.clear_economy:
             self.helperObj.resetEconomyHelper(self.guild_id)
-            result = (
+            results.append(
                 "Economy data (balance, elo, game record, betting record, gold "
                 f"wagered/won/lost) has been reset for every player in **{self.guild_name}**."
             )
-        else:
+        elif self.clear_elo:
             self.helperObj.resetEloHelper(self.guild_id)
-            result = f"Elo has been reset to {DEFAULT_ELO} for every player in **{self.guild_name}**."
+            results.append(f"Elo has been reset to {DEFAULT_ELO} for every player in **{self.guild_name}**.")
+        if self.clear_achievements:
+            if self.achievements_target is not None:
+                self.helperObj.resetAchievementsHelper(self.guild_id, user_id=self.achievements_target.id)
+                results.append(f"Every earned achievement has been reset for {self.achievements_target.mention}.")
+            else:
+                self.helperObj.resetAchievementsHelper(self.guild_id)
+                results.append(
+                    f"Every earned achievement has been reset for every player in **{self.guild_name}**."
+                )
+        result = " ".join(results)
         self._disable_buttons()
         self.stop()
         await interaction.response.edit_message(content=result, view=self)
@@ -1402,22 +1495,74 @@ class helpers():
         )
         self.db.commit()
 
-    # Posts the confirm/cancel view for /clear's clear_elo and clear_economy
-    # flags — neither actually touches player data until the invoker clicks
-    # "Confirm reset" on the message this sends.
-    async def confirmDestructiveClearHelper(self, ctx, clear_economy):
-        if clear_economy:
-            warning = (
-                "This will **wipe the entire economy** (balance, elo, game record, "
-                "betting record, gold wagered/won/lost) for **every player** in "
-                f"**{ctx.guild.name}**. This can't be undone."
+    # Resets EARNED ACHIEVEMENTS for a guild — deletes only the
+    # card_unlocks rows whose itemKey is a CARD_ACHIEVEMENT_TITLES key,
+    # leaving every other unlock (tier rewards, special grants, shop
+    # purchases) and the underlying economy stats those achievements were
+    # computed from (game_wins, current_win_streak, ...) untouched.
+    # `user_id=None` (the default) resets every player in the guild — the
+    # /clear counterpart to resetEconomyHelper/resetEloHelper above; a real
+    # `user_id` narrows it to just that one player instead, for /clear's
+    # own optional `user` parameter. Unlike /card-clear-unlocks (a single
+    # targeted player, but EVERYTHING they've unlocked), both modes here
+    # are achievements-only.
+    def resetAchievementsHelper(self, guild_id, user_id=None):
+        achievement_keys = list(CARD_ACHIEVEMENT_TITLES.keys())
+        placeholders = ",".join("?" for _ in achievement_keys)
+        if user_id is None:
+            self.cursor.execute(
+                f"DELETE FROM card_unlocks WHERE guildId=? AND itemType='title' AND itemKey IN ({placeholders})",
+                (guild_id, *achievement_keys)
             )
         else:
-            warning = (
-                f"This will **reset elo back to {DEFAULT_ELO}** for **every player** "
-                f"in **{ctx.guild.name}**. This can't be undone."
+            self.cursor.execute(
+                "DELETE FROM card_unlocks WHERE guildId=? AND userId=? AND itemType='title' "
+                f"AND itemKey IN ({placeholders})",
+                (guild_id, user_id, *achievement_keys)
             )
-        view = ConfirmResetView(self, ctx.guild.id, ctx.guild.name, ctx.user.id, clear_economy)
+        self.db.commit()
+
+    # Posts the confirm/cancel view for /clear's clear_elo, clear_economy,
+    # and clear_achievements flags — none of them actually touch player
+    # data until the invoker clicks "Confirm reset" on the message this
+    # sends. clear_economy takes priority over clear_elo when both are set
+    # (the whole-row wipe already resets elo too, so there's nothing left
+    # for clear_elo to do); clear_achievements is independent of both and
+    # can combine with either. `achievements_target` (None, or a
+    # discord.Member) narrows clear_achievements to just that one player —
+    # clear_elo/clear_economy always stay whole-server regardless, so a
+    # combined run mixes "for every player" and "for @member" sentences
+    # rather than trying to force everything to one shared scope.
+    async def confirmDestructiveClearHelper(
+        self, ctx, clear_economy, clear_elo, clear_achievements, achievements_target=None
+    ):
+        warnings = []
+        if clear_economy:
+            warnings.append(
+                "This will **wipe the entire economy** (balance, elo, game record, "
+                "betting record, gold wagered/won/lost) for **every player** in "
+                f"**{ctx.guild.name}**."
+            )
+        elif clear_elo:
+            warnings.append(
+                f"This will **reset elo back to {DEFAULT_ELO}** for **every player** "
+                f"in **{ctx.guild.name}**."
+            )
+        if clear_achievements:
+            if achievements_target is not None:
+                warnings.append(
+                    f"This will **reset every earned achievement** for {achievements_target.mention}."
+                )
+            else:
+                warnings.append(
+                    f"This will **reset every earned achievement** for **every player** "
+                    f"in **{ctx.guild.name}**."
+                )
+        warning = " ".join(warnings) + " This can't be undone."
+        view = ConfirmResetView(
+            self, ctx.guild.id, ctx.guild.name, ctx.user.id,
+            clear_economy, clear_elo, clear_achievements, achievements_target,
+        )
         view.message = await ctx.followup.send(warning, view=view)
 
     # ---------------- Tournaments ----------------
@@ -3205,7 +3350,7 @@ class helpers():
             return
 
         deltas = self._matchWagerDeltas(wagers, winning_team)
-        self.applyGameDeltas(guild_id, deltas)
+        newly_unlocked = self.applyGameDeltas(guild_id, deltas)
 
         lines = [f"\U0001f4b0 **Match #{match_id} payouts:**"]
         for user_id, username, team, amount in wagers:
@@ -3224,6 +3369,7 @@ class helpers():
 
         if len(lines) > 1:
             await channel.send("\n".join(lines))
+        await self._announceAchievements(channel, newly_unlocked)
 
     # Queues every real pairing in `round_index` of the WINNERS bracket as a
     # tournament_matches row (byes — a pairing where only one side has a
@@ -3373,6 +3519,10 @@ class helpers():
             else:
                 await channel.send(f"\U0001f3c6 **{tournament.get_name()}** is complete! Champion: **{name}**")
                 await self._postTournamentLeaderboard(channel, guild_id, tournament)
+                if champion.team is not None:
+                    await self._announceAchievements(
+                        channel, self._grantTournamentChampionAchievement(guild_id, champion.team)
+                    )
             return
 
         round_nodes = rounds[round_index]
@@ -3872,6 +4022,7 @@ class helpers():
         # too, once _renderGrandFinalsImage finds a resolved finals match.
         await self._sendBracketText(channel, tournament, guild_id)
         await self._postTournamentLeaderboard(channel, guild_id, tournament)
+        await self._announceAchievements(channel, self._grantTournamentChampionAchievement(guild_id, winner))
 
     # /report-correct-winner's match_id path: fixes a specific tournament
     # match's recorded winner, re-propagates the bracket, and — if anyone
@@ -3939,10 +4090,11 @@ class helpers():
         self.cursor.execute("UPDATE tournament_matches SET winner=? WHERE id=?", (correct_team, match_id))
 
         wager_note = ""
+        newly_unlocked = []
         if settled_wagers_json:
             wagers = json.loads(settled_wagers_json)
             self.applyGameDeltas(guild_id, self._matchWagerDeltas(wagers, winner), sign=-1)
-            self.applyGameDeltas(guild_id, self._matchWagerDeltas(wagers, correct_team))
+            newly_unlocked = self.applyGameDeltas(guild_id, self._matchWagerDeltas(wagers, correct_team))
             wager_note = " Bet payouts on this match have been reversed and reapplied."
 
         self.db.commit()
@@ -3951,6 +4103,7 @@ class helpers():
             f"Match #{match_id} corrected: **{correct_winner_node.team.get_name()}** actually won.{wager_note}"
         )
         await self._sendBracketText(ctx.channel, tournament, guild_id)
+        await self._announceAchievements(ctx.channel, newly_unlocked)
 
     # ---------------- Persistent teams ----------------
 
@@ -4995,170 +5148,111 @@ class helpers():
         if embed is not None:
             await channel.send(embed=embed)
 
-    # /test's per-match flavor: a handful of clearly-fake bettors wager on
-    # one side or the other. Deliberately NOT the real wagers/economy
-    # tables — those are built around a single guild-wide betting_state,
-    # one active bet per user at a time (see wagerHelper), which can't
-    # represent several tournament matches being open at once the way
-    # simultaneous mode routinely has. Returns the wager list so
-    # _postSimulatedPayout can settle the same bets once the match
-    # resolves, without needing a second DB round-trip to reconstruct them.
-    async def _postSimulatedWagers(self, match_id, channel):
-        self.cursor.execute("SELECT team1, team2 FROM tournament_matches WHERE id=?", (match_id,))
-        team1_ser, team2_ser = self.cursor.fetchone()
-        team1, team2 = Team(), Team()
-        team1.deserializeTeam(team1_ser)
-        team2.deserializeTeam(team2_ser)
-
-        bettors = random.sample(FAKE_BETTOR_NAMES, random.randint(2, min(5, len(FAKE_BETTOR_NAMES))))
-        wagers = [(name, random.choice([1, 2]), random.choice(FAKE_WAGER_AMOUNTS)) for name in bettors]
-
-        lines = [f"\U0001f3b2 **Betting on Match #{match_id}** ({team1.get_name()} vs {team2.get_name()}):"]
-        for name, team_choice, amount in wagers:
-            team_name = team1.get_name() if team_choice == 1 else team2.get_name()
-            lines.append(f"{name} wagers {amount} gold on **{team_name}**")
-        await channel.send("\n".join(lines))
-
-        return wagers, team1, team2
-
-    # Settles the wagers _postSimulatedWagers just posted, once the match's
-    # real winner is known — same pari-mutuel formula computeGameDeltas
-    # uses for real bets (winners split the losing pool proportional to
-    # their own wager, on top of getting it back), just without an
-    # economy table on the other end of it to actually credit.
-    async def _postSimulatedPayout(self, channel, wagers, team1, team2, winning_team):
-        winning_pool = sum(amount for _, team_choice, amount in wagers if team_choice == winning_team)
-        losing_pool = sum(amount for _, team_choice, amount in wagers if team_choice != winning_team)
-        winner_name = team1.get_name() if winning_team == 1 else team2.get_name()
-
-        lines = [f"\U0001f4b0 **{winner_name}** won the bet — payouts:"]
-        for name, team_choice, amount in wagers:
-            if team_choice != winning_team:
-                continue
-            payout = round(amount + (amount / winning_pool) * losing_pool) if winning_pool > 0 else amount
-            lines.append(f"{name} won {payout} gold (bet {amount})")
-        if len(lines) == 1:
-            lines.append("(nobody bet on the winning side!)")
-        await channel.send("\n".join(lines))
-
-    # /test's whole implementation — a full double-elimination tournament
-    # run through the REAL pipeline (_startRound, _resolveTournamentMatch,
-    # ...) instead of faking a result in memory. Every message that follows
-    # is exactly what a real tournament posts: per-match results with
-    # updated bracket images, round transitions, Grand Finals, the
-    # completion announcement, and the team leaderboard (see
-    # _resolveFinalsMatch) — a genuine, scrollable trace of a tournament in
-    # chat. Winners are picked randomly and resolved directly instead of
-    # waiting on reactions (_resolveTournamentMatch works from any
-    # unresolved state, so there's no need to simulate a ready-check
-    # reaction first), which is what makes it finish in seconds instead of
-    # requiring real people to click through it.
+    # /test-achievements' whole implementation — forces every achievement
+    # threshold for the caller and then runs the REAL check/unlock/announce
+    # pipeline (_checkAchievements, applyGameDeltas,
+    # _grantTournamentChampionAchievement, _announceAchievements) instead
+    # of poking card_unlocks directly, so a bug in any of those functions
+    # shows up here rather than only surfacing in a live game.
     #
-    # This DOES touch real data: it persists `teams` rows (named "TEST Team
-    # N") and overwrites whatever tournament this server already has set up
-    # with its own. Neither is cleaned up afterward — see /test in bot.py
-    # for the caller-facing warning about that.
-    async def runSimulatedTournamentHelper(self, ctx, teams, timing_value):
+    # This DOES touch real data: it overwrites the caller's own economy row
+    # (game_wins/game_losses/current_win_streak/wins/losses) and
+    # card_unlocks, and persists a couple of "TEST Team N" rows (same
+    # clearly-fake naming the old /test tournament simulator used) so
+    # team_player/captain have real rosters to count. Nothing is cleaned up
+    # afterward — see /test-achievements in bot.py for the caller-facing
+    # warning about that.
+    async def runSimulatedAchievementsHelper(self, ctx):
         guild_id = ctx.guild.id
-        existing = self.getTournament(guild_id)
+        user_id = ctx.user.id
+        username = ctx.user.name
+        self.ensureEconomyRow(guild_id, user_id, username)
 
-        # A previous /test run's fake teams are never cleaned up, so
-        # without this a repeat run just adds another batch of
-        # identically-named "TEST Team N" rows on top of the old ones —
-        # both cluttering /team-leaderboard with stale entries and leaving
-        # their old win/loss counts intact instead of starting fresh.
-        # GLOB'd to the exact "TEST Team <number>" shape this generates
-        # below (rather than a looser LIKE prefix match) so a real team a
-        # user happened to name e.g. "TEST Team Alpha's Squad" can't get
-        # caught up in it.
+        # Clear this caller's own achievement unlocks first so a repeat run
+        # always shows everything as freshly unlocked again, instead of
+        # _unlockAchievement's own IGNORE branch silently eating every
+        # achievement past the first run.
         self.cursor.execute(
-            "DELETE FROM teams WHERE guildId=? AND name GLOB 'TEST Team [0-9]*'", (guild_id,)
+            "DELETE FROM card_unlocks WHERE guildId=? AND userId=? AND itemKey IN ({})".format(
+                ",".join("?" for _ in CARD_ACHIEVEMENT_TITLES)
+            ),
+            (guild_id, user_id, *CARD_ACHIEVEMENT_TITLES.keys())
+        )
+
+        # Parked one short of the TOP of the veteran/on_fire ladders (and
+        # the gambler/iron_will thresholds) — the single applyGameDeltas
+        # call below supplies the "+1" that crosses every rung of both
+        # ladders at once, the same way one real winning game would, while
+        # iron_will (game_losses) is set outright since nothing else here
+        # ever touches it.
+        self.cursor.execute(
+            "UPDATE economy SET game_wins=?, game_losses=?, current_win_streak=?, wins=?, losses=0 "
+            "WHERE guildId=? AND userId=?",
+            (
+                CARD_ACHIEVEMENT_VETERAN_IMMORTAL_WINS - 1, CARD_ACHIEVEMENT_IRON_WILL_LOSSES,
+                CARD_ACHIEVEMENT_ON_FIRE_UNTOUCHABLE_STREAK - 1, CARD_ACHIEVEMENT_GAMBLER_BETS - 1,
+                guild_id, user_id,
+            )
         )
         self.db.commit()
 
-        # 3 fake players per team (the first as captain) rather than empty
-        # rosters — /test's whole point is showing what a real tournament
-        # looks like end to end, and an empty roster meant the matchup
-        # graphic's captain-first roster list (see _orderedRoster) never
-        # actually had anything to demonstrate.
-        fake_teams = []
-        for i in range(teams):
+        # team_player: GLOB-cleaned "TEST Team N" rows, the same throwaway
+        # naming convention the old /test tournament simulator used, so
+        # these are still easy to spot and clean up by hand afterward.
+        self.cursor.execute(
+            "DELETE FROM teams WHERE guildId=? AND name GLOB 'TEST Team [0-9]*'", (guild_id,)
+        )
+        for i in range(CARD_ACHIEVEMENT_TEAM_PLAYER_TEAMS):
             team = Team()
             team.set_name(f"TEST Team {i + 1}")
-            team.set_team_size(3)
-            for j in range(3):
-                player = Player(1000000 + i * 10 + j, f"P{i + 1}-{j + 1}")
-                team.add_player(player)
-                if j == 0:
-                    team.set_captain(player)
+            player = Player(user_id, username)
+            team.add_player(player)
+            team.set_captain(player)
             self._saveNewTeam(guild_id, team)
-            fake_teams.append(team)
 
-        tournament = Tournament("TEST Tournament", 1, teams, double_elimination=True)
-        for team in fake_teams:
-            tournament.register_team(team)
-
-        wb_nodes = self.buildBracket(fake_teams)
-        lb_nodes, lb_rounds, lb_wb_dependency = self.buildLosersBracket(wb_nodes)
-        tournament.set_bracket(wb_nodes)
-        tournament.set_losers_bracket(lb_nodes, lb_rounds, lb_wb_dependency)
-        tournament.set_losers_bracket_timing(timing_value)
-
-        # Same guard createBracketHelper uses when building a fresh
-        # bracket: without it, a resolved Grand Finals row left over from a
-        # previous /test run would make _tournamentChampionName think THIS
-        # tournament already finished before a single match has been
-        # played. Also resets Match #N back to #1 when it's safe to (see
-        # _clearTournamentMatchesForGuild).
-        self._clearTournamentMatchesForGuild(guild_id)
-        self.saveTournament(guild_id, tournament)
-
-        overwrite_note = (
-            f"\n⚠️ This replaced **{existing.get_name()}**, which was already set up here."
-            if existing is not None else ""
-        )
-        timing_note = (
-            "losers bracket interleaved with the winners bracket"
-            if timing_value == "interleaved" else "losers bracket after winners finishes"
-        )
-        await ctx.response.send_message(
-            f"\U0001f9ea Running a {teams}-team double-elimination tournament ({timing_note}) through the real "
-            f"pipeline — everything below is exactly what a live tournament posts, with results auto-picked "
-            f"instead of waiting on reactions.{overwrite_note}"
-        )
-
-        await self._startRound(guild_id, tournament, 0, "simultaneous", ctx.channel)
-
-        # Drives the tournament to completion: find whatever's currently
-        # unresolved and resolve it with a coin flip, which — via
-        # _resolveTournamentMatch's own cascade — queues up whatever comes
-        # next (the rest of the round, the next round, the losers bracket,
-        # Grand Finals, a bracket reset...) until nothing's left open.
-        # Re-queried every pass rather than collected once up front, since
-        # resolving the last open match of a round is exactly what creates
-        # the next round's rows. The 500-iteration cap is a safety net, not
-        # an expected outcome — even a 64-team bracket resolves in well
-        # under 200.
-        for _ in range(500):
+        # big_spender: real card_unlocks rows in the exact shape
+        # shopBuyHelper itself writes, against real CARD_SHOP_TITLES keys,
+        # rather than anything achievement-specific.
+        for key in list(CARD_SHOP_TITLES)[:CARD_ACHIEVEMENT_BIG_SPENDER_ITEMS]:
             self.cursor.execute(
-                "SELECT id FROM tournament_matches WHERE guildId=? AND state != 'RESOLVED'", (guild_id,)
+                "INSERT OR IGNORE INTO card_unlocks(guildId, userId, itemType, itemKey) VALUES(?, ?, 'title', ?)",
+                (guild_id, user_id, key)
             )
-            open_ids = [row[0] for row in self.cursor.fetchall()]
-            if not open_ids:
-                break
-            for match_id in open_ids:
-                winning_team = random.choice([1, 2])
-                # A handful of fake bettors wager on the match, then get
-                # paid out once it resolves — same pari-mutuel math a real
-                # bet uses (see _postSimulatedWagers), just entirely
-                # separate from the real wagers/economy tables so it can't
-                # collide with an actual game running elsewhere in this
-                # server.
-                wagers, team1, team2 = await self._postSimulatedWagers(match_id, ctx.channel)
-                await self._resolveTournamentMatch(guild_id, match_id, winning_team, ctx.channel.id)
-                await self._postSimulatedPayout(ctx.channel, wagers, team1, team2, winning_team)
-        else:
-            await ctx.channel.send("⚠️ Hit the safety cap before the simulated tournament finished.")
+        self.db.commit()
+
+        newly_unlocked = [(user_id, key) for key in self._checkAchievements(guild_id, user_id)]
+
+        # Every remaining achievement keys off a single win delta's own
+        # context — one real applyGameDeltas call crosses the top of both
+        # ladders (game_wins/current_win_streak up by 1) and the gambler
+        # bet count at once, plus a high-roller/jackpot-sized payout and an
+        # underdog-sized elo swing, the same way one very lucky real game
+        # would.
+        win_deltas = {
+            user_id: {
+                "username": username, "balance": 0, "wins": 1, "losses": 0,
+                "gold_wagered": CARD_ACHIEVEMENT_HIGH_ROLLER_GOLD,
+                "gold_won": CARD_ACHIEVEMENT_JACKPOT_PAYOUT_MULTIPLIER * CARD_ACHIEVEMENT_HIGH_ROLLER_GOLD,
+                "gold_lost": 0,
+                "game_wins": 1, "game_losses": 0, "ranked_wins": 0, "ranked_losses": 0,
+                "elo": CARD_ACHIEVEMENT_UNDERDOG_ELO_GAIN,
+            }
+        }
+        newly_unlocked += self.applyGameDeltas(guild_id, win_deltas)
+
+        # tournament_champion has no economy-row condition at all — grant
+        # it directly through the exact same hook a real tournament's
+        # completion announcement calls.
+        champion_team = Team()
+        champion_team.set_name("TEST Team Champions")
+        champion_team.add_player(Player(user_id, username))
+        newly_unlocked += self._grantTournamentChampionAchievement(guild_id, champion_team)
+
+        await ctx.response.send_message(
+            f"\U0001f9ea Forced every achievement threshold for {ctx.user.mention} and ran the real "
+            f"check/unlock/announce pipeline — {len(newly_unlocked)} newly unlocked below."
+        )
+        await self._announceAchievements(ctx.channel, newly_unlocked)
 
     # Loads two persistent teams straight into team1/team2 for a casual or
     # ranked game — the "quickly reuse a tournament team" path, skipping
@@ -5584,12 +5678,13 @@ class helpers():
         deltas, summary = self.computeGameDeltas(
             allWagers, team1_roster, team2_roster, elo_lookup, winning_team, is_ranked
         )
-        self.applyGameDeltas(guild_id, deltas)
+        newly_unlocked = self.applyGameDeltas(guild_id, deltas)
         self.saveLastResult(
             guild_id, winning_team, allWagers, team1_roster, team2_roster, deltas, is_ranked
         )
 
         await channel.send(self.formatResultMessage(winning_team, summary))
+        await self._announceAchievements(channel, newly_unlocked)
 
         if guild is not None and await self.moveMembersToOriginalChannel(guild):
             await channel.send("Moved everyone back to the original channel!")
@@ -5880,7 +5975,13 @@ class helpers():
 
     # Applies (sign=1) or reverses (sign=-1) a deltas dict from
     # computeGameDeltas() against every affected player's economy row.
+    # Returns the (user_id, achievement_key) pairs newly unlocked while
+    # applying these deltas — always [] on a reversal (sign<0), same
+    # reasoning as the elo-tier check below. Callers with a channel handy
+    # pass this straight to _announceAchievements; callers that don't
+    # (or a reversal, which never populates it) just ignore it.
     def applyGameDeltas(self, guild_id, deltas, sign=1):
+        newly_unlocked = []
         for user_id, d in deltas.items():
             self.ensureEconomyRow(guild_id, user_id, d["username"])
             self.cursor.execute(
@@ -5898,17 +5999,57 @@ class helpers():
                 )
             )
             # Only on forward application, not a correction's reversal —
-            # unlocking a tier reward while UNDOING a wrongly-recorded
-            # result (see _correctTournamentMatchHelper) would be checking
-            # against elo on its way back down, not up. The reapply that
-            # follows a reversal calls back in here with sign=1 anyway, so
-            # a corrected winner still gets checked properly.
-            if sign > 0 and d["elo"] != 0:
-                self.cursor.execute(
-                    "SELECT elo FROM economy WHERE guildId=? AND userId=?", (guild_id, user_id)
-                )
-                self._checkTierRewardUnlocks(guild_id, user_id, self.cursor.fetchone()[0])
+            # unlocking a tier reward (or an achievement) while UNDOING a
+            # wrongly-recorded result (see _correctTournamentMatchHelper)
+            # would be checking against elo/streak on their way back down,
+            # not up. The reapply that follows a reversal calls back in
+            # here with sign=1 anyway, so a corrected winner still gets
+            # checked properly.
+            if sign > 0:
+                if d["elo"] != 0:
+                    self.cursor.execute(
+                        "SELECT elo FROM economy WHERE guildId=? AND userId=?", (guild_id, user_id)
+                    )
+                    self._checkTierRewardUnlocks(guild_id, user_id, self.cursor.fetchone()[0])
+
+                # Streak tracking: a win extends it, a loss resets it to
+                # zero — not itself a pure additive delta the way every
+                # other economy column is, so it needs the CURRENT stored
+                # value rather than just adding a fixed amount, hence its
+                # own UPDATE instead of joining the one above.
+                if d["game_wins"] > 0:
+                    self.cursor.execute(
+                        "UPDATE economy SET current_win_streak = current_win_streak + 1 "
+                        "WHERE guildId=? AND userId=?", (guild_id, user_id)
+                    )
+                elif d["game_losses"] > 0:
+                    self.cursor.execute(
+                        "UPDATE economy SET current_win_streak = 0 WHERE guildId=? AND userId=?",
+                        (guild_id, user_id)
+                    )
+
+                # High Roller, Jackpot, and Giant Slayer all need this
+                # specific event's own context (this game's wager amount,
+                # this game's payout, this game's elo swing) rather than a
+                # plain row snapshot, so they're checked here directly
+                # instead of inside _checkAchievements.
+                if d["wins"] > 0 and d["gold_wagered"] >= CARD_ACHIEVEMENT_HIGH_ROLLER_GOLD:
+                    if self._unlockAchievement(guild_id, user_id, "high_roller"):
+                        newly_unlocked.append((user_id, "high_roller"))
+                if (
+                    d["wins"] > 0 and d["gold_wagered"] > 0
+                    and d["gold_won"] >= d["gold_wagered"] * (CARD_ACHIEVEMENT_JACKPOT_PAYOUT_MULTIPLIER - 1)
+                ):
+                    if self._unlockAchievement(guild_id, user_id, "jackpot"):
+                        newly_unlocked.append((user_id, "jackpot"))
+                if d["elo"] >= CARD_ACHIEVEMENT_UNDERDOG_ELO_GAIN:
+                    if self._unlockAchievement(guild_id, user_id, "underdog"):
+                        newly_unlocked.append((user_id, "underdog"))
+
+                for achievement_key in self._checkAchievements(guild_id, user_id):
+                    newly_unlocked.append((user_id, achievement_key))
         self.db.commit()
+        return newly_unlocked
 
     def formatResultMessage(self, winning_team, summary):
         lines = [f"**Team {winning_team}** wins!"]
@@ -6001,7 +6142,7 @@ class helpers():
         new_deltas, summary = self.computeGameDeltas(
             last["wagers"], team1_roster, team2_roster, elo_lookup, correct_team, is_ranked
         )
-        self.applyGameDeltas(guild_id, new_deltas)
+        newly_unlocked = self.applyGameDeltas(guild_id, new_deltas)
         self.saveLastResult(
             guild_id, correct_team, last["wagers"], team1_roster, team2_roster, new_deltas, is_ranked
         )
@@ -6011,6 +6152,7 @@ class helpers():
             f"Team {last['winning_team']}). Balances, records, and elo have been adjusted."
         )
         await ctx.channel.send(self.formatResultMessage(correct_team, summary))
+        await self._announceAchievements(ctx.channel, newly_unlocked)
 
     # Builds the plain /stats embed for `target` (a discord.Member or
     # discord.User — anything with .id/.name/.display_name/.display_avatar)
@@ -6043,6 +6185,11 @@ class helpers():
         # correction, a manual DB edit) still gets credited the next time
         # anything looks at their stats, not never.
         self._checkTierRewardUnlocks(guild_id, user_id, elo)
+        # Same self-heal for the snapshot-checkable achievements (return
+        # value intentionally discarded — no _announceAchievements call
+        # here, since a quiet backfill shouldn't suddenly announce
+        # something that may have been true for a while).
+        self._checkAchievements(guild_id, user_id)
 
         net_gold = gold_won - gold_lost
 
@@ -6347,6 +6494,154 @@ class helpers():
         for tier_name in CARD_TIER_REWARD_TITLES:
             if elo >= ELO_TIER_THRESHOLDS[tier_name]:
                 self._unlockCardReward(guild_id, user_id, tier_name)
+
+    # Permanently records that `user_id` has earned `achievement_key` (a
+    # CARD_ACHIEVEMENT_TITLES key) — same INSERT OR IGNORE shape
+    # _unlockCardReward/grantSpecialCardTitle use, so an achievement title
+    # shows up through the exact same getUnlockedCardTitles/
+    # getAvailableCardTitles/_countShopPurchases reads those use, with no
+    # separate "did they earn this" concept anywhere else in the code.
+    # Returns whether this call actually inserted a new row (rather than
+    # hitting the IGNORE branch on an already-earned achievement) — the
+    # one thing this path needs that the other three don't, since
+    # achievements are the only unlock type that also notifies (see
+    # _announceAchievements) and a notification firing on every repeat
+    # check would be spam.
+    def _unlockAchievement(self, guild_id, user_id, achievement_key):
+        self.cursor.execute(
+            "INSERT OR IGNORE INTO card_unlocks(guildId, userId, itemType, itemKey) VALUES(?, ?, 'title', ?)",
+            (guild_id, user_id, achievement_key)
+        )
+        newly_unlocked = self.cursor.rowcount > 0
+        self.db.commit()
+        return newly_unlocked
+
+    # How many CARD_SHOP_* items (any of the three catalogs) `user_id` has
+    # actually purchased — used by the "big_spender" achievement.
+    # card_unlocks doesn't distinguish "bought" from "earned by rank" or
+    # "specially granted" on its own (they're all just rows), so this
+    # cross-checks each row's itemKey against the shop catalogs
+    # specifically rather than just counting every unlock they have.
+    def _countShopPurchases(self, guild_id, user_id):
+        self.cursor.execute(
+            "SELECT itemType, itemKey FROM card_unlocks WHERE guildId=? AND userId=?",
+            (guild_id, user_id)
+        )
+        count = 0
+        for item_type, item_key in self.cursor.fetchall():
+            if item_type == "title" and item_key in CARD_SHOP_TITLES:
+                count += 1
+            elif item_type == "color_scheme" and item_key in CARD_SHOP_COLOR_SCHEMES:
+                count += 1
+            elif item_type == "font_style" and item_key in CARD_SHOP_FONT_STYLES:
+                count += 1
+        return count
+
+    # (game_wins threshold, achievement_key) pairs, lowest to highest — the
+    # Veteran ladder. Walked as a plain list rather than four separate
+    # if-statements so a fifth tier is a one-line addition later.
+    CARD_ACHIEVEMENT_VETERAN_LADDER = [
+        (CARD_ACHIEVEMENT_VETERAN_WINS, "veteran"),
+        (CARD_ACHIEVEMENT_VETERAN_ELITE_WINS, "veteran_elite"),
+        (CARD_ACHIEVEMENT_VETERAN_MASTER_WINS, "veteran_master"),
+        (CARD_ACHIEVEMENT_VETERAN_IMMORTAL_WINS, "veteran_immortal"),
+    ]
+    # Same shape for the On Fire streak ladder.
+    CARD_ACHIEVEMENT_ON_FIRE_LADDER = [
+        (CARD_ACHIEVEMENT_ON_FIRE_STREAK, "on_fire"),
+        (CARD_ACHIEVEMENT_ON_FIRE_UNSTOPPABLE_STREAK, "on_fire_unstoppable"),
+        (CARD_ACHIEVEMENT_ON_FIRE_UNTOUCHABLE_STREAK, "on_fire_untouchable"),
+    ]
+
+    # Every achievement checkable from a plain snapshot of `user_id`'s own
+    # state (their economy row plus a couple of cheap live queries) rather
+    # than needing extra context from a specific event — those (High
+    # Roller, Jackpot, Giant Slayer, Tournament Champion) are checked
+    # separately, inline where that event's own extra context is already
+    # available (applyGameDeltas, the tournament-champion announcement
+    # sites). Called both from applyGameDeltas (right after a game result
+    # changes game_wins/game_losses/current_win_streak) and lazily from
+    # _buildStatsEmbed — the same "self-heal on the next read" idea
+    # ensureEconomyRow/ensureCardSettings/_checkTierRewardUnlocks already
+    # use elsewhere, so someone who already qualified before an
+    # achievement existed (or whose team-count/shop-purchase count changed
+    # some other way) still gets credited the next time anything looks at
+    # their stats. Returns the keys newly unlocked this call, for the
+    # caller to notify about (empty from the lazy _buildStatsEmbed path,
+    # which intentionally discards it — the self-heal shouldn't announce
+    # something that may have quietly been true for a while).
+    def _checkAchievements(self, guild_id, user_id):
+        self.cursor.execute(
+            "SELECT game_wins, game_losses, current_win_streak, wins, losses "
+            "FROM economy WHERE guildId=? AND userId=?",
+            (guild_id, user_id)
+        )
+        row = self.cursor.fetchone()
+        if row is None:
+            return []
+        game_wins, game_losses, current_win_streak, bet_wins, bet_losses = row
+
+        newly_unlocked = []
+        if game_wins >= 1 and self._unlockAchievement(guild_id, user_id, "first_blood"):
+            newly_unlocked.append("first_blood")
+        for threshold, key in self.CARD_ACHIEVEMENT_VETERAN_LADDER:
+            if game_wins >= threshold and self._unlockAchievement(guild_id, user_id, key):
+                newly_unlocked.append(key)
+        for threshold, key in self.CARD_ACHIEVEMENT_ON_FIRE_LADDER:
+            if current_win_streak >= threshold and self._unlockAchievement(guild_id, user_id, key):
+                newly_unlocked.append(key)
+        if (
+            game_losses >= CARD_ACHIEVEMENT_IRON_WILL_LOSSES
+            and self._unlockAchievement(guild_id, user_id, "iron_will")
+        ):
+            newly_unlocked.append("iron_will")
+        if (
+            bet_wins + bet_losses >= CARD_ACHIEVEMENT_GAMBLER_BETS
+            and self._unlockAchievement(guild_id, user_id, "gambler")
+        ):
+            newly_unlocked.append("gambler")
+
+        teams = self.getTeamsForPlayer(guild_id, user_id)
+        if (
+            len(teams) >= CARD_ACHIEVEMENT_TEAM_PLAYER_TEAMS
+            and self._unlockAchievement(guild_id, user_id, "team_player")
+        ):
+            newly_unlocked.append("team_player")
+        is_captain = any(self.isTeamCaptain(team, user_id) for _team_id, team in teams)
+        if is_captain and self._unlockAchievement(guild_id, user_id, "captain"):
+            newly_unlocked.append("captain")
+
+        if (
+            self._countShopPurchases(guild_id, user_id) >= CARD_ACHIEVEMENT_BIG_SPENDER_ITEMS
+            and self._unlockAchievement(guild_id, user_id, "big_spender")
+        ):
+            newly_unlocked.append("big_spender")
+        return newly_unlocked
+
+    # Posts one message per newly-unlocked achievement — `newly_unlocked`
+    # is a list of (user_id, achievement_key) pairs, the shape
+    # applyGameDeltas/_grantTournamentChampionAchievement both return. A
+    # raw `<@id>` mention is used directly rather than resolving a real
+    # Member first — it renders identically either way, and every caller
+    # here already has a channel but not necessarily a fetched member.
+    async def _announceAchievements(self, channel, newly_unlocked):
+        for user_id, achievement_key in newly_unlocked:
+            title = CARD_ACHIEVEMENT_TITLES.get(achievement_key)
+            if title is None:
+                continue
+            await channel.send(f"\U0001f3c6 <@{user_id}> unlocked the **{title}** achievement!")
+
+    # Grants every rostered player on `team` credit for winning a
+    # tournament — called from both tournament-completion announcement
+    # sites (single elimination, and the Grand Finals path for double
+    # elimination). Returns the same (user_id, achievement_key) list shape
+    # applyGameDeltas does, ready to pass straight to _announceAchievements.
+    def _grantTournamentChampionAchievement(self, guild_id, team):
+        newly_unlocked = []
+        for player in team.get_players():
+            if self._unlockAchievement(guild_id, player.get_id(), "tournament_champion"):
+                newly_unlocked.append((player.get_id(), "tournament_champion"))
+        return newly_unlocked
 
     # Every trading-card title `user_id` has permanently unlocked in this
     # guild, as display-ready strings (CARD_TITLE_CATALOG's values, not the
@@ -6790,6 +7085,65 @@ class helpers():
         embed.set_footer(
             text="/shop-buy to purchase — equip with /card-set-title, /card-set-color-scheme, or /card-set-font"
         )
+        await ctx.response.send_message(embed=embed)
+
+    # Every CARD_ACHIEVEMENT_TITLES entry as {key, name, description,
+    # earned} — what /achievements displays. Earned state reads straight
+    # off card_unlocks, the exact same table (and same itemType='title'
+    # shape) getUnlockedCardTitles already reads for tier rewards, special
+    # grants, and shop purchases.
+    def getAchievementCatalog(self, guild_id, user_id):
+        self.cursor.execute(
+            "SELECT itemKey FROM card_unlocks WHERE guildId=? AND userId=? AND itemType='title'",
+            (guild_id, user_id)
+        )
+        earned_keys = {row[0] for row in self.cursor.fetchall()}
+        return [
+            {
+                "key": key, "name": name, "description": CARD_ACHIEVEMENT_DESCRIPTIONS.get(key, ""),
+                "earned": key in earned_keys,
+            }
+            for key, name in CARD_ACHIEVEMENT_TITLES.items()
+        ]
+
+    # /achievements: browses the full catalog with earned/not-earned state,
+    # grouped into fields the same way /shop's own shopHelper groups by
+    # item type (embed.add_field per category rather than one flat
+    # description) — Veteran and On Fire are each a ladder of several
+    # rising thresholds (see CARD_ACHIEVEMENT_VETERAN_LADDER/
+    # CARD_ACHIEVEMENT_ON_FIRE_LADDER), so each gets its own field with its
+    # tiers listed lowest-to-highest instead of its rungs being scattered
+    # through one long list alongside every unrelated achievement. Runs the
+    # snapshot self-heal first (same as _buildStatsEmbed does) so anyone
+    # who already qualified sees it reflected immediately rather than
+    # needing a /stats call first.
+    async def achievementsHelper(self, ctx):
+        guild_id = ctx.guild.id
+        user_id = ctx.user.id
+        self.ensureEconomyRow(guild_id, user_id, ctx.user.name)
+        self._checkAchievements(guild_id, user_id)
+
+        catalog = {item["key"]: item for item in self.getAchievementCatalog(guild_id, user_id)}
+
+        def render(key):
+            item = catalog[key]
+            status = "✅" if item["earned"] else "🔒"
+            return f"{status} **{item['name']}** — {item['description']}"
+
+        embed = discord.Embed(title="Achievements", color=discord.Color.gold())
+
+        ladder_keys = set()
+        for label, ladder in (
+            ("Veteran", self.CARD_ACHIEVEMENT_VETERAN_LADDER), ("On Fire", self.CARD_ACHIEVEMENT_ON_FIRE_LADDER)
+        ):
+            keys = [key for _threshold, key in ladder]
+            ladder_keys.update(keys)
+            embed.add_field(name=f"__{label}__", value="\n".join(render(key) for key in keys), inline=False)
+
+        other_lines = [render(key) for key in CARD_ACHIEVEMENT_TITLES if key not in ladder_keys]
+        embed.add_field(name="__Other__", value="\n".join(other_lines), inline=False)
+
+        embed.set_footer(text="Earned achievements unlock their title for /card-set-title")
         await ctx.response.send_message(embed=embed)
 
     # /shop-buy: spends gold to permanently unlock one CARD_SHOP_* item —

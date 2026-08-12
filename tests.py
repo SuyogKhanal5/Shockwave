@@ -62,7 +62,7 @@ SERVERS_SCHEMA = (
 ECONOMY_SCHEMA = (
     "CREATE TABLE economy(guildId, userId, username, balance, wins, losses, "
     "gold_wagered, gold_won, gold_lost, game_wins, game_losses, elo, last_daily, "
-    "ranked_wins DEFAULT 0, ranked_losses DEFAULT 0, "
+    "ranked_wins DEFAULT 0, ranked_losses DEFAULT 0, current_win_streak DEFAULT 0, "
     "PRIMARY KEY(guildId, userId))"
 )
 WAGERS_SCHEMA = (
@@ -4778,8 +4778,13 @@ class RecordResultTests(HelperTestCase):
         self.cursor.execute("SELECT COUNT(*) FROM wagers WHERE guildId=?", (GUILD_ID,))
         self.assertEqual(self.cursor.fetchone()[0], 0)
 
-        message = channel.send.call_args.args[0]
-        self.assertIn("won 400 gold (bet 100)", message)
+        # Not necessarily the last message: a 400-gold payout on a 100-gold
+        # bet is a 4x return, which also crosses the Jackpot achievement's
+        # own 3x threshold and gets announced right after this one (see
+        # _announceAchievements) — scan every call instead of assuming
+        # this is the final one, same fix the First Blood case needed.
+        messages = [c.args[0] for c in channel.send.call_args_list if c.args]
+        self.assertTrue(any("won 400 gold (bet 100)" in m for m in messages))
 
     async def test_multiple_winners_split_losing_pool_proportionally(self):
         await self._place_bet(901, "Alice", 1, 1)
@@ -4879,8 +4884,12 @@ class RecordResultTests(HelperTestCase):
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 702, "game_losses"), 1)
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 702, "elo"), 984)
 
-        message = channel.send.call_args.args[0]
-        self.assertIn("Elo:", message)
+        # P1's first-ever win also earns the "First Blood" achievement,
+        # which posts its own announcement — check every message sent
+        # rather than assuming the result message is the last (or only)
+        # one.
+        messages = [c.args[0] for c in channel.send.call_args_list]
+        self.assertTrue(any("Elo:" in m for m in messages))
 
     async def test_underdog_win_gains_more_elo_than_favorite_win(self):
         team1 = Team(); team1.name = "Team 1"
@@ -5650,6 +5659,369 @@ class HandleStatsReactionTests(HelperTestCase):
         )
         await self.helperObj.handleStatsReaction(payload)
         self.channel.fetch_message.assert_not_awaited()
+
+
+class UnlockAchievementTests(HelperTestCase):
+    def test_first_unlock_returns_true_and_records_it(self):
+        newly = self.helperObj._unlockAchievement(GUILD_ID, 901, "first_blood")
+        self.assertTrue(newly)
+        self.assertIn(
+            helper_module.CARD_ACHIEVEMENT_TITLES["first_blood"], self.helperObj.getUnlockedCardTitles(GUILD_ID, 901)
+        )
+
+    def test_repeat_unlock_returns_false(self):
+        self.helperObj._unlockAchievement(GUILD_ID, 901, "first_blood")
+        newly = self.helperObj._unlockAchievement(GUILD_ID, 901, "first_blood")
+        self.assertFalse(newly)
+
+
+class CountShopPurchasesTests(HelperTestCase):
+    async def test_counts_only_shop_bought_items_not_other_unlock_types(self):
+        # a tier reward and a special grant shouldn't count as "purchased"
+        self.helperObj._checkTierRewardUnlocks(GUILD_ID, 901, helper_module.ELO_TIER_THRESHOLDS["Diamond"])
+        self.helperObj.grantSpecialCardTitle(GUILD_ID, 901, "Developer")
+        self.assertEqual(self.helperObj._countShopPurchases(GUILD_ID, 901), 0)
+
+        ctx = FakeInteraction(self.guild, FakeMember("Alice", id=901))
+        self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.cursor.execute("UPDATE economy SET balance=10000 WHERE guildId=? AND userId=?", (GUILD_ID, 901))
+        self.db.commit()
+        await self.helperObj.shopBuyHelper(ctx, "Legend")
+        self.assertEqual(self.helperObj._countShopPurchases(GUILD_ID, 901), 1)
+
+
+class CheckAchievementsTests(HelperTestCase):
+    def test_first_win_unlocks_first_blood(self):
+        self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.cursor.execute("UPDATE economy SET game_wins=1 WHERE guildId=? AND userId=?", (GUILD_ID, 901))
+        self.db.commit()
+
+        newly = self.helperObj._checkAchievements(GUILD_ID, 901)
+        self.assertIn("first_blood", newly)
+
+    def test_veteran_requires_the_configured_win_count(self):
+        self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.cursor.execute(
+            "UPDATE economy SET game_wins=? WHERE guildId=? AND userId=?",
+            (helper_module.CARD_ACHIEVEMENT_VETERAN_WINS - 1, GUILD_ID, 901)
+        )
+        self.db.commit()
+        self.assertNotIn("veteran", self.helperObj._checkAchievements(GUILD_ID, 901))
+
+        self.cursor.execute(
+            "UPDATE economy SET game_wins=? WHERE guildId=? AND userId=?",
+            (helper_module.CARD_ACHIEVEMENT_VETERAN_WINS, GUILD_ID, 901)
+        )
+        self.db.commit()
+        self.assertIn("veteran", self.helperObj._checkAchievements(GUILD_ID, 901))
+
+    def test_on_fire_requires_the_configured_streak(self):
+        self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.cursor.execute(
+            "UPDATE economy SET current_win_streak=? WHERE guildId=? AND userId=?",
+            (helper_module.CARD_ACHIEVEMENT_ON_FIRE_STREAK, GUILD_ID, 901)
+        )
+        self.db.commit()
+        self.assertIn("on_fire", self.helperObj._checkAchievements(GUILD_ID, 901))
+
+    async def test_team_player_requires_the_configured_team_count(self):
+        for i in range(helper_module.CARD_ACHIEVEMENT_TEAM_PLAYER_TEAMS):
+            ctx = FakeInteraction(self.guild, FakeMember("Alice", id=901))
+            await self.helperObj.createTeamHelper(ctx, f"Team{i}", 5)
+        self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.assertIn("team_player", self.helperObj._checkAchievements(GUILD_ID, 901))
+
+    def test_veteran_ladder_unlocks_each_distinct_tier_in_order(self):
+        self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        ladder = [
+            (helper_module.CARD_ACHIEVEMENT_VETERAN_WINS, "veteran"),
+            (helper_module.CARD_ACHIEVEMENT_VETERAN_ELITE_WINS, "veteran_elite"),
+            (helper_module.CARD_ACHIEVEMENT_VETERAN_MASTER_WINS, "veteran_master"),
+            (helper_module.CARD_ACHIEVEMENT_VETERAN_IMMORTAL_WINS, "veteran_immortal"),
+        ]
+        for threshold, key in ladder:
+            self.cursor.execute(
+                "UPDATE economy SET game_wins=? WHERE guildId=? AND userId=?", (threshold - 1, GUILD_ID, 901)
+            )
+            self.db.commit()
+            self.assertNotIn(key, self.helperObj._checkAchievements(GUILD_ID, 901))
+
+            self.cursor.execute(
+                "UPDATE economy SET game_wins=? WHERE guildId=? AND userId=?", (threshold, GUILD_ID, 901)
+            )
+            self.db.commit()
+            self.assertIn(key, self.helperObj._checkAchievements(GUILD_ID, 901))
+
+        # Every tier's title is distinct — reaching Immortal doesn't just
+        # mean four copies of "Veteran".
+        unlocked = self.helperObj.getUnlockedCardTitles(GUILD_ID, 901)
+        for _, key in ladder:
+            self.assertIn(helper_module.CARD_ACHIEVEMENT_TITLES[key], unlocked)
+        self.assertEqual(len({helper_module.CARD_ACHIEVEMENT_TITLES[key] for _, key in ladder}), 4)
+
+    def test_on_fire_ladder_unlocks_each_distinct_tier(self):
+        self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.cursor.execute(
+            "UPDATE economy SET current_win_streak=? WHERE guildId=? AND userId=?",
+            (helper_module.CARD_ACHIEVEMENT_ON_FIRE_UNTOUCHABLE_STREAK, GUILD_ID, 901)
+        )
+        self.db.commit()
+
+        newly = self.helperObj._checkAchievements(GUILD_ID, 901)
+        self.assertIn("on_fire", newly)
+        self.assertIn("on_fire_unstoppable", newly)
+        self.assertIn("on_fire_untouchable", newly)
+
+    def test_on_fire_untouchable_requires_its_own_higher_streak(self):
+        self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.cursor.execute(
+            "UPDATE economy SET current_win_streak=? WHERE guildId=? AND userId=?",
+            (helper_module.CARD_ACHIEVEMENT_ON_FIRE_UNSTOPPABLE_STREAK, GUILD_ID, 901)
+        )
+        self.db.commit()
+
+        newly = self.helperObj._checkAchievements(GUILD_ID, 901)
+        self.assertIn("on_fire_unstoppable", newly)
+        self.assertNotIn("on_fire_untouchable", newly)
+
+    def test_iron_will_requires_the_configured_loss_count(self):
+        self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.cursor.execute(
+            "UPDATE economy SET game_losses=? WHERE guildId=? AND userId=?",
+            (helper_module.CARD_ACHIEVEMENT_IRON_WILL_LOSSES - 1, GUILD_ID, 901)
+        )
+        self.db.commit()
+        self.assertNotIn("iron_will", self.helperObj._checkAchievements(GUILD_ID, 901))
+
+        self.cursor.execute(
+            "UPDATE economy SET game_losses=? WHERE guildId=? AND userId=?",
+            (helper_module.CARD_ACHIEVEMENT_IRON_WILL_LOSSES, GUILD_ID, 901)
+        )
+        self.db.commit()
+        self.assertIn("iron_will", self.helperObj._checkAchievements(GUILD_ID, 901))
+
+    def test_gambler_counts_total_bet_wins_and_losses_together(self):
+        self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        half = helper_module.CARD_ACHIEVEMENT_GAMBLER_BETS // 2
+        remainder = helper_module.CARD_ACHIEVEMENT_GAMBLER_BETS - half
+        self.cursor.execute(
+            "UPDATE economy SET wins=?, losses=? WHERE guildId=? AND userId=?",
+            (half, remainder - 1, GUILD_ID, 901)
+        )
+        self.db.commit()
+        self.assertNotIn("gambler", self.helperObj._checkAchievements(GUILD_ID, 901))
+
+        self.cursor.execute(
+            "UPDATE economy SET losses=? WHERE guildId=? AND userId=?", (remainder, GUILD_ID, 901)
+        )
+        self.db.commit()
+        self.assertIn("gambler", self.helperObj._checkAchievements(GUILD_ID, 901))
+
+    def test_captain_requires_actually_being_a_teams_captain(self):
+        bob = Player(902, "Bob")
+        alice = Player(901, "Alice")
+        team = Team()
+        team.set_name("NotCaptainTeam")
+        team.add_player(bob)
+        team.add_player(alice)
+        team.set_captain(bob)
+        self.helperObj._saveNewTeam(GUILD_ID, team)
+
+        self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.assertNotIn("captain", self.helperObj._checkAchievements(GUILD_ID, 901))
+
+        team_id, persisted_team = self.helperObj.getTeamRow(GUILD_ID, "NotCaptainTeam")
+        persisted_alice = next(p for p in persisted_team.get_players() if p.get_id() == 901)
+        persisted_team.set_captain(persisted_alice)
+        self.helperObj.updateTeamData(team_id, persisted_team)
+        self.assertIn("captain", self.helperObj._checkAchievements(GUILD_ID, 901))
+
+    def test_repeat_calls_do_not_re_unlock_the_same_achievement(self):
+        self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.cursor.execute("UPDATE economy SET game_wins=1 WHERE guildId=? AND userId=?", (GUILD_ID, 901))
+        self.db.commit()
+
+        first = self.helperObj._checkAchievements(GUILD_ID, 901)
+        second = self.helperObj._checkAchievements(GUILD_ID, 901)
+        self.assertIn("first_blood", first)
+        self.assertEqual(second, [])
+
+    def test_no_economy_row_returns_no_achievements(self):
+        self.assertEqual(self.helperObj._checkAchievements(GUILD_ID, 999999), [])
+
+
+class ApplyGameDeltasAchievementTests(HelperTestCase):
+    def _win_deltas(self, user_id, name="Alice", gold_wagered=0, gold_won=0, elo=0):
+        return {
+            user_id: {
+                "username": name, "balance": 0, "wins": 1 if gold_wagered else 0, "losses": 0,
+                "gold_wagered": gold_wagered, "gold_won": gold_won, "gold_lost": 0,
+                "game_wins": 1, "game_losses": 0, "ranked_wins": 0, "ranked_losses": 0, "elo": elo,
+            }
+        }
+
+    def _loss_deltas(self, user_id, name="Alice"):
+        return {
+            user_id: {
+                "username": name, "balance": 0, "wins": 0, "losses": 0,
+                "gold_wagered": 0, "gold_won": 0, "gold_lost": 0,
+                "game_wins": 0, "game_losses": 1, "ranked_wins": 0, "ranked_losses": 0, "elo": 0,
+            }
+        }
+
+    def test_a_win_extends_the_streak_and_a_loss_resets_it(self):
+        self.helperObj.applyGameDeltas(GUILD_ID, self._win_deltas(901))
+        self.helperObj.applyGameDeltas(GUILD_ID, self._win_deltas(901))
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "current_win_streak"), 2)
+
+        self.helperObj.applyGameDeltas(GUILD_ID, self._loss_deltas(901))
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "current_win_streak"), 0)
+
+    def test_reaching_the_streak_threshold_unlocks_on_fire(self):
+        newly_unlocked = []
+        for _ in range(helper_module.CARD_ACHIEVEMENT_ON_FIRE_STREAK):
+            newly_unlocked = self.helperObj.applyGameDeltas(GUILD_ID, self._win_deltas(901))
+        self.assertIn((901, "on_fire"), newly_unlocked)
+
+    def test_winning_a_big_enough_bet_unlocks_high_roller(self):
+        newly_unlocked = self.helperObj.applyGameDeltas(
+            GUILD_ID, self._win_deltas(901, gold_wagered=helper_module.CARD_ACHIEVEMENT_HIGH_ROLLER_GOLD)
+        )
+        self.assertIn((901, "high_roller"), newly_unlocked)
+
+    def test_a_small_winning_bet_does_not_unlock_high_roller(self):
+        newly_unlocked = self.helperObj.applyGameDeltas(
+            GUILD_ID, self._win_deltas(901, gold_wagered=helper_module.CARD_ACHIEVEMENT_HIGH_ROLLER_GOLD - 1)
+        )
+        self.assertNotIn((901, "high_roller"), newly_unlocked)
+
+    def test_a_big_enough_payout_ratio_unlocks_jackpot(self):
+        multiplier = helper_module.CARD_ACHIEVEMENT_JACKPOT_PAYOUT_MULTIPLIER
+        newly_unlocked = self.helperObj.applyGameDeltas(
+            GUILD_ID, self._win_deltas(901, gold_wagered=100, gold_won=(multiplier - 1) * 100)
+        )
+        self.assertIn((901, "jackpot"), newly_unlocked)
+
+    def test_a_small_payout_ratio_does_not_unlock_jackpot(self):
+        multiplier = helper_module.CARD_ACHIEVEMENT_JACKPOT_PAYOUT_MULTIPLIER
+        newly_unlocked = self.helperObj.applyGameDeltas(
+            GUILD_ID, self._win_deltas(901, gold_wagered=100, gold_won=(multiplier - 1) * 100 - 1)
+        )
+        self.assertNotIn((901, "jackpot"), newly_unlocked)
+
+    def test_a_big_elo_gain_unlocks_giant_slayer(self):
+        newly_unlocked = self.helperObj.applyGameDeltas(
+            GUILD_ID, self._win_deltas(901, elo=helper_module.CARD_ACHIEVEMENT_UNDERDOG_ELO_GAIN)
+        )
+        self.assertIn((901, "underdog"), newly_unlocked)
+
+    def test_a_normal_elo_gain_does_not_unlock_giant_slayer(self):
+        newly_unlocked = self.helperObj.applyGameDeltas(
+            GUILD_ID, self._win_deltas(901, elo=helper_module.CARD_ACHIEVEMENT_UNDERDOG_ELO_GAIN - 1)
+        )
+        self.assertNotIn((901, "underdog"), newly_unlocked)
+
+    def test_reversal_never_unlocks_or_touches_the_streak(self):
+        self.helperObj.applyGameDeltas(GUILD_ID, self._win_deltas(901))
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "current_win_streak"), 1)
+
+        newly_unlocked = self.helperObj.applyGameDeltas(GUILD_ID, self._win_deltas(901), sign=-1)
+        self.assertEqual(newly_unlocked, [])
+        # reversing a win delta subtracts game_wins back to 0, but the
+        # streak counter itself is untouched by a reversal — same
+        # reasoning the elo-tier check already skips on sign<0 for.
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "current_win_streak"), 1)
+
+
+class AnnounceAchievementsTests(HelperTestCase):
+    async def test_posts_one_message_per_newly_unlocked_achievement(self):
+        channel = FakeChannel("game-chat")
+        await self.helperObj._announceAchievements(channel, [(901, "first_blood"), (902, "veteran")])
+
+        self.assertEqual(channel.send.await_count, 2)
+        messages = [c.args[0] for c in channel.send.call_args_list]
+        self.assertTrue(any("<@901>" in m and "First Blood" in m for m in messages))
+        self.assertTrue(any("<@902>" in m and "Veteran" in m for m in messages))
+
+    async def test_no_messages_when_nothing_newly_unlocked(self):
+        channel = FakeChannel("game-chat")
+        await self.helperObj._announceAchievements(channel, [])
+        channel.send.assert_not_awaited()
+
+
+class TournamentChampionAchievementTests(HelperTestCase):
+    def _team(self, name, player_ids):
+        team = Team()
+        team.set_name(name)
+        for pid in player_ids:
+            team.add_player(Player(pid, f"P{pid}"))
+        return team
+
+    def test_grants_every_rostered_player_on_the_champion_team(self):
+        team = self._team("Champions", [901, 902, 903])
+        newly_unlocked = self.helperObj._grantTournamentChampionAchievement(GUILD_ID, team)
+
+        self.assertEqual(set(newly_unlocked), {(901, "tournament_champion"), (902, "tournament_champion"),
+                                                 (903, "tournament_champion")})
+        for pid in (901, 902, 903):
+            self.assertIn(
+                helper_module.CARD_ACHIEVEMENT_TITLES["tournament_champion"],
+                self.helperObj.getUnlockedCardTitles(GUILD_ID, pid)
+            )
+
+    def test_does_not_re_grant_on_a_second_call(self):
+        team = self._team("Champions", [901])
+        self.helperObj._grantTournamentChampionAchievement(GUILD_ID, team)
+        newly_unlocked = self.helperObj._grantTournamentChampionAchievement(GUILD_ID, team)
+        self.assertEqual(newly_unlocked, [])
+
+
+class AchievementsHelperTests(HelperTestCase):
+    def _ctx(self, user_id=901, name="Alice"):
+        return FakeInteraction(self.guild, FakeMember(name, id=user_id))
+
+    async def test_lists_every_achievement_with_lock_state(self):
+        ctx = self._ctx()
+        await self.helperObj.achievementsHelper(ctx)
+
+        embed = ctx.response.send_message.call_args.kwargs["embed"]
+        combined = "\n".join(field.value for field in embed.fields)
+        for title in helper_module.CARD_ACHIEVEMENT_TITLES.values():
+            self.assertIn(title, combined)
+        self.assertIn("🔒", combined)
+
+    async def test_veteran_and_on_fire_ladders_get_their_own_fields(self):
+        ctx = self._ctx()
+        await self.helperObj.achievementsHelper(ctx)
+
+        embed = ctx.response.send_message.call_args.kwargs["embed"]
+        field_names = [field.name for field in embed.fields]
+        self.assertIn("__Veteran__", field_names)
+        self.assertIn("__On Fire__", field_names)
+        self.assertIn("__Other__", field_names)
+
+        veteran_field = next(field for field in embed.fields if field.name == "__Veteran__")
+        for key in ("veteran", "veteran_elite", "veteran_master", "veteran_immortal"):
+            self.assertIn(helper_module.CARD_ACHIEVEMENT_TITLES[key], veteran_field.value)
+        # Rungs of the ladder shouldn't also be scattered into "Other".
+        other_field = next(field for field in embed.fields if field.name == "__Other__")
+        self.assertNotIn(helper_module.CARD_ACHIEVEMENT_TITLES["veteran_immortal"], other_field.value)
+
+    async def test_self_heals_already_qualifying_achievements(self):
+        self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.cursor.execute("UPDATE economy SET game_wins=1 WHERE guildId=? AND userId=?", (GUILD_ID, 901))
+        self.db.commit()
+
+        ctx = self._ctx()
+        await self.helperObj.achievementsHelper(ctx)
+
+        embed = ctx.response.send_message.call_args.kwargs["embed"]
+        combined = "\n".join(field.value for field in embed.fields)
+        self.assertIn("✅", combined)
+        self.assertIn(
+            helper_module.CARD_ACHIEVEMENT_TITLES["first_blood"],
+            self.helperObj.getUnlockedCardTitles(GUILD_ID, 901)
+        )
 
 
 class CardUnlocksTests(HelperTestCase):
@@ -7826,6 +8198,7 @@ class CommandRegistrationTests(BotModuleTestCase):
         expected = {
             "team-set-size", "team-set-channels", "start", "wager", "wager-against", "daily",
             "stats", "card-set-title", "card-set-color-scheme", "card-set-font", "card-test", "shop", "shop-buy",
+            "achievements",
             "leaderboard", "help", "make-teams", "return", "report-correct-winner",
             "captains", "choose", "clear", "notify",
             "roll", "randomize-roles", "tournament-create", "team-create", "team-set-voice-channel",
@@ -7833,7 +8206,7 @@ class CommandRegistrationTests(BotModuleTestCase):
             "tournament-register", "tournament-create-bracket",
             "tournament-print-bracket", "tournament-start", "wager-set-channel", "team-use",
             "set-betting-timer", "set-elo", "card-clear-unlocks",
-            "test",  # TEMP: bracket-renderer preview command, see bot.py
+            "test-achievements",  # TEMP: forces every achievement for the caller, see bot.py
         }
         self.assertEqual(names, expected)
 
@@ -8398,156 +8771,50 @@ class HelpCommandTests(BotModuleTestCase):
         self.assertIn("shockwave.netlify.app", message)
 
     def test_every_registered_command_has_an_entry(self):
-        # "test" is a TEMP debug command (see bot.py) — deliberately left
-        # out of COMMAND_HELP since it's not a real, documented command.
-        names = {c.name for c in self.bot.tree.get_commands()} - {"test"}
+        # "test-achievements" is a TEMP debug command (see bot.py) —
+        # deliberately left out of COMMAND_HELP since it's not a real,
+        # documented command.
+        names = {c.name for c in self.bot.tree.get_commands()} - {"test-achievements"}
         self.assertEqual(names, set(self.bot.COMMAND_HELP.keys()))
 
 
-# TEMP: smoke tests for the throwaway /test command — delete alongside it
-# once the real tournament flow is confirmed to work end to end. Unlike
-# every other command tested in this file, /test drives itself entirely
-# (no reactions to simulate) — resolving a match requires helperObj.client
-# to be able to look the channel back up by id (see
-# _resolveTournamentMatch), so every test here wires up a FakeClient
-# pointed at its own channel first, same as DoubleEliminationMatchFlowTests
-# does for the real reaction-driven flow.
-class TestCommandTests(BotModuleTestCase):
-    def _wired_ctx(self, guild_id=GUILD_ID):
-        guild = FakeGuild(id=guild_id)
-        channel = FakeChannel("test-channel", guild=guild)
-        channel.send = AsyncMock(side_effect=lambda *a, **k: FakeMessage())
-        self.bot.helperObj.client = FakeClient(channels=[channel], guilds=[guild])
-        return FakeInteraction(guild, FakeMember("Caller", id=1), channel=channel)
-
-    async def test_runs_a_full_tournament_through_the_real_pipeline(self):
-        # A small team count keeps this fast — the point is exercising the
-        # real state machine (winners bracket -> losers bracket -> Grand
-        # Finals -> completion -> leaderboard) end to end, not stress-
-        # testing bracket size (that's covered separately by
-        # BracketImageTests).
-        ctx = self._wired_ctx()
-        await self._command("test").callback(ctx, teams=4)
-
-        tournament = self.bot.helperObj.getTournament(GUILD_ID)
-        self.assertIsNotNone(tournament)
-        self.assertTrue(tournament.is_double_elimination())
-        self.assertEqual(len(tournament.get_teams()), 4)
-
-        persisted_teams = self.bot.helperObj.getTeamsForGuild(GUILD_ID)
-        self.assertEqual(len(persisted_teams), 4)
-        self.assertTrue(all(team.get_name().startswith("TEST Team") for _, team in persisted_teams))
-
-        # Fully played out — nothing left open in any bracket.
-        self.bot.cursor.execute(
-            "SELECT COUNT(*) FROM tournament_matches WHERE guildId=? AND state != 'RESOLVED'", (GUILD_ID,)
-        )
-        self.assertEqual(self.bot.cursor.fetchone()[0], 0)
-
-        champion_name = self.bot.helperObj._tournamentChampionName(GUILD_ID, tournament)
-        self.assertIsNotNone(champion_name)
+# TEMP: smoke tests for the throwaway /test-achievements command — delete
+# alongside it once the achievement system is confirmed to work end to end.
+class TestAchievementsCommandTests(BotModuleTestCase):
+    async def test_forces_and_announces_every_achievement(self):
+        ctx = self._ctx()
+        await self._command("test-achievements").callback(ctx)
 
         ctx.response.send_message.assert_awaited_once()
         intro_message = ctx.response.send_message.call_args.args[0]
-        self.assertIn("4-team", intro_message)
+        self.assertIn("newly unlocked", intro_message)
 
-        # _resolveFinalsMatch posts the completion announcement (and,
-        # right after it, the team leaderboard) once Grand Finals resolves
-        # — proof the real completion path actually ran, not just that the
-        # match rows all ended up RESOLVED some other way.
-        sent_messages = [c.args[0] for c in ctx.channel.send.call_args_list if c.args]
-        self.assertTrue(any("is complete!" in m and champion_name in m for m in sent_messages))
-        embeds = [c.kwargs["embed"] for c in ctx.channel.send.call_args_list if "embed" in c.kwargs]
-        self.assertTrue(any("Results" in e.title for e in embeds))
+        announced = [c.args[0] for c in ctx.channel.send.call_args_list if c.args]
+        for title in helper_module.CARD_ACHIEVEMENT_TITLES.values():
+            self.assertTrue(any(title in m for m in announced), f"{title} was never announced")
 
-        # One "Betting on Match #" post and one payout post per resolved
-        # match — entirely separate from the real wagers/economy tables
-        # (see _postSimulatedWagers), so this doesn't touch getEconomy at
-        # all; just confirming the messages themselves show up.
-        betting_posts = [m for m in sent_messages if "Betting on Match #" in m]
-        payout_posts = [m for m in sent_messages if "won the bet" in m]
-        self.assertGreater(len(betting_posts), 0)
-        self.assertEqual(len(betting_posts), len(payout_posts))
+        unlocked = self.bot.helperObj.getUnlockedCardTitles(GUILD_ID, ctx.user.id)
+        for title in helper_module.CARD_ACHIEVEMENT_TITLES.values():
+            self.assertIn(title, unlocked)
 
-    async def test_warns_when_it_overwrites_an_existing_tournament(self):
-        ctx = self._wired_ctx()
-        self.bot.helperObj.saveTournament(GUILD_ID, Tournament("Old Cup", 1, 2, False))
+    async def test_rerunning_still_announces_everything_again(self):
+        ctx1 = self._ctx()
+        await self._command("test-achievements").callback(ctx1)
 
-        await self._command("test").callback(ctx, teams=2)
+        ctx2 = self._ctx()
+        await self._command("test-achievements").callback(ctx2)
 
-        intro_message = ctx.response.send_message.call_args.args[0]
-        self.assertIn("Old Cup", intro_message)
+        announced = [c.args[0] for c in ctx2.channel.send.call_args_list if c.args]
+        for title in helper_module.CARD_ACHIEVEMENT_TITLES.values():
+            self.assertTrue(any(title in m for m in announced), f"{title} was never re-announced")
 
-    async def test_rejects_an_out_of_range_team_count(self):
-        ctx = self._wired_ctx()
+    async def test_does_not_duplicate_test_teams_on_a_rerun(self):
+        await self._command("test-achievements").callback(self._ctx())
+        await self._command("test-achievements").callback(self._ctx())
 
-        await self._command("test").callback(ctx, teams=1)
-
-        ctx.response.send_message.assert_awaited_once_with("Pick a team count between 2 and 64.")
-        self.assertIsNone(self.bot.helperObj.getTournament(GUILD_ID))
-
-    async def test_rerunning_does_not_leave_stale_teams_from_the_previous_run(self):
-        # Previously each /test run added a fresh batch of identically-
-        # named "TEST Team N" rows on top of whatever the last run left
-        # behind — old teams (with their old win/loss counts) piling up
-        # and cluttering /team-leaderboard instead of the round starting
-        # clean like the tournament bracket itself already did.
-        await self._command("test").callback(self._wired_ctx(), teams=4)
-        await self._command("test").callback(self._wired_ctx(), teams=6)
-
-        # Exactly the second run's 6 teams — none of the first run's 4
-        # left behind, and no name collisions between the two batches.
         persisted_teams = self.bot.helperObj.getTeamsForGuild(GUILD_ID)
-        self.assertEqual(len(persisted_teams), 6)
         names = [team.get_name() for _, team in persisted_teams]
         self.assertEqual(len(names), len(set(names)))
-
-    async def test_a_real_team_named_like_a_test_team_survives_a_rerun(self):
-        real_team = Team()
-        real_team.set_name("TEST Team Alpha's Real Squad")
-        self.bot.helperObj._saveNewTeam(GUILD_ID, real_team)
-
-        await self._command("test").callback(self._wired_ctx(), teams=2)
-
-        names = [team.get_name() for _, team in self.bot.helperObj.getTeamsForGuild(GUILD_ID)]
-        self.assertIn("TEST Team Alpha's Real Squad", names)
-
-    async def test_rerunning_restarts_match_numbering_at_1(self):
-        await self._command("test").callback(self._wired_ctx(), teams=4)
-        await self._command("test").callback(self._wired_ctx(), teams=4)
-
-        self.bot.cursor.execute(
-            "SELECT MIN(id) FROM tournament_matches WHERE guildId=?", (GUILD_ID,)
-        )
-        self.assertEqual(self.bot.cursor.fetchone()[0], 1)
-
-    async def test_defaults_to_after_winners_timing(self):
-        ctx = self._wired_ctx()
-        await self._command("test").callback(ctx, teams=4)
-
-        tournament = self.bot.helperObj.getTournament(GUILD_ID)
-        self.assertEqual(tournament.get_losers_bracket_timing(), "after_winners")
-        intro_message = ctx.response.send_message.call_args.args[0]
-        self.assertIn("losers bracket after winners finishes", intro_message)
-
-    async def test_interleaved_timing_option_plays_out_the_whole_tournament(self):
-        ctx = self._wired_ctx()
-        choice = app_commands.Choice(name="Interleaved — as soon as each round unlocks it", value="interleaved")
-        await self._command("test").callback(ctx, teams=4, losers_bracket_timing=choice)
-
-        tournament = self.bot.helperObj.getTournament(GUILD_ID)
-        self.assertEqual(tournament.get_losers_bracket_timing(), "interleaved")
-        intro_message = ctx.response.send_message.call_args.args[0]
-        self.assertIn("losers bracket interleaved with the winners bracket", intro_message)
-
-        # Still fully played out end to end — the coin-flip loop drives
-        # interleaved scheduling exactly the same way it drives the
-        # default timing.
-        self.bot.cursor.execute(
-            "SELECT COUNT(*) FROM tournament_matches WHERE guildId=? AND state != 'RESOLVED'", (GUILD_ID,)
-        )
-        self.assertEqual(self.bot.cursor.fetchone()[0], 0)
-        self.assertIsNotNone(self.bot.helperObj._tournamentChampionName(GUILD_ID, tournament))
 
 
 class SetTeamSizeCommandTests(BotModuleTestCase):
@@ -8753,6 +9020,135 @@ class ClearCommandTests(BotModuleTestCase):
         self.assertFalse(allowed)
         stranger.response.send_message.assert_awaited_once()
         self.assertTrue(stranger.response.send_message.call_args.kwargs.get("ephemeral"))
+
+    async def test_clear_achievements_resets_only_achievements_after_confirmation(self):
+        guild_id = 9038
+        await self._insert_guild_row(guild_id)
+        self.bot.helperObj.ensureEconomyRow(guild_id, 901, "Alice")
+        self.bot.helperObj.grantSpecialCardTitle(guild_id, 901, "Developer")
+        self.bot.helperObj._unlockAchievement(guild_id, 901, "first_blood")
+        self.bot.helperObj._unlockAchievement(guild_id, 901, "veteran")
+        ctx = self._ctx(guild_id=guild_id)
+
+        await self._command("clear").callback(ctx, clear_achievements=True)
+
+        # real per-player unlocks don't change until the reset is confirmed.
+        unlocked = self.bot.helperObj.getUnlockedCardTitles(guild_id, 901)
+        self.assertIn(helper_module.CARD_ACHIEVEMENT_TITLES["first_blood"], unlocked)
+
+        view = ctx.followup.send.call_args.kwargs["view"]
+        click = self._ctx(guild_id=guild_id)
+        await view.confirm.callback(click)
+
+        unlocked = self.bot.helperObj.getUnlockedCardTitles(guild_id, 901)
+        # achievements are gone...
+        self.assertNotIn(helper_module.CARD_ACHIEVEMENT_TITLES["first_blood"], unlocked)
+        self.assertNotIn(helper_module.CARD_ACHIEVEMENT_TITLES["veteran"], unlocked)
+        # ...but an unrelated special-grant title survives untouched.
+        self.assertIn("Developer", unlocked)
+        self.assertIn("Every earned achievement", click.response.edit_message.call_args.kwargs["content"])
+
+    async def test_clear_achievements_can_combine_with_clear_elo(self):
+        guild_id = 9039
+        await self._insert_guild_row(guild_id)
+        self.bot.helperObj.ensureEconomyRow(guild_id, 901, "Alice")
+        self.bot.cursor.execute(
+            "UPDATE economy SET elo=1500 WHERE guildId=? AND userId=?", (guild_id, 901)
+        )
+        self.bot.mainDB.commit()
+        self.bot.helperObj._unlockAchievement(guild_id, 901, "first_blood")
+        ctx = self._ctx(guild_id=guild_id)
+
+        await self._command("clear").callback(ctx, clear_elo=True, clear_achievements=True)
+        view = ctx.followup.send.call_args.kwargs["view"]
+        click = self._ctx(guild_id=guild_id)
+        await view.confirm.callback(click)
+
+        self.assertEqual(self.bot.helperObj.getEconomy(guild_id, 901, "elo"), helper_module.DEFAULT_ELO)
+        self.assertNotIn(
+            helper_module.CARD_ACHIEVEMENT_TITLES["first_blood"],
+            self.bot.helperObj.getUnlockedCardTitles(guild_id, 901)
+        )
+        content = click.response.edit_message.call_args.kwargs["content"]
+        self.assertIn("Elo has been reset", content)
+        self.assertIn("Every earned achievement", content)
+
+    async def test_clear_achievements_with_a_user_only_resets_that_players_achievements(self):
+        guild_id = 9040
+        await self._insert_guild_row(guild_id)
+        self.bot.helperObj.ensureEconomyRow(guild_id, 901, "Alice")
+        self.bot.helperObj.ensureEconomyRow(guild_id, 902, "Bob")
+        self.bot.helperObj._unlockAchievement(guild_id, 901, "first_blood")
+        self.bot.helperObj._unlockAchievement(guild_id, 902, "first_blood")
+        target = FakeMember("Alice", id=901)
+        ctx = self._ctx(guild_id=guild_id)
+
+        await self._command("clear").callback(ctx, clear_achievements=True, user=target)
+
+        # warning names the specific player, not "every player".
+        warning = ctx.followup.send.call_args.args[0]
+        self.assertIn(target.mention, warning)
+        self.assertNotIn("every player", warning)
+
+        view = ctx.followup.send.call_args.kwargs["view"]
+        click = self._ctx(guild_id=guild_id)
+        await view.confirm.callback(click)
+
+        self.assertNotIn(
+            helper_module.CARD_ACHIEVEMENT_TITLES["first_blood"],
+            self.bot.helperObj.getUnlockedCardTitles(guild_id, 901)
+        )
+        # Bob's own achievement survives untouched.
+        self.assertIn(
+            helper_module.CARD_ACHIEVEMENT_TITLES["first_blood"],
+            self.bot.helperObj.getUnlockedCardTitles(guild_id, 902)
+        )
+        self.assertIn(target.mention, click.response.edit_message.call_args.kwargs["content"])
+
+    async def test_user_without_clear_achievements_is_rejected(self):
+        guild_id = 9041
+        await self._insert_guild_row(guild_id)
+        target = FakeMember("Alice", id=901)
+        ctx = self._ctx(guild_id=guild_id)
+
+        await self._command("clear").callback(ctx, user=target)
+
+        ctx.response.send_message.assert_awaited_once()
+        self.assertIn("clear_achievements", ctx.response.send_message.call_args.args[0])
+        # Nothing else ran either — not even the non-destructive team wipe.
+        ctx.followup.send.assert_not_awaited()
+
+    async def test_clear_achievements_for_a_user_can_combine_with_whole_server_clear_elo(self):
+        guild_id = 9042
+        await self._insert_guild_row(guild_id)
+        self.bot.helperObj.ensureEconomyRow(guild_id, 901, "Alice")
+        self.bot.helperObj.ensureEconomyRow(guild_id, 902, "Bob")
+        self.bot.cursor.execute(
+            "UPDATE economy SET elo=1500 WHERE guildId=?", (guild_id,)
+        )
+        self.bot.mainDB.commit()
+        self.bot.helperObj._unlockAchievement(guild_id, 901, "first_blood")
+        self.bot.helperObj._unlockAchievement(guild_id, 902, "first_blood")
+        target = FakeMember("Alice", id=901)
+        ctx = self._ctx(guild_id=guild_id)
+
+        await self._command("clear").callback(ctx, clear_elo=True, clear_achievements=True, user=target)
+        view = ctx.followup.send.call_args.kwargs["view"]
+        click = self._ctx(guild_id=guild_id)
+        await view.confirm.callback(click)
+
+        # elo reset for EVERYONE...
+        self.assertEqual(self.bot.helperObj.getEconomy(guild_id, 901, "elo"), helper_module.DEFAULT_ELO)
+        self.assertEqual(self.bot.helperObj.getEconomy(guild_id, 902, "elo"), helper_module.DEFAULT_ELO)
+        # ...but achievements only reset for the targeted user.
+        self.assertNotIn(
+            helper_module.CARD_ACHIEVEMENT_TITLES["first_blood"],
+            self.bot.helperObj.getUnlockedCardTitles(guild_id, 901)
+        )
+        self.assertIn(
+            helper_module.CARD_ACHIEVEMENT_TITLES["first_blood"],
+            self.bot.helperObj.getUnlockedCardTitles(guild_id, 902)
+        )
 
     async def test_clear_economy_leaves_player_stats_alone_by_default(self):
         guild_id = 9033

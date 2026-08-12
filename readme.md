@@ -186,13 +186,44 @@ whole thing.
 
 `/clear` requires the **Manage Server** permission outright
 (`app_commands.checks.has_permissions`, same as `/report-correct-winner`).
-Within it, `clear_elo` and `clear_economy` additionally act on *every
-player* in the server, so neither runs the moment the command is invoked
-— `/clear` posts a `discord.ui.View` with "Confirm reset"/"Cancel" buttons
-(`ConfirmResetView`), and the reset only happens from inside that view's
-button callback. `interaction_check` on the view rejects anyone who isn't
-the member who ran `/clear`, and the view times out after 30 seconds with
-nothing changed if it's ignored. `/tournament-create` follows a narrower
+Within it, `clear_elo`, `clear_economy`, and `clear_achievements`
+additionally act on *every player* in the server, so none of them run the
+moment the command is invoked — `/clear` posts a `discord.ui.View` with
+"Confirm reset"/"Cancel" buttons (`ConfirmResetView`), and the reset only
+happens from inside that view's button callback. `interaction_check` on
+the view rejects anyone who isn't the member who ran `/clear`, and the
+view times out after 30 seconds with nothing changed if it's ignored. All
+three flags can be requested together — `clear_economy` takes priority
+over `clear_elo` when both are set (the whole-row wipe already resets elo
+too, so there'd be nothing left for `clear_elo` to separately do), while
+`clear_achievements` is independent of both and just adds its own extra
+sentence to the warning/confirmation text (`confirmDestructiveClearHelper`/
+`ConfirmResetView.confirm` build these as a list of per-flag sentences
+rather than one combined string, so any combination reads cleanly without
+custom-casing grammar for every case). `resetAchievementsHelper` only
+deletes `card_unlocks` rows whose `itemKey` is a `CARD_ACHIEVEMENT_TITLES`
+key — every other unlock (tier rewards, special grants, shop purchases)
+and the underlying `economy` stats those achievements were computed from
+(`game_wins`, `current_win_streak`, ...) are untouched, so a player who
+still qualifies will simply earn them back the next time something
+self-heals (`/achievements`, `/stats`, their next game) — this is a "clear
+the trophies off the shelf" reset, not a "make everyone start over" one.
+
+`clear_achievements` alone also takes an optional `user` — narrows it from
+"every player in the server" down to just that one member, still gated
+behind the exact same confirm/cancel view (a single-player reset is still
+irreversible, so it gets no less confirmation than a server-wide one).
+`clear_elo`/`clear_economy` always stay whole-server regardless of `user`
+— only `clear_achievements` reads it — so a combined run (say,
+`clear_elo` + `clear_achievements` + `user`) mixes an "every player" elo
+sentence with a "for @member" achievements sentence in the same warning/
+confirmation message rather than trying to force both onto one shared
+scope. `resetAchievementsHelper(guild_id, user_id=None)` carries that same
+split down to the SQL: `user_id=None` deletes every achievement row for
+the guild, a real one narrows the `DELETE` with an extra `AND userId=?`.
+Passing `user` without `clear_achievements` is rejected outright, before
+even the non-destructive team wipe runs — there's no other flag `user`
+could mean anything for. `/tournament-create` follows a narrower
 version of the same idea: creating a server's *first* tournament needs no
 permission at all, but overwriting an existing one checks
 `ctx.user.guild_permissions.manage_guild` before it will even show the
@@ -697,6 +728,116 @@ thing, before any rendering, and sends the actual result via
 `ctx.followup.send()` instead — the same `returnHelper` BUG FIX shape
 already documented (a `move_to()` API call per member instead of PIL
 rendering, but the same "defer before anything slow" fix).
+
+### Achievements
+
+`/achievements` and `CARD_ACHIEVEMENT_TITLES` add a fourth path into
+`card_unlocks` (title only), alongside a tier reward, a special grant, and
+a shop purchase — same `INSERT OR IGNORE`-shaped row (`_unlockAchievement`
+handles it, using `rowcount` to tell a genuine first unlock from a
+no-op repeat), so an achievement title shows up through
+`getUnlockedCardTitles`/`/card-set-title` automatically like any other
+(`CARD_TITLE_CATALOG` folds `CARD_ACHIEVEMENT_TITLES` in too). What's new
+is *why* one unlocks: conditions tied to actual gameplay rather than rank
+or gold spent — first win (First Blood); a single tournament win
+(Tournament Champion); being rostered on `CARD_ACHIEVEMENT_TEAM_PLAYER_
+TEAMS` (3)+ persistent teams at once (Team Player) or actually captaining
+one of them (The Captain, checked via `isTeamCaptain`); owning
+`CARD_ACHIEVEMENT_BIG_SPENDER_ITEMS` (3)+ items bought from `/shop` (Big
+Spender, counted by `_countShopPurchases` filtering `card_unlocks` down to
+shop-catalog keys only — a tier reward or special grant doesn't count as
+"purchased"); a single-match elo swing of `CARD_ACHIEVEMENT_UNDERDOG_
+ELO_GAIN` (20)+ (Giant Slayer); winning a single `CARD_ACHIEVEMENT_HIGH_
+ROLLER_GOLD` (5000)+ gold bet (High Roller) or one paying out
+`CARD_ACHIEVEMENT_JACKPOT_PAYOUT_MULTIPLIER` (3)x+ the wager regardless of
+its size (Jackpot); placing `CARD_ACHIEVEMENT_GAMBLER_BETS` (25)+ total
+bets, win or lose (Frequent Bettor); and racking up `CARD_ACHIEVEMENT_
+IRON_WILL_LOSSES` (20)+ game losses without quitting (Iron Will).
+
+Veteran and On Fire are each a *ladder* rather than a single condition —
+the same `game_wins`/`current_win_streak` column crossing further
+thresholds for further, genuinely distinct titles (not just "Veteran
+II"/"III"), so a card's epithet keeps meaning something as the number
+climbs instead of just growing a suffix: Veteran (`CARD_ACHIEVEMENT_
+VETERAN_WINS`, 10) → Elite (50) → Battle-Hardened (150) → Immortal (500)
+career wins; On Fire (`CARD_ACHIEVEMENT_ON_FIRE_STREAK`, 5) → Unstoppable
+(10) → Untouchable (20) win streak. Each ladder is walked as a
+`(threshold, achievement_key)` list (`CARD_ACHIEVEMENT_VETERAN_LADDER`/
+`CARD_ACHIEVEMENT_ON_FIRE_LADDER`) rather than one `if` per tier, so
+crossing a big enough number in one jump (see `/test-achievements` below)
+unlocks every rung up to it in the same pass, not just the one it
+technically landed past.
+
+Gold-based achievements are deliberately keyed off a single transaction —
+a single wager's own win, payout, or size — never a balance milestone:
+`/daily` hands out `DAILY_GOLD_AMOUNT` (1000) for free every single day, so
+"reach N gold saved" would just reward showing up regardless of size, not
+anything skill- or risk-related, and "place N total bets" (Frequent
+Bettor) is about activity, not any amount won or lost. High Roller,
+Jackpot, and Giant Slayer are all checked inline inside `applyGameDeltas`'s
+existing per-user loop for exactly that reason — each needs that specific
+event's own context (this game's wager, this game's payout, this game's
+elo swing) rather than a plain row snapshot. Every other achievement
+(first_blood, the two ladders, team_player, captain, big_spender, gambler,
+iron_will) lives in `_checkAchievements`, a single read against the
+caller's current `economy` row (plus `getTeamsForPlayer`/
+`_countShopPurchases` for the ones that need more than that) run from
+three places — `applyGameDeltas` itself (every non-reversal delta
+application), and a lazy self-heal call from `_buildStatsEmbed` (return
+value discarded, no announcement) mirroring the same pattern
+`ensureCardSettings`'s own self-heal already uses elsewhere in this file.
+`current_win_streak` (new `economy` column) is maintained right alongside
+those checks: incremented on a win, reset to 0 on a loss, and — like the
+existing elo-tier check already sitting in this same function — skipped
+entirely on `sign=-1` (a correction/reversal shouldn't move a streak
+counter any more than it should re-fire an unlock).
+
+Tournament Champion is the one condition with no natural home in
+`applyGameDeltas` (a tournament win isn't a per-game delta at all), so
+`_grantTournamentChampionAchievement` is a separate one-off hook called
+from both places a tournament can actually end: single elimination's
+`_startRound` and double elimination's `_resolveFinalsMatch` (Grand
+Finals) — it unlocks the achievement for every rostered player on the
+winning team in one pass.
+
+Unlike the other three unlock paths, earning an achievement also posts a
+notification — these are meant to feel like a moment worth noticing, not
+just another option quietly waiting in `/card-set-title`'s autocomplete.
+`applyGameDeltas` returns the list of newly-unlocked `(user_id,
+achievement_key)` pairs (a mechanical `rowcount`-based fact, not an I/O
+side effect, keeping the same "helper does data, caller does I/O" split
+this file uses elsewhere) for its callers to hand to `_announceAchievements`
+— `_settleMatchWagers`, `recordResult`, and both tournament-completion
+hooks all do; `reportCorrectWinnerHelper`/`_correctTournamentMatchHelper`'s
+own *reapply* half does too (their reversal half never unlocks anything,
+since `sign=-1` skips every check above), so a correction can still
+retroactively earn an achievement it should have. `/achievements` itself
+(`achievementsHelper`/`getAchievementCatalog`, no permission gate) lists
+every achievement with its description and a ✅/🔒 marker for the caller,
+self-healing via a `_checkAchievements` call first so an achievement earned
+before this feature existed (e.g. an existing win count already past
+`CARD_ACHIEVEMENT_VETERAN_WINS`) shows up correctly the first time it's
+checked rather than waiting on the caller's next game. The embed itself is
+grouped into fields the same way `/shop`'s own `shopHelper` groups by item
+type (`embed.add_field` per category, not one flat description) —
+Veteran and On Fire each get their own field, tiers listed lowest-to-
+highest, so a four-rung ladder reads as one clear progression instead of
+its rungs being scattered alphabetically-by-insertion-order alongside
+every unrelated achievement; everything else lands in a shared `__Other__`
+field.
+
+`/test-achievements` (TEMP debug command, excluded from `COMMAND_HELP` the
+same way the old tournament-simulating `/test` was) exists to exercise this
+whole pipeline without grinding real games: `runSimulatedAchievementsHelper`
+parks the caller's own `economy` row one short of the TOP of both ladders
+(plus `iron_will`/`gambler`'s own thresholds), grants a few real "TEST Team
+N" rosters (captained by the caller, covering `team_player`/`captain`
+together) and shop-catalog `card_unlocks` rows (`big_spender`), then fires
+one real `applyGameDeltas` win — the same single event that crosses every
+remaining threshold at once — through the actual `_checkAchievements`/
+`_announceAchievements` functions rather than writing `card_unlocks` rows
+directly, so a bug in the real pipeline shows up here instead of only in a
+live game.
 
 ### Team cards
 

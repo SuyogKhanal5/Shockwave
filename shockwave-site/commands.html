@@ -123,17 +123,21 @@
             <tr><td class="param-name">clear_tournament</td><td class="param-type">boolean, optional</td><td>Deletes this server's tournament entirely — bracket, registrations, and match history. Runs immediately, no confirmation. Registered/persistent teams (<code class="inline">/team-create</code>) aren't touched.</td></tr>
             <tr><td class="param-name">clear_elo</td><td class="param-type">boolean, optional</td><td>Resets every player's elo back to 1000 for this server — balance, wins/losses, and gold are untouched. Server-wide, so it asks for confirmation before it runs (see below).</td></tr>
             <tr><td class="param-name">clear_economy</td><td class="param-type">boolean, optional</td><td>Wipes every member's stats for this server entirely — balance, elo, game record, betting record, and gold wagered/won/lost. Also server-wide and confirmation-gated; if both this and <code class="inline">clear_elo</code> are set, this one wins since it already includes an elo reset.</td></tr>
+            <tr><td class="param-name">clear_achievements</td><td class="param-type">boolean, optional</td><td>Resets earned <a href="commands.html#achievements" style="color:var(--gold);">achievements</a> so they go back to locked — every player in the server by default, or just one player if <code class="inline">user</code> is also set. A player who still qualifies (e.g. their win count is still past the threshold) simply earns it back the next time something checks — this doesn't touch elo, balance, game record, or any other unlocks. Confirmation-gated; can be combined with <code class="inline">clear_elo</code> or <code class="inline">clear_economy</code> in the same run (those two always stay server-wide regardless of <code class="inline">user</code>).</td></tr>
+            <tr><td class="param-name">user</td><td class="param-type">member, optional</td><td>Only usable together with <code class="inline">clear_achievements</code> — narrows it to just this one player instead of everyone. Setting it without <code class="inline">clear_achievements</code> is rejected outright.</td></tr>
           </table>
           <div class="cmd-note">
             <strong>clear_tournament can't be undone.</strong> Unlike <code class="inline">clear_elo</code>/
-            <code class="inline">clear_economy</code> below, it doesn't ask for confirmation first — it deletes
-            the tournament the moment the command runs.
+            <code class="inline">clear_economy</code>/<code class="inline">clear_achievements</code> below, it
+            doesn't ask for confirmation first — it deletes the tournament the moment the command runs.
           </div>
           <div class="cmd-note">
-            <strong>clear_elo/clear_economy require confirmation.</strong> Since they reset data for
-            <em>every player</em> in the server, neither runs immediately — Shockwave posts a warning with
-            "Confirm reset" / "Cancel" buttons, and only the member who ran <code class="inline">/clear</code>
-            can click them. The prompt expires after 30 seconds with nothing changed if it's ignored.
+            <strong>clear_elo/clear_economy/clear_achievements require confirmation.</strong> Since they reset
+            data for at least one player (every player, unless <code class="inline">clear_achievements</code>
+            is narrowed with <code class="inline">user</code>), none of them run immediately — Shockwave posts
+            a warning with "Confirm reset" / "Cancel" buttons, and only the member who ran
+            <code class="inline">/clear</code> can click them. The prompt expires after 30 seconds with nothing
+            changed if it's ignored.
           </div>
         </div>
       </section>
@@ -634,6 +638,37 @@
             deducted either way. On success, equip it with <code class="inline">/card-set-title</code>,
             <code class="inline">/card-set-color-scheme</code>, or <code class="inline">/card-set-font</code>
             depending on what you bought.
+          </div>
+        </div>
+
+        <div class="cmd-card" id="achievements">
+          <div class="cmd-head">
+            <span class="cmd-name"><span class="slash">/</span>achievements</span>
+            <span class="cmd-badge">betting</span>
+          </div>
+          <p class="cmd-desc">Lists every trading-card achievement with its description and a ✅/🔒 marker for whether you've earned it — no permission gate, anyone can check their own progress.</p>
+          <div class="cmd-note">
+            <strong>17 achievements</strong>, each unlocking an exclusive title equipped the same way as any
+            other via <code class="inline">/card-set-title</code>: First Blood (win a game); a four-tier
+            Veteran ladder — Veteran (10 career wins) → Elite (50) → Battle-Hardened (150) → Immortal (500),
+            each a genuinely distinct title, not just "Veteran II"; a matching three-tier On Fire ladder —
+            On Fire (5-game win streak) → Unstoppable (10) → Untouchable (20); High Roller (win a single bet
+            of 5000+ gold) and Jackpot (win a single bet paying out 3x+ your wager, any size); Giant Slayer
+            (a big single-match elo swing); Team Player (rostered on 3+ persistent teams at once) and The
+            Captain (actually captain one); Big Spender (own 3+ items bought from
+            <code class="inline">/shop</code>) and Frequent Bettor (place 25+ total bets, win or lose); Iron
+            Will (rack up 20+ game losses without quitting); and Tournament Champion (win a tournament).
+            Gold-based achievements are keyed off a single transaction, never a balance milestone —
+            <code class="inline">/daily</code> hands out free gold every day, so "save up N gold" would just
+            reward showing up. Unlocking one posts a notification in the channel where it happened; running
+            <code class="inline">/achievements</code> also retroactively unlocks anything you already qualify
+            for but haven't been credited with yet.
+          </div>
+          <div class="cmd-note">
+            <strong>Veteran and On Fire get their own sections.</strong> Since each is a ladder of several
+            rising tiers, their achievements are grouped into their own field in the results instead of being
+            scattered alphabetically alongside every unrelated achievement — so the four-rung Veteran
+            progression (and the three-rung On Fire one) reads clearly as one climb from top to bottom.
           </div>
         </div>
 
