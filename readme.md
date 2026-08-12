@@ -440,10 +440,14 @@ thumbnail URL against `STATS_PLACEHOLDER_AVATAR_URL` to know which
 direction to flip), and 🎴 throws the whole embed away and replaces it with
 a rendered trading card (`_renderTradingCardImage`) — Shockwave's logo and
 the server's name across the top (the exact same `_drawBracketHeader` every
-other rendered image uses), the player's live avatar as a circular
-centerpiece, a customizable title underneath it, then elo/ranked record/
-ranked win rate as three stacked lines (each stat gets the card's full
-width rather than sharing a column, so a long value never clips), and
+other rendered image uses), the player's actual Discord username
+(`member.name`, not their nickname) small in the header's top-right —
+mirroring the logo/name block's own top-left placement — so the card
+identifies exactly who it belongs to even for a player known mainly by a
+nickname, the player's live avatar as a circular centerpiece, a
+customizable title underneath it, then elo/ranked record/ranked win rate
+as three stacked lines (each stat gets the card's full width rather than
+sharing a column, so a long value never clips), and
 finally — if they're rostered on any — their persistent teams, each with
 its own logo pasted alongside its name (same self-healing `_ensureLogo`
 every other team-logo display already relies on). The elo line's tier
@@ -565,6 +569,27 @@ overall mood still authentically reflects the tier that earned it —
 stored in `trading_cards` exactly as given, whether that came from a
 scheme selection or a hand-edited custom hex value.
 
+Two bugs turned up once schemes actually started getting equipped instead
+of just existing as unused plumbing. First, `CARD_MIN_ACCENT_CONTRAST`
+(90, at the time) forced almost any accent to lighten into the 70-80%
+HSL-lightness range against these cards' fairly bright vignette centers —
+a fully saturated red's own average-channel brightness tops out around 85
+even at 100% saturation, so a 90-point floor left it nowhere to go but
+pastel. Turned saturating `CARD_SHOP_COLOR_SCHEMES`' raw accents into a
+no-op regardless of how vivid they were on paper; dropped to 45, which
+still rescues a genuinely too-dark color (see `RenderTeamCardImageTests`'
+dark-navy regression test) without forcing an already-good one toward
+white. Second, and more fundamental: `setCardColorScheme` only ever wrote
+the *computed* hex pair, not which scheme it came from — so a later
+change to a scheme's own colors (exactly what fixing the first bug
+required) never reached a player who'd already equipped it, the identical
+staleness problem `trading_cards.customized` was built to solve for the
+default palette, just one layer down. `color_scheme_name` (nullable —
+`NULL` for a hand-edited custom hex value with nothing to track) plus
+`_resyncEquippedColorScheme` (called from `ensureCardSettings`, so every
+`/stats` view re-checks it) fixes that the same way: an equipped scheme
+now tracks its source of truth instead of freezing at equip time.
+
 `grantSpecialCardTitle` is the escape hatch for a title with no elo tier
 behind it at all (no matching color-scheme unlock alongside it, unlike a
 rank reward) — a per-(guild, player) `card_unlocks` row, same shape as a
@@ -574,6 +599,104 @@ user id `getUnlockedCardTitles` checks directly, so it's available in
 every guild the bot is in — including ones with no `card_unlocks` row for
 them at all, and future guilds the bot hasn't joined yet — rather than a
 grant that would need repeating by hand every time.
+
+### Shop
+
+`/shop`/`/shop-buy` add a third, gold-priced path into `card_unlocks`
+alongside reaching an elo tier and a special grant — `CARD_SHOP_TITLES`,
+`CARD_SHOP_COLOR_SCHEMES`, and `CARD_SHOP_FONT_STYLES` are the three
+catalogs (name → price, color schemes also carrying their own hex pair),
+kept name-distinct from each other and from every `ELO_TIERS`/
+`CARD_SPECIAL_TITLES` name so `shopBuyHelper`'s single `item` parameter can
+resolve a purchase to its category (`_resolveShopItem`) without needing to
+know it ahead of time. `CARD_SHOP_COLOR_SCHEMES` is the biggest of the
+three — a handful of standalone themes (Crimson, Emerald, Azure, Sunset,
+Fire) plus one per Runeterra region (Demacia, Noxus, Freljord, Ionia,
+Piltover, Zaun, Shurima, Shadow Isles, Bilgewater, Bandle City, Targon)
+— the same region set `assets/clash-logos/` already covers for
+`/team-set-logo`, so a team using one of those crests has a matching
+player-card scheme available too. A purchase is just `economy.balance -= price` plus
+the exact same `INSERT OR IGNORE INTO card_unlocks` a tier reward or a
+special grant writes — there's no separate "did I buy this" bookkeeping
+anywhere, so a purchased item shows up through `getUnlockedCardTitles`/
+`getUnlockedCardColorSchemes` automatically (`CARD_TITLE_CATALOG` folds
+`CARD_SHOP_TITLES` in, and `getUnlockedCardColorSchemes` branches on
+whether an `itemKey` is a tier name or a `CARD_SHOP_COLOR_SCHEMES` one).
+Font styles are shop-only — there's no elo-tier path to one at all — so
+`getUnlockedCardFontStyles` is a plain lookup against `CARD_SHOP_FONT_STYLES`
+with no combining catalog needed. `shopHelper` lists every item grouped by
+category with its price or an "✅ Owned" marker plus the caller's current
+balance; `shopBuyHelper` refuses an unknown item, one already owned, or
+one the caller can't afford, and on success tells them which
+`/card-set-*` command equips it.
+
+`/card-set-font` is `/card-set-title`/`/card-set-color-scheme`'s exact
+counterpart for `trading_cards.font_style` — the one difference from
+those two is `_cardFontPaths` itself, which resolves a `font_style` key
+to a dict: `name_font`/`name_variation` and `title_font`/`title_variation`
+for the card's two biggest typographic elements (the player's name, and
+the title/epithet under it), `body_font` plus a `label_weight`/
+`value_weight`/`team_weight` for everything smaller (stat labels, stat
+values, team/roster rows — the header's username shares `team_weight`,
+both being small secondary text).
+
+`CARD_SHOP_FONT_STYLES`' three styles each back `name_font`/`title_font`
+with a genuinely different bundled typeface — `"Bold"` is `RUSSO_ONE`,
+`"Elegant"` is `CINZEL`, `"Cyber"` is `ORBITRON`, all pulled from Google
+Fonts (SIL Open Font License) into `assets/fonts/`, alongside the
+already-bundled Chakra Petch/IBM Plex Sans pairing `"default"` still
+uses. `body_font` stays `IBM_PLEX_SANS` for every style — there's still
+only the one bundled body typeface — so a style's effect on the smaller
+text is a different named `_loadFont` weight/instance of that same file,
+same mechanism as `name_variation`/`title_variation` for Cinzel/Orbitron
+(both variable fonts, like `IBM_PLEX_SANS` itself); Russo One is a single
+static weight by design, so its own `_variation` fields are `None`.
+
+Two rounds of BUG FIXes got the font-style feature to this point. First:
+`_cardFontPaths` originally only varied `name_font`/`title_font`, and
+even then only via different weights of the *same* Chakra Petch file —
+every body element (stat labels, values, roster rows, the header's
+username) always loaded the exact same three hardcoded `_loadFont`
+weights regardless of `font_style` at all, so equipping "Bold"/"Elegant"
+only visibly touched two smallish pieces of text and read as "nothing
+changed" at a glance even where it did do something. `_renderTradingCardImage`
+now reads every one of `_cardFontPaths`' weight keys instead of hardcoding
+`"Bold"`/`"SemiBold"`/`"Medium"` inline, so a font style shifts the whole
+card's typography together. Second: even with that fixed, "Bold" and
+"Elegant" were still just different weights of the one Chakra Petch font
+— a real but subtle difference, easy to miss at a glance. Downloading
+Russo One/Cinzel/Orbitron (plus adding a third style, "Cyber") swapped in
+actually distinct typefaces instead.
+
+All three `/card-set-*` commands show the card, not just confirm the
+change in text — `_renderMemberTradingCardFile` (the caller's own current
+title/scheme/font/stats/teams/avatar, rendered once) and the thin
+`_cardPreviewEmbedAndFile` wrapper around it are shared by all three, each
+passing its own confirmation string as `content=` alongside the same
+`embed=`/`file=` pair. Simpler than `_swapStatsForTradingCard`'s own
+member-resolution: the caller of a `/card-set-*` command is always a
+real, currently-present member (they're the one running it), so there's
+no "member left the guild" fallback to handle the way that function needs.
+
+`/card-test` reuses the same rendering path to preview every color scheme
+at once — `CARD_DEFAULT_SCHEME_NAME` plus the whole `CARD_SHOP_COLOR_SCHEMES`
+catalog regardless of what the caller has actually unlocked, each render's
+own title field overridden to the scheme's name so the image is
+self-labeled without needing to cross-reference a filename. Stats/teams/
+avatar are fetched once and reused across every render — only the color
+scheme itself changes between them. Discord caps a single message at 10
+file attachments (`CARD_TEST_BATCH_SIZE`), so the first batch goes out as
+a follow-up and anything past that spills into further follow-up
+`ctx.channel.send()` calls in the same channel.
+
+BUG FIX: rendering every scheme (17 today) comfortably takes longer than
+Discord's 3-second interaction window — the real bot hit a 404 "Unknown
+interaction" trying to send the initial response only after finishing all
+that PIL work. `cardTestHelper` now calls `ctx.response.defer()` first
+thing, before any rendering, and sends the actual result via
+`ctx.followup.send()` instead — the same `returnHelper` BUG FIX shape
+already documented (a `move_to()` API call per member instead of PIL
+rendering, but the same "defer before anything slow" fix).
 
 ### Team cards
 

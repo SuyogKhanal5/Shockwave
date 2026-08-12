@@ -91,7 +91,8 @@ STATS_VIEWS_SCHEMA = (
 )
 TRADING_CARDS_SCHEMA = (
     "CREATE TABLE trading_cards(guildId, userId, title, accent_color, background_color, "
-    "text_color, font_style, customized INTEGER DEFAULT 0, PRIMARY KEY(guildId, userId))"
+    "text_color, font_style, customized INTEGER DEFAULT 0, color_scheme_name, "
+    "PRIMARY KEY(guildId, userId))"
 )
 TEAM_STATS_VIEWS_SCHEMA = (
     "CREATE TABLE team_stats_views(messageId INTEGER PRIMARY KEY, guildId, teamId, "
@@ -5518,6 +5519,31 @@ class HandleStatsReactionTests(HelperTestCase):
         self.assertTrue(new_embed.image.url.endswith(attached_files[0].filename))
         attached_files[0].close()
 
+    async def test_card_shows_the_real_discord_username_not_the_nickname(self):
+        alice = FakeMember("Alice", id=901)
+        alice.display_name = "Ally"  # a server nickname, distinct from her real username
+        self.guild.members = [alice]
+        ctx = FakeInteraction(self.guild, alice, channel=self.channel)
+        await self.helperObj.statsHelper(ctx)
+        msg = await ctx.original_response()
+
+        fetched_message = FakeMessage(id=msg.id)
+        fetched_message.embeds = [ctx.response.send_message.call_args.kwargs["embed"]]
+        self.channel.fetch_message = AsyncMock(return_value=fetched_message)
+
+        payload = FakePayload(
+            GUILD_ID, msg.id, self.channel.id, helper_module.STATS_CARD_EMOJI,
+            member=FakeMember("Bob", id=902), user_id=902
+        )
+        with patch.object(
+            self.helperObj, "_renderTradingCardImage", wraps=self.helperObj._renderTradingCardImage
+        ) as mock_render:
+            await self.helperObj.handleStatsReaction(payload)
+
+        self.assertEqual(mock_render.call_args.kwargs["username"], "Alice")
+        self.assertEqual(mock_render.call_args.args[1], "Ally")
+        fetched_message.edit.call_args.kwargs["attachments"][0].close()
+
         # cardShown is recorded, and both now-irrelevant /stats-embed
         # reactions are removed from the message outright, replaced by the
         # one that goes back.
@@ -5793,9 +5819,14 @@ class CardSetTitleHelperTests(HelperTestCase):
     async def test_equipping_the_default_title_always_succeeds(self):
         ctx = self._ctx()
         await self.helperObj.cardSetTitleHelper(ctx, helper_module.CARD_DEFAULT_TITLE)
-        ctx.response.send_message.assert_awaited_once_with(
-            f'Your trading card title is now **"{helper_module.CARD_DEFAULT_TITLE}"**.'
+        kwargs = ctx.response.send_message.call_args.kwargs
+        self.assertEqual(
+            kwargs["content"], f'Your trading card title is now **"{helper_module.CARD_DEFAULT_TITLE}"**.'
         )
+        # the card itself is shown too, not just confirmed in text
+        self.assertIsInstance(kwargs["file"], discord.File)
+        self.assertTrue(kwargs["embed"].image.url.startswith("attachment://"))
+        kwargs["file"].close()
         self.assertEqual(
             self.helperObj.getCardSettings(GUILD_ID, 901)["title"], helper_module.CARD_DEFAULT_TITLE
         )
@@ -5839,9 +5870,13 @@ class CardSetColorSchemeHelperTests(HelperTestCase):
     async def test_equipping_the_default_scheme_always_succeeds(self):
         ctx = self._ctx()
         await self.helperObj.cardSetColorSchemeHelper(ctx, helper_module.CARD_DEFAULT_SCHEME_NAME)
-        ctx.response.send_message.assert_awaited_once_with(
+        kwargs = ctx.response.send_message.call_args.kwargs
+        self.assertEqual(
+            kwargs["content"],
             f'Your trading card now uses the **{helper_module.CARD_DEFAULT_SCHEME_NAME}** color scheme.'
         )
+        self.assertIsInstance(kwargs["file"], discord.File)
+        kwargs["file"].close()
         settings = self.helperObj.getCardSettings(GUILD_ID, 901)
         self.assertEqual(settings["accent_color"], helper_module.CARD_DEFAULT_ACCENT_COLOR)
         self.assertEqual(settings["background_color"], helper_module.CARD_DEFAULT_BACKGROUND_COLOR)
@@ -5882,6 +5917,364 @@ class CardSetColorSchemeHelperTests(HelperTestCase):
         self.helperObj.ensureCardSettings(GUILD_ID, 901)
         settings = self.helperObj.getCardSettings(GUILD_ID, 901)
         self.assertNotEqual(settings["accent_color"], helper_module.CARD_DEFAULT_ACCENT_COLOR)
+
+    async def test_equipped_scheme_tracks_later_changes_to_its_catalog_entry(self):
+        # BUG FIX: a player who equipped, say, "Fire" used to have its
+        # colors frozen forever at whatever they were computed to be the
+        # moment /card-set-color-scheme ran — a later tweak to
+        # CARD_SHOP_COLOR_SCHEMES (or to CARD_MIN_ACCENT_CONTRAST itself)
+        # never reached them, the exact staleness bug the customized flag
+        # was built to avoid for the default palette. color_scheme_name
+        # plus _resyncEquippedColorScheme (run from ensureCardSettings, so
+        # the very next /stats call picks it up) fixes that.
+        self.cursor.execute(
+            "INSERT INTO card_unlocks(guildId, userId, itemType, itemKey) VALUES(?, ?, 'color_scheme', 'Fire')",
+            (GUILD_ID, 901)
+        )
+        self.db.commit()
+
+        with patch.dict(
+            helper_module.CARD_SHOP_COLOR_SCHEMES,
+            {"Fire": {"price": 4000, "accent_color": "#FF4500", "background_color": "#3D0C02"}},
+        ):
+            ctx = self._ctx()
+            await self.helperObj.cardSetColorSchemeHelper(ctx, "Fire")
+            original = self.helperObj.getCardSettings(GUILD_ID, 901)["accent_color"]
+
+        with patch.dict(
+            helper_module.CARD_SHOP_COLOR_SCHEMES,
+            {"Fire": {"price": 4000, "accent_color": "#00FF00", "background_color": "#3D0C02"}},
+        ):
+            self.helperObj.ensureCardSettings(GUILD_ID, 901)
+            updated = self.helperObj.getCardSettings(GUILD_ID, 901)["accent_color"]
+
+        self.assertNotEqual(updated, original)
+
+    async def test_a_hand_edited_custom_hex_is_never_resynced(self):
+        # No color_scheme_name recorded here (setCardColorScheme wasn't
+        # used) — nothing for _resyncEquippedColorScheme to track, so a
+        # directly-written custom value stays exactly as set.
+        self.helperObj.ensureCardSettings(GUILD_ID, 901)
+        self.cursor.execute(
+            "UPDATE trading_cards SET accent_color=?, customized=1 WHERE guildId=? AND userId=?",
+            ("#123456", GUILD_ID, 901)
+        )
+        self.db.commit()
+
+        self.helperObj.ensureCardSettings(GUILD_ID, 901)
+        settings = self.helperObj.getCardSettings(GUILD_ID, 901)
+        self.assertEqual(settings["accent_color"], "#123456")
+
+
+class CardSetFontHelperTests(HelperTestCase):
+    def _ctx(self, user_id=901, name="Alice"):
+        return FakeInteraction(self.guild, FakeMember(name, id=user_id))
+
+    async def test_equipping_the_default_font_always_succeeds(self):
+        ctx = self._ctx()
+        await self.helperObj.cardSetFontHelper(ctx, helper_module.CARD_DEFAULT_FONT_STYLE)
+        kwargs = ctx.response.send_message.call_args.kwargs
+        self.assertEqual(
+            kwargs["content"], f'Your trading card now uses the **{helper_module.CARD_DEFAULT_FONT_STYLE}** font.'
+        )
+        self.assertIsInstance(kwargs["file"], discord.File)
+        kwargs["file"].close()
+        settings = self.helperObj.getCardSettings(GUILD_ID, 901)
+        self.assertEqual(settings["font_style"], helper_module.CARD_DEFAULT_FONT_STYLE)
+
+    async def test_rejects_a_font_that_has_not_been_purchased(self):
+        ctx = self._ctx()
+        await self.helperObj.cardSetFontHelper(ctx, "Bold")
+        message = ctx.response.send_message.call_args.args[0]
+        self.assertIn("haven't unlocked", message)
+        settings = self.helperObj.getCardSettings(GUILD_ID, 901)
+        self.assertEqual(settings["font_style"], helper_module.CARD_DEFAULT_FONT_STYLE)
+
+    async def test_equips_a_purchased_font(self):
+        self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.helperObj.cursor.execute(
+            "UPDATE economy SET balance=10000 WHERE guildId=? AND userId=?", (GUILD_ID, 901)
+        )
+        self.helperObj.db.commit()
+        ctx = self._ctx()
+        await self.helperObj.shopBuyHelper(ctx, "Bold")
+
+        ctx = self._ctx()
+        await self.helperObj.cardSetFontHelper(ctx, "Bold")
+        settings = self.helperObj.getCardSettings(GUILD_ID, 901)
+        self.assertEqual(settings["font_style"], "Bold")
+
+
+class CardTestHelperTests(HelperTestCase):
+    def _ctx(self, user_id=901, name="Alice"):
+        return FakeInteraction(self.guild, FakeMember(name, id=user_id))
+
+    async def test_defers_before_rendering(self):
+        # BUG FIX: rendering every scheme (17 today) comfortably takes
+        # longer than Discord's 3-second interaction window — without
+        # deferring first, the real bot hit a 404 "Unknown interaction"
+        # trying to send the initial response after the fact.
+        ctx = self._ctx()
+        await self.helperObj.cardTestHelper(ctx)
+        ctx.response.defer.assert_awaited_once()
+        ctx.followup.send.assert_awaited_once()
+
+        kwargs = ctx.followup.send.call_args.kwargs
+        for f in kwargs["files"]:
+            f.close()
+        for call in ctx.channel.send.call_args_list:
+            for f in call.kwargs["files"]:
+                f.close()
+
+    async def test_previews_every_scheme_including_unowned_ones(self):
+        ctx = self._ctx()
+        await self.helperObj.cardTestHelper(ctx)
+
+        expected_count = 1 + len(helper_module.CARD_SHOP_COLOR_SCHEMES)  # +1 for Default
+        kwargs = ctx.followup.send.call_args.kwargs
+        self.assertIn(str(expected_count), kwargs["content"])
+
+        all_files = list(kwargs["files"])
+        for call in ctx.channel.send.call_args_list:
+            all_files.extend(call.kwargs["files"])
+        self.assertEqual(len(all_files), expected_count)
+
+        filenames = {f.filename for f in all_files}
+        self.assertIn("card_Default.png", filenames)
+        self.assertIn("card_Fire.png", filenames)
+        for f in all_files:
+            self.assertIsInstance(f, discord.File)
+            f.close()
+
+    async def test_batches_never_exceed_the_discord_attachment_limit(self):
+        ctx = self._ctx()
+        await self.helperObj.cardTestHelper(ctx)
+
+        kwargs = ctx.followup.send.call_args.kwargs
+        self.assertLessEqual(len(kwargs["files"]), helper_module.CARD_TEST_BATCH_SIZE)
+        for call in ctx.channel.send.call_args_list:
+            self.assertLessEqual(len(call.kwargs["files"]), helper_module.CARD_TEST_BATCH_SIZE)
+
+        for f in kwargs["files"]:
+            f.close()
+        for call in ctx.channel.send.call_args_list:
+            for f in call.kwargs["files"]:
+                f.close()
+
+    async def test_spills_into_follow_up_messages_past_the_first_batch(self):
+        # Regression coverage for the actual multi-message batching, not
+        # just the total count — only meaningfully exercised while the
+        # catalog (17 schemes today: Default + 16) is bigger than one
+        # batch (10).
+        ctx = self._ctx()
+        await self.helperObj.cardTestHelper(ctx)
+
+        total = 1 + len(helper_module.CARD_SHOP_COLOR_SCHEMES)
+        if total > helper_module.CARD_TEST_BATCH_SIZE:
+            self.assertGreaterEqual(ctx.channel.send.await_count, 1)
+
+        kwargs = ctx.followup.send.call_args.kwargs
+        for f in kwargs["files"]:
+            f.close()
+        for call in ctx.channel.send.call_args_list:
+            for f in call.kwargs["files"]:
+                f.close()
+
+
+class SetEloHelperTests(HelperTestCase):
+    def _ctx(self, user_id=901, name="Alice"):
+        return FakeInteraction(self.guild, FakeMember(name, id=user_id))
+
+    async def test_sets_elo_to_the_exact_value(self):
+        target = FakeMember("Target", id=555)
+        ctx = self._ctx()
+        await self.helperObj.setEloHelper(ctx, target, 1500)
+
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 555, "elo"), 1500)
+        message = ctx.response.send_message.call_args.args[0]
+        self.assertIn("1500", message)
+        self.assertIn(target.mention, message)
+
+    async def test_creates_an_economy_row_for_a_brand_new_target(self):
+        target = FakeMember("NeverPlayed", id=556)
+        ctx = self._ctx()
+        await self.helperObj.setEloHelper(ctx, target, 800)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 556, "elo"), 800)
+
+    async def test_overwrites_an_existing_elo_value(self):
+        target = FakeMember("Target", id=555)
+        self.helperObj.ensureEconomyRow(GUILD_ID, 555, "Target")
+        self.cursor.execute("UPDATE economy SET elo=1200 WHERE guildId=? AND userId=?", (GUILD_ID, 555))
+        self.db.commit()
+
+        ctx = self._ctx()
+        await self.helperObj.setEloHelper(ctx, target, 300)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 555, "elo"), 300)
+
+    async def test_setting_a_qualifying_elo_credits_the_tier_reward(self):
+        target = FakeMember("Target", id=555)
+        ctx = self._ctx()
+        await self.helperObj.setEloHelper(ctx, target, helper_module.ELO_TIER_THRESHOLDS["Diamond"])
+
+        self.assertIn(
+            helper_module.CARD_TIER_REWARD_TITLES["Diamond"], self.helperObj.getUnlockedCardTitles(GUILD_ID, 555)
+        )
+
+
+class ClearCardUnlocksHelperTests(HelperTestCase):
+    def _ctx(self, user_id=901, name="Alice"):
+        return FakeInteraction(self.guild, FakeMember(name, id=user_id))
+
+    async def test_removes_every_unlock_for_the_target(self):
+        target_id = 555
+        self.helperObj._checkTierRewardUnlocks(GUILD_ID, target_id, helper_module.ELO_TIER_THRESHOLDS["Diamond"])
+        self.helperObj.grantSpecialCardTitle(GUILD_ID, target_id, "Developer")
+        self.assertTrue(self.helperObj.getUnlockedCardTitles(GUILD_ID, target_id))
+
+        ctx = self._ctx()
+        await self.helperObj.clearCardUnlocksHelper(ctx, FakeMember("Target", id=target_id))
+
+        self.assertEqual(self.helperObj.getUnlockedCardTitles(GUILD_ID, target_id), [])
+        self.assertEqual(self.helperObj.getUnlockedCardColorSchemes(GUILD_ID, target_id), [])
+        self.assertEqual(self.helperObj.getUnlockedCardFontStyles(GUILD_ID, target_id), [])
+
+    async def test_resets_the_equipped_card_to_defaults(self):
+        target_id = 555
+        self.helperObj._checkTierRewardUnlocks(GUILD_ID, target_id, helper_module.ELO_TIER_THRESHOLDS["Diamond"])
+        self.helperObj.setCardTitle(GUILD_ID, target_id, helper_module.CARD_TIER_REWARD_TITLES["Diamond"])
+        self.helperObj.setCardColorScheme(
+            GUILD_ID, target_id, "#123456", "#654321", scheme_name="Diamond"
+        )
+
+        ctx = self._ctx()
+        await self.helperObj.clearCardUnlocksHelper(ctx, FakeMember("Target", id=target_id))
+
+        settings = self.helperObj.getCardSettings(GUILD_ID, target_id)
+        self.assertEqual(settings["title"], helper_module.CARD_DEFAULT_TITLE)
+        self.assertEqual(settings["accent_color"], helper_module.CARD_DEFAULT_ACCENT_COLOR)
+        self.assertEqual(settings["background_color"], helper_module.CARD_DEFAULT_BACKGROUND_COLOR)
+
+        # customized=0 again — a later /stats call's own default-resync
+        # logic won't be refused by a stale customized flag.
+        self.cursor.execute(
+            "SELECT customized, color_scheme_name FROM trading_cards WHERE guildId=? AND userId=?",
+            (GUILD_ID, target_id)
+        )
+        self.assertEqual(self.cursor.fetchone(), (0, None))
+
+    async def test_does_not_affect_a_different_players_unlocks(self):
+        self.helperObj._checkTierRewardUnlocks(GUILD_ID, 555, helper_module.ELO_TIER_THRESHOLDS["Diamond"])
+        self.helperObj._checkTierRewardUnlocks(GUILD_ID, 556, helper_module.ELO_TIER_THRESHOLDS["Diamond"])
+
+        ctx = self._ctx()
+        await self.helperObj.clearCardUnlocksHelper(ctx, FakeMember("Target", id=555))
+
+        self.assertEqual(self.helperObj.getUnlockedCardTitles(GUILD_ID, 555), [])
+        self.assertTrue(self.helperObj.getUnlockedCardTitles(GUILD_ID, 556))
+
+
+class ShopTests(HelperTestCase):
+    def _ctx(self, user_id=901, name="Alice", balance=10000):
+        self.helperObj.ensureEconomyRow(GUILD_ID, user_id, name)
+        self.cursor.execute(
+            "UPDATE economy SET balance=? WHERE guildId=? AND userId=?", (balance, GUILD_ID, user_id)
+        )
+        self.db.commit()
+        return FakeInteraction(self.guild, FakeMember(name, id=user_id))
+
+    async def test_shop_lists_every_catalog_item_with_price(self):
+        ctx = self._ctx()
+        await self.helperObj.shopHelper(ctx)
+        embed = ctx.response.send_message.call_args.kwargs["embed"]
+        values = {f.name: f.value for f in embed.fields}
+        # category headings are underlined (Discord markdown) to read
+        # distinctly from each item line's own bolded name.
+        self.assertIn("__Titles__", values)
+        self.assertIn("Legend", values["__Titles__"])
+        self.assertIn("Crimson", values["__Color Schemes__"])
+        self.assertIn("Bold", values["__Fonts__"])
+        self.assertIn(f"{helper_module.CARD_SHOP_TITLES['Legend']} gold", values["__Titles__"])
+
+    async def test_shop_marks_already_owned_items(self):
+        ctx = self._ctx()
+        await self.helperObj.shopBuyHelper(ctx, "Legend")
+
+        ctx = self._ctx()
+        await self.helperObj.shopHelper(ctx)
+        embed = ctx.response.send_message.call_args.kwargs["embed"]
+        values = {f.name: f.value for f in embed.fields}
+        self.assertIn("Legend", values["__Titles__"])
+        self.assertIn("✅ Owned", values["__Titles__"])
+
+    async def test_purchasing_a_title_deducts_gold_and_unlocks_it(self):
+        ctx = self._ctx(balance=10000)
+        await self.helperObj.shopBuyHelper(ctx, "Legend")
+
+        self.assertEqual(
+            self.helperObj.getEconomy(GUILD_ID, 901, "balance"), 10000 - helper_module.CARD_SHOP_TITLES["Legend"]
+        )
+        self.assertIn("Legend", self.helperObj.getUnlockedCardTitles(GUILD_ID, 901))
+
+    async def test_purchasing_a_color_scheme_unlocks_it(self):
+        ctx = self._ctx(balance=10000)
+        await self.helperObj.shopBuyHelper(ctx, "Crimson")
+        names = [s["name"] for s in self.helperObj.getUnlockedCardColorSchemes(GUILD_ID, 901)]
+        self.assertIn("Crimson", names)
+
+    async def test_purchasing_a_region_themed_color_scheme_unlocks_it(self):
+        ctx = self._ctx(balance=10000)
+        await self.helperObj.shopBuyHelper(ctx, "Noxus")
+        names = [s["name"] for s in self.helperObj.getUnlockedCardColorSchemes(GUILD_ID, 901)]
+        self.assertIn("Noxus", names)
+
+    async def test_every_shop_color_scheme_is_a_real_readable_hex_pair(self):
+        # Regression coverage for the whole catalog, not just one entry —
+        # every CARD_SHOP_COLOR_SCHEMES name (Fire/Ice/each region
+        # included) should unlock into a scheme with valid "#RRGGBB" hex
+        # for both colors, run through the same _ensureReadableAccent
+        # safety net a tier reward's own scheme gets.
+        for name in helper_module.CARD_SHOP_COLOR_SCHEMES:
+            ctx = self._ctx(user_id=901, balance=10000)
+            await self.helperObj.shopBuyHelper(ctx, name)
+
+        schemes = {s["name"]: s for s in self.helperObj.getUnlockedCardColorSchemes(GUILD_ID, 901)}
+        for name in helper_module.CARD_SHOP_COLOR_SCHEMES:
+            self.assertIn(name, schemes)
+            accent = schemes[name]["accent_color"]
+            background = schemes[name]["background_color"]
+            self.assertRegex(accent, r"^#[0-9A-F]{6}$")
+            self.assertRegex(background, r"^#[0-9A-F]{6}$")
+
+    async def test_purchasing_a_font_style_unlocks_it(self):
+        ctx = self._ctx(balance=10000)
+        await self.helperObj.shopBuyHelper(ctx, "Elegant")
+        self.assertIn("Elegant", self.helperObj.getUnlockedCardFontStyles(GUILD_ID, 901))
+
+    async def test_rejects_purchase_with_insufficient_gold(self):
+        ctx = self._ctx(balance=10)
+        await self.helperObj.shopBuyHelper(ctx, "Legend")
+        message = ctx.response.send_message.call_args.args[0]
+        self.assertIn("only have", message)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "balance"), 10)
+        self.assertNotIn("Legend", self.helperObj.getUnlockedCardTitles(GUILD_ID, 901))
+
+    async def test_rejects_purchasing_an_item_already_owned(self):
+        ctx = self._ctx(balance=10000)
+        await self.helperObj.shopBuyHelper(ctx, "Legend")
+        balance_after_first_purchase = self.helperObj.getEconomy(GUILD_ID, 901, "balance")
+
+        ctx = self._ctx(balance=balance_after_first_purchase)
+        await self.helperObj.shopBuyHelper(ctx, "Legend")
+        message = ctx.response.send_message.call_args.args[0]
+        self.assertIn("already own", message)
+        # not charged a second time
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "balance"), balance_after_first_purchase)
+
+    async def test_rejects_an_item_not_in_the_shop(self):
+        ctx = self._ctx()
+        await self.helperObj.shopBuyHelper(ctx, "Nonexistent Item")
+        message = ctx.response.send_message.call_args.args[0]
+        self.assertIn("isn't in the shop", message)
 
 
 class TradingCardSettingsTests(HelperTestCase):
@@ -6041,6 +6434,93 @@ class RenderTradingCardImageTests(HelperTestCase):
         mid_y = image.height // 2
         border_pixel = image.convert("RGB").getpixel((helper_module.BRACKET_LINE_WIDTH, mid_y))
         self.assertEqual(border_pixel, (0, 255, 0))
+
+    def test_username_renders_in_the_top_right_when_provided(self):
+        settings = {
+            "title": "X", "accent_color": "#00FF00", "background_color": "#000000",
+            "text_color": "#FFFFFF", "font_style": "default",
+        }
+        avatar = Image.new("RGBA", (64, 64), (255, 0, 0, 255))
+        # the header's top-right quadrant — where a username is drawn,
+        # right-aligned, mirroring the logo/guild-name block's own
+        # top-left placement — should differ once one is actually given.
+        box = (
+            helper_module.CARD_WIDTH // 2, 0,
+            helper_module.CARD_WIDTH, helper_module.BRACKET_MARGIN + helper_module.BRACKET_LOGO_HEIGHT
+        )
+
+        without_username = self.helperObj._renderTradingCardImage(
+            "Guild", "Alice", avatar, settings, self._stats(), []
+        ).convert("RGB").crop(box)
+        with_username = self.helperObj._renderTradingCardImage(
+            "Guild", "Alice", avatar, settings, self._stats(), [], username="alice_real"
+        ).convert("RGB").crop(box)
+
+        self.assertNotEqual(list(without_username.getdata()), list(with_username.getdata()))
+
+    def test_omitting_username_matches_the_pre_existing_render(self):
+        # username defaults to None — every caller written before this
+        # parameter existed passes exactly the same positional args it
+        # always did, and should get exactly the same image back, not a
+        # blank "@" or other placeholder in the corner.
+        settings = {
+            "title": "X", "accent_color": "#EDC643", "background_color": "#150B22",
+            "text_color": "#F3EFFA", "font_style": "default",
+        }
+        avatar = Image.new("RGBA", (64, 64), (255, 0, 0, 255))
+        without_arg = self.helperObj._renderTradingCardImage("Guild", "Alice", avatar, settings, self._stats(), [])
+        with_none = self.helperObj._renderTradingCardImage(
+            "Guild", "Alice", avatar, settings, self._stats(), [], username=None
+        )
+        self.assertEqual(list(without_arg.getdata()), list(with_none.getdata()))
+
+    def test_font_style_changes_body_text_not_just_the_name_and_title(self):
+        # BUG FIX: font_style used to only vary name_font/title_font —
+        # every body element (stat labels, values, roster rows, username)
+        # always loaded the exact same hardcoded weight regardless of
+        # font_style, so equipping "Bold"/"Elegant" only visibly touched
+        # two smallish pieces of text and read as "nothing changed" at a
+        # glance. A stat label (drawn with label_font, one of the
+        # previously-frozen elements) is the cheapest one to compare
+        # pixel-for-pixel between styles.
+        team = self._team("Red Dragons")  # gives the render some roster-row pixels too
+        avatar = Image.new("RGBA", (64, 64), (255, 0, 0, 255))
+        rendered = {}
+        for font_style in (helper_module.CARD_DEFAULT_FONT_STYLE, "Bold", "Elegant"):
+            settings = {
+                "title": "X", "accent_color": "#EDC643", "background_color": "#150B22",
+                "text_color": "#F3EFFA", "font_style": font_style,
+            }
+            rendered[font_style] = self.helperObj._renderTradingCardImage(
+                "Guild", "Alice", avatar, settings, self._stats(), [team]
+            ).convert("RGB")
+
+        default_data = list(rendered[helper_module.CARD_DEFAULT_FONT_STYLE].getdata())
+        for font_style in ("Bold", "Elegant"):
+            self.assertNotEqual(list(rendered[font_style].getdata()), default_data)
+
+    def test_card_font_paths_covers_every_font_style_key_the_shop_sells(self):
+        for font_style in (helper_module.CARD_DEFAULT_FONT_STYLE, *helper_module.CARD_SHOP_FONT_STYLES):
+            fonts = self.helperObj._cardFontPaths(font_style)
+            for key in (
+                "name_font", "name_variation", "title_font", "title_variation", "body_font",
+                "label_weight", "value_weight", "team_weight",
+            ):
+                self.assertIn(key, fonts)
+
+    def test_shop_font_styles_use_a_genuinely_different_typeface_than_default(self):
+        # BUG FIX regression: these used to just be different weights of
+        # the same Chakra Petch file as "default" — easy to miss at a
+        # glance. Each shop style's name_font should now be a completely
+        # different bundled font file.
+        default_name_font = self.helperObj._cardFontPaths(helper_module.CARD_DEFAULT_FONT_STYLE)["name_font"]
+        for font_style in helper_module.CARD_SHOP_FONT_STYLES:
+            self.assertNotEqual(self.helperObj._cardFontPaths(font_style)["name_font"], default_name_font)
+
+    def test_unrecognized_font_style_falls_back_to_default(self):
+        self.assertEqual(
+            self.helperObj._cardFontPaths("Nonexistent"), self.helperObj._cardFontPaths(helper_module.CARD_DEFAULT_FONT_STYLE)
+        )
 
 
 class EloRankLabelTests(HelperTestCase):
@@ -7345,14 +7825,14 @@ class CommandRegistrationTests(BotModuleTestCase):
         names = {c.name for c in self.bot.tree.get_commands()}
         expected = {
             "team-set-size", "team-set-channels", "start", "wager", "wager-against", "daily",
-            "stats", "card-set-title", "card-set-color-scheme", "leaderboard", "help", "make-teams",
-            "return", "report-correct-winner",
+            "stats", "card-set-title", "card-set-color-scheme", "card-set-font", "card-test", "shop", "shop-buy",
+            "leaderboard", "help", "make-teams", "return", "report-correct-winner",
             "captains", "choose", "clear", "notify",
             "roll", "randomize-roles", "tournament-create", "team-create", "team-set-voice-channel",
             "team-invite", "team-set-logo", "team-stats", "team-list", "my-teams",
             "tournament-register", "tournament-create-bracket",
             "tournament-print-bracket", "tournament-start", "wager-set-channel", "team-use",
-            "set-betting-timer",
+            "set-betting-timer", "set-elo", "card-clear-unlocks",
             "test",  # TEMP: bracket-renderer preview command, see bot.py
         }
         self.assertEqual(names, expected)
@@ -7465,6 +7945,71 @@ class CardColorSchemeAutocompleteTests(BotModuleTestCase):
                    for i in range(30)]
         with patch.object(self.bot.helperObj, "getAvailableCardColorSchemes", return_value=schemes):
             choices = await self.bot.cardColorSchemeAutocomplete(ctx, "")
+        self.assertLessEqual(len(choices), 25)
+
+
+class CardFontAutocompleteTests(BotModuleTestCase):
+    async def test_filters_by_current_input_case_insensitively(self):
+        ctx = self._ctx()
+        with patch.object(
+            self.bot.helperObj, "getAvailableCardFontStyles", return_value=["default", "Bold", "Elegant"]
+        ):
+            choices = await self.bot.cardFontAutocomplete(ctx, "BOL")
+        self.assertEqual([c.value for c in choices], ["Bold"])
+
+    async def test_empty_input_returns_every_available_font(self):
+        ctx = self._ctx()
+        with patch.object(
+            self.bot.helperObj, "getAvailableCardFontStyles", return_value=["default", "Bold"]
+        ):
+            choices = await self.bot.cardFontAutocomplete(ctx, "")
+        self.assertEqual(sorted(c.value for c in choices), ["Bold", "default"])
+
+    async def test_caps_results_at_25(self):
+        ctx = self._ctx()
+        with patch.object(
+            self.bot.helperObj, "getAvailableCardFontStyles", return_value=[f"Font{i}" for i in range(30)]
+        ):
+            choices = await self.bot.cardFontAutocomplete(ctx, "")
+        self.assertLessEqual(len(choices), 25)
+
+
+class ShopBuyAutocompleteTests(BotModuleTestCase):
+    async def test_only_offers_unowned_items(self):
+        ctx = self._ctx()
+        catalog = [
+            {"type": "title", "name": "Legend", "price": 500, "owned": False},
+            {"type": "title", "name": "Ace", "price": 300, "owned": True},
+        ]
+        with patch.object(self.bot.helperObj, "getShopCatalog", return_value=catalog):
+            choices = await self.bot.shopBuyAutocomplete(ctx, "")
+        self.assertEqual([c.value for c in choices], ["Legend"])
+
+    async def test_choice_label_shows_the_price(self):
+        ctx = self._ctx()
+        catalog = [{"type": "title", "name": "Legend", "price": 500, "owned": False}]
+        with patch.object(self.bot.helperObj, "getShopCatalog", return_value=catalog):
+            choices = await self.bot.shopBuyAutocomplete(ctx, "")
+        self.assertEqual(choices[0].name, "Legend (500 gold)")
+        self.assertEqual(choices[0].value, "Legend")
+
+    async def test_filters_by_current_input_case_insensitively(self):
+        ctx = self._ctx()
+        catalog = [
+            {"type": "title", "name": "Legend", "price": 500, "owned": False},
+            {"type": "color_scheme", "name": "Crimson", "price": 400, "owned": False},
+        ]
+        with patch.object(self.bot.helperObj, "getShopCatalog", return_value=catalog):
+            choices = await self.bot.shopBuyAutocomplete(ctx, "leg")
+        self.assertEqual([c.value for c in choices], ["Legend"])
+
+    async def test_caps_results_at_25(self):
+        ctx = self._ctx()
+        catalog = [
+            {"type": "title", "name": f"Item{i}", "price": 100, "owned": False} for i in range(30)
+        ]
+        with patch.object(self.bot.helperObj, "getShopCatalog", return_value=catalog):
+            choices = await self.bot.shopBuyAutocomplete(ctx, "")
         self.assertLessEqual(len(choices), 25)
 
 
@@ -8262,6 +8807,88 @@ class SetBettingTimerCommandTests(BotModuleTestCase):
         with patch.object(self.bot.helperObj, "setBettingTimerHelper", mock):
             await self._command("set-betting-timer").callback(ctx, seconds=30)
         mock.assert_awaited_once_with(ctx, 30)
+
+
+class SetEloCommandTests(BotModuleTestCase):
+    def test_requires_manage_guild_permission(self):
+        cmd = self._command("set-elo")
+        denied = SimpleNamespace(permissions=discord.Permissions.none())
+
+        with self.assertRaises(app_commands.MissingPermissions):
+            for check in cmd.checks:
+                check(denied)
+
+    def test_manage_guild_permission_is_sufficient(self):
+        cmd = self._command("set-elo")
+        allowed = SimpleNamespace(permissions=discord.Permissions(manage_guild=True))
+
+        for check in cmd.checks:
+            self.assertTrue(check(allowed))
+
+    async def test_error_handler_gives_a_friendly_denial_message(self):
+        cmd = self._command("set-elo")
+        ctx = self._ctx()
+
+        await cmd.on_error(ctx, app_commands.MissingPermissions(["manage_guild"]))
+
+        ctx.response.send_message.assert_awaited_once()
+        self.assertIn("Manage Server", ctx.response.send_message.call_args.args[0])
+
+    async def test_error_handler_reraises_unrelated_errors(self):
+        cmd = self._command("set-elo")
+        ctx = self._ctx()
+
+        with self.assertRaises(ValueError):
+            await cmd.on_error(ctx, ValueError("boom"))
+
+    async def test_delegates_to_helper(self):
+        ctx = self._ctx()
+        member = FakeMember("Target", id=555)
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "setEloHelper", mock):
+            await self._command("set-elo").callback(ctx, member=member, elo=1500)
+        mock.assert_awaited_once_with(ctx, member, 1500)
+
+
+class CardClearUnlocksCommandTests(BotModuleTestCase):
+    def test_requires_manage_guild_permission(self):
+        cmd = self._command("card-clear-unlocks")
+        denied = SimpleNamespace(permissions=discord.Permissions.none())
+
+        with self.assertRaises(app_commands.MissingPermissions):
+            for check in cmd.checks:
+                check(denied)
+
+    def test_manage_guild_permission_is_sufficient(self):
+        cmd = self._command("card-clear-unlocks")
+        allowed = SimpleNamespace(permissions=discord.Permissions(manage_guild=True))
+
+        for check in cmd.checks:
+            self.assertTrue(check(allowed))
+
+    async def test_error_handler_gives_a_friendly_denial_message(self):
+        cmd = self._command("card-clear-unlocks")
+        ctx = self._ctx()
+
+        await cmd.on_error(ctx, app_commands.MissingPermissions(["manage_guild"]))
+
+        ctx.response.send_message.assert_awaited_once()
+        self.assertIn("Manage Server", ctx.response.send_message.call_args.args[0])
+
+    async def test_error_handler_reraises_unrelated_errors(self):
+        cmd = self._command("card-clear-unlocks")
+        ctx = self._ctx()
+
+        with self.assertRaises(ValueError):
+            await cmd.on_error(ctx, ValueError("boom"))
+
+    async def test_delegates_to_helper(self):
+        ctx = self._ctx()
+        member = FakeMember("Target", id=555)
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "clearCardUnlocksHelper", mock):
+            await self._command("card-clear-unlocks").callback(ctx, member=member)
+        mock.assert_awaited_once_with(ctx, member)
 
 
 class NotifyCommandTests(BotModuleTestCase):

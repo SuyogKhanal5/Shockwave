@@ -71,6 +71,14 @@ CHAKRA_PETCH_REGULAR = os.path.join(FONTS_DIR, "ChakraPetch-Regular.ttf")
 CHAKRA_PETCH_SEMIBOLD = os.path.join(FONTS_DIR, "ChakraPetch-SemiBold.ttf")
 CHAKRA_PETCH_BOLD = os.path.join(FONTS_DIR, "ChakraPetch-Bold.ttf")
 IBM_PLEX_SANS = os.path.join(FONTS_DIR, "IBMPlexSans.ttf")  # variable weight — see _loadFont
+# CARD_SHOP_FONT_STYLES' own typefaces — genuinely different fonts (not
+# just different weights of Chakra Petch) from Google Fonts, all SIL Open
+# Font License. Russo One is a single static weight by design (no
+# variation axis); Cinzel and Orbitron are variable fonts like IBM_PLEX_
+# SANS itself — see _loadFont's own variation-name mechanism.
+RUSSO_ONE = os.path.join(FONTS_DIR, "RussoOne-Regular.ttf")
+CINZEL = os.path.join(FONTS_DIR, "Cinzel-Variable.ttf")
+ORBITRON = os.path.join(FONTS_DIR, "Orbitron-Variable.ttf")
 
 # Colors lifted straight from shockwave-site/assets/styles.css's :root
 # palette, so the bracket image reads as part of the same brand instead of
@@ -236,6 +244,10 @@ CARD_DEFAULT_FONT_STYLE = "default"        # Chakra Petch + IBM Plex Sans — se
 # offered (see getAvailableCardColorSchemes) the same way CARD_DEFAULT_
 # TITLE always is for /card-set-title, since it needs no unlocking either.
 CARD_DEFAULT_SCHEME_NAME = "Default"
+# Discord caps a single message at 10 file attachments — /card-test (see
+# cardTestHelper) batches its per-scheme renders to this size, spreading
+# anything past the first batch across follow-up messages.
+CARD_TEST_BATCH_SIZE = 10
 
 # /team-stats: react to swap the embed for a team card (see
 # _renderTeamCardImage), the team's own counterpart to /stats' trading
@@ -276,10 +288,20 @@ TEAM_CARD_FALLBACK_ACCENT_COLOR = (237, 198, 67)
 # brightness to the vignette's own lightened center — legible in the dark
 # corners, nearly invisible in the middle of the card. Reused by
 # getUnlockedCardColorSchemes for the same reason: those schemes' accents
-# are ELO_TIER_BADGE_COLORS entries, chosen for how they read as a small
-# emoji-stand-in badge, not vetted against the darkened-background card
-# they'd be driving once equipped as a full color scheme.
-CARD_MIN_ACCENT_CONTRAST = 90
+# aren't vetted against the darkened-background card they'd be driving
+# once equipped as a full color scheme.
+#
+# BUG FIX: this used to be 90, which (against these cards' fairly bright
+# vignette centers, ~80-120 brightness already) forced almost any color to
+# get lightened into the 70-80% HSL-lightness range to clear the gap —
+# fully saturated reds/pinks especially, since a pure red's own average-
+# channel brightness tops out around 85 even at 100% saturation. The
+# result read as washed-out pastel regardless of how saturated
+# CARD_SHOP_COLOR_SCHEMES' own raw accents were, silently undoing any
+# saturation tuning there. 45 still rescues a genuinely too-dark color
+# (see RenderTeamCardImageTests' own dark-navy regression test) without
+# forcing an already-vivid one toward white.
+CARD_MIN_ACCENT_CONTRAST = 45
 
 # League-style rank tiers for /stats. Each tier spans 250 elo, with
 # DEFAULT_ELO (1000) landing every new player in the middle at Platinum —
@@ -346,11 +368,84 @@ CARD_TIER_REWARD_TITLES = {
 CARD_SPECIAL_TITLES = {
     "Developer": "Developer",
 }
-# Every card_unlocks itemKey that resolves to a real title, tier-earned or
-# specially-granted alike — the one place getUnlockedCardTitles and
-# /card-set-title's own validation both read from, so the two catalogs
-# above only ever need combining in one place.
-CARD_TITLE_CATALOG = {**CARD_TIER_REWARD_TITLES, **CARD_SPECIAL_TITLES}
+# /shop: trading-card cosmetics purchasable with gold (economy.balance)
+# rather than earned by rank — same card_unlocks table, same itemType/
+# itemKey shape as a tier reward or a special grant, just a different
+# unlock path (see shopBuyHelper). Names are kept distinct across all
+# three catalogs below (and distinct from every ELO_TIERS/CARD_SPECIAL_
+# TITLES name too) so /shop-buy's own `item` parameter can look one up by
+# name alone without needing to know its category ahead of time.
+CARD_SHOP_TITLES = {
+    "Legend": 5000,
+    "Ace": 3000,
+    "Champion": 7500,
+}
+# Hand-picked accent/background pairs rather than derived from anything
+# else — unlike a tier reward's scheme, there's no ELO_TIERS badge color
+# backing these, just a curated catalog. Still run through
+# _ensureReadableAccent before ever being offered (see
+# getUnlockedCardColorSchemes) as the same safety net, even though these
+# were chosen to already read well against their own background. Accents
+# are kept deliberately vivid — at least ~93% HSL saturation, lightness
+# clamped to a punchy 48-58% band rather than drifting pastel — so a
+# theme's color still reads clearly even on the smaller badge/line
+# elements it drives, not just the big ones. The region-named entries pair
+# with assets/clash-logos' own region crests (Demacia.png, Noxus.png,
+# ...) — same Runeterra region set, so a team that's already using one of
+# those logos has a matching player-card scheme available too.
+CARD_SHOP_COLOR_SCHEMES = {
+    "Crimson": {"price": 4000, "accent_color": "#F72837", "background_color": "#3D0F14"},
+    "Emerald": {"price": 4000, "accent_color": "#09F16B", "background_color": "#0F3D1F"},
+    "Azure": {"price": 4000, "accent_color": "#189DF7", "background_color": "#0F2A3D"},
+    "Sunset": {"price": 4500, "accent_color": "#FF7D29", "background_color": "#3D1F0F"},
+    "Fire": {"price": 4000, "accent_color": "#FF0800", "background_color": "#472100"},
+    "Demacia": {"price": 4000, "accent_color": "#F8B530", "background_color": "#0A1D3D"},
+    "Noxus": {"price": 4000, "accent_color": "#EC092F", "background_color": "#2B0A0F"},
+    "Freljord": {"price": 4000, "accent_color": "#30F0F8", "background_color": "#0D2B3E"},
+    "Ionia": {"price": 4000, "accent_color": "#F83074", "background_color": "#2E1A3D"},
+    "Piltover": {"price": 4000, "accent_color": "#F8BB30", "background_color": "#0D3B3E"},
+    "Zaun": {"price": 4000, "accent_color": "#A6FF00", "background_color": "#1F1A2E"},
+    "Shurima": {"price": 4000, "accent_color": "#F7A62E", "background_color": "#3D2A14"},
+    "Shadow Isles": {"price": 4000, "accent_color": "#29FF8A", "background_color": "#0A1F16"},
+    "Bilgewater": {"price": 4000, "accent_color": "#09ECD7", "background_color": "#2E1A0D"},
+    # BUG FIX: this used to be a yellow accent on a purple-ish background
+    # (#FFCD29 / #3D2E4D) — close enough to CARD_DEFAULT_ACCENT_COLOR's
+    # own gold-on-indigo look that the two read as nearly the same card at
+    # a glance. Swapped which hue plays which role instead of just picking
+    # new colors outright: the accent is now a lavender derived from the
+    # old background's own purple hue (re-saturated/lightened to work as
+    # an accent), and the background is the old accent's yellow hue
+    # darkened down (same 28%-of-a-full-saturation-base approach every
+    # other entry's background uses) — still recognizably "Bandle City"
+    # colored, just with the two roles reversed. Accent brightened further
+    # (same reasoning as Targon's own BUG FIX below) after the first swap
+    # still only cleared CARD_MIN_ACCENT_CONTRAST by ~7 units — legible in
+    # principle, but not comfortably so.
+    "Bandle City": {"price": 4000, "accent_color": "#B677F8", "background_color": "#473700"},
+    # BUG FIX: #8529FF only cleared CARD_MIN_ACCENT_CONTRAST by ~3.5
+    # units — technically passing but barely, and it read as genuinely
+    # hard to make out. Brightened (same hue, higher HSL lightness) twice
+    # now for a comfortable margin instead of just scraping past the
+    # floor.
+    "Targon": {"price": 4000, "accent_color": "#AE77F8", "background_color": "#150A2E"},
+}
+# Genuinely different typefaces for the card's name/title (see
+# _cardFontPaths) — RUSSO_ONE/CINZEL/ORBITRON, not just different weights
+# of the same Chakra Petch font as before (see that BUG FIX note).
+CARD_SHOP_FONT_STYLES = {
+    "Bold": 3000,
+    "Elegant": 3000,
+    "Cyber": 3000,
+}
+# Every card_unlocks itemKey that resolves to a real title — tier-earned,
+# specially-granted, or purchased alike — the one place getUnlockedCardTitles
+# and /card-set-title's own validation both read from, so all three
+# catalogs above only ever need combining in one place. Shop titles have
+# no separate display text of their own (unlike a tier's flavor title),
+# so each just maps to itself.
+CARD_TITLE_CATALOG = {
+    **CARD_TIER_REWARD_TITLES, **CARD_SPECIAL_TITLES, **{name: name for name in CARD_SHOP_TITLES}
+}
 
 # Shockwave's own developer — always has the "Developer" title available
 # in every guild the bot is in (see getUnlockedCardTitles), not just ones
@@ -5115,6 +5210,58 @@ class helpers():
         row = self.cursor.fetchone()
         return row[0] if row is not None else None
 
+    # /set-elo (admin-only, manage_guild — see bot.py): sets `member`'s elo
+    # to an exact value rather than a +/- delta, for correcting a broken
+    # rating directly rather than fighting the match-result math to get
+    # there. Still runs _checkTierRewardUnlocks afterward, the same as any
+    # other path that changes elo (applyGameDeltas, the lazy self-heal in
+    # _buildStatsEmbed) — an admin manually setting someone to Diamond+
+    # should credit that tier's reward exactly like earning it normally
+    # would.
+    async def setEloHelper(self, ctx, member, elo):
+        guild_id = ctx.guild.id
+        user_id = member.id
+
+        self.ensureEconomyRow(guild_id, user_id, member.name)
+        self.cursor.execute(
+            "UPDATE economy SET elo=? WHERE guildId=? AND userId=?", (elo, guild_id, user_id)
+        )
+        self.db.commit()
+        self._checkTierRewardUnlocks(guild_id, user_id, elo)
+
+        await ctx.response.send_message(f"Set {member.mention}'s elo to **{elo}**.")
+
+    # /card-clear-unlocks (admin-only, manage_guild — see bot.py): wipes
+    # every title/color scheme/font `member` has unlocked in this guild —
+    # a targeted undo for a bad grant or an exploited unlock, not the
+    # whole-server resets /clear's own clear_elo/clear_economy flags do.
+    # Also resets their equipped trading_cards row back to Shockwave's own
+    # defaults (customized=0, color_scheme_name cleared) rather than
+    # leaving it pointed at something they no longer actually own — the
+    # same "don't leave the equipped state inconsistent with what's
+    # unlocked" reasoning _resyncEquippedColorScheme exists for, just
+    # triggered by an admin action instead of a catalog change.
+    async def clearCardUnlocksHelper(self, ctx, member):
+        guild_id = ctx.guild.id
+        user_id = member.id
+
+        self.cursor.execute(
+            "DELETE FROM card_unlocks WHERE guildId=? AND userId=?", (guild_id, user_id)
+        )
+        self.cursor.execute(
+            "UPDATE trading_cards SET title=?, accent_color=?, background_color=?, text_color=?, "
+            "font_style=?, customized=0, color_scheme_name=NULL WHERE guildId=? AND userId=?",
+            (
+                CARD_DEFAULT_TITLE, CARD_DEFAULT_ACCENT_COLOR, CARD_DEFAULT_BACKGROUND_COLOR,
+                CARD_DEFAULT_TEXT_COLOR, CARD_DEFAULT_FONT_STYLE, guild_id, user_id,
+            )
+        )
+        self.db.commit()
+
+        await ctx.response.send_message(
+            f"Cleared all trading-card unlocks for {member.mention} and reset their card to Shockwave's defaults."
+        )
+
     async def dailyHelper(self, ctx):
         guild_id = ctx.guild.id
         user_id = ctx.user.id
@@ -6030,15 +6177,58 @@ class helpers():
     def _lightenColor(self, color, amount):
         return tuple(round(c + (255 - c) * amount) for c in color)
 
-    # Resolves a trading_cards.font_style key to the actual bundled font
-    # files to use — (display font for the name, subtitle font for the
-    # title/epithet, body font for the stat labels/values). Only
-    # "default" (Shockwave's own Chakra Petch + IBM Plex Sans pairing)
-    # exists today; anything else falls back to it rather than erroring,
-    # the same "unknown preset degrades to the default" approach
-    # _hexToRgb takes for a bad color.
+    # Resolves a trading_cards.font_style key to the actual bundled fonts
+    # to use — name_font/title_font (+ their own variation, for the two
+    # variable ones) for the name and the title/epithet, plus body_font
+    # and a weight for each of the smaller body-text elements (stat
+    # labels, stat values, team/roster rows — username shares team_weight,
+    # both being small secondary text).
+    #
+    # BUG FIX: earlier versions only varied name_font/title_font, and even
+    # then only via different WEIGHTS of the same Chakra Petch font — the
+    # difference between "default" and "Bold" was one modest weight step
+    # on two smallish pieces of text, easy to read as "nothing changed" at
+    # a glance, and every body element always used the same three
+    # hardcoded weights regardless of font_style at all. CARD_SHOP_FONT_
+    # STYLES now backs each style with a genuinely different bundled
+    # typeface (RUSSO_ONE/CINZEL/ORBITRON, all Google Fonts, SIL Open Font
+    # License) for name/title, and shifts every body element's weight
+    # together too — there's still only the one bundled body typeface
+    # (IBM_PLEX_SANS, a variable font — see _loadFont), so "a different
+    # font" for the smaller text still means a different weight of it
+    # rather than a whole second body typeface.
+    #
+    # Anything unrecognized (including the "default" key itself) falls
+    # back to Shockwave's own pairing, the same "unknown preset degrades
+    # to the default" approach _hexToRgb takes for a bad color.
     def _cardFontPaths(self, font_style):
-        return (CHAKRA_PETCH_BOLD, CHAKRA_PETCH_SEMIBOLD, IBM_PLEX_SANS)
+        if font_style == "Bold":
+            return {
+                "name_font": RUSSO_ONE, "name_variation": None,
+                "title_font": RUSSO_ONE, "title_variation": None,
+                "body_font": IBM_PLEX_SANS,
+                "label_weight": "Bold", "value_weight": "Bold", "team_weight": "SemiBold",
+            }
+        if font_style == "Elegant":
+            return {
+                "name_font": CINZEL, "name_variation": "Bold",
+                "title_font": CINZEL, "title_variation": "Regular",
+                "body_font": IBM_PLEX_SANS,
+                "label_weight": "Medium", "value_weight": "Regular", "team_weight": "Light",
+            }
+        if font_style == "Cyber":
+            return {
+                "name_font": ORBITRON, "name_variation": "Bold",
+                "title_font": ORBITRON, "title_variation": "SemiBold",
+                "body_font": IBM_PLEX_SANS,
+                "label_weight": "SemiBold", "value_weight": "Medium", "team_weight": "Regular",
+            }
+        return {
+            "name_font": CHAKRA_PETCH_BOLD, "name_variation": None,
+            "title_font": CHAKRA_PETCH_SEMIBOLD, "title_variation": None,
+            "body_font": IBM_PLEX_SANS,
+            "label_weight": "Bold", "value_weight": "SemiBold", "team_weight": "Medium",
+        }
 
     # A player's trading_cards row, created with Shockwave's own defaults
     # (CARD_DEFAULT_*) the first time it's needed — same self-healing
@@ -6077,7 +6267,38 @@ class helpers():
                 CARD_DEFAULT_TEXT_COLOR, CARD_DEFAULT_FONT_STYLE, guild_id, user_id,
             )
         )
+        self._resyncEquippedColorScheme(guild_id, user_id)
         self.db.commit()
+
+    # A row picking a NAMED color scheme (color_scheme_name set, by
+    # /card-set-color-scheme — see setCardColorScheme) tracks that scheme's
+    # current colors on every call here, the same "follow the source of
+    # truth instead of freezing at equip time" idea the customized=0
+    # branch above already applies to the whole default palette. Without
+    # this, a later tweak to CARD_SHOP_COLOR_SCHEMES/ELO_TIER_BADGE_COLORS
+    # (or to CARD_MIN_ACCENT_CONTRAST itself — exactly what motivated
+    # adding this) would never reach a player who'd already equipped that
+    # scheme, the same staleness bug the customized flag was built to
+    # avoid in the first place. A hand-edited custom hex value (no
+    # recorded scheme name) is untouched — there's nothing to track it
+    # against.
+    def _resyncEquippedColorScheme(self, guild_id, user_id):
+        self.cursor.execute(
+            "SELECT color_scheme_name FROM trading_cards WHERE guildId=? AND userId=?",
+            (guild_id, user_id)
+        )
+        row = self.cursor.fetchone()
+        if row is None or row[0] is None:
+            return
+        scheme_name = row[0]
+        schemes = {s["name"]: s for s in self.getAvailableCardColorSchemes(guild_id, user_id)}
+        scheme = schemes.get(scheme_name)
+        if scheme is None:
+            return
+        self.cursor.execute(
+            "UPDATE trading_cards SET accent_color=?, background_color=? WHERE guildId=? AND userId=?",
+            (scheme["accent_color"], scheme["background_color"], guild_id, user_id)
+        )
 
     def getCardSettings(self, guild_id, user_id):
         self.ensureCardSettings(guild_id, user_id)
@@ -6184,6 +6405,54 @@ class helpers():
         )
         self.db.commit()
 
+    # Renders `member`'s current trading card as a ready-to-send
+    # discord.File — shared by the three /card-set-* commands so each one
+    # can actually show the result of the change it just made, not just
+    # confirm it in text. Simpler than _swapStatsForTradingCard's own
+    # version: the caller of a /card-set-* command is always a real,
+    # currently-present member (they're the one running the command right
+    # now), so there's no "member left the guild" fallback to handle here.
+    async def _renderMemberTradingCardFile(self, guild_id, guild_name, member):
+        user_id = member.id
+        display_name = member.display_name
+
+        self.ensureEconomyRow(guild_id, user_id, display_name)
+        self.cursor.execute(
+            "SELECT elo, ranked_wins, ranked_losses FROM economy WHERE guildId=? AND userId=?",
+            (guild_id, user_id)
+        )
+        elo, ranked_wins, ranked_losses = self.cursor.fetchone()
+        ranked_games = ranked_wins + ranked_losses
+        stats = {
+            "elo": elo, "elo_rank": self.eloRankLabelPlain(elo),
+            "ranked_wins": ranked_wins, "ranked_losses": ranked_losses,
+            "ranked_win_rate": f"{(ranked_wins / ranked_games) * 100:.1f}%" if ranked_games > 0 else "N/A",
+        }
+        teams = [team for _, team in self.getTeamsForPlayer(guild_id, user_id)]
+        settings = self.getCardSettings(guild_id, user_id)
+
+        try:
+            avatar_bytes = await member.display_avatar.with_format("png").read()
+            avatar_image = Image.open(io.BytesIO(avatar_bytes))
+        except Exception:
+            avatar_image = Image.new("RGBA", (CARD_AVATAR_SIZE, CARD_AVATAR_SIZE), BRACKET_BACKGROUND_CENTER)
+
+        card_image = self._renderTradingCardImage(
+            guild_name, display_name, avatar_image, settings, stats, teams, username=member.name
+        )
+        return self._imageToFile(card_image, "trading_card.png")
+
+    # An embed+file pair ready to pass straight to ctx.response.send_message
+    # (embed=..., file=...) showing `member`'s current trading card —
+    # thin wrapper around _renderMemberTradingCardFile so each /card-set-*
+    # helper doesn't repeat the same two lines of embed setup.
+    async def _cardPreviewEmbedAndFile(self, ctx, member):
+        guild_name = ctx.guild.name if ctx.guild is not None else ""
+        file = await self._renderMemberTradingCardFile(ctx.guild.id, guild_name, member)
+        embed = discord.Embed(color=discord.Color.gold())
+        embed.set_image(url=f"attachment://{file.filename}")
+        return embed, file
+
     # /card-set-title: equips any title the caller has unlocked (or the
     # base CARD_DEFAULT_TITLE, always available) as their trading card's
     # epithet. Rejects anything else rather than trusting free text here —
@@ -6202,7 +6471,10 @@ class helpers():
             return
 
         self.setCardTitle(guild_id, user_id, title)
-        await ctx.response.send_message(f'Your trading card title is now **"{title}"**.')
+        embed, file = await self._cardPreviewEmbedAndFile(ctx, ctx.user)
+        await ctx.response.send_message(
+            content=f'Your trading card title is now **"{title}"**.', embed=embed, file=file
+        )
 
     # Every trading-card color scheme `user_id` has permanently unlocked in
     # this guild — {name, accent_color, background_color}, hex-encoded the
@@ -6212,32 +6484,48 @@ class helpers():
     # call rather than stored, so a scheme always matches whatever that
     # tier's badge color currently is instead of freezing at whatever it
     # was the day it was unlocked.
+    # `accent_rgb` boosted for readability against `background_rgb`'s own
+    # lightened vignette center (see _ensureReadableAccent), hex-encoded —
+    # the one place getUnlockedCardColorSchemes computes this for either a
+    # tier-earned or a shop-bought scheme, so the two branches below share
+    # one implementation instead of drifting apart.
+    def _readableAccentHex(self, accent_rgb, background_rgb):
+        background_center = self._lightenColor(background_rgb, 0.3)
+        return self._rgbToHex(self._ensureReadableAccent(accent_rgb, background_center))
+
     def getUnlockedCardColorSchemes(self, guild_id, user_id):
         self.cursor.execute(
             "SELECT itemKey FROM card_unlocks WHERE guildId=? AND userId=? AND itemType='color_scheme'",
             (guild_id, user_id)
         )
         schemes = []
-        for (tier_name,) in self.cursor.fetchall():
-            badge_color = ELO_TIER_BADGE_COLORS.get(tier_name)
-            if badge_color is None:
+        for (key,) in self.cursor.fetchall():
+            if key in ELO_TIER_BADGE_COLORS:
+                accent_rgb = ELO_TIER_BADGE_COLORS[key]
+                background_rgb = tuple(round(c * CARD_BACKGROUND_DARKEN_RATIO) for c in accent_rgb)
+                background_hex = self._rgbToHex(background_rgb)
+            elif key in CARD_SHOP_COLOR_SCHEMES:
+                entry = CARD_SHOP_COLOR_SCHEMES[key]
+                accent_rgb = self._hexToRgb(entry["accent_color"], TEAM_CARD_FALLBACK_ACCENT_COLOR)
+                background_rgb = self._hexToRgb(entry["background_color"], (0, 0, 0))
+                background_hex = entry["background_color"]
+            else:
                 continue
-            background = tuple(round(c * CARD_BACKGROUND_DARKEN_RATIO) for c in badge_color)
             # _renderTradingCardImage trusts trading_cards' stored colors
             # exactly as given (a player who hand-edits a custom hex value
             # should see exactly that value, not something silently
             # adjusted) — so the readability guarantee has to live here
             # instead, in the catalog itself, before a scheme is ever
-            # offered or equipped. A badge color was picked for how it
-            # reads as a small circle/diamond standing in for an emoji
+            # offered or equipped. A tier badge color was picked for how
+            # it reads as a small circle/diamond standing in for an emoji
             # (see ELO_TIERS), not for driving a whole card's header/label
-            # text against its own darkened background.
-            background_center = self._lightenColor(background, 0.3)
-            readable_accent = self._ensureReadableAccent(badge_color, background_center)
+            # text against its own darkened background — and even a
+            # hand-picked shop color gets the same safety net rather than
+            # trusting it was chosen carefully enough.
             schemes.append({
-                "name": tier_name,
-                "accent_color": self._rgbToHex(readable_accent),
-                "background_color": self._rgbToHex(background),
+                "name": key,
+                "accent_color": self._readableAccentHex(accent_rgb, background_rgb),
+                "background_color": background_hex,
             })
         return schemes
 
@@ -6260,12 +6548,16 @@ class helpers():
     # internal write half only. Also marks the row customized=1, same
     # reasoning setCardTitle's own comment gives: without it, the very
     # next /stats call would silently resync these back to CARD_DEFAULT_*.
-    def setCardColorScheme(self, guild_id, user_id, accent_color, background_color):
+    # `scheme_name`, when given, is remembered (color_scheme_name) so
+    # _resyncEquippedColorScheme can keep tracking that scheme's current
+    # colors — omitting it (a hand-edited custom hex value some other way)
+    # leaves nothing to track, same as before this parameter existed.
+    def setCardColorScheme(self, guild_id, user_id, accent_color, background_color, scheme_name=None):
         self.ensureCardSettings(guild_id, user_id)
         self.cursor.execute(
-            "UPDATE trading_cards SET accent_color=?, background_color=?, customized=1 "
+            "UPDATE trading_cards SET accent_color=?, background_color=?, color_scheme_name=?, customized=1 "
             "WHERE guildId=? AND userId=?",
-            (accent_color, background_color, guild_id, user_id)
+            (accent_color, background_color, scheme_name, guild_id, user_id)
         )
         self.db.commit()
 
@@ -6288,8 +6580,261 @@ class helpers():
             return
 
         chosen = available[scheme]
-        self.setCardColorScheme(guild_id, user_id, chosen["accent_color"], chosen["background_color"])
-        await ctx.response.send_message(f'Your trading card now uses the **{scheme}** color scheme.')
+        self.setCardColorScheme(
+            guild_id, user_id, chosen["accent_color"], chosen["background_color"], scheme_name=scheme
+        )
+        embed, file = await self._cardPreviewEmbedAndFile(ctx, ctx.user)
+        await ctx.response.send_message(
+            content=f'Your trading card now uses the **{scheme}** color scheme.', embed=embed, file=file
+        )
+
+    # Every trading-card font style `user_id` has purchased in this guild
+    # (see /shop) — unlike titles/color schemes there's no elo-tier path to
+    # one of these at all, only the shop, so this is a straight itemKey
+    # lookup against CARD_SHOP_FONT_STYLES rather than needing a combining
+    # catalog the way getUnlockedCardTitles does.
+    def getUnlockedCardFontStyles(self, guild_id, user_id):
+        self.cursor.execute(
+            "SELECT itemKey FROM card_unlocks WHERE guildId=? AND userId=? AND itemType='font_style'",
+            (guild_id, user_id)
+        )
+        return [key for (key,) in self.cursor.fetchall() if key in CARD_SHOP_FONT_STYLES]
+
+    # /card-set-font's own choice list: CARD_DEFAULT_FONT_STYLE (always
+    # available — needs no unlocking) plus whatever this player has
+    # actually purchased, same shape getAvailableCardTitles/
+    # getAvailableCardColorSchemes have to their own unlocked-items lookup.
+    def getAvailableCardFontStyles(self, guild_id, user_id):
+        return [CARD_DEFAULT_FONT_STYLE] + self.getUnlockedCardFontStyles(guild_id, user_id)
+
+    # Sets `user_id`'s equipped trading-card font. Trusts `font_style` is
+    # already validated (see cardSetFontHelper) — this is the internal
+    # write half only, same shape setCardTitle/setCardColorScheme have.
+    # Also marks the row customized=1 for the same reason those two do.
+    def setCardFontStyle(self, guild_id, user_id, font_style):
+        self.ensureCardSettings(guild_id, user_id)
+        self.cursor.execute(
+            "UPDATE trading_cards SET font_style=?, customized=1 WHERE guildId=? AND userId=?",
+            (font_style, guild_id, user_id)
+        )
+        self.db.commit()
+
+    # /card-set-font: equips any font style the caller has purchased (or
+    # CARD_DEFAULT_FONT_STYLE, always available). Same "gate it, don't
+    # trust free text" shape as the other two customization commands.
+    async def cardSetFontHelper(self, ctx, font_style):
+        guild_id = ctx.guild.id
+        user_id = ctx.user.id
+
+        available = self.getAvailableCardFontStyles(guild_id, user_id)
+        if font_style not in available:
+            await ctx.response.send_message(
+                f"You haven't unlocked the **{font_style}** font. Pick one of your unlocked fonts "
+                "from the autocomplete list, or check /shop to see what's available."
+            )
+            return
+
+        self.setCardFontStyle(guild_id, user_id, font_style)
+        embed, file = await self._cardPreviewEmbedAndFile(ctx, ctx.user)
+        await ctx.response.send_message(
+            content=f'Your trading card now uses the **{font_style}** font.', embed=embed, file=file
+        )
+
+    # Whether `user_id` already owns `item_key` (any shop item type) in
+    # this guild — shared by getShopCatalog (to mark what's already owned)
+    # and shopBuyHelper (to refuse selling the same thing twice).
+    def _shopItemOwned(self, guild_id, user_id, item_type, item_key):
+        self.cursor.execute(
+            "SELECT 1 FROM card_unlocks WHERE guildId=? AND userId=? AND itemType=? AND itemKey=?",
+            (guild_id, user_id, item_type, item_key)
+        )
+        return self.cursor.fetchone() is not None
+
+    # Every purchasable item across all three CARD_SHOP_* catalogs, each
+    # as {type, name, price, owned} — what /shop displays and
+    # /shop-buy's own autocomplete filters down to just what's still
+    # unowned.
+    def getShopCatalog(self, guild_id, user_id):
+        catalog = []
+        for name, price in CARD_SHOP_TITLES.items():
+            catalog.append({
+                "type": "title", "name": name, "price": price,
+                "owned": self._shopItemOwned(guild_id, user_id, "title", name),
+            })
+        for name, entry in CARD_SHOP_COLOR_SCHEMES.items():
+            catalog.append({
+                "type": "color_scheme", "name": name, "price": entry["price"],
+                "owned": self._shopItemOwned(guild_id, user_id, "color_scheme", name),
+            })
+        for name, price in CARD_SHOP_FONT_STYLES.items():
+            catalog.append({
+                "type": "font_style", "name": name, "price": price,
+                "owned": self._shopItemOwned(guild_id, user_id, "font_style", name),
+            })
+        return catalog
+
+    # `item`'s (type, price) from whichever CARD_SHOP_* catalog actually
+    # has it, or (None, None) if it's not a real shop item at all — the
+    # one place shopBuyHelper needs to know which catalog (and which
+    # command) a purchased name belongs to.
+    def _resolveShopItem(self, item):
+        if item in CARD_SHOP_TITLES:
+            return "title", CARD_SHOP_TITLES[item]
+        if item in CARD_SHOP_COLOR_SCHEMES:
+            return "color_scheme", CARD_SHOP_COLOR_SCHEMES[item]["price"]
+        if item in CARD_SHOP_FONT_STYLES:
+            return "font_style", CARD_SHOP_FONT_STYLES[item]
+        return None, None
+
+    # /card-test: renders the caller's own card once per color scheme —
+    # CARD_DEFAULT_SCHEME_NAME plus the whole CARD_SHOP_COLOR_SCHEMES
+    # catalog, regardless of what they've actually unlocked — so browsing
+    # the shop's color options doesn't mean guessing from a hex code. Each
+    # render's own title field is overridden to the scheme's name (rather
+    # than the caller's real equipped title) so the image is self-labeled
+    # without needing to cross-reference a filename. Stats/teams/avatar
+    # are fetched once and reused across every render — only the color
+    # scheme actually changes between them.
+    async def cardTestHelper(self, ctx):
+        # Rendering every scheme (17 today) comfortably blows past
+        # Discord's 3-second interaction window — same BUG FIX shape
+        # returnHelper's own defer() comment describes, just for PIL
+        # rendering instead of one move_to() call per member.
+        await ctx.response.defer()
+
+        guild_id = ctx.guild.id
+        guild_name = ctx.guild.name if ctx.guild is not None else ""
+        member = ctx.user
+
+        base_settings = self.getCardSettings(guild_id, member.id)
+
+        self.ensureEconomyRow(guild_id, member.id, member.display_name)
+        self.cursor.execute(
+            "SELECT elo, ranked_wins, ranked_losses FROM economy WHERE guildId=? AND userId=?",
+            (guild_id, member.id)
+        )
+        elo, ranked_wins, ranked_losses = self.cursor.fetchone()
+        ranked_games = ranked_wins + ranked_losses
+        stats = {
+            "elo": elo, "elo_rank": self.eloRankLabelPlain(elo),
+            "ranked_wins": ranked_wins, "ranked_losses": ranked_losses,
+            "ranked_win_rate": f"{(ranked_wins / ranked_games) * 100:.1f}%" if ranked_games > 0 else "N/A",
+        }
+        teams = [team for _, team in self.getTeamsForPlayer(guild_id, member.id)]
+        try:
+            avatar_bytes = await member.display_avatar.with_format("png").read()
+            avatar_image = Image.open(io.BytesIO(avatar_bytes))
+        except Exception:
+            avatar_image = Image.new("RGBA", (CARD_AVATAR_SIZE, CARD_AVATAR_SIZE), BRACKET_BACKGROUND_CENTER)
+
+        schemes = [{
+            "name": CARD_DEFAULT_SCHEME_NAME, "accent_color": CARD_DEFAULT_ACCENT_COLOR,
+            "background_color": CARD_DEFAULT_BACKGROUND_COLOR,
+        }]
+        for name, entry in CARD_SHOP_COLOR_SCHEMES.items():
+            accent_rgb = self._hexToRgb(entry["accent_color"], TEAM_CARD_FALLBACK_ACCENT_COLOR)
+            background_rgb = self._hexToRgb(entry["background_color"], (0, 0, 0))
+            schemes.append({
+                "name": name,
+                "accent_color": self._readableAccentHex(accent_rgb, background_rgb),
+                "background_color": entry["background_color"],
+            })
+
+        files = []
+        for scheme in schemes:
+            settings = dict(base_settings)
+            settings["title"] = scheme["name"]
+            settings["accent_color"] = scheme["accent_color"]
+            settings["background_color"] = scheme["background_color"]
+            card_image = self._renderTradingCardImage(
+                guild_name, member.display_name, avatar_image, settings, stats, teams, username=member.name
+            )
+            safe_name = scheme["name"].replace(" ", "_")
+            files.append(self._imageToFile(card_image, f"card_{safe_name}.png"))
+
+        await ctx.followup.send(
+            content=f"Previewing all {len(files)} color schemes on your card:", files=files[:CARD_TEST_BATCH_SIZE]
+        )
+        # Discord caps a single message at 10 attachments — the rest go
+        # out as follow-up messages in the same channel.
+        for i in range(CARD_TEST_BATCH_SIZE, len(files), CARD_TEST_BATCH_SIZE):
+            await ctx.channel.send(files=files[i:i + CARD_TEST_BATCH_SIZE])
+
+    # /shop: every purchasable cosmetic, grouped by category, with its
+    # price or an "owned" marker and the caller's current balance so they
+    # can see at a glance what they can actually afford.
+    async def shopHelper(self, ctx):
+        guild_id = ctx.guild.id
+        user_id = ctx.user.id
+        self.ensureEconomyRow(guild_id, user_id, ctx.user.name)
+        balance = self.getEconomy(guild_id, user_id, "balance")
+        catalog = self.getShopCatalog(guild_id, user_id)
+
+        embed = discord.Embed(
+            title="Trading Card Shop", description=f"Your balance: **{balance} gold**",
+            color=discord.Color.gold()
+        )
+        for label, item_type in (
+            ("Titles", "title"), ("Color Schemes", "color_scheme"), ("Fonts", "font_style")
+        ):
+            lines = []
+            for item in catalog:
+                if item["type"] != item_type:
+                    continue
+                status = "✅ Owned" if item["owned"] else f"{item['price']} gold"
+                lines.append(f"**{item['name']}** — {status}")
+            # __underline__ (Discord markdown) rather than just bold, so
+            # each category heading reads distinctly from the item lines'
+            # own bolded names underneath it.
+            embed.add_field(name=f"__{label}__", value="\n".join(lines), inline=False)
+        embed.set_footer(
+            text="/shop-buy to purchase — equip with /card-set-title, /card-set-color-scheme, or /card-set-font"
+        )
+        await ctx.response.send_message(embed=embed)
+
+    # /shop-buy: spends gold to permanently unlock one CARD_SHOP_* item —
+    # writes to card_unlocks exactly like a tier reward or a special grant
+    # does (see _unlockCardReward/grantSpecialCardTitle), so a purchased
+    # item shows up through the exact same getUnlockedCardTitles/
+    # getUnlockedCardColorSchemes/getUnlockedCardFontStyles reads those use,
+    # with no separate "did I buy this" concept anywhere else in the code.
+    async def shopBuyHelper(self, ctx, item):
+        guild_id = ctx.guild.id
+        user_id = ctx.user.id
+
+        item_type, price = self._resolveShopItem(item)
+        if item_type is None:
+            await ctx.response.send_message(f"**{item}** isn't in the shop.")
+            return
+
+        if self._shopItemOwned(guild_id, user_id, item_type, item):
+            await ctx.response.send_message(f"You already own **{item}**.")
+            return
+
+        self.ensureEconomyRow(guild_id, user_id, ctx.user.name)
+        balance = self.getEconomy(guild_id, user_id, "balance")
+        if balance < price:
+            await ctx.response.send_message(
+                f"**{item}** costs {price} gold, but you only have {balance}."
+            )
+            return
+
+        self.cursor.execute(
+            "UPDATE economy SET balance = balance - ? WHERE guildId=? AND userId=?",
+            (price, guild_id, user_id)
+        )
+        self.cursor.execute(
+            "INSERT OR IGNORE INTO card_unlocks(guildId, userId, itemType, itemKey) VALUES(?, ?, ?, ?)",
+            (guild_id, user_id, item_type, item)
+        )
+        self.db.commit()
+
+        equip_command = {
+            "title": "/card-set-title", "color_scheme": "/card-set-color-scheme", "font_style": "/card-set-font",
+        }[item_type]
+        await ctx.response.send_message(
+            f"Purchased **{item}** for {price} gold! Equip it with {equip_command}."
+        )
 
     # A small filled circle standing in for the elo tier emoji (see
     # ELO_TIERS' own comment on why — PIL's bundled TTF fonts can't render
@@ -6322,18 +6867,25 @@ class helpers():
     # ranked_losses, ranked_win_rate}; `teams` is every persistent Team
     # (see getTeamsForPlayer) this player is rostered on in this guild,
     # most relevant first — each one's own logo (self-healing, see
-    # _ensureLogo) is pasted alongside its name.
-    def _renderTradingCardImage(self, guild_name, display_name, avatar_image, settings, stats, teams):
+    # _ensureLogo) is pasted alongside its name. `username` (optional —
+    # every existing caller predates it, hence the default) is the
+    # player's actual Discord account name (`member.name`), distinct from
+    # `display_name` (their nickname, if they have one) — drawn small in
+    # the header's top-right, mirroring the logo/guild-name block's own
+    # top-left placement, so the card identifies exactly who it belongs to
+    # even for a player known mainly by a nickname.
+    def _renderTradingCardImage(self, guild_name, display_name, avatar_image, settings, stats, teams, username=None):
         accent_color = self._hexToRgb(settings["accent_color"], BRACKET_TITLE_COLOR)
         text_color = self._hexToRgb(settings["text_color"], BRACKET_TEXT_COLOR)
         background_color = self._hexToRgb(settings["background_color"], BRACKET_BACKGROUND)
-        name_font_path, title_font_path, body_font_path = self._cardFontPaths(settings["font_style"])
+        fonts = self._cardFontPaths(settings["font_style"])
 
-        name_font = self._loadFont(name_font_path, CARD_NAME_FONT_SIZE)
-        title_font = self._loadFont(title_font_path, CARD_TITLE_FONT_SIZE)
-        label_font = self._loadFont(body_font_path, CARD_STAT_LABEL_FONT_SIZE, "Bold")
-        value_font = self._loadFont(body_font_path, CARD_STAT_VALUE_FONT_SIZE, "SemiBold")
-        team_font = self._loadFont(body_font_path, CARD_STAT_LABEL_FONT_SIZE, "Medium")
+        name_font = self._loadFont(fonts["name_font"], CARD_NAME_FONT_SIZE, fonts["name_variation"])
+        title_font = self._loadFont(fonts["title_font"], CARD_TITLE_FONT_SIZE, fonts["title_variation"])
+        label_font = self._loadFont(fonts["body_font"], CARD_STAT_LABEL_FONT_SIZE, fonts["label_weight"])
+        value_font = self._loadFont(fonts["body_font"], CARD_STAT_VALUE_FONT_SIZE, fonts["value_weight"])
+        team_font = self._loadFont(fonts["body_font"], CARD_STAT_LABEL_FONT_SIZE, fonts["team_weight"])
+        username_font = self._loadFont(fonts["body_font"], CARD_STAT_LABEL_FONT_SIZE, fonts["team_weight"])
 
         stat_rows = [
             ("ELO", f"{stats['elo']} ({stats['elo_rank']})"),
@@ -6380,6 +6932,11 @@ class helpers():
             CARD_WIDTH, height, accent_color, background=background_color, background_center=background_center
         )
         self._drawBracketHeader(image, draw, guild_name, None, accent_color, CARD_WIDTH, bold_title=True)
+        if username:
+            draw.text(
+                (CARD_WIDTH - BRACKET_MARGIN, BRACKET_MARGIN + BRACKET_LOGO_HEIGHT / 2), f"@{username}",
+                font=username_font, fill=accent_color, anchor="rm"
+            )
 
         # Avatar: circular crop via a mask (paste() only respects alpha on
         # the SOURCE image being pasted, hence converting to RGBA first),
@@ -6476,7 +7033,10 @@ class helpers():
         if avatar_image is None:
             avatar_image = Image.new("RGBA", (CARD_AVATAR_SIZE, CARD_AVATAR_SIZE), BRACKET_BACKGROUND_CENTER)
 
-        card_image = self._renderTradingCardImage(guild_name, display_name, avatar_image, settings, stats, teams)
+        username = member.name if member is not None else None
+        card_image = self._renderTradingCardImage(
+            guild_name, display_name, avatar_image, settings, stats, teams, username=username
+        )
         file = self._imageToFile(card_image, "trading_card.png")
 
         embed = discord.Embed(color=discord.Color.gold())

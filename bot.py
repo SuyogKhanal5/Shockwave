@@ -182,6 +182,12 @@ cursor.execute(
     "PRIMARY KEY(guildId, userId))"
 )
 ensure_column("trading_cards", "customized", "INTEGER", "0")
+# Which CARD_SHOP_COLOR_SCHEMES/tier-name a row's colors were last equipped
+# from via /card-set-color-scheme, or NULL for a hand-edited custom hex
+# value with nothing to track (see _resyncEquippedColorScheme). Lets an
+# already-equipped scheme keep following that scheme's current colors
+# instead of freezing at whatever they were the moment it was picked.
+ensure_column("trading_cards", "color_scheme_name")
 # Permanent record of which trading-card cosmetics (a title, a color
 # scheme — see CARD_TIER_REWARD_TITLES) each player has unlocked in each
 # guild, by reaching Diamond/Master/Grandmaster/Challenger at least once
@@ -486,6 +492,46 @@ async def setBettingTimer_error(ctx, error):
 
 
 @tree.command(
+    name="set-elo",
+    description="Admin: set a player's elo directly, to an exact value"
+)
+@app_commands.describe(member="Whose elo to set", elo="The exact elo value to set it to")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def setElo(ctx, member: discord.Member, elo: int):
+    await helperObj.setEloHelper(ctx, member, elo)
+
+
+@setElo.error
+async def setElo_error(ctx, error):
+    if isinstance(error, app_commands.MissingPermissions):
+        await ctx.response.send_message(
+            "You need the Manage Server permission to set a player's elo."
+        )
+    else:
+        raise error
+
+
+@tree.command(
+    name="card-clear-unlocks",
+    description="Admin: wipe a player's unlocked trading-card titles/color schemes/fonts"
+)
+@app_commands.describe(member="Whose unlocks to clear")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def cardClearUnlocks(ctx, member: discord.Member):
+    await helperObj.clearCardUnlocksHelper(ctx, member)
+
+
+@cardClearUnlocks.error
+async def cardClearUnlocks_error(ctx, error):
+    if isinstance(error, app_commands.MissingPermissions):
+        await ctx.response.send_message(
+            "You need the Manage Server permission to clear a player's trading-card unlocks."
+        )
+    else:
+        raise error
+
+
+@tree.command(
     name="start",
     description="Move players to their respective channels and open betting on the game"
 )
@@ -583,6 +629,63 @@ async def cardSetColorScheme(ctx, scheme: str):
     await helperObj.cardSetColorSchemeHelper(ctx, scheme)
 
 
+# Same shape as cardTitleAutocomplete/cardColorSchemeAutocomplete above —
+# the caller's own available font styles only.
+async def cardFontAutocomplete(ctx, current: str):
+    current = current.lower()
+    styles = helperObj.getAvailableCardFontStyles(ctx.guild.id, ctx.user.id)
+    matches = [s for s in styles if current in s.lower()]
+    return [app_commands.Choice(name=s, value=s) for s in matches[:25]]
+
+
+@tree.command(
+    name="card-set-font",
+    description="Equip one of your purchased trading-card fonts"
+)
+@app_commands.describe(font_style="Which font to equip — pick from your unlocked ones")
+@app_commands.autocomplete(font_style=cardFontAutocomplete)
+async def cardSetFont(ctx, font_style: str):
+    await helperObj.cardSetFontHelper(ctx, font_style)
+
+
+@tree.command(
+    name="card-test",
+    description="Preview your trading card in every color scheme"
+)
+async def cardTest(ctx):
+    await helperObj.cardTestHelper(ctx)
+
+
+@tree.command(
+    name="shop",
+    description="Browse trading-card cosmetics purchasable with gold"
+)
+async def shop(ctx):
+    await helperObj.shopHelper(ctx)
+
+
+# Unlike the three cardXAutocomplete functions above (which only ever
+# offer what's already unlocked), this one offers what's still buyable —
+# getShopCatalog's own "owned" flag is what filters an already-purchased
+# item out, so /shop-buy never suggests something there's nothing left to
+# do with.
+async def shopBuyAutocomplete(ctx, current: str):
+    current = current.lower()
+    catalog = helperObj.getShopCatalog(ctx.guild.id, ctx.user.id)
+    matches = [i for i in catalog if not i["owned"] and current in i["name"].lower()]
+    return [app_commands.Choice(name=f"{i['name']} ({i['price']} gold)", value=i["name"]) for i in matches[:25]]
+
+
+@tree.command(
+    name="shop-buy",
+    description="Purchase a trading-card cosmetic with gold"
+)
+@app_commands.describe(item="Which item to purchase — pick from what you don't already own")
+@app_commands.autocomplete(item=shopBuyAutocomplete)
+async def shopBuy(ctx, item: str):
+    await helperObj.shopBuyHelper(ctx, item)
+
+
 @tree.command(
     name="leaderboard",
     description="Rank the server by a stat — react to page through it"
@@ -640,12 +743,18 @@ COMMAND_HELP = {
     "notify": "DMs a one-time invite link to your voice channel — to one member, or to everyone holding a given role.",
     "wager-set-channel": "Redirects every betting posting to one specific text channel, instead of wherever /start happens to run.",
     "set-betting-timer": "Sets how long a betting window stays open (1-600 seconds). Multiplied by the number of matches for a concurrent tournament round. Requires the Manage Server permission.",
+    "set-elo": "Sets a player's elo directly to an exact value, correcting a broken rating without fighting the match-result math to get there. Still credits any Diamond+ tier reward the new elo qualifies for. Requires the Manage Server permission.",
+    "card-clear-unlocks": "Wipes a player's unlocked trading-card titles, color schemes, and fonts, and resets their equipped card back to Shockwave's own defaults. A targeted undo for a bad grant or an exploited unlock — not a whole-server reset. Requires the Manage Server permission.",
     "wager": "Bets gold on one team winning the current game — or, with a match id, on a specific tournament match. Only while betting is open, one bet per player per game/match.",
     "wager-against": "Challenges another player to a heads-up gold wager — separate from team-game betting, no /start required.",
     "daily": "Claims 1000 free gold. Once per calendar day, per player.",
     "stats": "Shows a player's elo, ranked/casual/game record, betting record, balance, and net gold — defaults to you. React with \U0001f5bc️ to toggle the avatar between their real one and a generic placeholder, or \U0001f3b4 to replace the whole embed with a customizable trading card; \U0001faaa swaps back.",
     "card-set-title": "Equips one of your unlocked trading-card titles (see /stats' \U0001f3b4 reaction). Reaching Diamond, Master, Grandmaster, or Challenger permanently unlocks that tier's own title, even if you derank afterward.",
     "card-set-color-scheme": "Equips one of your unlocked trading-card color schemes (see /stats' \U0001f3b4 reaction). Reaching Diamond, Master, Grandmaster, or Challenger permanently unlocks that tier's own scheme (colors matching its emoji), even if you derank afterward. \"Default\" (Shockwave's own palette) is always available.",
+    "card-set-font": "Equips one of your purchased trading-card fonts (see /shop). \"Default\" (Shockwave's own Chakra Petch/IBM Plex Sans pairing) is always available.",
+    "card-test": "Renders your trading card once per color scheme (Default plus the whole /shop catalog, regardless of what you own) so you can see what each one looks like before buying.",
+    "shop": "Browse every trading-card title, color scheme, and font purchasable with gold, and what you already own.",
+    "shop-buy": "Purchases a trading-card cosmetic with gold, permanently unlocking it for /card-set-title, /card-set-color-scheme, or /card-set-font. Refuses if you already own it or can't afford it.",
     "leaderboard": "Ranks the server by a stat, including ranked-only and casual-only wins/losses/win rate. Omit filter for an elo-sorted overview. Reactions page through the results.",
     "report-correct-winner": "Fixes a misreported winner — undoes and reapplies the payouts, records, and elo. Requires Manage Server.",
     "team-create": "Creates a persistent team with you as its captain.",

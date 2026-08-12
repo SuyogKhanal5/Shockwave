@@ -488,10 +488,11 @@
           <div class="cmd-note">
             <strong>🎴 turns the embed into a trading card.</strong> React with it and the whole
             embed — stats, fields, avatar, all of it — is replaced with a portrait-style trading card:
-            Shockwave's logo and this server's name across the top, the player's own Discord avatar as the
-            centerpiece, a customizable title underneath it, then a colored rank badge with elo, ranked
-            record, and ranked win rate (each its own line), and finally — if they're rostered on any — their
-            persistent teams, each with its own logo. 🖼️ and 🎴 both disappear once this fires and are
+            Shockwave's logo and this server's name across the top with the player's actual Discord username
+            (not their nickname) in the opposite corner, their Discord avatar as the centerpiece, a
+            customizable title underneath it, then a colored rank badge with elo, ranked record, and ranked
+            win rate (each its own line), and finally — if they're rostered on any — their persistent teams,
+            each with its own logo. 🖼️ and 🎴 both disappear once this fires and are
             replaced with a single 🪪 — react with that to swap back to the plain stats embed, which restores
             🖼️ and 🎴 in turn, so it's a real toggle rather than a one-way trip. Colors, title, and font are
             stored per player in the database (<code class="inline">trading_cards</code>) and default to
@@ -540,7 +541,7 @@
             <span class="cmd-name"><span class="slash">/</span>card-set-title</span>
             <span class="cmd-badge">betting</span>
           </div>
-          <p class="cmd-desc">Equips one of your unlocked trading-card titles as the epithet shown under your name on the card (see /stats' 🎴 reaction).</p>
+          <p class="cmd-desc">Equips one of your unlocked trading-card titles as the epithet shown under your name on the card (see /stats' 🎴 reaction), and shows the resulting card.</p>
           <table class="params">
             <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
             <tr><td class="param-name">title</td><td class="param-type">string, autocomplete</td><td>Which title to equip. Autocomplete only offers titles you've actually unlocked — "Rookie" (the default, always available) plus anything you've earned.</td></tr>
@@ -559,7 +560,7 @@
             <span class="cmd-name"><span class="slash">/</span>card-set-color-scheme</span>
             <span class="cmd-badge">betting</span>
           </div>
-          <p class="cmd-desc">Equips one of your unlocked trading-card color schemes — accent and background — on your card (see /stats' 🎴 reaction).</p>
+          <p class="cmd-desc">Equips one of your unlocked trading-card color schemes — accent and background — on your card (see /stats' 🎴 reaction), and shows the resulting card.</p>
           <table class="params">
             <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
             <tr><td class="param-name">scheme</td><td class="param-type">string, autocomplete</td><td>Which color scheme to equip. Autocomplete only offers schemes you've actually unlocked — "Default" (Shockwave's own palette, always available) plus anything you've earned.</td></tr>
@@ -569,6 +570,70 @@
             color scheme</strong> alongside its title — the accent is that tier's own rank-badge color,
             automatically brightened just enough to stay readable against the card's own background if the raw
             badge color would otherwise be too dark there. Stays unlocked forever after, the same as the title.
+          </div>
+        </div>
+
+        <div class="cmd-card" id="card-set-font">
+          <div class="cmd-head">
+            <span class="cmd-name"><span class="slash">/</span>card-set-font</span>
+            <span class="cmd-badge">betting</span>
+          </div>
+          <p class="cmd-desc">Equips one of your purchased trading-card fonts on your card (see /stats' 🎴 reaction), and shows the resulting card.</p>
+          <table class="params">
+            <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+            <tr><td class="param-name">font_style</td><td class="param-type">string, autocomplete</td><td>Which font to equip. Autocomplete only offers fonts you've purchased — "Default" (Shockwave's own Chakra Petch/IBM Plex Sans pairing, always available) plus anything from /shop.</td></tr>
+          </table>
+          <div class="cmd-note">
+            <strong>Fonts are shop-only</strong> — unlike titles and color schemes, there's no way to earn one by
+            rank. Each one is a genuinely different bundled typeface, not just a different weight of the
+            default: "Bold" is Russo One, "Elegant" is Cinzel, "Cyber" is Orbitron — all free/open-source
+            (Google Fonts, SIL Open Font License).
+          </div>
+        </div>
+
+        <div class="cmd-card" id="card-test">
+          <div class="cmd-head">
+            <span class="cmd-name"><span class="slash">/</span>card-test</span>
+            <span class="cmd-badge">betting</span>
+          </div>
+          <p class="cmd-desc">Renders your trading card once per color scheme — "Default" plus the entire /shop catalog, regardless of what you actually own — so you can see what each one looks like before buying.</p>
+          <div class="cmd-note">
+            <strong>Every render is labeled with its own scheme name</strong> in the card's own title field, so
+            each image is self-explanatory without needing to check a filename. Discord caps a message at 10
+            attachments, so the full set (17 today) arrives as the initial response plus one or more follow-up
+            messages.
+          </div>
+        </div>
+
+        <div class="cmd-card" id="shop">
+          <div class="cmd-head">
+            <span class="cmd-name"><span class="slash">/</span>shop</span>
+            <span class="cmd-badge">betting</span>
+          </div>
+          <p class="cmd-desc">Lists every trading-card title, color scheme, and font purchasable with gold, grouped by category, with your current balance and what you already own.</p>
+          <div class="cmd-note">
+            <strong>Color schemes include Fire plus one for each Runeterra region</strong> (Demacia,
+            Noxus, Freljord, Ionia, Piltover, Zaun, Shurima, Shadow Isles, Bilgewater, Bandle City, Targon)
+            — the same region set <code class="inline">/team-set-logo</code>'s built-in crests cover, so
+            a team already using one of those logos has a matching player-card scheme to go with it.
+          </div>
+        </div>
+
+        <div class="cmd-card" id="shop-buy">
+          <div class="cmd-head">
+            <span class="cmd-name"><span class="slash">/</span>shop-buy</span>
+            <span class="cmd-badge">betting</span>
+          </div>
+          <p class="cmd-desc">Purchases a trading-card cosmetic with gold, permanently unlocking it the same way reaching an elo tier does.</p>
+          <table class="params">
+            <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+            <tr><td class="param-name">item</td><td class="param-type">string, autocomplete</td><td>Which item to buy — autocomplete only offers items you don't already own, labeled with their price.</td></tr>
+          </table>
+          <div class="cmd-note">
+            <strong>Refuses the purchase</strong> if you already own the item or can't afford it — nothing is
+            deducted either way. On success, equip it with <code class="inline">/card-set-title</code>,
+            <code class="inline">/card-set-color-scheme</code>, or <code class="inline">/card-set-font</code>
+            depending on what you bought.
           </div>
         </div>
 
