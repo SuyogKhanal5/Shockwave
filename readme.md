@@ -186,13 +186,44 @@ whole thing.
 
 `/clear` requires the **Manage Server** permission outright
 (`app_commands.checks.has_permissions`, same as `/report-correct-winner`).
-Within it, `clear_elo` and `clear_economy` additionally act on *every
-player* in the server, so neither runs the moment the command is invoked
-— `/clear` posts a `discord.ui.View` with "Confirm reset"/"Cancel" buttons
-(`ConfirmResetView`), and the reset only happens from inside that view's
-button callback. `interaction_check` on the view rejects anyone who isn't
-the member who ran `/clear`, and the view times out after 30 seconds with
-nothing changed if it's ignored. `/tournament-create` follows a narrower
+Within it, `clear_elo`, `clear_economy`, and `clear_achievements`
+additionally act on *every player* in the server, so none of them run the
+moment the command is invoked — `/clear` posts a `discord.ui.View` with
+"Confirm reset"/"Cancel" buttons (`ConfirmResetView`), and the reset only
+happens from inside that view's button callback. `interaction_check` on
+the view rejects anyone who isn't the member who ran `/clear`, and the
+view times out after 30 seconds with nothing changed if it's ignored. All
+three flags can be requested together — `clear_economy` takes priority
+over `clear_elo` when both are set (the whole-row wipe already resets elo
+too, so there'd be nothing left for `clear_elo` to separately do), while
+`clear_achievements` is independent of both and just adds its own extra
+sentence to the warning/confirmation text (`confirmDestructiveClearHelper`/
+`ConfirmResetView.confirm` build these as a list of per-flag sentences
+rather than one combined string, so any combination reads cleanly without
+custom-casing grammar for every case). `resetAchievementsHelper` only
+deletes `card_unlocks` rows whose `itemKey` is a `CARD_ACHIEVEMENT_TITLES`
+key — every other unlock (tier rewards, special grants, shop purchases)
+and the underlying `economy` stats those achievements were computed from
+(`game_wins`, `current_win_streak`, ...) are untouched, so a player who
+still qualifies will simply earn them back the next time something
+self-heals (`/achievements`, `/stats`, their next game) — this is a "clear
+the trophies off the shelf" reset, not a "make everyone start over" one.
+
+`clear_achievements` alone also takes an optional `user` — narrows it from
+"every player in the server" down to just that one member, still gated
+behind the exact same confirm/cancel view (a single-player reset is still
+irreversible, so it gets no less confirmation than a server-wide one).
+`clear_elo`/`clear_economy` always stay whole-server regardless of `user`
+— only `clear_achievements` reads it — so a combined run (say,
+`clear_elo` + `clear_achievements` + `user`) mixes an "every player" elo
+sentence with a "for @member" achievements sentence in the same warning/
+confirmation message rather than trying to force both onto one shared
+scope. `resetAchievementsHelper(guild_id, user_id=None)` carries that same
+split down to the SQL: `user_id=None` deletes every achievement row for
+the guild, a real one narrows the `DELETE` with an extra `AND userId=?`.
+Passing `user` without `clear_achievements` is rejected outright, before
+even the non-destructive team wipe runs — there's no other flag `user`
+could mean anything for. `/tournament-create` follows a narrower
 version of the same idea: creating a server's *first* tournament needs no
 permission at all, but overwriting an existing one checks
 `ctx.user.guild_permissions.manage_guild` before it will even show the
@@ -431,6 +462,60 @@ land on a different one, which is fine for a team with no identity to keep
 consistent in the first place. Falls back to the ring only if the
 built-in set itself is unavailable.
 
+### Trading cards
+
+`/stats` posts two reactions alongside the embed (see `handleStatsReaction`):
+🖼️ toggles the thumbnail between the player's real Discord avatar and
+Discord's own generic default avatar (comparing the embed's current
+thumbnail URL against `STATS_PLACEHOLDER_AVATAR_URL` to know which
+direction to flip), and 🎴 throws the whole embed away and replaces it with
+a rendered trading card (`_renderTradingCardImage`) — Shockwave's logo and
+the server's name across the top (the exact same `_drawBracketHeader` every
+other rendered image uses), the player's actual Discord username
+(`member.name`, not their nickname) small in the header's top-right —
+mirroring the logo/name block's own top-left placement — so the card
+identifies exactly who it belongs to even for a player known mainly by a
+nickname, the player's live avatar as a circular centerpiece, a
+customizable title underneath it, then elo/ranked record/ranked win rate
+as three stacked lines (each stat gets the card's full width rather than
+sharing a column, so a long value never clips), and
+finally — if they're rostered on any — their persistent teams, each with
+its own logo pasted alongside its name (same self-healing `_ensureLogo`
+every other team-logo display already relies on). The elo line's tier
+"emoji" is actually a small filled shape in a per-tier color
+(`ELO_TIERS`' 4th/5th elements, `_drawEloBadge`) rather than the literal
+character `eloRankLabel` uses in a real embed — PIL's bundled TTF fonts
+can't render color emoji glyphs (`eloRankLabelPlain` strips it for exactly
+this reason). It's a circle for most tiers, but a diamond for Platinum
+(`\U0001f537`) and Diamond (`\U0001f48e`) — both of those are actually
+diamond/gem-cut shapes, not circles, in the real emoji, so a round badge
+there was a shape mismatch against the embed, not just a color one.
+Neither of those two reactions applies to a card once it's up
+(there's no "thumbnail" or "show the card again" to toggle), so
+`handleStatsReaction` removes both outright the moment 🎴 fires and adds a
+single 🪪 in their place; clicking that rebuilds the plain `/stats` embed
+(`_buildStatsEmbed`, the same code `statsHelper` itself calls) via
+`_swapTradingCardForStats`, sets `stats_views.cardShown` back to 0, and
+restores 🖼️/🎴 — so the whole thing is a real back-and-forth toggle rather
+than a one-way trip.
+
+A card's look lives in `trading_cards` (one row per (guild, player), same
+self-healing "insert defaults on first read" shape `ensureEconomyRow` uses
+for the economy table) — `title`, `accent_color`/`background_color`/
+`text_color` as `"#RRGGBB"` hex, and `font_style` (a named preset
+`_cardFontPaths` resolves to actual bundled font files; only `"default"` —
+Chakra Petch + IBM Plex Sans, the same pairing every other image already
+uses — exists today, but the column means more presets can be added later
+with no schema change). Defaults are a deliberately more saturated purple
+background than the site's own near-black `--ink` (`CARD_DEFAULT_
+BACKGROUND_COLOR`, its own shade rather than reused from `BRACKET_*`),
+"Rookie" as a placeholder title, and that default font pairing. There's no
+`/customize-card`-style command yet — the table is meant to be edited
+directly (or through a future command) — but `_renderTradingCardImage`
+always reads through `getCardSettings` rather than hardcoding anything, so
+a changed row shows up on the next card rendered with no code changes
+needed.
+
 `/report-correct-winner` fixes a specific tournament match via its
 optional `match_id` — a narrower, separate path from the economy
 correction described above. It flips the match's recorded winner and
@@ -439,6 +524,372 @@ started, rather than risk quietly corrupting a bracket that's moved on.
 It only supports winners-bracket matches for now — correcting a losers-
 bracket or Grand Finals match is refused with an explanatory message
 rather than silently doing the wrong thing.
+
+### Trading-card cosmetic unlocks
+
+`card_unlocks` (one row per unlocked item — `(guildId, userId, itemType,
+itemKey)`, `itemType` is `"title"` or `"color_scheme"`) permanently records
+which trading-card cosmetics a player has earned, separately from
+`trading_cards`' own currently-equipped settings — unlocking something and
+actually wearing it are different concerns, the same way a game's
+cosmetic inventory is separate from its loadout. `CARD_TIER_REWARD_TITLES`
+is the whole catalog today: reaching Diamond, Master, Grandmaster, or
+Challenger for the first time unlocks that tier's own title (e.g.
+Diamond → "Diamond Mind") and a matching color scheme whose accent is
+that tier's own `ELO_TIER_BADGE_COLORS` entry — looked up from `ELO_TIERS`
+itself rather than duplicated, so a reward automatically tracks whatever
+that tier's badge color currently is instead of freezing at whatever it
+was the day it was unlocked (same reasoning `CARD_DEFAULT_*`'s own history
+of stale-duplicate bugs already forced elsewhere in this file).
+`_checkTierRewardUnlocks` checks every reward tier `elo` currently
+qualifies for, not just whichever one it's presently sitting in — a big
+enough single swing that jumps straight from Platinum to Grandmaster still
+credits Diamond and Master along the way. `_unlockCardReward`'s `INSERT OR
+IGNORE` makes checking idempotent, and since nothing anywhere deletes from
+`card_unlocks`, a reward earned once stays unlocked even after the player
+deranks back below the tier that earned it.
+
+The unlock check runs from two places: `applyGameDeltas`, right after a
+ranked result actually changes someone's elo (guarded to `sign > 0` only —
+a tournament correction's reversal is "undo", not "grant a reward on the
+way down"; the reapply against the corrected winner that follows calls
+back in with `sign=1`, which checks properly), and lazily from
+`_buildStatsEmbed` every time `/stats` runs for someone — the same
+"self-heal on the next read" idea `ensureEconomyRow`/`ensureCardSettings`/
+`_ensureLogo` already use elsewhere, so a player who was already sitting
+at Diamond+ before this feature existed gets credited the first time
+anything looks at their stats rather than never. `getUnlockedCardTitles`/
+`getUnlockedCardColorSchemes` read back what's unlocked in
+customization-ready form (display strings for titles; `{name,
+accent_color, background_color}` hex dicts for schemes, background
+derived the same darken-the-accent way `_renderTeamCardImage`'s own
+background is).
+
+`/card-set-title` is the first (and so far only) command that actually
+consumes `getUnlockedCardTitles` — `cardTitleAutocomplete` offers each
+caller their own `getAvailableCardTitles` (`CARD_DEFAULT_TITLE` plus
+whatever they've personally unlocked, so the picker never shows a title
+they can't actually equip), and `cardSetTitleHelper` re-validates that
+same list at the command boundary before writing anything, rather than
+trusting whatever the client sent. `setCardTitle` itself is a trusting
+internal setter — it also flips `trading_cards.customized` to 1, the same
+flag `ensureCardSettings`'s own resync-to-defaults check respects, since
+without it the very next `/stats` call would silently revert an equipped
+title right back to `CARD_DEFAULT_TITLE`.
+
+`/card-set-color-scheme` is `/card-set-title`'s exact counterpart for
+colors — same shape end to end: `cardColorSchemeAutocomplete` offers each
+caller their own `getAvailableCardColorSchemes` (`CARD_DEFAULT_SCHEME_NAME`
+plus whatever they've unlocked), `cardSetColorSchemeHelper` re-validates
+against that same list at the command boundary and resolves the chosen
+name to its `{accent_color, background_color}` pair, and `setCardColorScheme`
+is the trusting internal setter that writes both plus `customized=1`. The
+one place this differs from titles: `getUnlockedCardColorSchemes` runs
+each scheme's `ELO_TIER_BADGE_COLORS` accent through `_ensureReadableAccent`
+(`CARD_MIN_ACCENT_CONTRAST`, the same helper and threshold
+`_renderTeamCardImage` uses for a team's sampled logo color) before ever
+offering it — a badge color was picked for how it reads as a small
+circle/diamond standing in for an emoji, not for driving a whole card's
+header/label text against its own darkened background, and Master's and
+Grandmaster's own badge colors are dim enough that offering them
+unboosted would have reintroduced the exact readability problem the team
+card already had to solve. Only the accent gets boosted; the background
+stays the badge color's raw 28%-darkened shade either way, so a scheme's
+overall mood still authentically reflects the tier that earned it —
+`_renderTradingCardImage` itself is untouched and still trusts whatever's
+stored in `trading_cards` exactly as given, whether that came from a
+scheme selection or a hand-edited custom hex value.
+
+Two bugs turned up once schemes actually started getting equipped instead
+of just existing as unused plumbing. First, `CARD_MIN_ACCENT_CONTRAST`
+(90, at the time) forced almost any accent to lighten into the 70-80%
+HSL-lightness range against these cards' fairly bright vignette centers —
+a fully saturated red's own average-channel brightness tops out around 85
+even at 100% saturation, so a 90-point floor left it nowhere to go but
+pastel. Turned saturating `CARD_SHOP_COLOR_SCHEMES`' raw accents into a
+no-op regardless of how vivid they were on paper; dropped to 45, which
+still rescues a genuinely too-dark color (see `RenderTeamCardImageTests`'
+dark-navy regression test) without forcing an already-good one toward
+white. Second, and more fundamental: `setCardColorScheme` only ever wrote
+the *computed* hex pair, not which scheme it came from — so a later
+change to a scheme's own colors (exactly what fixing the first bug
+required) never reached a player who'd already equipped it, the identical
+staleness problem `trading_cards.customized` was built to solve for the
+default palette, just one layer down. `color_scheme_name` (nullable —
+`NULL` for a hand-edited custom hex value with nothing to track) plus
+`_resyncEquippedColorScheme` (called from `ensureCardSettings`, so every
+`/stats` view re-checks it) fixes that the same way: an equipped scheme
+now tracks its source of truth instead of freezing at equip time.
+
+`grantSpecialCardTitle` is the escape hatch for a title with no elo tier
+behind it at all (no matching color-scheme unlock alongside it, unlike a
+rank reward) — a per-(guild, player) `card_unlocks` row, same shape as a
+tier reward's own title unlock. Shockwave's own developer gets "Developer"
+a different way, though: `SHOCKWAVE_DEVELOPER_ID` is a hardcoded Discord
+user id `getUnlockedCardTitles` checks directly, so it's available in
+every guild the bot is in — including ones with no `card_unlocks` row for
+them at all, and future guilds the bot hasn't joined yet — rather than a
+grant that would need repeating by hand every time.
+
+### Shop
+
+`/shop`/`/shop-buy` add a third, gold-priced path into `card_unlocks`
+alongside reaching an elo tier and a special grant — `CARD_SHOP_TITLES`,
+`CARD_SHOP_COLOR_SCHEMES`, and `CARD_SHOP_FONT_STYLES` are the three
+catalogs (name → price, color schemes also carrying their own hex pair),
+kept name-distinct from each other and from every `ELO_TIERS`/
+`CARD_SPECIAL_TITLES` name so `shopBuyHelper`'s single `item` parameter can
+resolve a purchase to its category (`_resolveShopItem`) without needing to
+know it ahead of time. `CARD_SHOP_COLOR_SCHEMES` is the biggest of the
+three — a handful of standalone themes (Crimson, Emerald, Azure, Sunset,
+Fire) plus one per Runeterra region (Demacia, Noxus, Freljord, Ionia,
+Piltover, Zaun, Shurima, Shadow Isles, Bilgewater, Bandle City, Targon)
+— the same region set `assets/clash-logos/` already covers for
+`/team-set-logo`, so a team using one of those crests has a matching
+player-card scheme available too. A purchase is just `economy.balance -= price` plus
+the exact same `INSERT OR IGNORE INTO card_unlocks` a tier reward or a
+special grant writes — there's no separate "did I buy this" bookkeeping
+anywhere, so a purchased item shows up through `getUnlockedCardTitles`/
+`getUnlockedCardColorSchemes` automatically (`CARD_TITLE_CATALOG` folds
+`CARD_SHOP_TITLES` in, and `getUnlockedCardColorSchemes` branches on
+whether an `itemKey` is a tier name or a `CARD_SHOP_COLOR_SCHEMES` one).
+Font styles are shop-only — there's no elo-tier path to one at all — so
+`getUnlockedCardFontStyles` is a plain lookup against `CARD_SHOP_FONT_STYLES`
+with no combining catalog needed. `shopHelper` lists every item grouped by
+category with its price or an "✅ Owned" marker plus the caller's current
+balance; `shopBuyHelper` refuses an unknown item, one already owned, or
+one the caller can't afford, and on success tells them which
+`/card-set-*` command equips it.
+
+`/card-set-font` is `/card-set-title`/`/card-set-color-scheme`'s exact
+counterpart for `trading_cards.font_style` — the one difference from
+those two is `_cardFontPaths` itself, which resolves a `font_style` key
+to a dict: `name_font`/`name_variation` and `title_font`/`title_variation`
+for the card's two biggest typographic elements (the player's name, and
+the title/epithet under it), `body_font` plus a `label_weight`/
+`value_weight`/`team_weight` for everything smaller (stat labels, stat
+values, team/roster rows — the header's username shares `team_weight`,
+both being small secondary text).
+
+`CARD_SHOP_FONT_STYLES`' three styles each back `name_font`/`title_font`
+with a genuinely different bundled typeface — `"Bold"` is `RUSSO_ONE`,
+`"Elegant"` is `CINZEL`, `"Cyber"` is `ORBITRON`, all pulled from Google
+Fonts (SIL Open Font License) into `assets/fonts/`, alongside the
+already-bundled Chakra Petch/IBM Plex Sans pairing `"default"` still
+uses. `body_font` stays `IBM_PLEX_SANS` for every style — there's still
+only the one bundled body typeface — so a style's effect on the smaller
+text is a different named `_loadFont` weight/instance of that same file,
+same mechanism as `name_variation`/`title_variation` for Cinzel/Orbitron
+(both variable fonts, like `IBM_PLEX_SANS` itself); Russo One is a single
+static weight by design, so its own `_variation` fields are `None`.
+
+Two rounds of BUG FIXes got the font-style feature to this point. First:
+`_cardFontPaths` originally only varied `name_font`/`title_font`, and
+even then only via different weights of the *same* Chakra Petch file —
+every body element (stat labels, values, roster rows, the header's
+username) always loaded the exact same three hardcoded `_loadFont`
+weights regardless of `font_style` at all, so equipping "Bold"/"Elegant"
+only visibly touched two smallish pieces of text and read as "nothing
+changed" at a glance even where it did do something. `_renderTradingCardImage`
+now reads every one of `_cardFontPaths`' weight keys instead of hardcoding
+`"Bold"`/`"SemiBold"`/`"Medium"` inline, so a font style shifts the whole
+card's typography together. Second: even with that fixed, "Bold" and
+"Elegant" were still just different weights of the one Chakra Petch font
+— a real but subtle difference, easy to miss at a glance. Downloading
+Russo One/Cinzel/Orbitron (plus adding a third style, "Cyber") swapped in
+actually distinct typefaces instead.
+
+All three `/card-set-*` commands show the card, not just confirm the
+change in text — `_renderMemberTradingCardFile` (the caller's own current
+title/scheme/font/stats/teams/avatar, rendered once) and the thin
+`_cardPreviewEmbedAndFile` wrapper around it are shared by all three, each
+passing its own confirmation string as `content=` alongside the same
+`embed=`/`file=` pair. Simpler than `_swapStatsForTradingCard`'s own
+member-resolution: the caller of a `/card-set-*` command is always a
+real, currently-present member (they're the one running it), so there's
+no "member left the guild" fallback to handle the way that function needs.
+
+`/card-test` reuses the same rendering path to preview every color scheme
+at once — `CARD_DEFAULT_SCHEME_NAME` plus the whole `CARD_SHOP_COLOR_SCHEMES`
+catalog regardless of what the caller has actually unlocked, each render's
+own title field overridden to the scheme's name so the image is
+self-labeled without needing to cross-reference a filename. Stats/teams/
+avatar are fetched once and reused across every render — only the color
+scheme itself changes between them. Discord caps a single message at 10
+file attachments (`CARD_TEST_BATCH_SIZE`), so the first batch goes out as
+a follow-up and anything past that spills into further follow-up
+`ctx.channel.send()` calls in the same channel.
+
+BUG FIX: rendering every scheme (17 today) comfortably takes longer than
+Discord's 3-second interaction window — the real bot hit a 404 "Unknown
+interaction" trying to send the initial response only after finishing all
+that PIL work. `cardTestHelper` now calls `ctx.response.defer()` first
+thing, before any rendering, and sends the actual result via
+`ctx.followup.send()` instead — the same `returnHelper` BUG FIX shape
+already documented (a `move_to()` API call per member instead of PIL
+rendering, but the same "defer before anything slow" fix).
+
+### Achievements
+
+`/achievements` and `CARD_ACHIEVEMENT_TITLES` add a fourth path into
+`card_unlocks` (title only), alongside a tier reward, a special grant, and
+a shop purchase — same `INSERT OR IGNORE`-shaped row (`_unlockAchievement`
+handles it, using `rowcount` to tell a genuine first unlock from a
+no-op repeat), so an achievement title shows up through
+`getUnlockedCardTitles`/`/card-set-title` automatically like any other
+(`CARD_TITLE_CATALOG` folds `CARD_ACHIEVEMENT_TITLES` in too). What's new
+is *why* one unlocks: conditions tied to actual gameplay rather than rank
+or gold spent — first win (First Blood); a single tournament win
+(Tournament Champion); being rostered on `CARD_ACHIEVEMENT_TEAM_PLAYER_
+TEAMS` (3)+ persistent teams at once (Team Player) or actually captaining
+one of them (The Captain, checked via `isTeamCaptain`); owning
+`CARD_ACHIEVEMENT_BIG_SPENDER_ITEMS` (3)+ items bought from `/shop` (Big
+Spender, counted by `_countShopPurchases` filtering `card_unlocks` down to
+shop-catalog keys only — a tier reward or special grant doesn't count as
+"purchased"); a single-match elo swing of `CARD_ACHIEVEMENT_UNDERDOG_
+ELO_GAIN` (20)+ (Giant Slayer); winning a single `CARD_ACHIEVEMENT_HIGH_
+ROLLER_GOLD` (5000)+ gold bet (High Roller) or one paying out
+`CARD_ACHIEVEMENT_JACKPOT_PAYOUT_MULTIPLIER` (3)x+ the wager regardless of
+its size (Jackpot); placing `CARD_ACHIEVEMENT_GAMBLER_BETS` (25)+ total
+bets, win or lose (Frequent Bettor); and racking up `CARD_ACHIEVEMENT_
+IRON_WILL_LOSSES` (20)+ game losses without quitting (Iron Will).
+
+Veteran and On Fire are each a *ladder* rather than a single condition —
+the same `game_wins`/`current_win_streak` column crossing further
+thresholds for further, genuinely distinct titles (not just "Veteran
+II"/"III"), so a card's epithet keeps meaning something as the number
+climbs instead of just growing a suffix: Veteran (`CARD_ACHIEVEMENT_
+VETERAN_WINS`, 10) → Elite (50) → Battle-Hardened (150) → Immortal (500)
+career wins; On Fire (`CARD_ACHIEVEMENT_ON_FIRE_STREAK`, 5) → Unstoppable
+(10) → Untouchable (20) win streak. Each ladder is walked as a
+`(threshold, achievement_key)` list (`CARD_ACHIEVEMENT_VETERAN_LADDER`/
+`CARD_ACHIEVEMENT_ON_FIRE_LADDER`) rather than one `if` per tier, so
+crossing a big enough number in one jump (see `/test-achievements` below)
+unlocks every rung up to it in the same pass, not just the one it
+technically landed past.
+
+Gold-based achievements are deliberately keyed off a single transaction —
+a single wager's own win, payout, or size — never a balance milestone:
+`/daily` hands out `DAILY_GOLD_AMOUNT` (1000) for free every single day, so
+"reach N gold saved" would just reward showing up regardless of size, not
+anything skill- or risk-related, and "place N total bets" (Frequent
+Bettor) is about activity, not any amount won or lost. High Roller,
+Jackpot, and Giant Slayer are all checked inline inside `applyGameDeltas`'s
+existing per-user loop for exactly that reason — each needs that specific
+event's own context (this game's wager, this game's payout, this game's
+elo swing) rather than a plain row snapshot. Every other achievement
+(first_blood, the two ladders, team_player, captain, big_spender, gambler,
+iron_will) lives in `_checkAchievements`, a single read against the
+caller's current `economy` row (plus `getTeamsForPlayer`/
+`_countShopPurchases` for the ones that need more than that) run from
+three places — `applyGameDeltas` itself (every non-reversal delta
+application), and a lazy self-heal call from `_buildStatsEmbed` (return
+value discarded, no announcement) mirroring the same pattern
+`ensureCardSettings`'s own self-heal already uses elsewhere in this file.
+`current_win_streak` (new `economy` column) is maintained right alongside
+those checks: incremented on a win, reset to 0 on a loss, and — like the
+existing elo-tier check already sitting in this same function — skipped
+entirely on `sign=-1` (a correction/reversal shouldn't move a streak
+counter any more than it should re-fire an unlock).
+
+Tournament Champion is the one condition with no natural home in
+`applyGameDeltas` (a tournament win isn't a per-game delta at all), so
+`_grantTournamentChampionAchievement` is a separate one-off hook called
+from both places a tournament can actually end: single elimination's
+`_startRound` and double elimination's `_resolveFinalsMatch` (Grand
+Finals) — it unlocks the achievement for every rostered player on the
+winning team in one pass.
+
+Unlike the other three unlock paths, earning an achievement also posts a
+notification — these are meant to feel like a moment worth noticing, not
+just another option quietly waiting in `/card-set-title`'s autocomplete.
+`applyGameDeltas` returns the list of newly-unlocked `(user_id,
+achievement_key)` pairs (a mechanical `rowcount`-based fact, not an I/O
+side effect, keeping the same "helper does data, caller does I/O" split
+this file uses elsewhere) for its callers to hand to `_announceAchievements`
+— `_settleMatchWagers`, `recordResult`, and both tournament-completion
+hooks all do; `reportCorrectWinnerHelper`/`_correctTournamentMatchHelper`'s
+own *reapply* half does too (their reversal half never unlocks anything,
+since `sign=-1` skips every check above), so a correction can still
+retroactively earn an achievement it should have. `/achievements` itself
+(`achievementsHelper`/`getAchievementCatalog`, no permission gate) lists
+every achievement with its description and a ✅/🔒 marker for the caller,
+self-healing via a `_checkAchievements` call first so an achievement earned
+before this feature existed (e.g. an existing win count already past
+`CARD_ACHIEVEMENT_VETERAN_WINS`) shows up correctly the first time it's
+checked rather than waiting on the caller's next game. The embed itself is
+grouped into fields the same way `/shop`'s own `shopHelper` groups by item
+type (`embed.add_field` per category, not one flat description) —
+Veteran and On Fire each get their own field, tiers listed lowest-to-
+highest, so a four-rung ladder reads as one clear progression instead of
+its rungs being scattered alphabetically-by-insertion-order alongside
+every unrelated achievement; everything else lands in a shared `__Other__`
+field.
+
+`/test-achievements` (TEMP debug command, excluded from `COMMAND_HELP` the
+same way the old tournament-simulating `/test` was) exists to exercise this
+whole pipeline without grinding real games: `runSimulatedAchievementsHelper`
+parks the caller's own `economy` row one short of the TOP of both ladders
+(plus `iron_will`/`gambler`'s own thresholds), grants a few real "TEST Team
+N" rosters (captained by the caller, covering `team_player`/`captain`
+together) and shop-catalog `card_unlocks` rows (`big_spender`), then fires
+one real `applyGameDeltas` win — the same single event that crosses every
+remaining threshold at once — through the actual `_checkAchievements`/
+`_announceAchievements` functions rather than writing `card_unlocks` rows
+directly, so a bug in the real pipeline shows up here instead of only in a
+live game.
+
+### Team cards
+
+`/team-stats` gets the same card treatment as `/stats`, via its own single
+reaction (see `handleTeamStatsReaction`): `TEAM_CARD_EMOJI` (🛡️) throws the
+embed away for a portrait card (`_renderTeamCardImage`) built around the
+team's own logo as the focal point — big, framed, centered, right below
+the usual Shockwave-logo-and-server-name header every rendered image
+opens with. Unlike the player trading card, there's no `trading_cards`-
+style settings row backing this: "color scheme matches the logo" means
+sampling a color straight off the logo file itself on every render
+(`_dominantLogoColor`) rather than reading a stored customization — there's
+nothing to customize independently of the logo in the first place. That
+function buckets a downscaled copy of the logo into 16-value RGB groups
+and returns the most common one, skipping near-transparent pixels (the
+background) and near-white/near-black ones (padding/outlines), so a
+logo's actual identifying color wins out over whatever frames it. The
+sampled color becomes the card's accent (header title, frame, rule, stat
+labels); the background is that same color darkened to 28% and lightened
+back up 30% for the vignette center, the same darken-then-relighten
+relationship the player card's customizable `background_color` has to its
+own center, just derived instead of stored.
+
+A logo's dominant color has no readability guarantee at all — a deep navy
+or forest green passes `_dominantLogoColor`'s own brightness filter just
+fine, and since that same color also drives the background, drawing it
+as-is for header/label text risked it nearly disappearing against the
+vignette's own lightened center. `_ensureReadableAccent` fixes this: it
+lightens the sampled color toward white (closed-form, since
+`_lightenColor`'s blend is linear in its `amount` — no search needed) just
+enough to clear `TEAM_CARD_MIN_ACCENT_CONTRAST` average-brightness units
+above that center, and leaves an already-readable color untouched. Only
+the *background* derivation above uses the true, unboosted sample — every
+drawn accent element (header title, frame, rule, stat labels, captain
+star, roster overflow line) uses the boosted version, so the card still
+visibly carries the logo's hue without any of its text becoming hard to
+read. Below the logo: the team's
+name, then three stat rows (captain, record, win rate — same bolded-label
+layout the player card's own stat rows use), then its full roster
+(`_orderedRoster`, captain floated to the front) with the captain marked
+by the same drawn star `_drawMatchupColumn` uses, capped at
+`TEAM_CARD_MAX_ROSTER_ROWS` with a "+N more players" overflow line past
+that. A team with no logo file at all falls back to `TEAM_CARD_FALLBACK_
+ACCENT_COLOR` (the same gold the player card defaults to) rather than a
+bare/colorless frame. `TEAM_CARD_RETURN_EMOJI` (↩️) is the one action that
+applies once the card is up — swaps back to the plain embed
+(`_renderTeamStatsEmbed`, the same one `/team-stats` itself posts) via
+`_swapTeamCardForStats` and restores 🛡️, mirroring `STATS_RETURN_EMOJI`'s
+real back-and-forth toggle rather than `/stats`' card being a one-way
+trip. Tracked in its own `team_stats_views` table (`teamId` instead of a
+player's `targetUserId`) rather than reusing `stats_views`, since a team
+and a player are different things to look back up on a reaction.
 
 ### Double elimination: losers bracket and Grand Finals
 

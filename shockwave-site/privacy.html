@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Privacy Policy — Shockwave</title>
+<meta name="description" content="What data the Shockwave Discord bot collects, why, how long it's kept, and how to get it deleted.">
+<link rel="icon" type="image/png" href="assets/img/favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/styles.css">
+</head>
+<body>
+
+<div class="topbar">
+  <a class="brand" href="index.html" style="margin-bottom:0;">
+    <img class="brand-mark" src="assets/img/logo-mark.png" alt="" width="28" height="35">
+    <span class="brand-name">Shockwave</span>
+  </a>
+  <button class="menu-btn" aria-expanded="false" aria-label="Toggle navigation">Menu</button>
+</div>
+<div class="scrim"></div>
+
+<div class="shell">
+  <aside class="sidebar">
+    <a class="brand" href="index.html">
+      <img class="brand-mark" src="assets/img/logo-mark.png" alt="" width="28" height="35">
+      <span class="brand-name">Shockwave</span>
+    </a>
+    <span class="brand-tag">voice team organizer</span>
+
+    <nav>
+      <div class="nav-group">
+        <div class="nav-label">Overview</div>
+        <a class="nav-link" href="index.html#top">Introduction</a>
+        <a class="nav-link" href="index.html#quick-start">Draft-night flow</a>
+        <a class="nav-link" href="index.html#tournament-flow">Tournament flow</a>
+      </div>
+      <div class="nav-group">
+        <div class="nav-label">Get started</div>
+        <a class="nav-link" href="add-to-server.html">Add to your server</a>
+      </div>
+      <div class="nav-group">
+        <div class="nav-label">Commands</div>
+        <a class="nav-link" href="commands.html#team-setup">Team setup</a>
+        <a class="nav-link" href="commands.html#team-formation">Team formation</a>
+        <a class="nav-link" href="commands.html#voice-ops">Voice channel ops</a>
+        <a class="nav-link" href="commands.html#betting">Betting &amp; economy</a>
+        <a class="nav-link" href="commands.html#tournaments">Tournaments &amp; teams</a>
+        <a class="nav-link" href="commands.html#utility">Utility</a>
+      </div>
+      <div class="nav-group">
+        <div class="nav-label">Help</div>
+        <a class="nav-link" href="faq.html">FAQ</a>
+      </div>
+      <div class="nav-group">
+        <div class="nav-label">Running your own</div>
+        <a class="nav-link" href="self-hosting.html">Self-hosting guide</a>
+      </div>
+      <div class="nav-group">
+        <div class="nav-label">Legal</div>
+        <a class="nav-link" href="privacy.html">Privacy Policy</a>
+        <a class="nav-link" href="terms.html">Terms of Service</a>
+      </div>
+    </nav>
+
+    <div class="sidebar-foot">v3.0 · docs</div>
+  </aside>
+
+  <main>
+    <div class="content">
+
+      <div class="page-header">
+        <div class="eyebrow">Legal</div>
+        <h1>Privacy Policy</h1>
+        <p class="lede">
+          A plain-language rundown of what Shockwave collects, why, and how to get it deleted.
+          Last updated August 11, 2026.
+        </p>
+      </div>
+
+      <div class="cmd-note">
+        <strong>Open Source Hostings.</strong> Shockwave's code is open-source. This means that anyone can run
+        their own copy (see the <a href="self-hosting.html" style="color:var(--gold);">self-hosting
+        guide</a>). Shockwave also has its own instance that anyone can use. This page describes what the software itself
+        collects and stores. Whoever is hosting the instance you're using controls the database, decides how long data is kept, 
+        and is who you should contact about it. In the case that you are using the project's own instance, you can open an issue on
+        github or reach out at <a href="mailto:shockwavelolbot@gmail.com" style="color:var(--gold);">shockwavelolbot@gmail.com</a>
+      </div>
+
+      <br>
+
+      <section class="block" id="what-we-collect">
+        <h2>What Shockwave collects</h2>
+        <p class="muted" style="max-width:62ch;">
+          Everything below comes directly from the commands you or your server run. Nothing is
+          collected passively or in the background.
+        </p>
+        <table class="params">
+          <tr><th>Data</th><th>Where it comes from</th></tr>
+          <tr>
+            <td class="param-name">Discord IDs &amp; names</td>
+            <td>Server (guild) ID and name, channel IDs/names you configure, and the Discord user ID
+            and display name of anyone whose commands or reactions the bot processes.</td>
+          </tr>
+          <tr>
+            <td class="param-name">Team &amp; roster data</td>
+            <td>Rosters built with <code class="inline">/make-teams</code>, <code class="inline">/captains</code>,
+            persistent teams from <code class="inline">/team-create</code>: names, captains, and members.</td>
+          </tr>
+          <tr>
+            <td class="param-name">Competitive stats</td>
+            <td>Elo rating, win/loss record, and betting record. Tracked per-server, never shared across servers.</td>
+          </tr>
+          <tr>
+            <td class="param-name">In-app currency</td>
+            <td>A fictional gold balance and wager history (see the
+            <a href="terms.html#fictional-currency" style="color:var(--gold);">Terms of Service</a>,
+            it has no real-world value).</td>
+          </tr>
+          <tr>
+            <td class="param-name">Tournament data</td>
+            <td>Brackets, registrations, and match history for servers running <code class="inline">/tournament-create</code>.</td>
+          </tr>
+          <tr>
+            <td class="param-name">Team logo choice</td>
+            <td>Which built-in logo (see <code class="inline">/team-set-logo</code>) was picked.
+            No user-uploaded images are collected.</td>
+          </tr>
+        </table>
+      </section>
+
+      <hr class="rule">
+
+      <section class="block" id="what-we-dont-collect">
+        <h2>What Shockwave does <em>not</em> collect</h2>
+        <ul style="padding-left:20px; color:var(--text);">
+          <li style="margin-bottom:8px;"><strong>Message content</strong>: Shockwave only ever sees the slash-command
+            inputs Discord delivers directly to it, never the rest of a channel's chat.</li>
+          <li style="margin-bottom:8px;"><strong>Voice audio</strong>: The bot moves people between voice channels; it
+            never joins a call, listens to, or records anything spoken in one.</li>
+          <li style="margin-bottom:8px;"><strong>Email addresses, real names, phone numbers, or payment information</strong>: Discord doesn't expose these to bots, and Shockwave never asks for them.</li>
+          <li><strong>Direct-message content</strong>: the only DM Shockwave ever sends is a one-time voice-channel
+            invite link via <code class="inline">/notify</code>, and it doesn't read DMs sent to it.</li>
+        </ul>
+      </section>
+
+      <hr class="rule">
+
+      <section class="block" id="how-its-used">
+        <h2>How this data is used</h2>
+        <p>
+          Solely to run the feature you invoked: forming and announcing teams, moving voice channels,
+          tracking elo/records, settling bets in the fictional-gold economy, and playing out tournament
+          brackets. It's never used for advertising, profiling, or anything outside what's documented on
+          the <a href="commands.html" style="color:var(--gold);">command reference</a>.
+        </p>
+      </section>
+
+      <hr class="rule">
+
+      <section class="block" id="storage-and-retention">
+        <h2>Storage &amp; retention</h2>
+        <p>
+          Data lives in a database maintained by whichever operator's instance you're using. There's no
+          central, project-wide database shared across every server running Shockwave.
+        </p>
+        <p>
+          Removing the bot from a server deletes that server's live session/configuration state
+          automatically. Historical records tied to that server (i.e., past game results, elo, team rosters,
+          tournament history) are <strong style="color:var(--text);">not</strong> automatically erased
+          when the bot is removed; they persist until an admin clears them or the operator purges them
+          directly. A server admin (Manage Server permission) can wipe this data at any time with
+          <code class="inline">/clear</code>, see its
+          <a href="commands.html#clear" style="color:var(--gold);">clear_tournament, clear_elo, and
+          clear_economy</a> options for exactly what each one erases.
+        </p>
+      </section>
+
+      <hr class="rule">
+
+      <section class="block" id="sharing">
+        <h2>Sharing</h2>
+        <p>
+          Shockwave does not sell or share the data above with third parties. It's necessarily visible to
+          Discord itself (governed by Discord's own <a href="https://discord.com/privacy" style="color:var(--gold);">Privacy Policy</a>),
+          and to the administrators/members of any server the bot occupies, since team, bracket, and
+          economy data is posted directly into that server's own channels as part of how the features
+          work.
+        </p>
+      </section>
+
+      <hr class="rule">
+
+      <section class="block" id="childrens-privacy">
+        <h2>Children's privacy</h2>
+        <p>
+          Discord requires users to meet its own minimum age requirement. Shockwave doesn't
+          independently verify age and relies entirely on Discord's own enforcement of that requirement.
+          It does not knowingly collect data from anyone who doesn't meet it.
+        </p>
+      </section>
+
+      <hr class="rule">
+
+      <section class="block" id="self-hosted-instances">
+        <h2>Self-hosted instances</h2>
+        <p>
+          Anyone can run their own copy of Shockwave (see the
+          <a href="self-hosting.html" style="color:var(--gold);">self-hosting guide</a>). If the instance
+          in your server isn't operated by this project's maintainer, that operator controls the
+          database, decides how long data is kept, and is who you should contact about it, This policy
+          describes what the software itself does with data, not what any specific third-party operator
+          chooses to do beyond that.
+        </p>
+      </section>
+
+      <hr class="rule">
+
+      <section class="block" id="your-choices">
+        <h2>Your choices &amp; requesting deletion</h2>
+        <p>
+          The fastest path is <code class="inline">/clear</code> (Manage Server permission). It can wipe
+          channel config, the tournament, elo, or the entire economy for your server immediately. For
+          anything that doesn't cover, contact the operator of your server's Shockwave instance directly.
+          For the project's own reference instance, open an issue on
+          <a href="https://github.com/SuyogKhanal5/Shockwave" style="color:var(--gold);">its GitHub repository</a>, or send an email to <a href="mailto:shockwavelolbot@gmail.com" style="color:var(--gold);">shockwavelolbot@gmail.com</a>
+        </p>
+      </section>
+
+      <hr class="rule">
+
+      <section class="block" id="security">
+        <h2>Security</h2>
+        <p>
+          Reasonable technical measures are used to protect stored data, but no method of storage or
+          transmission over the internet is completely secure. Shockwave makes no guarantee of absolute security of your data.
+        </p>
+      </section>
+
+      <hr class="rule">
+
+      <section class="block" id="changes">
+        <h2>Changes to this policy</h2>
+        <p>
+          This policy may be updated as Shockwave's features change. The "last updated" date at the top
+          of this page always reflects the current version.
+        </p>
+      </section>
+
+      <div class="page-footer">
+        <span>Shockwave · privacy policy</span>
+        <span><a href="terms.html" style="color:var(--gold); text-decoration:none;">Terms of Service →</a></span>
+      </div>
+
+    </div>
+  </main>
+</div>
+
+<script src="assets/main.js"></script>
+</body>
+</html>

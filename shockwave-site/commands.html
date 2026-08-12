@@ -58,6 +58,11 @@
         <div class="nav-label">Running your own</div>
         <a class="nav-link" href="self-hosting.html">Self-hosting guide</a>
       </div>
+      <div class="nav-group">
+        <div class="nav-label">Legal</div>
+        <a class="nav-link" href="privacy.html">Privacy Policy</a>
+        <a class="nav-link" href="terms.html">Terms of Service</a>
+      </div>
     </nav>
 
     <div class="sidebar-foot">v3.0 · docs</div>
@@ -115,16 +120,24 @@
           <table class="params">
             <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
             <tr><td class="param-name">clear_channels</td><td class="param-type">boolean, optional</td><td>Also forget the saved team channel names.</td></tr>
-            <tr><td class="param-name">clear_tournament</td><td class="param-type">boolean, optional</td><td>Legacy/unused field, kept for backwards compatibility — doesn't touch a tournament created with <code class="inline">/tournament-create</code>.</td></tr>
+            <tr><td class="param-name">clear_tournament</td><td class="param-type">boolean, optional</td><td>Deletes this server's tournament entirely — bracket, registrations, and match history. Runs immediately, no confirmation. Registered/persistent teams (<code class="inline">/team-create</code>) aren't touched.</td></tr>
             <tr><td class="param-name">clear_elo</td><td class="param-type">boolean, optional</td><td>Resets every player's elo back to 1000 for this server — balance, wins/losses, and gold are untouched. Server-wide, so it asks for confirmation before it runs (see below).</td></tr>
             <tr><td class="param-name">clear_economy</td><td class="param-type">boolean, optional</td><td>Wipes every member's stats for this server entirely — balance, elo, game record, betting record, and gold wagered/won/lost. Also server-wide and confirmation-gated; if both this and <code class="inline">clear_elo</code> are set, this one wins since it already includes an elo reset.</td></tr>
+            <tr><td class="param-name">clear_achievements</td><td class="param-type">boolean, optional</td><td>Resets earned <a href="commands.html#achievements" style="color:var(--gold);">achievements</a> so they go back to locked — every player in the server by default, or just one player if <code class="inline">user</code> is also set. A player who still qualifies (e.g. their win count is still past the threshold) simply earns it back the next time something checks — this doesn't touch elo, balance, game record, or any other unlocks. Confirmation-gated; can be combined with <code class="inline">clear_elo</code> or <code class="inline">clear_economy</code> in the same run (those two always stay server-wide regardless of <code class="inline">user</code>).</td></tr>
+            <tr><td class="param-name">user</td><td class="param-type">member, optional</td><td>Only usable together with <code class="inline">clear_achievements</code> — narrows it to just this one player instead of everyone. Setting it without <code class="inline">clear_achievements</code> is rejected outright.</td></tr>
           </table>
           <div class="cmd-note">
-            <strong>Both flags require confirmation.</strong> Since <code class="inline">clear_elo</code> and
-            <code class="inline">clear_economy</code> reset data for <em>every player</em> in the server, neither
-            runs immediately — Shockwave posts a warning with "Confirm reset" / "Cancel" buttons, and only the
-            member who ran <code class="inline">/clear</code> can click them. The prompt expires after 30
-            seconds with nothing changed if it's ignored.
+            <strong>clear_tournament can't be undone.</strong> Unlike <code class="inline">clear_elo</code>/
+            <code class="inline">clear_economy</code>/<code class="inline">clear_achievements</code> below, it
+            doesn't ask for confirmation first — it deletes the tournament the moment the command runs.
+          </div>
+          <div class="cmd-note">
+            <strong>clear_elo/clear_economy/clear_achievements require confirmation.</strong> Since they reset
+            data for at least one player (every player, unless <code class="inline">clear_achievements</code>
+            is narrowed with <code class="inline">user</code>), none of them run immediately — Shockwave posts
+            a warning with "Confirm reset" / "Cancel" buttons, and only the member who ran
+            <code class="inline">/clear</code> can click them. The prompt expires after 30 seconds with nothing
+            changed if it's ignored.
           </div>
         </div>
       </section>
@@ -465,11 +478,31 @@
             <span class="cmd-name"><span class="slash">/</span>stats</span>
             <span class="cmd-badge">betting</span>
           </div>
-          <p class="cmd-desc">The full picture for one player: elo (shown with a League-style rank), actual in-game win/loss record (separate from betting), betting record, balance, and net gold won or lost overall — all in one embed.</p>
+          <p class="cmd-desc">The full picture for one player: elo (shown with a League-style rank), actual in-game win/loss record — combined, and broken out separately for ranked and casual games — betting record, balance, and net gold won or lost overall, all in one embed. Shows their Discord avatar as the embed thumbnail.</p>
           <table class="params">
             <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
             <tr><td class="param-name">member</td><td class="param-type">member, optional</td><td>Whose stats to look up. Defaults to you.</td></tr>
           </table>
+          <div class="cmd-note">
+            <strong>🖼️ toggles the avatar on and off.</strong> React with it and the embed's thumbnail
+            switches from the player's own Discord avatar to Discord's plain default avatar; react again and
+            it switches back to their real one — same reaction either direction, and anyone can click it, not
+            just the player it's about. Stops working once 🎴 (below) has been used on the same message.
+          </div>
+          <div class="cmd-note">
+            <strong>🎴 turns the embed into a trading card.</strong> React with it and the whole
+            embed — stats, fields, avatar, all of it — is replaced with a portrait-style trading card:
+            Shockwave's logo and this server's name across the top with the player's actual Discord username
+            (not their nickname) in the opposite corner, their Discord avatar as the centerpiece, a
+            customizable title underneath it, then a colored rank badge with elo, ranked record, and ranked
+            win rate (each its own line), and finally — if they're rostered on any — their persistent teams,
+            each with its own logo. 🖼️ and 🎴 both disappear once this fires and are
+            replaced with a single 🪪 — react with that to swap back to the plain stats embed, which restores
+            🖼️ and 🎴 in turn, so it's a real toggle rather than a one-way trip. Colors, title, and font are
+            stored per player in the database (<code class="inline">trading_cards</code>) and default to
+            Shockwave's own palette (a deep purple background) and a plain "Rookie" title until something
+            changes them.
+          </div>
           <div class="cmd-note">
             <strong>Elo is ranked-only, per-server.</strong> Every player starts at 1000. Elo only changes for
             games formed with <code class="inline">ranked:true</code>
@@ -477,6 +510,14 @@
             update the Game Record above but never touch elo. When it does update, the size of the change is
             based on the average rating on each side — beating a higher-rated team gains more than beating a
             lower-rated one.
+          </div>
+          <div class="cmd-note">
+            <strong>Game Record is ranked + casual combined;</strong> Ranked and Casual split it out
+            separately. Fields are grouped in three rows — Elo/Ranked Wins/Ranked Win Rate, then Game/Casual/Bet
+            Record (each showing its win rate right alongside the W-L count, e.g.
+            <code class="inline">4W - 1L (80.0%)</code>), then Balance/Net Gold/Gold Wagered — a player with
+            no games in one of those categories yet shows <code class="inline">0W - 0L</code> and
+            <code class="inline">N/A</code>.
           </div>
           <div class="cmd-note">
             <strong>Elo shows an emoji rank alongside the number,</strong> the same way League does — nine
@@ -499,6 +540,138 @@
           </div>
         </div>
 
+        <div class="cmd-card" id="card-set-title">
+          <div class="cmd-head">
+            <span class="cmd-name"><span class="slash">/</span>card-set-title</span>
+            <span class="cmd-badge">betting</span>
+          </div>
+          <p class="cmd-desc">Equips one of your unlocked trading-card titles as the epithet shown under your name on the card (see /stats' 🎴 reaction), and shows the resulting card.</p>
+          <table class="params">
+            <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+            <tr><td class="param-name">title</td><td class="param-type">string, autocomplete</td><td>Which title to equip. Autocomplete only offers titles you've actually unlocked — "Rookie" (the default, always available) plus anything you've earned.</td></tr>
+          </table>
+          <div class="cmd-note">
+            <strong>Reaching Diamond, Master, Grandmaster, or Challenger permanently unlocks that tier's own
+            title</strong> ("Diamond Mind", "Mastermind", "Grandmaster", "The Challenger") the moment you first
+            get there — it stays unlocked forever after, even if your elo drops back down below the tier that
+            earned it. Picking one here doesn't require currently being at that rank, just having reached it
+            once.
+          </div>
+        </div>
+
+        <div class="cmd-card" id="card-set-color-scheme">
+          <div class="cmd-head">
+            <span class="cmd-name"><span class="slash">/</span>card-set-color-scheme</span>
+            <span class="cmd-badge">betting</span>
+          </div>
+          <p class="cmd-desc">Equips one of your unlocked trading-card color schemes — accent and background — on your card (see /stats' 🎴 reaction), and shows the resulting card.</p>
+          <table class="params">
+            <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+            <tr><td class="param-name">scheme</td><td class="param-type">string, autocomplete</td><td>Which color scheme to equip. Autocomplete only offers schemes you've actually unlocked — "Default" (Shockwave's own palette, always available) plus anything you've earned.</td></tr>
+          </table>
+          <div class="cmd-note">
+            <strong>Reaching Diamond, Master, Grandmaster, or Challenger permanently unlocks that tier's own
+            color scheme</strong> alongside its title — the accent is that tier's own rank-badge color,
+            automatically brightened just enough to stay readable against the card's own background if the raw
+            badge color would otherwise be too dark there. Stays unlocked forever after, the same as the title.
+          </div>
+        </div>
+
+        <div class="cmd-card" id="card-set-font">
+          <div class="cmd-head">
+            <span class="cmd-name"><span class="slash">/</span>card-set-font</span>
+            <span class="cmd-badge">betting</span>
+          </div>
+          <p class="cmd-desc">Equips one of your purchased trading-card fonts on your card (see /stats' 🎴 reaction), and shows the resulting card.</p>
+          <table class="params">
+            <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+            <tr><td class="param-name">font_style</td><td class="param-type">string, autocomplete</td><td>Which font to equip. Autocomplete only offers fonts you've purchased — "Default" (Shockwave's own Chakra Petch/IBM Plex Sans pairing, always available) plus anything from /shop.</td></tr>
+          </table>
+          <div class="cmd-note">
+            <strong>Fonts are shop-only</strong> — unlike titles and color schemes, there's no way to earn one by
+            rank. Each one is a genuinely different bundled typeface, not just a different weight of the
+            default: "Bold" is Russo One, "Elegant" is Cinzel, "Cyber" is Orbitron — all free/open-source
+            (Google Fonts, SIL Open Font License).
+          </div>
+        </div>
+
+        <div class="cmd-card" id="card-test">
+          <div class="cmd-head">
+            <span class="cmd-name"><span class="slash">/</span>card-test</span>
+            <span class="cmd-badge">betting</span>
+          </div>
+          <p class="cmd-desc">Renders your trading card once per color scheme — "Default" plus the entire /shop catalog, regardless of what you actually own — so you can see what each one looks like before buying.</p>
+          <div class="cmd-note">
+            <strong>Every render is labeled with its own scheme name</strong> in the card's own title field, so
+            each image is self-explanatory without needing to check a filename. Discord caps a message at 10
+            attachments, so the full set (17 today) arrives as the initial response plus one or more follow-up
+            messages.
+          </div>
+        </div>
+
+        <div class="cmd-card" id="shop">
+          <div class="cmd-head">
+            <span class="cmd-name"><span class="slash">/</span>shop</span>
+            <span class="cmd-badge">betting</span>
+          </div>
+          <p class="cmd-desc">Lists every trading-card title, color scheme, and font purchasable with gold, grouped by category, with your current balance and what you already own.</p>
+          <div class="cmd-note">
+            <strong>Color schemes include Fire plus one for each Runeterra region</strong> (Demacia,
+            Noxus, Freljord, Ionia, Piltover, Zaun, Shurima, Shadow Isles, Bilgewater, Bandle City, Targon)
+            — the same region set <code class="inline">/team-set-logo</code>'s built-in crests cover, so
+            a team already using one of those logos has a matching player-card scheme to go with it.
+          </div>
+        </div>
+
+        <div class="cmd-card" id="shop-buy">
+          <div class="cmd-head">
+            <span class="cmd-name"><span class="slash">/</span>shop-buy</span>
+            <span class="cmd-badge">betting</span>
+          </div>
+          <p class="cmd-desc">Purchases a trading-card cosmetic with gold, permanently unlocking it the same way reaching an elo tier does.</p>
+          <table class="params">
+            <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+            <tr><td class="param-name">item</td><td class="param-type">string, autocomplete</td><td>Which item to buy — autocomplete only offers items you don't already own, labeled with their price.</td></tr>
+          </table>
+          <div class="cmd-note">
+            <strong>Refuses the purchase</strong> if you already own the item or can't afford it — nothing is
+            deducted either way. On success, equip it with <code class="inline">/card-set-title</code>,
+            <code class="inline">/card-set-color-scheme</code>, or <code class="inline">/card-set-font</code>
+            depending on what you bought.
+          </div>
+        </div>
+
+        <div class="cmd-card" id="achievements">
+          <div class="cmd-head">
+            <span class="cmd-name"><span class="slash">/</span>achievements</span>
+            <span class="cmd-badge">betting</span>
+          </div>
+          <p class="cmd-desc">Lists every trading-card achievement with its description and a ✅/🔒 marker for whether you've earned it — no permission gate, anyone can check their own progress.</p>
+          <div class="cmd-note">
+            <strong>17 achievements</strong>, each unlocking an exclusive title equipped the same way as any
+            other via <code class="inline">/card-set-title</code>: First Blood (win a game); a four-tier
+            Veteran ladder — Veteran (10 career wins) → Elite (50) → Battle-Hardened (150) → Immortal (500),
+            each a genuinely distinct title, not just "Veteran II"; a matching three-tier On Fire ladder —
+            On Fire (5-game win streak) → Unstoppable (10) → Untouchable (20); High Roller (win a single bet
+            of 5000+ gold) and Jackpot (win a single bet paying out 3x+ your wager, any size); Giant Slayer
+            (a big single-match elo swing); Team Player (rostered on 3+ persistent teams at once) and The
+            Captain (actually captain one); Big Spender (own 3+ items bought from
+            <code class="inline">/shop</code>) and Frequent Bettor (place 25+ total bets, win or lose); Iron
+            Will (rack up 20+ game losses without quitting); and Tournament Champion (win a tournament).
+            Gold-based achievements are keyed off a single transaction, never a balance milestone —
+            <code class="inline">/daily</code> hands out free gold every day, so "save up N gold" would just
+            reward showing up. Unlocking one posts a notification in the channel where it happened; running
+            <code class="inline">/achievements</code> also retroactively unlocks anything you already qualify
+            for but haven't been credited with yet.
+          </div>
+          <div class="cmd-note">
+            <strong>Veteran and On Fire get their own sections.</strong> Since each is a ladder of several
+            rising tiers, their achievements are grouped into their own field in the results instead of being
+            scattered alphabetically alongside every unrelated achievement — so the four-rung Veteran
+            progression (and the three-rung On Fire one) reads clearly as one climb from top to bottom.
+          </div>
+        </div>
+
         <div class="cmd-card" id="leaderboard">
           <div class="cmd-head">
             <span class="cmd-name"><span class="slash">/</span>leaderboard</span>
@@ -507,7 +680,7 @@
           <p class="cmd-desc">Ranks every player in the server who has stats to show. Leave both options out for an overview sorted by elo, showing just the raw elo number and game record; pick a specific stat to rank by just that instead.</p>
           <table class="params">
             <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
-            <tr><td class="param-name">filter</td><td class="param-type">choice, optional</td><td>Elo, Balance, Game Wins, Game Losses, Game Win Rate, Bet Wins, Bet Losses, Bet Win Rate, Net Gold, or Gold Wagered. Omit for the elo-sorted overview.</td></tr>
+            <tr><td class="param-name">filter</td><td class="param-type">choice, optional</td><td>Elo, Balance, Game Wins, Game Losses, Game Win Rate, Ranked Wins, Ranked Losses, Ranked Win Rate, Casual Wins, Casual Losses, Casual Win Rate, Bet Wins, Bet Losses, Bet Win Rate, Net Gold, or Gold Wagered. Omit for the elo-sorted overview.</td></tr>
             <tr><td class="param-name">order</td><td class="param-type">choice, optional</td><td>Descending (highest first) or Ascending (lowest first). Defaults to Descending.</td></tr>
           </table>
           <div class="cmd-note">
@@ -613,6 +786,17 @@
             <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
             <tr><td class="param-name">team</td><td class="param-type">string</td><td>Name of the team.</td></tr>
           </table>
+          <div class="cmd-note">
+            <strong>🛡️ turns the embed into a team card.</strong> React with it and the whole embed is
+            replaced with a portrait-style card built around the team's own logo as the centerpiece — colors
+            (frame, header, labels, background) are all sampled straight from that logo, not a stored setting,
+            so every team's card automatically matches its own crest. A dark logo color gets automatically
+            lightened just enough to stay easily readable against the card's own background, so text is never
+            sacrificed for the sake of matching the crest exactly. Below the logo: the team's name, then
+            its captain, record, and win rate, then its full roster with the captain starred. ↩️ replaces 🛡️
+            once the card is up and swaps back to the plain embed, restoring 🛡️ in turn — a real toggle, not a
+            one-way trip. A team with no logo set falls back to Shockwave's own gold.
+          </div>
         </div>
 
         <div class="cmd-card" id="team-set-logo">
