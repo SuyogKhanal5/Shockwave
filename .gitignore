@@ -4,3 +4,4 @@ __pycache__/
 .vscode/
 .claude/
 data/guildData/serverInfo/main.db
+shockwave-site/
