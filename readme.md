@@ -67,43 +67,101 @@ later gates whether a reported result touches anyone's elo at all.
 
 ### Voice moves & the betting window
 
-`/start` (`movefunc`) is the only command that actually moves players —
-one `move_to()` Discord API call per member, which is slow enough to blow
-the 3-second interaction window, so the command `defer()`s immediately and
-confirms via a followup once every move finishes. Opening betting
-(`startBettingHelper`) works the same way for a different reason: betting
-has to stay open for 60 seconds while the bot keeps responding to *other*
-commands, so the countdown runs as its own `asyncio.create_task`
-(`_bettingTimer`), tracked per-guild in `self.bettingTasks` so a `/return`
-or a fresh `/start` can cancel it instead of leaving it to fire later
-against a game that no longer exists.
+There's no standalone `/start` command anymore — moving players and
+opening betting both live behind a ▶️ reaction (`TEAM_START_EMOJI`) that
+`_finalizeRoster` adds to the *second* of the two team embeds every
+roster-forming path posts (`/make-teams`, ranked or not; `/captains` once
+the draft actually finishes; `/team-use`). `printEmbed` now returns both
+posted messages so its callers can hand them to `_finalizeRoster`, which
+records `roster_team1_message_id`/`roster_team2_message_id`/
+`roster_channel_id` on the guild's `servers` row — the same "remember
+which message is still live" shape `betting_message_id` already used for
+the winner-report reaction, and for the same reason: it's what lets
+`handleRosterReaction` tell a stale roster's ▶️ apart from the current
+one, since forming a new roster just overwrites those columns.
 
-Right after the move (and before betting opens), `/start` also posts the
-same matchup graphic a tournament match gets (`sendCurrentMatchupImage` →
-`_sendMatchupImage` → the tournament path's own `_renderMatchupImage`, just
-with no match id or tournament name in the subtitle) — deliberately only
-here, not at `/make-teams`/`/captains`/`/team-use` time, since those just
-form or load a roster and `/start` is the actual "this game is beginning"
-moment. The headline text comes from whichever `mode` string
+Clicking ▶️ runs `_startRosterViaReaction`: since a reaction has no
+`ctx.user` the way an Interaction does, the "channel to send everyone back
+to later" is found by scanning the roster's own players for whichever one
+is *currently* sitting in a voice channel (`_findRosterVoiceChannel`),
+rather than assuming the clicker themselves is in voice — anyone can click
+it, not just someone at the table. `roster_team2_message_id` is cleared
+**synchronously**, before any `await`, the moment the checks above it
+pass — the same "flip before doing anything async" shape
+`handleGameReportReaction`'s own `betting_message_id` clear uses, so two
+near-simultaneous ▶️ clicks can't both pass the guard and start the game
+twice. Once the moves are done, it posts the same matchup graphic a
+tournament match gets (`_sendMatchupImage` → the tournament path's own
+`_renderMatchupImage`, just with no match id or tournament name in the
+subtitle) and calls `_openBetting`. Betting has to stay open for 60
+seconds while the bot keeps responding to *other* commands, so the
+countdown runs as its own `asyncio.create_task` (`_bettingTimer`), tracked
+per-guild in `self.bettingTasks` so CANCEL_GAME_EMOJI or a fresh ▶️ click
+can cancel it instead of leaving it to fire later against a game that no
+longer exists. The headline text comes from whichever `mode` string
 (`"Normal"`/`"Ranked"`/`"Captains"`/`"Ranked Captains"`) the most recent
 team-forming command left in `servers` (`_matchupLabelForMode`), so it
 reads correctly no matter how the two teams got there.
 
-### Resolving a winner
+A 🔄 reaction (`TEAM_ROLES_REROLL_EMOJI`) sits alongside ▶️ on that same
+message, but only when the roster actually qualifies (`use_roles` was set
+*and* both teams landed at exactly 5 — the same condition
+`makeEmbedString` already used to decide whether to draw roles at all).
+Clicking it (`_rerollRoster`) genuinely re-shuffles both teams' player
+order and persists it back to `team1`/`team2`, then edits *both* posted
+messages in place with freshly role-labeled embeds — a real fix over the
+command this replaced (`/randomize-roles`/`randomRoleHelper`), which
+shuffled into a `result1`/`result2` text pair nothing ever displayed and
+never wrote the shuffle back to `team1`/`team2` at all, so the embeds
+`/make-teams` itself posted never actually reflected a reroll no matter
+how many times it ran. `_clearPagingReaction` removes the clicker's own
+reaction afterward (same as leaderboard paging) so 🔄 stays clickable for
+another reroll.
+
+### Resolving a winner, or cancelling the game
 
 Betting state for a guild is a finite state machine stored in the
-`betting_state` column: `NONE → OPEN → CLOSED → AWAITING_RESULT → NONE`.
-Once betting closes, `_bettingTimer` posts a message asking who won and
-reacts to it with 🔵/🔴 (`TEAM_EMOJIS`) itself, then stores that message's id. Any
-non-bot reaction anywhere goes through `on_raw_reaction_add` →
-`handleWinnerReaction`, which checks the emoji, the stored message id, and
-the state, then **flips the state to `NONE` synchronously before doing
-anything `await`-based** — that ordering matters, since it's what stops
-two near-simultaneous reactions (e.g. someone double-clicking, or two
-different people reacting within milliseconds of each other) from both
-passing the check and paying out twice. The same
-flip-before-await-anything pattern shows up again in `_acceptDuel` and
-`_resolveDuel` for `/wager-against`.
+`betting_state` column: `NONE → OPEN → CLOSED → NONE`. Unlike the old
+flow, the winner-report message doesn't wait for betting to close —
+`_openBetting` posts it immediately, in the same message as "betting is
+open," pre-reacted with 🔵/🔴 (`TEAM_EMOJIS`) *and* 🛑
+(`CANCEL_GAME_EMOJI`) right from the start, and stores that message's id
+before returning. A real game doesn't wait for a 60-second countdown to
+finish before anyone knows who won, so reporting (or cancelling) is valid
+the whole time `betting_state` is `OPEN` *or* `CLOSED` — `_bettingTimer`
+firing after the configured duration only flips `OPEN → CLOSED` and posts
+a short "betting is now closed" notice; it doesn't touch the report
+message or its reactions at all.
+
+Any non-bot reaction anywhere goes through `on_raw_reaction_add` →
+`handleGameReportReaction`, which checks the emoji (a `TEAM_EMOJIS` pick,
+or `CANCEL_GAME_EMOJI`), the stored message id, and that
+`betting_state` is `OPEN`/`CLOSED`, then **clears `betting_message_id`
+synchronously before doing anything `await`-based** — that ordering
+matters, since it's what stops two near-simultaneous reactions (e.g.
+someone double-clicking, or two different people reacting within
+milliseconds of each other) from both passing the check and double-
+processing the same game. It's the stored message id that gets cleared
+rather than `betting_state` itself, since the cancel path still needs to
+read the real, un-flipped `betting_state` afterward to know whether
+there's anything to refund. `_cancelBettingTimerTask` stops the running
+timer either way, since a winner can now be reported (or the game
+cancelled) while it's still counting down. A `TEAM_EMOJIS` pick calls
+`recordResult`, exactly as before; `CANCEL_GAME_EMOJI` calls
+`cancelGameHelper` instead — the reaction-driven replacement for the old
+`/return` command, living on the exact same message. It refunds any open
+bets and resets betting state via `cancelBettingHelper` (also clearing
+`active_tournament_match_id`, so an abandoned tournament match's
+bracket-advance hook can't fire against whatever unrelated game starts
+next), then moves everyone back to the original channel the same way a
+reported winner does. `cancelBettingHelper` itself is also what
+`_openBetting` calls first, to silently clear out a stale unresolved round
+before a fresh one opens — that path never moves anyone, since clearing a
+stale round isn't the player-facing "the game was cancelled" event
+`cancelGameHelper` handles.
+
+The same flip-before-await-anything pattern shows up again in
+`_acceptDuel` and `_resolveDuel` for `/wager-against`.
 
 ### The economy
 
@@ -149,7 +207,7 @@ second correction is possible from the new baseline too.
 
 A 1-on-1 side bet between two specific players, deliberately kept
 independent of the team-game betting above (own table, own emoji, no
-`/start` required). Unlike the single-active-game betting state stored
+active game required). Unlike the single-active-game betting state stored
 directly on the `servers` row, several duels can be open at once between
 different pairs of players in the same guild, so each one gets its own row
 in `duels` keyed by the current message id. Nothing is escrowed at
@@ -172,56 +230,69 @@ the bottom regardless of ascending/descending order, rather than a
 
 ### Redirecting where bets get posted (`/wager-set-channel`)
 
-By default every betting message (open/closed/winner-report) goes to
-wherever `/start` — or a tournament match — happened to run. Setting a
-wager channel changes that: `_openBetting` (the shared core both `/start`
-and a sequential tournament match call) resolves `servers.wager_channel`
+By default every betting message (the combined open+report message,
+the closed notice, and either a reported result or a cancellation) goes
+to wherever a game — or a tournament match — happened to start. Setting a
+wager channel changes that: `_openBetting` (the shared core both
+`_startRosterViaReaction`'s ▶️ handler and a sequential tournament match
+call) resolves `servers.wager_channel`
 by name right before anything else, and swaps it in for the channel it
-was handed. Since every later step in the cycle (`_bettingTimer`, the
-winner report, `recordResult`) just keeps using whatever channel it was
-given, redirecting at that one entry point is enough to redirect the
-whole thing.
+was handed. Since every later step in the cycle (`_bettingTimer`,
+`handleGameReportReaction`, `recordResult`, `cancelGameHelper`) just keeps
+using whatever channel it was given, redirecting at that one entry point
+is enough to redirect the whole thing.
 
 ### Admin resets and permissions
 
 `/clear` requires the **Manage Server** permission outright
 (`app_commands.checks.has_permissions`, same as `/report-correct-winner`).
-Within it, `clear_elo`, `clear_economy`, and `clear_achievements`
-additionally act on *every player* in the server, so none of them run the
-moment the command is invoked — `/clear` posts a `discord.ui.View` with
-"Confirm reset"/"Cancel" buttons (`ConfirmResetView`), and the reset only
-happens from inside that view's button callback. `interaction_check` on
-the view rejects anyone who isn't the member who ran `/clear`, and the
-view times out after 30 seconds with nothing changed if it's ignored. All
-three flags can be requested together — `clear_economy` takes priority
-over `clear_elo` when both are set (the whole-row wipe already resets elo
-too, so there'd be nothing left for `clear_elo` to separately do), while
-`clear_achievements` is independent of both and just adds its own extra
-sentence to the warning/confirmation text (`confirmDestructiveClearHelper`/
-`ConfirmResetView.confirm` build these as a list of per-flag sentences
-rather than one combined string, so any combination reads cleanly without
-custom-casing grammar for every case). `resetAchievementsHelper` only
-deletes `card_unlocks` rows whose `itemKey` is a `CARD_ACHIEVEMENT_TITLES`
-key — every other unlock (tier rewards, special grants, shop purchases)
-and the underlying `economy` stats those achievements were computed from
-(`game_wins`, `current_win_streak`, ...) are untouched, so a player who
-still qualifies will simply earn them back the next time something
-self-heals (`/achievements`, `/stats`, their next game) — this is a "clear
-the trophies off the shelf" reset, not a "make everyone start over" one.
+Within it, `clear_elo`, `clear_economy`, `clear_achievements`, and
+`clear_card_unlocks` additionally act on *every player* in the server, so
+none of them run the moment the command is invoked — `/clear` posts a
+`discord.ui.View` with "Confirm reset"/"Cancel" buttons
+(`ConfirmResetView`), and the reset only happens from inside that view's
+button callback. `interaction_check` on the view rejects anyone who isn't
+the member who ran `/clear`, and the view times out after 30 seconds with
+nothing changed if it's ignored. All four flags can be requested together
+— `clear_economy` takes priority over `clear_elo` when both are set (the
+whole-row wipe already resets elo too, so there'd be nothing left for
+`clear_elo` to separately do), while `clear_achievements` and
+`clear_card_unlocks` are independent of both (and of each other) and just
+add their own extra sentence to the warning/confirmation text
+(`confirmDestructiveClearHelper`/`ConfirmResetView.confirm` build these as
+a list of per-flag sentences rather than one combined string, so any
+combination reads cleanly without custom-casing grammar for every case).
+`resetAchievementsHelper` only deletes `card_unlocks` rows whose `itemKey`
+is a `CARD_ACHIEVEMENT_TITLES` key — every other unlock (tier rewards,
+special grants, shop purchases) and the underlying `economy` stats those
+achievements were computed from (`game_wins`, `current_win_streak`, ...)
+are untouched, so a player who still qualifies will simply earn them back
+the next time something self-heals (`/achievements`, `/stats`, their next
+game) — this is a "clear the trophies off the shelf" reset, not a "make
+everyone start over" one. `resetCardUnlocksHelper`, backing
+`clear_card_unlocks`, goes further on purpose: it deletes *every*
+`card_unlocks` row regardless of `itemType` (tier rewards, special
+grants, shop purchases, and achievement titles alike) and resets the
+equipped `trading_cards` row back to Shockwave's own defaults, since
+leaving it pointed at a title/scheme/font that no longer resolves to
+anything would just surface as a broken card the next time it renders.
 
-`clear_achievements` alone also takes an optional `user` — narrows it from
-"every player in the server" down to just that one member, still gated
-behind the exact same confirm/cancel view (a single-player reset is still
-irreversible, so it gets no less confirmation than a server-wide one).
-`clear_elo`/`clear_economy` always stay whole-server regardless of `user`
-— only `clear_achievements` reads it — so a combined run (say,
-`clear_elo` + `clear_achievements` + `user`) mixes an "every player" elo
-sentence with a "for @member" achievements sentence in the same warning/
-confirmation message rather than trying to force both onto one shared
-scope. `resetAchievementsHelper(guild_id, user_id=None)` carries that same
-split down to the SQL: `user_id=None` deletes every achievement row for
-the guild, a real one narrows the `DELETE` with an extra `AND userId=?`.
-Passing `user` without `clear_achievements` is rejected outright, before
+`clear_achievements`/`clear_card_unlocks` each also take the same optional
+`user` — narrows either from "every player in the server" down to just
+that one member, still gated behind the exact same confirm/cancel view (a
+single-player reset is still irreversible, so it gets no less confirmation
+than a server-wide one). `clear_elo`/`clear_economy` always stay
+whole-server regardless of `user` — only `clear_achievements`/
+`clear_card_unlocks` read it — so a combined run (say, `clear_elo` +
+`clear_achievements` + `user`) mixes an "every player" elo sentence with a
+"for @member" achievements sentence in the same warning/confirmation
+message rather than trying to force both onto one shared scope.
+`resetAchievementsHelper(guild_id, user_id=None)`/
+`resetCardUnlocksHelper(guild_id, user_id=None)` carry that same split
+down to the SQL: `user_id=None` deletes every row for the guild, a real
+one narrows the `DELETE` (and, for card unlocks, the `trading_cards`
+reset) with an extra `AND userId=?`. Passing `user` without
+`clear_achievements` or `clear_card_unlocks` is rejected outright, before
 even the non-destructive team wipe runs — there's no other flag `user`
 could mean anything for. `/tournament-create` follows a narrower
 version of the same idea: creating a server's *first* tournament needs no
@@ -245,7 +316,7 @@ which turned out to need its own fix (see below). `/team-use` is the
 shortcut: it loads two persistent teams straight into `team1`/`team2` so
 a casual or ranked game can start immediately, without cloning any state
 back into the `teams` table — the in-memory copy gets `set_id(1)`/`set_id(2)`
-purely for `movefunc`'s sake.
+purely for `_startRosterViaReaction`'s sake.
 
 **Bugs fixed to make this possible:** `Team.deserializeTeam` never parsed
 its `id` or `captain` fields back to real types after a database
@@ -375,7 +446,8 @@ visual style bolted on.
 **Sequential mode** genuinely reuses the ordinary game cycle rather than
 reimplementing it: accepting a match's ready-check (✅, either captain)
 sets `servers.team1`/`team2` to that match's two teams and calls
-`_openBetting` — the exact function `/start` calls — so betting, the
+`_openBetting` — the exact function ▶️'s own `_startRosterViaReaction`
+calls — so betting, the
 🔵/🔴 winner report, and payouts all work unmodified. The only addition
 is `active_tournament_match_id`, a column on `servers` that's `None` for
 every ordinary game and only gets set while a tournament match is
@@ -391,7 +463,7 @@ every match's 🔵/🔴 report at once through its own lightweight reaction
 path, scoped by each match's own row instead of guild state. Betting
 still happens, just through a second, match-scoped path
 (`_openConcurrentTournamentBetting`/`tournament_wagers`) instead of the
-singleton `wagers` table `/start` uses — see "Concurrent tournament
+singleton `wagers` table a normal game uses — see "Concurrent tournament
 betting" below.
 
 Either way, resolving a match funnels through the same
@@ -409,8 +481,8 @@ game) keep working the entire time a tournament round is in progress.
 ### Concurrent tournament betting
 
 The singleton `wagers` table (`PRIMARY KEY(guildId, userId)`) can only ever
-represent one active bet per player per *guild* — fine for `/start` and
-sequential-mode tournament matches, where there's only ever one game live
+represent one active bet per player per *guild* — fine for an ordinary
+game and sequential-mode tournament matches, where there's only ever one game live
 at a time, but structurally incapable of letting one player bet on several
 matches at once, which simultaneous mode routinely has. Rather than bend
 that table to fit, simultaneous-mode betting gets its own, genuinely
@@ -438,7 +510,7 @@ concurrently-open match's bettors getting paid.
 
 `Team.logo_path` is a local file path, not image data — resolved against
 `assets/clash-logos/` (Riot Games' official Clash-mode faction/region
-logos, `/team-set-logo`'s autocomplete lists every file there by name) via
+logos, `/team-set`'s `logo` autocomplete lists every file there by name) via
 `_resolveLogoPath`. A team with no logo set gets one **assigned randomly**
 the moment it's next loaded — `_ensureLogo`, called from every read path
 (`getTeamRow`, `getTeamById`, `getTeamsForGuild`) as well as
@@ -454,7 +526,7 @@ instead.
 row to write the pick back to) — the ad-hoc `Team` objects `/make-teams`,
 `/captains`, and ranked team formation build on the fly for a casual game
 never go through it, so `team.get_logo_path()` is still `None` for them by
-the time `/start`'s matchup graphic renders. Rather than draw a bare
+the time ▶️'s matchup graphic renders. Rather than draw a bare
 accent-colored ring for those, `_drawMatchupColumn` picks a random
 built-in logo right at render time and uses that instead — not persisted
 anywhere (there's no stable row to persist it against), so a re-render can
@@ -465,10 +537,15 @@ built-in set itself is unavailable.
 ### Trading cards
 
 `/stats` posts two reactions alongside the embed (see `handleStatsReaction`):
-🖼️ toggles the thumbnail between the player's real Discord avatar and
-Discord's own generic default avatar (comparing the embed's current
-thumbnail URL against `STATS_PLACEHOLDER_AVATAR_URL` to know which
-direction to flip), and 🎴 throws the whole embed away and replaces it with
+🖼️ toggles the thumbnail between this server's own profile picture for
+that player and their regular, account-wide one (`_resolveMemberAvatarUrl`
+for the server half — `member.display_avatar`, which already resolves a
+per-server override if one's set — and the new `_resolveGlobalAvatarUrl`
+for the regular half, which deliberately fetches the plain `discord.User`
+behind the member, bypassing any guild avatar override; comparing the
+embed's current thumbnail URL against a freshly-resolved server URL is
+what tells the handler which direction to flip), and 🎴 throws the whole
+embed away and replaces it with
 a rendered trading card (`_renderTradingCardImage`) — Shockwave's logo and
 the server's name across the top (the exact same `_drawBracketHeader` every
 other rendered image uses), the player's actual Discord username
@@ -490,14 +567,24 @@ this reason). It's a circle for most tiers, but a diamond for Platinum
 (`\U0001f537`) and Diamond (`\U0001f48e`) — both of those are actually
 diamond/gem-cut shapes, not circles, in the real emoji, so a round badge
 there was a shape mismatch against the embed, not just a color one.
-Neither of those two reactions applies to a card once it's up
-(there's no "thumbnail" or "show the card again" to toggle), so
-`handleStatsReaction` removes both outright the moment 🎴 fires and adds a
-single 🪪 in their place; clicking that rebuilds the plain `/stats` embed
-(`_buildStatsEmbed`, the same code `statsHelper` itself calls) via
-`_swapTradingCardForStats`, sets `stats_views.cardShown` back to 0, and
-restores 🖼️/🎴 — so the whole thing is a real back-and-forth toggle rather
-than a one-way trip.
+🎴 itself doesn't apply anymore once the card is up (there's no "show the
+card again" to offer), so `handleStatsReaction` removes just that one
+reaction the moment it fires and adds a single 🪪 in its place; clicking
+that rebuilds the plain `/stats` embed (`_buildStatsEmbed`, the same code
+`statsHelper` itself calls) via `_swapTradingCardForStats`, sets
+`stats_views.cardShown` back to 0, and restores 🎴 — a real back-and-forth
+toggle rather than a one-way trip. 🖼️ is deliberately *not* touched by
+either swap, since the avatar toggle applies on both sides of the
+embed/card divide: `handleStatsReaction` branches on `cardShown` when 🖼️
+fires, and once a card is up the toggle re-renders the whole card image
+in place instead of swapping an embed thumbnail URL — the avatar is baked
+into the PNG, not a swappable field. `_resolveCardAvatarImage` picks
+between `member`'s per-server avatar and a plain `discord.User`'s
+account-wide one (fetched the same way `_resolveGlobalAvatarUrl` does),
+and `stats_views.cardAvatarGlobal` tracks which one is currently showing
+so the next 🖼️ click knows which way to flip — reset to 0 every time the
+card is (re-)entered, so it always starts on the server avatar, matching
+the plain embed's own default.
 
 A card's look lives in `trading_cards` (one row per (guild, player), same
 self-healing "insert defaults on first read" shape `ensureEconomyRow` uses
@@ -565,26 +652,30 @@ accent_color, background_color}` hex dicts for schemes, background
 derived the same darken-the-accent way `_renderTeamCardImage`'s own
 background is).
 
-`/card-set-title` is the first (and so far only) command that actually
-consumes `getUnlockedCardTitles` — `cardTitleAutocomplete` offers each
-caller their own `getAvailableCardTitles` (`CARD_DEFAULT_TITLE` plus
-whatever they've personally unlocked, so the picker never shows a title
-they can't actually equip), and `cardSetTitleHelper` re-validates that
-same list at the command boundary before writing anything, rather than
-trusting whatever the client sent. `setCardTitle` itself is a trusting
-internal setter — it also flips `trading_cards.customized` to 1, the same
-flag `ensureCardSettings`'s own resync-to-defaults check respects, since
-without it the very next `/stats` call would silently revert an equipped
-title right back to `CARD_DEFAULT_TITLE`.
+`/card-set` is the one command that consumes `getUnlockedCardTitles`,
+`getUnlockedCardColorSchemes`, and `getUnlockedCardFontStyles` together —
+`title`, `color_scheme`, and `font_style` are all optional params on the
+same command (each with its own autocomplete: `cardTitleAutocomplete` offers
+`getAvailableCardTitles`, `cardColorSchemeAutocomplete` offers
+`getAvailableCardColorSchemes`, `cardFontAutocomplete` offers
+`getAvailableCardFontStyles` — each the default plus whatever the caller's
+personally unlocked, so the picker never shows something they can't
+actually equip), and any combination of the three can be set in one call.
+`cardSetHelper` re-validates every *provided* field against its own
+catalog before writing anything — the whole point of doing this validate-
+first: a bad value in one field (a typo'd font, say) can't leave another,
+genuinely valid field half-applied, since nothing gets written until every
+given field has passed. `setCardTitle`/`setCardColorScheme`/
+`setCardFontStyle` are the trusting internal setters `cardSetHelper` calls
+for whichever fields were actually given — each also flips
+`trading_cards.customized` to 1, the same flag `ensureCardSettings`'s own
+resync-to-defaults check respects, since without it the very next
+`/stats` call would silently revert an equipped field right back to its
+`CARD_DEFAULT_*` value.
 
-`/card-set-color-scheme` is `/card-set-title`'s exact counterpart for
-colors — same shape end to end: `cardColorSchemeAutocomplete` offers each
-caller their own `getAvailableCardColorSchemes` (`CARD_DEFAULT_SCHEME_NAME`
-plus whatever they've unlocked), `cardSetColorSchemeHelper` re-validates
-against that same list at the command boundary and resolves the chosen
-name to its `{accent_color, background_color}` pair, and `setCardColorScheme`
-is the trusting internal setter that writes both plus `customized=1`. The
-one place this differs from titles: `getUnlockedCardColorSchemes` runs
+The color-scheme half of `cardSetHelper` (`getAvailableCardColorSchemes`)
+is the one place this differs from titles/fonts in what it has to do
+before offering a choice: `getUnlockedCardColorSchemes` runs
 each scheme's `ELO_TIER_BADGE_COLORS` accent through `_ensureReadableAccent`
 (`CARD_MIN_ACCENT_CONTRAST`, the same helper and threshold
 `_renderTeamCardImage` uses for a team's sampled logo color) before ever
@@ -645,7 +736,7 @@ three — a handful of standalone themes (Crimson, Emerald, Azure, Sunset,
 Fire) plus one per Runeterra region (Demacia, Noxus, Freljord, Ionia,
 Piltover, Zaun, Shurima, Shadow Isles, Bilgewater, Bandle City, Targon)
 — the same region set `assets/clash-logos/` already covers for
-`/team-set-logo`, so a team using one of those crests has a matching
+`/team-set`'s `logo` option, so a team using one of those crests has a matching
 player-card scheme available too. A purchase is just `economy.balance -= price` plus
 the exact same `INSERT OR IGNORE INTO card_unlocks` a tier reward or a
 special grant writes — there's no separate "did I buy this" bookkeeping
@@ -658,12 +749,12 @@ Font styles are shop-only — there's no elo-tier path to one at all — so
 with no combining catalog needed. `shopHelper` lists every item grouped by
 category with its price or an "✅ Owned" marker plus the caller's current
 balance; `shopBuyHelper` refuses an unknown item, one already owned, or
-one the caller can't afford, and on success tells them which
-`/card-set-*` command equips it.
+one the caller can't afford, and on success tells them it's ready to
+equip with `/card-set`.
 
-`/card-set-font` is `/card-set-title`/`/card-set-color-scheme`'s exact
-counterpart for `trading_cards.font_style` — the one difference from
-those two is `_cardFontPaths` itself, which resolves a `font_style` key
+The font half of `cardSetHelper`/`getAvailableCardFontStyles` is otherwise
+the same shape as titles/color schemes for `trading_cards.font_style` —
+the one thing that's different is `_cardFontPaths` itself, which resolves a `font_style` key
 to a dict: `name_font`/`name_variation` and `title_font`/`title_variation`
 for the card's two biggest typographic elements (the player's name, and
 the title/epithet under it), `body_font` plus a `label_weight`/
@@ -699,35 +790,17 @@ card's typography together. Second: even with that fixed, "Bold" and
 Russo One/Cinzel/Orbitron (plus adding a third style, "Cyber") swapped in
 actually distinct typefaces instead.
 
-All three `/card-set-*` commands show the card, not just confirm the
-change in text — `_renderMemberTradingCardFile` (the caller's own current
-title/scheme/font/stats/teams/avatar, rendered once) and the thin
-`_cardPreviewEmbedAndFile` wrapper around it are shared by all three, each
-passing its own confirmation string as `content=` alongside the same
-`embed=`/`file=` pair. Simpler than `_swapStatsForTradingCard`'s own
-member-resolution: the caller of a `/card-set-*` command is always a
-real, currently-present member (they're the one running it), so there's
-no "member left the guild" fallback to handle the way that function needs.
-
-`/card-test` reuses the same rendering path to preview every color scheme
-at once — `CARD_DEFAULT_SCHEME_NAME` plus the whole `CARD_SHOP_COLOR_SCHEMES`
-catalog regardless of what the caller has actually unlocked, each render's
-own title field overridden to the scheme's name so the image is
-self-labeled without needing to cross-reference a filename. Stats/teams/
-avatar are fetched once and reused across every render — only the color
-scheme itself changes between them. Discord caps a single message at 10
-file attachments (`CARD_TEST_BATCH_SIZE`), so the first batch goes out as
-a follow-up and anything past that spills into further follow-up
-`ctx.channel.send()` calls in the same channel.
-
-BUG FIX: rendering every scheme (17 today) comfortably takes longer than
-Discord's 3-second interaction window — the real bot hit a 404 "Unknown
-interaction" trying to send the initial response only after finishing all
-that PIL work. `cardTestHelper` now calls `ctx.response.defer()` first
-thing, before any rendering, and sends the actual result via
-`ctx.followup.send()` instead — the same `returnHelper` BUG FIX shape
-already documented (a `move_to()` API call per member instead of PIL
-rendering, but the same "defer before anything slow" fix).
+`/card-set` shows the card, not just confirms the change in text —
+`_renderMemberTradingCardFile` (the caller's own current
+title/scheme/font/stats/teams/avatar, rendered once, reflecting whichever
+fields the call actually changed) and the thin `_cardPreviewEmbedAndFile`
+wrapper around it render it, with the confirmation string (naming every
+field that was set, joined into one sentence) passed as `content=`
+alongside the same `embed=`/`file=` pair. Simpler than
+`_swapStatsForTradingCard`'s own member-resolution: the caller of
+`/card-set` is always a real, currently-present member (they're the one
+running it), so there's no "member left the guild" fallback to handle the
+way that function needs.
 
 ### Achievements
 
@@ -736,7 +809,7 @@ rendering, but the same "defer before anything slow" fix).
 a shop purchase — same `INSERT OR IGNORE`-shaped row (`_unlockAchievement`
 handles it, using `rowcount` to tell a genuine first unlock from a
 no-op repeat), so an achievement title shows up through
-`getUnlockedCardTitles`/`/card-set-title` automatically like any other
+`getUnlockedCardTitles`/`/card-set` automatically like any other
 (`CARD_TITLE_CATALOG` folds `CARD_ACHIEVEMENT_TITLES` in too). What's new
 is *why* one unlocks: conditions tied to actual gameplay rather than rank
 or gold spent — first win (First Blood); a single tournament win
@@ -764,9 +837,8 @@ career wins; On Fire (`CARD_ACHIEVEMENT_ON_FIRE_STREAK`, 5) → Unstoppable
 (10) → Untouchable (20) win streak. Each ladder is walked as a
 `(threshold, achievement_key)` list (`CARD_ACHIEVEMENT_VETERAN_LADDER`/
 `CARD_ACHIEVEMENT_ON_FIRE_LADDER`) rather than one `if` per tier, so
-crossing a big enough number in one jump (see `/test-achievements` below)
-unlocks every rung up to it in the same pass, not just the one it
-technically landed past.
+crossing a big enough number in one jump unlocks every rung up to it in
+the same pass, not just the one it technically landed past.
 
 Gold-based achievements are deliberately keyed off a single transaction —
 a single wager's own win, payout, or size — never a balance milestone:
@@ -802,7 +874,7 @@ winning team in one pass.
 
 Unlike the other three unlock paths, earning an achievement also posts a
 notification — these are meant to feel like a moment worth noticing, not
-just another option quietly waiting in `/card-set-title`'s autocomplete.
+just another option quietly waiting in `/card-set`'s title autocomplete.
 `applyGameDeltas` returns the list of newly-unlocked `(user_id,
 achievement_key)` pairs (a mechanical `rowcount`-based fact, not an I/O
 side effect, keeping the same "helper does data, caller does I/O" split
@@ -825,19 +897,6 @@ highest, so a four-rung ladder reads as one clear progression instead of
 its rungs being scattered alphabetically-by-insertion-order alongside
 every unrelated achievement; everything else lands in a shared `__Other__`
 field.
-
-`/test-achievements` (TEMP debug command, excluded from `COMMAND_HELP` the
-same way the old tournament-simulating `/test` was) exists to exercise this
-whole pipeline without grinding real games: `runSimulatedAchievementsHelper`
-parks the caller's own `economy` row one short of the TOP of both ladders
-(plus `iron_will`/`gambler`'s own thresholds), grants a few real "TEST Team
-N" rosters (captained by the caller, covering `team_player`/`captain`
-together) and shop-catalog `card_unlocks` rows (`big_spender`), then fires
-one real `applyGameDeltas` win — the same single event that crosses every
-remaining threshold at once — through the actual `_checkAchievements`/
-`_announceAchievements` functions rather than writing `card_unlocks` rows
-directly, so a bug in the real pipeline shows up here instead of only in a
-live game.
 
 ### Team cards
 
