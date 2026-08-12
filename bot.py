@@ -1238,8 +1238,7 @@ async def notify(ctx, member: discord.Member = None, role: discord.Role = None):
     for target in targets:
         await helperObj.notifyHelper(ctx, target)
 
-    team_size = helperObj.get(ctx.guild.id, "team_size")
-    await ctx.response.send_message("Sent an invite for the " + str(team_size * 2) + " man!")
+    await ctx.response.send_message("Sent an invite to " + member.name + "!")
 
 
 @tree.command(
