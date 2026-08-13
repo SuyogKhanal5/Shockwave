@@ -85,7 +85,14 @@ Clicking ▶️ runs `_startRosterViaReaction`: since a reaction has no
 to later" is found by scanning the roster's own players for whichever one
 is *currently* sitting in a voice channel (`_findRosterVoiceChannel`),
 rather than assuming the clicker themselves is in voice — anyone can click
-it, not just someone at the table. `roster_team2_message_id` is cleared
+it, not just someone at the table. `channel1`/`channel2` (set by
+`/set-channels`, an admin-only command) are looked up next; if either is
+missing — `/set-channels` was never run, or the named channel got deleted
+— `_ensureDefaultTeamChannels` self-heals onto `DEFAULT_TEAM_CHANNEL_NAMES`
+(`"Team-1"`/`"Team-2"`), creating whichever one doesn't already exist and
+writing them back to `channel1`/`channel2` so this only happens once per
+guild, rather than refusing to start the game at all.
+`roster_team2_message_id` is cleared
 **synchronously**, before any `await`, the moment the checks above it
 pass — the same "flip before doing anything async" shape
 `handleGameReportReaction`'s own `betting_message_id` clear uses, so two

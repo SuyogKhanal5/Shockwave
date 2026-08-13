@@ -260,6 +260,11 @@ TEAM_CARD_RETURN_EMOJI = "↩️"  # ↩️
 # only gets added when the roster is role-eligible (see _finalizeRoster).
 TEAM_ROLES_REROLL_EMOJI = "\U0001f504"  # 🔄
 TEAM_START_EMOJI = "▶️"  # ▶️
+# Fallback voice channel names ▶️ self-heals onto a guild's `channel1`/
+# `channel2` (see _ensureDefaultTeamChannels) if a game is started before
+# /set-channels has ever been run — created on demand the same way
+# /set-channels itself creates a missing channel.
+DEFAULT_TEAM_CHANNEL_NAMES = ("Team-1", "Team-2")
 
 # Team-card layout (see _renderTeamCardImage) — same card shape/width as
 # the player trading card above (CARD_WIDTH, CARD_NAME_FONT_SIZE, CARD_
@@ -1171,6 +1176,25 @@ class helpers():
         team2_message = await channel.fetch_message(int(team2_msg_id))
         await team2_message.edit(embed=team2_embed)
 
+    # Finds (or creates) DEFAULT_TEAM_CHANNEL_NAMES and points this guild's
+    # channel1/channel2 at them — the self-heal ▶️ falls back to instead of
+    # refusing to start a game just because /set-channels was never run.
+    async def _ensureDefaultTeamChannels(self, guild):
+        name1, name2 = DEFAULT_TEAM_CHANNEL_NAMES
+
+        channel1 = discord.utils.get(guild.channels, name=name1)
+        if channel1 is None:
+            channel1 = await guild.create_voice_channel(name=name1)
+
+        channel2 = discord.utils.get(guild.channels, name=name2)
+        if channel2 is None:
+            channel2 = await guild.create_voice_channel(name=name2)
+
+        self.update(guild.id, "channel1", name1)
+        self.update(guild.id, "channel2", name2)
+
+        return channel1, channel2
+
     # ▶️'s whole implementation — everything the old /start command did
     # (movefunc + sendCurrentMatchupImage + startBettingHelper), just
     # working from guild/channel directly instead of an Interaction, since
@@ -1198,14 +1222,18 @@ class helpers():
         channel1 = discord.utils.get(guild.channels, name=channel1name)
         channel2 = discord.utils.get(guild.channels, name=channel2name)
         if channel1 is None or channel2 is None:
-            await channel.send('Team channels not set! Use "/team-set-channels" to set them first.')
-            return
+            # /set-channels was never run (or named channels got deleted) —
+            # rather than refuse to start the game, fall back to
+            # DEFAULT_TEAM_CHANNEL_NAMES, creating them if they don't
+            # already exist, and remember them as this guild's own from
+            # here on so this only happens once.
+            channel1, channel2 = await self._ensureDefaultTeamChannels(guild)
 
         # BUG-PRONE PATTERN AVOIDED: flip this synchronously, with no
         # `await` between it and the checks above, so a second
         # near-simultaneous ▶️ click can't also pass those checks and
-        # start the game twice — same reasoning handleWinnerReaction's own
-        # betting_state flip documents.
+        # start the game twice — same reasoning handleGameReportReaction's
+        # own betting_message_id clear documents.
         self.update(guild_id, "roster_team2_message_id", None)
         self.update(guild_id, "original_channel", str(original_channel))
 

@@ -763,14 +763,44 @@ class StartRosterViaReactionTests(HelperTestCase):
         # Not consumed — the same click's intent should still be retryable.
         self.assertEqual(self.helperObj.get(GUILD_ID, "roster_team2_message_id"), 112)
 
-    async def test_missing_team_channels_sends_a_message_and_does_not_start(self):
+    async def test_missing_team_channels_self_heals_onto_defaults(self):
+        # BUG FIX: this used to refuse to start the game at all ("Team
+        # channels not set!") if /set-channels had never been run. Now it
+        # falls back to DEFAULT_TEAM_CHANNEL_NAMES, creating them if
+        # missing, and remembers them for next time.
         self.helperObj.update(GUILD_ID, "channel1", "")
-        with patch.object(self.helperObj, "_openBetting", AsyncMock()) as open_betting:
+        self.helperObj.update(GUILD_ID, "channel2", "")
+        with patch.object(self.helperObj, "_openBetting", AsyncMock()) as open_betting, \
+             patch.object(self.helperObj, "_sendMatchupImage", AsyncMock()):
             await self.helperObj._startRosterViaReaction(GUILD_ID, self.channel, self._payload())
 
-        open_betting.assert_not_awaited()
-        self.channel.send.assert_awaited_once()
-        self.assertIn("Team channels not set", self.channel.send.call_args.args[0])
+        open_betting.assert_awaited_once_with(GUILD_ID, self.channel)
+        self.assertEqual(self.helperObj.get(GUILD_ID, "channel1"), "Team-1")
+        self.assertEqual(self.helperObj.get(GUILD_ID, "channel2"), "Team-2")
+
+        default1 = discord.utils.get(self.fakeGuild.channels, name="Team-1")
+        default2 = discord.utils.get(self.fakeGuild.channels, name="Team-2")
+        self.assertIsNotNone(default1)
+        self.assertIsNotNone(default2)
+        self.member1.move_to.assert_awaited_once_with(default1)
+        self.member2.move_to.assert_awaited_once_with(default2)
+
+    async def test_missing_team_channels_reuses_existing_defaults_without_recreating(self):
+        self.helperObj.update(GUILD_ID, "channel1", "")
+        self.helperObj.update(GUILD_ID, "channel2", "")
+        existing1 = FakeChannel("Team-1")
+        existing2 = FakeChannel("Team-2")
+        self.fakeGuild.channels.extend([existing1, existing2])
+
+        with patch.object(self.helperObj, "_openBetting", AsyncMock()), \
+             patch.object(self.helperObj, "_sendMatchupImage", AsyncMock()):
+            await self.helperObj._startRosterViaReaction(GUILD_ID, self.channel, self._payload())
+
+        self.member1.move_to.assert_awaited_once_with(existing1)
+        self.member2.move_to.assert_awaited_once_with(existing2)
+        names = [c.name for c in self.fakeGuild.channels]
+        self.assertEqual(names.count("Team-1"), 1)
+        self.assertEqual(names.count("Team-2"), 1)
 
 
 class HandleRosterReactionTests(HelperTestCase):
@@ -4644,7 +4674,6 @@ class SetWagerChannelHelperTests(HelperTestCase):
 
 class NotifyHelperTests(HelperTestCase):
     async def test_sends_dm_with_invite(self):
-        self.helperObj.update(GUILD_ID, "team_size", 5)
         voice_channel = FakeChannel("Lobby")
         caller = FakeMember("Caller")
         caller.voice = FakeVoiceState(voice_channel)
@@ -4657,7 +4686,7 @@ class NotifyHelperTests(HelperTestCase):
         dm_channel = target.create_dm.return_value
         dm_channel.send.assert_awaited_once()
         content = dm_channel.send.call_args.args[0]
-        self.assertIn("10 man", content)
+        self.assertIn("Caller has invited you to play in a game!", content)
         self.assertIn("https://discord.gg/fake-invite", content)
 
 
@@ -8503,7 +8532,7 @@ class CommandRegistrationTests(BotModuleTestCase):
     def test_all_expected_commands_registered(self):
         names = {c.name for c in self.bot.tree.get_commands()}
         expected = {
-            "team-set-channels", "wager", "wager-against", "daily",
+            "set-channels", "wager", "wager-against", "daily",
             "stats", "card-set", "shop", "shop-buy",
             "achievements",
             "leaderboard", "help", "make-teams", "report-correct-winner",
@@ -9020,14 +9049,14 @@ class CommandDelegationTests(BotModuleTestCase):
         ctx = self._ctx()
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "setTeamHelper", mock):
-            await self._command("team-set-channels").callback(ctx, team1="Red", team2="Blue")
+            await self._command("set-channels").callback(ctx, team1="Red", team2="Blue")
         mock.assert_awaited_once_with(ctx, "Red", "Blue", None)
 
     async def test_set_team_channels_delegates_size(self):
         ctx = self._ctx()
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "setTeamHelper", mock):
-            await self._command("team-set-channels").callback(ctx, team1="Red", team2="Blue", size=4)
+            await self._command("set-channels").callback(ctx, team1="Red", team2="Blue", size=4)
         mock.assert_awaited_once_with(ctx, "Red", "Blue", 4)
 
     async def test_choose_delegates_to_choose_func(self):
@@ -9091,12 +9120,43 @@ class HelpCommandTests(BotModuleTestCase):
 
 
 class SetTeamChannelsCommandTests(BotModuleTestCase):
+    def test_requires_manage_guild_permission(self):
+        cmd = self._command("set-channels")
+        denied = SimpleNamespace(permissions=discord.Permissions.none())
+
+        with self.assertRaises(app_commands.MissingPermissions):
+            for check in cmd.checks:
+                check(denied)
+
+    def test_manage_guild_permission_is_sufficient(self):
+        cmd = self._command("set-channels")
+        allowed = SimpleNamespace(permissions=discord.Permissions(manage_guild=True))
+
+        for check in cmd.checks:
+            self.assertTrue(check(allowed))
+
+    async def test_error_handler_gives_a_friendly_denial_message(self):
+        cmd = self._command("set-channels")
+        ctx = self._ctx()
+
+        await cmd.on_error(ctx, app_commands.MissingPermissions(["manage_guild"]))
+
+        ctx.response.send_message.assert_awaited_once()
+        self.assertIn("Manage Server", ctx.response.send_message.call_args.args[0])
+
+    async def test_error_handler_reraises_unrelated_errors(self):
+        cmd = self._command("set-channels")
+        ctx = self._ctx()
+
+        with self.assertRaises(ValueError):
+            await cmd.on_error(ctx, ValueError("boom"))
+
     async def test_size_is_optional_and_defaults_to_unset(self):
         guild_id = 902
         await self._insert_guild_row(guild_id)
         ctx = self._ctx(guild_id=guild_id)
 
-        await self._command("team-set-channels").callback(ctx, team1="Red", team2="Blue")
+        await self._command("set-channels").callback(ctx, team1="Red", team2="Blue")
 
         ctx.response.send_message.assert_awaited_once_with("Channels set!")
 
@@ -9105,7 +9165,7 @@ class SetTeamChannelsCommandTests(BotModuleTestCase):
         await self._insert_guild_row(guild_id)
         ctx = self._ctx(guild_id=guild_id)
 
-        await self._command("team-set-channels").callback(ctx, team1="Red", team2="Blue", size=4)
+        await self._command("set-channels").callback(ctx, team1="Red", team2="Blue", size=4)
 
         self.assertEqual(self.bot.helperObj.get(guild_id, "team_size"), 4)
         message = ctx.response.send_message.call_args.args[0]
@@ -9596,10 +9656,9 @@ class SetEloCommandTests(BotModuleTestCase):
 
 
 class NotifyCommandTests(BotModuleTestCase):
-    async def test_notify_reports_team_size(self):
+    async def test_notify_member_confirms_by_name(self):
         guild_id = 904
         await self._insert_guild_row(guild_id)
-        self.bot.helperObj.update(guild_id, "team_size", 5)
         ctx = self._ctx(guild_id=guild_id)
         target = FakeMember("Target")
 
@@ -9608,21 +9667,36 @@ class NotifyCommandTests(BotModuleTestCase):
             await self._command("notify").callback(ctx, member=target)
 
         mock.assert_awaited_once_with(ctx, target)
-        ctx.response.send_message.assert_awaited_once_with("Sent an invite for the 10 man!")
+        ctx.response.send_message.assert_awaited_once_with("Sent an invite to Target!")
 
     async def test_notify_role_notifies_every_member(self):
+        # BUG FIX: the confirmation message used to unconditionally
+        # reference `member.name`, which crashed with AttributeError
+        # whenever /notify was called with `role` instead (member is None
+        # in that case).
         guild_id = 905
         await self._insert_guild_row(guild_id)
-        self.bot.helperObj.update(guild_id, "team_size", 5)
         ctx = self._ctx(guild_id=guild_id)
-        role = SimpleNamespace(members=[FakeMember("A"), FakeMember("B")])
+        role = SimpleNamespace(name="Squad", members=[FakeMember("A"), FakeMember("B")])
 
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "notifyHelper", mock):
             await self._command("notify").callback(ctx, role=role)
 
         self.assertEqual(mock.await_count, 2)
-        ctx.response.send_message.assert_awaited_once_with("Sent an invite for the 10 man!")
+        ctx.response.send_message.assert_awaited_once_with("Sent an invite to 2 members in Squad!")
+
+    async def test_notify_role_with_a_single_member_uses_singular_wording(self):
+        guild_id = 906
+        await self._insert_guild_row(guild_id)
+        ctx = self._ctx(guild_id=guild_id)
+        role = SimpleNamespace(name="Squad", members=[FakeMember("A")])
+
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "notifyHelper", mock):
+            await self._command("notify").callback(ctx, role=role)
+
+        ctx.response.send_message.assert_awaited_once_with("Sent an invite to 1 member in Squad!")
 
     async def test_notify_rejects_when_neither_member_nor_role_given(self):
         guild_id = 905

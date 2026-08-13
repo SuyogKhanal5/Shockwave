@@ -487,16 +487,27 @@ async def on_app_command_error(interaction, error):
 
 
 @tree.command(
-    name="team-set-channels",
-    description="Set the team channels and, optionally, the team size"
+    name="set-channels",
+    description="Admin: set the team channels and, optionally, the team size"
 )
 @app_commands.describe(
     team1="Name for the first team's voice channel",
     team2="Name for the second team's voice channel",
     size="Number of players per team (optional)",
 )
+@app_commands.checks.has_permissions(manage_guild=True)
 async def setTeamChannels(ctx, *, team1: str, team2: str, size: int = None):
     await helperObj.setTeamHelper(ctx, team1, team2, size)
+
+
+@setTeamChannels.error
+async def setTeamChannels_error(ctx, error):
+    if isinstance(error, app_commands.MissingPermissions):
+        await ctx.response.send_message(
+            "You need the Manage Server permission to set the team channels."
+        )
+    else:
+        raise error
 
 
 @tree.command(
@@ -720,7 +731,7 @@ SITE_COMMANDS_URL = "https://shockwave.netlify.app/commands.html"
 # that has to stay short enough to fit there — this can afford a real
 # sentence or two, closer to what commands.html says.
 COMMAND_HELP = {
-    "team-set-channels": "Names the two voice channels teams get moved into. Creates them if they don't already exist. size optionally sets how many players make up one side.",
+    "set-channels": "Names the two voice channels teams get moved into. Creates them if they don't already exist. size optionally sets how many players make up one side. Requires the Manage Server permission.",
     "clear": "Wipes the current teams/draft so you can start a fresh session. clear_tournament deletes this server's tournament entirely. clear_elo and clear_economy reset data for every player; clear_achievements and clear_card_unlocks do too unless a user is given, which narrows either to just them. Requires the Manage Server permission.",
     "make-teams": "Randomly splits everyone in your voice channel into two even teams and posts the roster, with a ▶️ reaction on it to move everyone and open betting when you're ready (🔄 to reroll roles too, if use_roles was set). ranked:true forms roughly elo-balanced teams instead, and tracks elo once a winner is reported.",
     "captains": "Starts a live captain draft. Name two captains, or use_random to pick two automatically; everyone else lands in a pool picked from with /choose. Once both teams are set, react ▶️ on the roster to move everyone and open betting. ranked:true tracks elo for the resulting game.",
@@ -1238,7 +1249,15 @@ async def notify(ctx, member: discord.Member = None, role: discord.Role = None):
     for target in targets:
         await helperObj.notifyHelper(ctx, target)
 
-    await ctx.response.send_message("Sent an invite to " + member.name + "!")
+    # BUG FIX: this used to always reference `member.name`, which crashed
+    # with AttributeError whenever /notify was called with `role` instead
+    # (member is None in that case).
+    if member is not None:
+        summary = member.name
+    else:
+        count = len(targets)
+        summary = f"{count} member{'s' if count != 1 else ''} in {role.name}"
+    await ctx.response.send_message(f"Sent an invite to {summary}!")
 
 
 @tree.command(
