@@ -59,7 +59,7 @@ SERVERS_SCHEMA = (
     "betting_state, betting_message_id, betting_channel_id, is_ranked, "
     "active_tournament_match_id, wager_channel, betting_timer_seconds, "
     "roster_team1_message_id, roster_team2_message_id, roster_channel_id, "
-    "roster_use_roles DEFAULT 0)"
+    "roster_use_roles DEFAULT 0, default_elo)"
 )
 ECONOMY_SCHEMA = (
     "CREATE TABLE economy(guildId, userId, username, balance, wins, losses, "
@@ -152,7 +152,7 @@ def insert_guild_row(cursor, db, guild_id=GUILD_ID, name="Test Guild"):
     cursor.execute(
         "INSERT INTO servers VALUES(?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, "
         "NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'NONE', NULL, NULL, 0, NULL, NULL, ?, "
-        "NULL, NULL, NULL, 0)",
+        "NULL, NULL, NULL, 0, NULL)",
         (guild_id, name, helper_module.BETTING_DURATION_SECONDS),
     )
     db.commit()
@@ -765,9 +765,9 @@ class StartRosterViaReactionTests(HelperTestCase):
 
     async def test_missing_team_channels_self_heals_onto_defaults(self):
         # BUG FIX: this used to refuse to start the game at all ("Team
-        # channels not set!") if /set-channels had never been run. Now it
-        # falls back to DEFAULT_TEAM_CHANNEL_NAMES, creating them if
-        # missing, and remembers them for next time.
+        # channels not set!") if /set had never been run to configure
+        # team1/team2. Now it falls back to DEFAULT_TEAM_CHANNEL_NAMES,
+        # creating them if missing, and remembers them for next time.
         self.helperObj.update(GUILD_ID, "channel1", "")
         self.helperObj.update(GUILD_ID, "channel2", "")
         with patch.object(self.helperObj, "_openBetting", AsyncMock()) as open_betting, \
@@ -1192,6 +1192,37 @@ class ResetEloHelperTests(HelperTestCase):
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "wins"), 3)
         # other guild's elo is untouched
         self.assertEqual(self.helperObj.getEconomy(other_guild_id, 901, "elo"), 1600)
+
+    async def test_resets_to_the_guilds_configured_default_elo(self):
+        self.helperObj.update(GUILD_ID, "default_elo", 1200)
+        self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.cursor.execute(
+            "UPDATE economy SET elo=1400 WHERE guildId=? AND userId=?", (GUILD_ID, 901)
+        )
+        self.db.commit()
+
+        self.helperObj.resetEloHelper(GUILD_ID)
+
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "elo"), 1200)
+
+
+class DefaultEloForGuildTests(HelperTestCase):
+    def test_falls_back_to_the_global_default_when_unset(self):
+        self.assertEqual(self.helperObj._defaultEloForGuild(GUILD_ID), helper_module.DEFAULT_ELO)
+
+    def test_uses_the_guilds_configured_value(self):
+        self.helperObj.update(GUILD_ID, "default_elo", 1200)
+        self.assertEqual(self.helperObj._defaultEloForGuild(GUILD_ID), 1200)
+
+    def test_ensure_economy_row_uses_the_configured_default(self):
+        self.helperObj.update(GUILD_ID, "default_elo", 1200)
+        self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "elo"), 1200)
+
+    def test_get_elo_lookup_falls_back_to_the_configured_default_for_unranked_players(self):
+        self.helperObj.update(GUILD_ID, "default_elo", 1200)
+        lookup = self.helperObj.getEloLookup(GUILD_ID, [(901, "Alice")])
+        self.assertEqual(lookup[901], 1200)
 
 
 class SaveGetTournamentTests(HelperTestCase):
@@ -1627,7 +1658,7 @@ class TeamSetHelperTests(_FakeLogoDirTestCase):
         ctx = self._ctx()
         await self.helperObj.teamSetHelper(ctx, "Red", None, False, "NotALogo")
         ctx.response.send_message.assert_awaited_once_with(
-            "No logo named **NotALogo** — pick one from the autocomplete list."
+            "No logo named **NotALogo** - pick one from the autocomplete list."
         )
 
     async def test_sets_the_logo_case_insensitively_and_attaches_the_file(self):
@@ -2538,7 +2569,7 @@ class RegisterTeamHelperTests(HelperTestCase):
         ctx = self._ctx()
         await self.helperObj.registerTeamHelper(ctx, "Red")
         ctx.response.send_message.assert_awaited_once_with(
-            "No tournament set up for this server — use /tournament-create first."
+            "No tournament set up for this server - use /tournament-create first."
         )
 
     async def test_rejects_unknown_team(self):
@@ -2700,7 +2731,7 @@ class CreateBracketHelperTests(HelperTestCase):
         ctx = self._ctx()
         await self.helperObj.createBracketHelper(ctx, False)
         ctx.response.send_message.assert_awaited_once_with(
-            "No tournament set up for this server — use /tournament-create first."
+            "No tournament set up for this server - use /tournament-create first."
         )
 
     async def test_rejects_fewer_than_two_registered_teams(self):
@@ -2724,7 +2755,7 @@ class CreateBracketHelperTests(HelperTestCase):
         await self.helperObj.createBracketHelper(ctx, True)
 
         ctx.response.send_message.assert_awaited_once_with(
-            "Bracket created for **Cup** — 2 teams, double elimination. "
+            "Bracket created for **Cup** - 2 teams, double elimination. "
             "Losers bracket starts once the winners bracket finishes."
         )
         restored = self.helperObj.getTournament(GUILD_ID)
@@ -3169,7 +3200,7 @@ class PrintBracketHelperTests(HelperTestCase):
         ctx = self._ctx()
         await self.helperObj.printBracketHelper(ctx)
         ctx.response.send_message.assert_awaited_once_with(
-            "No tournament set up for this server — use /tournament-create first."
+            "No tournament set up for this server - use /tournament-create first."
         )
 
     async def test_prints_the_bracket(self):
@@ -3303,7 +3334,7 @@ class RenderMatchupImageTests(_FakeLogoDirTestCase):
         tournament = Tournament("Cup", 1, 4)
         self.assertEqual(self.helperObj._matchRoundLabel(tournament, 0, "finals"), "Grand Finals")
         self.assertEqual(
-            self.helperObj._matchRoundLabel(tournament, 1, "finals"), "Grand Finals — Bracket Reset"
+            self.helperObj._matchRoundLabel(tournament, 1, "finals"), "Grand Finals - Bracket Reset"
         )
 
 
@@ -3329,7 +3360,7 @@ class StartTournamentHelperTests(HelperTestCase):
         ctx = self._ctx()
         await self.helperObj.startTournamentHelper(ctx, "sequential")
         ctx.response.send_message.assert_awaited_once_with(
-            "No tournament set up for this server — use /tournament-create first."
+            "No tournament set up for this server - use /tournament-create first."
         )
 
     async def test_rejects_when_no_bracket_exists(self):
@@ -3337,7 +3368,7 @@ class StartTournamentHelperTests(HelperTestCase):
         ctx = self._ctx()
         await self.helperObj.startTournamentHelper(ctx, "sequential")
         ctx.response.send_message.assert_awaited_once_with(
-            "No bracket has been created yet — use /tournament-create-bracket first."
+            "No bracket has been created yet - use /tournament-create-bracket first."
         )
 
     async def test_rejects_when_already_finished(self):
@@ -3351,7 +3382,7 @@ class StartTournamentHelperTests(HelperTestCase):
         ctx = self._ctx()
         await self.helperObj.startTournamentHelper(ctx, "sequential")
         ctx.response.send_message.assert_awaited_once_with(
-            "**Cup** is already finished — **Red** is the champion!"
+            "**Cup** is already finished - **Red** is the champion!"
         )
 
     async def test_rejects_when_round_already_in_progress(self):
@@ -3723,7 +3754,7 @@ class CorrectTournamentMatchHelperTests(HelperTestCase):
         ctx = self._ctx()
         await self.helperObj.reportCorrectWinnerHelper(ctx, 2, match_id=match_id)
         ctx.response.send_message.assert_awaited_once_with(
-            f"Can't correct Match #{match_id} — the next round has already started."
+            f"Can't correct Match #{match_id} - the next round has already started."
         )
 
     async def test_successful_correction_flips_bracket_and_winner(self):
@@ -3817,7 +3848,7 @@ class CorrectTournamentMatchHelperTests(HelperTestCase):
         ctx = self._ctx()
         await self.helperObj.reportCorrectWinnerHelper(ctx, 2, match_id=match_id)
         ctx.response.send_message.assert_awaited_once_with(
-            f"Match #{match_id} is a losers bracket match — correcting those isn't supported yet."
+            f"Match #{match_id} is a losers bracket match - correcting those isn't supported yet."
         )
 
     async def test_rejects_correcting_a_grand_finals_match(self):
@@ -3834,7 +3865,7 @@ class CorrectTournamentMatchHelperTests(HelperTestCase):
         ctx = self._ctx()
         await self.helperObj.reportCorrectWinnerHelper(ctx, 2, match_id=match_id)
         ctx.response.send_message.assert_awaited_once_with(
-            f"Match #{match_id} is a Grand Finals match — correcting those isn't supported yet."
+            f"Match #{match_id} is a Grand Finals match - correcting those isn't supported yet."
         )
 
 
@@ -4617,63 +4648,220 @@ class PrintEmbedTests(HelperTestCase):
         self.assertEqual(ctx.channel.send.await_count, 2)
 
 
-class SetTeamHelperTests(HelperTestCase):
-    async def test_creates_channels_when_missing(self):
-        ctx = FakeInteraction(self.guild, FakeMember("Caller"))
+class AdminSetHelperTests(HelperTestCase):
+    def _ctx(self):
+        return FakeInteraction(self.guild, FakeMember("Caller"))
 
-        await self.helperObj.setTeamHelper(ctx, "Red", "Blue")
+    async def _set(
+        self, ctx, team1=None, team2=None, size=None, betting_timer=None,
+        wager_channel=None, member=None, elo=None, default_elo=None,
+    ):
+        await self.helperObj.adminSetHelper(
+            ctx, team1, team2, size, betting_timer, wager_channel, member, elo, default_elo
+        )
+
+    async def test_rejects_when_nothing_is_given(self):
+        ctx = self._ctx()
+        await self._set(ctx)
+        message = ctx.response.send_message.call_args.args[0]
+        self.assertIn("at least one setting", message)
+
+    async def test_rejects_team1_without_team2(self):
+        ctx = self._ctx()
+        await self._set(ctx, team1="Red")
+        ctx.response.send_message.assert_awaited_once_with(
+            "Give both team1 and team2 together, or neither."
+        )
+
+    async def test_rejects_team2_without_team1(self):
+        ctx = self._ctx()
+        await self._set(ctx, team2="Blue")
+        ctx.response.send_message.assert_awaited_once_with(
+            "Give both team1 and team2 together, or neither."
+        )
+
+    async def test_rejects_member_without_elo(self):
+        ctx = self._ctx()
+        await self._set(ctx, member=FakeMember("Target", id=555))
+        ctx.response.send_message.assert_awaited_once_with(
+            "Give both member and elo together, or neither."
+        )
+
+    async def test_rejects_elo_without_member(self):
+        ctx = self._ctx()
+        await self._set(ctx, elo=1500)
+        ctx.response.send_message.assert_awaited_once_with(
+            "Give both member and elo together, or neither."
+        )
+
+    async def test_rejects_non_positive_betting_timer(self):
+        ctx = self._ctx()
+        await self._set(ctx, betting_timer=0)
+        ctx.response.send_message.assert_awaited_once_with(
+            "betting_timer must be greater than 0 seconds."
+        )
+        self.assertEqual(
+            self.helperObj.get(GUILD_ID, "betting_timer_seconds"),
+            helper_module.BETTING_DURATION_SECONDS,
+        )
+
+    async def test_rejects_betting_timer_over_the_cap(self):
+        ctx = self._ctx()
+        await self._set(ctx, betting_timer=601)
+        ctx.response.send_message.assert_awaited_once_with(
+            "betting_timer can't be more than 600 seconds (10 minutes)."
+        )
+
+    async def test_rejects_non_positive_default_elo(self):
+        ctx = self._ctx()
+        await self._set(ctx, default_elo=0)
+        ctx.response.send_message.assert_awaited_once_with(
+            "default_elo must be greater than 0."
+        )
+        self.assertIsNone(self.helperObj.get(GUILD_ID, "default_elo"))
+
+    async def test_an_invalid_field_blocks_every_field_from_applying(self):
+        # validate-all-then-apply-all: a betting_timer over the cap
+        # shouldn't leave an otherwise-valid team1/team2 half-applied.
+        ctx = self._ctx()
+        await self._set(ctx, team1="Red", team2="Blue", betting_timer=601)
+        self.assertIsNone(self.helperObj.get(GUILD_ID, "channel1"))
+        self.assertEqual(len(self.guild.channels), 0)
+
+    async def test_sets_team_channels_creating_them_when_missing(self):
+        ctx = self._ctx()
+        await self._set(ctx, team1="Red", team2="Blue")
 
         names = {c.name for c in self.guild.channels}
         self.assertEqual(names, {"Red", "Blue"})
         self.assertEqual(self.helperObj.get(GUILD_ID, "channel1"), "Red")
         self.assertEqual(self.helperObj.get(GUILD_ID, "channel2"), "Blue")
-        ctx.response.send_message.assert_awaited_once_with("Channels set!")
+        message = ctx.response.send_message.call_args.args[0]
+        self.assertIn("team channels", message)
 
-    async def test_reuses_existing_channels(self):
+    async def test_reuses_existing_team_channels(self):
         self.guild.channels.append(FakeChannel("Red"))
         self.guild.channels.append(FakeChannel("Blue"))
-        ctx = FakeInteraction(self.guild, FakeMember("Caller"))
+        ctx = self._ctx()
 
-        await self.helperObj.setTeamHelper(ctx, "Red", "Blue")
+        await self._set(ctx, team1="Red", team2="Blue")
 
         self.assertEqual(len(self.guild.channels), 2)
 
+    async def test_sets_team_size_independently(self):
+        ctx = self._ctx()
+        await self._set(ctx, size=4)
 
-class SetWagerChannelHelperTests(HelperTestCase):
-    async def test_creates_the_channel_when_missing(self):
-        ctx = FakeInteraction(self.guild, FakeMember("Caller"))
+        self.assertEqual(self.helperObj.get(GUILD_ID, "team_size"), 4)
+        message = ctx.response.send_message.call_args.args[0]
+        self.assertIn("team size", message)
+        self.assertIn("4", message)
 
-        await self.helperObj.setWagerChannelHelper(ctx, "bets")
+    async def test_sets_betting_timer(self):
+        ctx = self._ctx()
+        await self._set(ctx, betting_timer=30)
+
+        self.assertEqual(self.helperObj.get(GUILD_ID, "betting_timer_seconds"), 30)
+        message = ctx.response.send_message.call_args.args[0]
+        self.assertIn("30 seconds", message)
+        self.assertIn("tournament round", message)
+
+    async def test_sets_wager_channel_creating_it_when_missing(self):
+        ctx = self._ctx()
+        await self._set(ctx, wager_channel="bets")
 
         created = [c for c in self.guild.channels if c.name == "bets"]
         self.assertEqual(len(created), 1)
         self.assertEqual(created[0].kind, "text")
         self.assertEqual(self.helperObj.get(GUILD_ID, "wager_channel"), "bets")
-        ctx.response.send_message.assert_awaited_once()
         self.assertIn(created[0].mention, ctx.response.send_message.call_args.args[0])
 
-    async def test_reuses_an_existing_text_channel(self):
-        self.guild.channels.append(FakeChannel("bets", kind="text"))
-        ctx = FakeInteraction(self.guild, FakeMember("Caller"))
-
-        await self.helperObj.setWagerChannelHelper(ctx, "bets")
-
-        self.assertEqual(len(self.guild.channels), 1)
-        self.assertEqual(self.helperObj.get(GUILD_ID, "wager_channel"), "bets")
-
-    async def test_ignores_a_same_named_voice_channel(self):
+    async def test_wager_channel_ignores_a_same_named_voice_channel(self):
         self.guild.channels.append(FakeChannel("bets", kind="voice"))
-        ctx = FakeInteraction(self.guild, FakeMember("Caller"))
+        ctx = self._ctx()
 
-        await self.helperObj.setWagerChannelHelper(ctx, "bets")
+        await self._set(ctx, wager_channel="bets")
 
         # a new text channel is created rather than reusing the voice one
         text_channels = [c for c in self.guild.channels if c.kind == "text"]
         self.assertEqual(len(text_channels), 1)
 
+    async def test_sets_a_players_elo(self):
+        target = FakeMember("Target", id=555)
+        ctx = self._ctx()
+        await self._set(ctx, member=target, elo=1500)
+
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 555, "elo"), 1500)
+        message = ctx.response.send_message.call_args.args[0]
+        self.assertIn("1500", message)
+        self.assertIn(target.mention, message)
+
+    async def test_setting_elo_creates_an_economy_row_for_a_brand_new_target(self):
+        target = FakeMember("NeverPlayed", id=556)
+        ctx = self._ctx()
+        await self._set(ctx, member=target, elo=800)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 556, "elo"), 800)
+
+    async def test_setting_elo_overwrites_an_existing_value(self):
+        target = FakeMember("Target", id=555)
+        self.helperObj.ensureEconomyRow(GUILD_ID, 555, "Target")
+        self.cursor.execute("UPDATE economy SET elo=1200 WHERE guildId=? AND userId=?", (GUILD_ID, 555))
+        self.db.commit()
+
+        ctx = self._ctx()
+        await self._set(ctx, member=target, elo=300)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 555, "elo"), 300)
+
+    async def test_setting_a_qualifying_elo_credits_the_tier_reward(self):
+        target = FakeMember("Target", id=555)
+        ctx = self._ctx()
+        await self._set(ctx, member=target, elo=helper_module.ELO_TIER_THRESHOLDS["Diamond"])
+
+        self.assertIn(
+            helper_module.CARD_TIER_REWARD_TITLES["Diamond"], self.helperObj.getUnlockedCardTitles(GUILD_ID, 555)
+        )
+
+    async def test_sets_the_default_elo(self):
+        ctx = self._ctx()
+        await self._set(ctx, default_elo=1200)
+
+        self.assertEqual(self.helperObj.get(GUILD_ID, "default_elo"), 1200)
+        message = ctx.response.send_message.call_args.args[0]
+        self.assertIn("default starting elo", message)
+        self.assertIn("1200", message)
+
+    async def test_default_elo_does_not_change_existing_players(self):
+        self.helperObj.ensureEconomyRow(GUILD_ID, 555, "Target")
+        ctx = self._ctx()
+        await self._set(ctx, default_elo=1200)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 555, "elo"), helper_module.DEFAULT_ELO)
+
+    async def test_default_elo_applies_to_brand_new_players(self):
+        ctx = self._ctx()
+        await self._set(ctx, default_elo=1200)
+        self.helperObj.ensureEconomyRow(GUILD_ID, 556, "NewPlayer")
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 556, "elo"), 1200)
+
+    async def test_applies_every_field_together_in_one_call(self):
+        target = FakeMember("Target", id=555)
+        ctx = self._ctx()
+        await self._set(
+            ctx, team1="Red", team2="Blue", size=4, betting_timer=30,
+            wager_channel="bets", member=target, elo=1500, default_elo=1200,
+        )
+
+        self.assertEqual(self.helperObj.get(GUILD_ID, "channel1"), "Red")
+        self.assertEqual(self.helperObj.get(GUILD_ID, "channel2"), "Blue")
+        self.assertEqual(self.helperObj.get(GUILD_ID, "team_size"), 4)
+        self.assertEqual(self.helperObj.get(GUILD_ID, "betting_timer_seconds"), 30)
+        self.assertEqual(self.helperObj.get(GUILD_ID, "wager_channel"), "bets")
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 555, "elo"), 1500)
+        self.assertEqual(self.helperObj.get(GUILD_ID, "default_elo"), 1200)
+        ctx.response.send_message.assert_awaited_once()
+
 
 class NotifyHelperTests(HelperTestCase):
-    async def test_sends_dm_with_invite(self):
+    async def test_sends_dm_with_invite_and_default_message(self):
         voice_channel = FakeChannel("Lobby")
         caller = FakeMember("Caller")
         caller.voice = FakeVoiceState(voice_channel)
@@ -4686,8 +4874,24 @@ class NotifyHelperTests(HelperTestCase):
         dm_channel = target.create_dm.return_value
         dm_channel.send.assert_awaited_once()
         content = dm_channel.send.call_args.args[0]
-        self.assertIn("Caller has invited you to play in a game!", content)
+        self.assertIn("You've been invited to play in a game!", content)
         self.assertIn("https://discord.gg/fake-invite", content)
+        self.assertIn("Sent by Caller", content)
+
+    async def test_custom_message_replaces_the_default_text(self):
+        voice_channel = FakeChannel("Lobby")
+        caller = FakeMember("Caller")
+        caller.voice = FakeVoiceState(voice_channel)
+        ctx = FakeInteraction(self.guild, caller)
+        target = FakeMember("Target")
+
+        await self.helperObj.notifyHelper(ctx, target, "We need a 5th, hop in!")
+
+        content = target.create_dm.return_value.send.call_args.args[0]
+        self.assertIn("We need a 5th, hop in!", content)
+        self.assertNotIn("You've been invited to play in a game!", content)
+        self.assertIn("https://discord.gg/fake-invite", content)
+        self.assertIn("Sent by Caller", content)
 
 
 class CancelGameHelperTests(HelperTestCase):
@@ -5253,6 +5457,18 @@ class ComputeGameDeltasTests(HelperTestCase):
         self.assertEqual(deltas[2]["ranked_wins"], 0)
         self.assertEqual(deltas[2]["ranked_losses"], 1)
 
+    def test_missing_players_fall_back_to_the_given_default_elo(self):
+        # elo_lookup has no entry for either player — as if this guild has
+        # a configured default_elo different from the global DEFAULT_ELO.
+        deltas, summary = self.helperObj.computeGameDeltas(
+            wagers=[], team1_roster=[(1, "A")], team2_roster=[(2, "B")],
+            elo_lookup={}, winning_team=1, is_ranked=True, default_elo=1200,
+        )
+        # equal (both defaulted to 1200) elo teams still split evenly
+        self.assertEqual(deltas[1]["elo"], 16)
+        self.assertEqual(deltas[2]["elo"], -16)
+        self.assertEqual(summary["elo_changes"], [("Team 1", 16), ("Team 2", -16)])
+
     def test_unranked_games_never_touch_elo(self):
         deltas, summary = self.helperObj.computeGameDeltas(
             wagers=[], team1_roster=[(1, "A")], team2_roster=[(2, "B")],
@@ -5400,7 +5616,7 @@ class ReportCorrectWinnerHelperTests(HelperTestCase):
         await self.helperObj.reportCorrectWinnerHelper(ctx, 1)
 
         ctx.response.send_message.assert_awaited_once_with(
-            "Team 1 is already the recorded winner — nothing to correct."
+            "Team 1 is already the recorded winner - nothing to correct."
         )
 
     async def test_corrects_bettor_payouts_when_winner_flips(self):
@@ -6794,46 +7010,6 @@ class ResetCardUnlocksHelperTests(HelperTestCase):
         self.assertEqual(self.helperObj.getUnlockedCardTitles(GUILD_ID, 556), [])
 
 
-class SetEloHelperTests(HelperTestCase):
-    def _ctx(self, user_id=901, name="Alice"):
-        return FakeInteraction(self.guild, FakeMember(name, id=user_id))
-
-    async def test_sets_elo_to_the_exact_value(self):
-        target = FakeMember("Target", id=555)
-        ctx = self._ctx()
-        await self.helperObj.setEloHelper(ctx, target, 1500)
-
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 555, "elo"), 1500)
-        message = ctx.response.send_message.call_args.args[0]
-        self.assertIn("1500", message)
-        self.assertIn(target.mention, message)
-
-    async def test_creates_an_economy_row_for_a_brand_new_target(self):
-        target = FakeMember("NeverPlayed", id=556)
-        ctx = self._ctx()
-        await self.helperObj.setEloHelper(ctx, target, 800)
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 556, "elo"), 800)
-
-    async def test_overwrites_an_existing_elo_value(self):
-        target = FakeMember("Target", id=555)
-        self.helperObj.ensureEconomyRow(GUILD_ID, 555, "Target")
-        self.cursor.execute("UPDATE economy SET elo=1200 WHERE guildId=? AND userId=?", (GUILD_ID, 555))
-        self.db.commit()
-
-        ctx = self._ctx()
-        await self.helperObj.setEloHelper(ctx, target, 300)
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 555, "elo"), 300)
-
-    async def test_setting_a_qualifying_elo_credits_the_tier_reward(self):
-        target = FakeMember("Target", id=555)
-        ctx = self._ctx()
-        await self.helperObj.setEloHelper(ctx, target, helper_module.ELO_TIER_THRESHOLDS["Diamond"])
-
-        self.assertIn(
-            helper_module.CARD_TIER_REWARD_TITLES["Diamond"], self.helperObj.getUnlockedCardTitles(GUILD_ID, 555)
-        )
-
-
 class ShopTests(HelperTestCase):
     def _ctx(self, user_id=901, name="Alice", balance=10000):
         self.helperObj.ensureEconomyRow(GUILD_ID, user_id, name)
@@ -7381,36 +7557,6 @@ class OpenBettingTests(HelperTestCase):
         second_task = self.helperObj.bettingTasks[GUILD_ID]
         second_task.cancel()
         await asyncio.wait([second_task])
-
-
-class SetBettingTimerHelperTests(HelperTestCase):
-    def _ctx(self):
-        return FakeInteraction(self.guild, FakeMember("Caller"))
-
-    async def test_rejects_non_positive_seconds(self):
-        ctx = self._ctx()
-        await self.helperObj.setBettingTimerHelper(ctx, 0)
-        ctx.response.send_message.assert_awaited_once_with(
-            "Betting timer must be greater than 0 seconds."
-        )
-        self.assertEqual(
-            self.helperObj.get(GUILD_ID, "betting_timer_seconds"),
-            helper_module.BETTING_DURATION_SECONDS,
-        )
-
-    async def test_rejects_seconds_over_the_cap(self):
-        ctx = self._ctx()
-        await self.helperObj.setBettingTimerHelper(ctx, 601)
-        ctx.response.send_message.assert_awaited_once_with(
-            "Betting timer can't be more than 600 seconds (10 minutes)."
-        )
-
-    async def test_updates_the_configured_duration(self):
-        ctx = self._ctx()
-        await self.helperObj.setBettingTimerHelper(ctx, 30)
-        self.assertEqual(self.helperObj.get(GUILD_ID, "betting_timer_seconds"), 30)
-        ctx.response.send_message.assert_awaited_once()
-        self.assertIn("30 seconds", ctx.response.send_message.call_args.args[0])
 
 
 class GetBettingTimerSecondsTests(HelperTestCase):
@@ -8476,6 +8622,199 @@ class HandleLeaderboardReactionTests(HelperTestCase):
 
 
 # ===========================================================================
+# Concurrency: "multiple servers sending commands at the same time" really
+# means multiple coroutines interleaved on discord.py's one asyncio event
+# loop, all sharing the one process-wide sqlite3 cursor (see helpers.__init__
+# in helper.py and its single instantiation in bot.py) — there's no thread
+# parallelism to worry about, but two guilds' coroutines genuinely can
+# interleave at any `await` point. These run real asyncio.gather() calls
+# across genuinely different guild_ids (never mocking the concurrency away)
+# to prove each guild's state stays isolated no matter how the awaits land.
+# ===========================================================================
+
+class ConcurrentMultiGuildCommandsTests(HelperTestCase):
+    def setUp(self):
+        super().setUp()
+        self.guild_a = GUILD_ID
+        self.guild_b = GUILD_ID + 1
+        insert_guild_row(self.cursor, self.db, guild_id=self.guild_b, name="Guild B")
+
+        self.channel_a = FakeChannel("game-chat-a")
+        self.team1_a = FakeChannel("A Team 1")
+        self.team2_a = FakeChannel("A Team 2")
+        self.voice_a = FakeChannel("A Lobby")
+        self.member_a1 = FakeMember("Alice", id=101)
+        self.member_a1.voice = FakeVoiceState(self.voice_a)
+        self.member_a2 = FakeMember("Bob", id=102)
+        self.fake_guild_a = FakeGuild(
+            id=self.guild_a, channels=[self.team1_a, self.team2_a],
+            members=[self.member_a1, self.member_a2],
+        )
+
+        self.channel_b = FakeChannel("game-chat-b")
+        self.team1_b = FakeChannel("B Team 1")
+        self.team2_b = FakeChannel("B Team 2")
+        self.voice_b = FakeChannel("B Lobby")
+        self.member_b1 = FakeMember("Carol", id=201)
+        self.member_b1.voice = FakeVoiceState(self.voice_b)
+        self.member_b2 = FakeMember("Dave", id=202)
+        self.fake_guild_b = FakeGuild(
+            id=self.guild_b, channels=[self.team1_b, self.team2_b],
+            members=[self.member_b1, self.member_b2],
+        )
+
+        # One shared client across both guilds — matches the real bot,
+        # which is a single process/single event loop no matter how many
+        # servers it's in.
+        self.helperObj.client = FakeClient(
+            channels=[self.channel_a, self.channel_b], guilds=[self.fake_guild_a, self.fake_guild_b]
+        )
+
+        self.helperObj.update(self.guild_a, "channel1", "A Team 1")
+        self.helperObj.update(self.guild_a, "channel2", "A Team 2")
+        self.helperObj.update(self.guild_b, "channel1", "B Team 1")
+        self.helperObj.update(self.guild_b, "channel2", "B Team 2")
+
+        team1_a = Team(); team1_a.set_name("A Team 1"); team1_a.add_player(Player(101, "Alice"))
+        team2_a = Team(); team2_a.set_name("A Team 2"); team2_a.add_player(Player(102, "Bob"))
+        self.helperObj.update(self.guild_a, "team1", team1_a.serializeTeam())
+        self.helperObj.update(self.guild_a, "team2", team2_a.serializeTeam())
+        self.helperObj.update(self.guild_a, "roster_team2_message_id", 501)
+
+        team1_b = Team(); team1_b.set_name("B Team 1"); team1_b.add_player(Player(201, "Carol"))
+        team2_b = Team(); team2_b.set_name("B Team 2"); team2_b.add_player(Player(202, "Dave"))
+        self.helperObj.update(self.guild_b, "team1", team1_b.serializeTeam())
+        self.helperObj.update(self.guild_b, "team2", team2_b.serializeTeam())
+        self.helperObj.update(self.guild_b, "roster_team2_message_id", 502)
+
+    async def test_two_guilds_starting_rosters_at_the_same_time_stay_isolated(self):
+        payload_a = FakePayload(self.guild_a, 501, self.channel_a.id, helper_module.TEAM_START_EMOJI)
+        payload_b = FakePayload(self.guild_b, 502, self.channel_b.id, helper_module.TEAM_START_EMOJI)
+
+        with patch.object(self.helperObj, "_openBetting", AsyncMock()), \
+             patch.object(self.helperObj, "_sendMatchupImage", AsyncMock()):
+            await asyncio.gather(
+                self.helperObj._startRosterViaReaction(self.guild_a, self.channel_a, payload_a),
+                self.helperObj._startRosterViaReaction(self.guild_b, self.channel_b, payload_b),
+            )
+
+        # each guild's own players only ever moved into that same guild's
+        # own channels — never the other guild's, even though both ran on
+        # the same event loop at "the same time"
+        self.member_a1.move_to.assert_awaited_once_with(self.team1_a)
+        self.member_a2.move_to.assert_awaited_once_with(self.team2_a)
+        self.member_b1.move_to.assert_awaited_once_with(self.team1_b)
+        self.member_b2.move_to.assert_awaited_once_with(self.team2_b)
+
+        self.assertEqual(self.helperObj.get(self.guild_a, "original_channel"), "A Lobby")
+        self.assertEqual(self.helperObj.get(self.guild_b, "original_channel"), "B Lobby")
+        self.assertIsNone(self.helperObj.get(self.guild_a, "roster_team2_message_id"))
+        self.assertIsNone(self.helperObj.get(self.guild_b, "roster_team2_message_id"))
+
+    async def test_guild_b_finishing_mid_flight_does_not_corrupt_guild_a(self):
+        # Forces genuine interleaving rather than hoping asyncio.gather
+        # happens to produce it: guild A's very first move_to() suspends
+        # for real, guaranteeing guild B's entire _startRosterViaReaction
+        # call — its own reads, writes, and moves — runs to completion
+        # while guild A is still mid-flight, sharing the one cursor the
+        # whole time. Guild A must still resume and finish correctly.
+        real_move_to = self.member_a1.move_to
+
+        async def slow_first_move(*args, **kwargs):
+            await asyncio.sleep(0.01)
+            return await real_move_to(*args, **kwargs)
+
+        self.member_a1.move_to = AsyncMock(side_effect=slow_first_move)
+
+        payload_a = FakePayload(self.guild_a, 501, self.channel_a.id, helper_module.TEAM_START_EMOJI)
+        payload_b = FakePayload(self.guild_b, 502, self.channel_b.id, helper_module.TEAM_START_EMOJI)
+
+        with patch.object(self.helperObj, "_openBetting", AsyncMock()), \
+             patch.object(self.helperObj, "_sendMatchupImage", AsyncMock()):
+            await asyncio.gather(
+                self.helperObj._startRosterViaReaction(self.guild_a, self.channel_a, payload_a),
+                self.helperObj._startRosterViaReaction(self.guild_b, self.channel_b, payload_b),
+            )
+
+        self.member_a1.move_to.assert_awaited_once_with(self.team1_a)
+        self.member_a2.move_to.assert_awaited_once_with(self.team2_a)
+        self.member_b1.move_to.assert_awaited_once_with(self.team1_b)
+        self.member_b2.move_to.assert_awaited_once_with(self.team2_b)
+        self.assertEqual(self.helperObj.get(self.guild_a, "channel1"), "A Team 1")
+        self.assertEqual(self.helperObj.get(self.guild_a, "channel2"), "A Team 2")
+        self.assertEqual(self.helperObj.get(self.guild_b, "channel1"), "B Team 1")
+        self.assertEqual(self.helperObj.get(self.guild_b, "channel2"), "B Team 2")
+
+    async def test_concurrent_wagers_in_different_guilds_settle_independently(self):
+        self.helperObj.update(self.guild_a, "betting_state", "OPEN")
+        self.helperObj.update(self.guild_b, "betting_state", "OPEN")
+        self.helperObj.ensureEconomyRow(self.guild_a, 901, "Alice")
+        self.helperObj.ensureEconomyRow(self.guild_b, 901, "Alice")  # same real user, two servers
+        self.cursor.execute(
+            "UPDATE economy SET balance=1000 WHERE guildId=? AND userId=?", (self.guild_a, 901)
+        )
+        self.cursor.execute(
+            "UPDATE economy SET balance=1000 WHERE guildId=? AND userId=?", (self.guild_b, 901)
+        )
+        self.db.commit()
+
+        guild_a_ctx = SimpleNamespace(
+            guild=SimpleNamespace(id=self.guild_a), user=FakeMember("Alice", id=901),
+            response=AsyncMock(),
+        )
+        guild_b_ctx = SimpleNamespace(
+            guild=SimpleNamespace(id=self.guild_b), user=FakeMember("Alice", id=901),
+            response=AsyncMock(),
+        )
+
+        await asyncio.gather(
+            self.helperObj.wagerHelper(guild_a_ctx, 400, 1),
+            self.helperObj.wagerHelper(guild_b_ctx, 250, 2),
+        )
+
+        self.assertEqual(self.helperObj.getEconomy(self.guild_a, 901, "balance"), 600)
+        self.assertEqual(self.helperObj.getEconomy(self.guild_b, 901, "balance"), 750)
+
+        self.cursor.execute(
+            "SELECT team, amount FROM wagers WHERE guildId=? AND userId=?", (self.guild_a, 901)
+        )
+        self.assertEqual(self.cursor.fetchone(), (1, 400))
+        self.cursor.execute(
+            "SELECT team, amount FROM wagers WHERE guildId=? AND userId=?", (self.guild_b, 901)
+        )
+        self.assertEqual(self.cursor.fetchone(), (2, 250))
+
+    async def test_concurrent_daily_claims_for_the_same_user_in_different_guilds(self):
+        # The same real Discord account, active in two different servers,
+        # claiming /daily in both at once — each guild's economy row must
+        # be credited independently, not double-counted or merged.
+        ctx_a = SimpleNamespace(
+            guild=SimpleNamespace(id=self.guild_a), user=FakeMember("Alice", id=901),
+            response=AsyncMock(),
+        )
+        ctx_b = SimpleNamespace(
+            guild=SimpleNamespace(id=self.guild_b), user=FakeMember("Alice", id=901),
+            response=AsyncMock(),
+        )
+
+        await asyncio.gather(
+            self.helperObj.dailyHelper(ctx_a),
+            self.helperObj.dailyHelper(ctx_b),
+        )
+
+        self.assertEqual(
+            self.helperObj.getEconomy(self.guild_a, 901, "balance"), helper_module.DAILY_GOLD_AMOUNT
+        )
+        self.assertEqual(
+            self.helperObj.getEconomy(self.guild_b, 901, "balance"), helper_module.DAILY_GOLD_AMOUNT
+        )
+        ctx_a.response.send_message.assert_awaited_once()
+        ctx_b.response.send_message.assert_awaited_once()
+        self.assertIn("claimed", ctx_a.response.send_message.call_args.args[0])
+        self.assertIn("claimed", ctx_b.response.send_message.call_args.args[0])
+
+
+# ===========================================================================
 # bot.py — import with DB/token side effects redirected away from the real
 # project database and the real bot token, then exercise command callbacks
 # and event handlers directly. Never connects to Discord.
@@ -8524,6 +8863,14 @@ class BotModuleTestCase(unittest.IsolatedAsyncioTestCase):
         user = FakeMember("Caller", id=1)
         return FakeInteraction(guild, user, channel=channel)
 
+    # For commands that require the caller to be sitting in a voice
+    # channel (make-teams, captains, notify, ...) — _ctx()'s FakeMember has
+    # .voice = None by default, which would trip those guards.
+    def _ctx_in_voice(self, guild_id=GUILD_ID):
+        ctx = self._ctx(guild_id=guild_id)
+        ctx.user.voice = FakeVoiceState(FakeChannel("Lobby"))
+        return ctx
+
     async def _insert_guild_row(self, guild_id, name="Test Guild"):
         await self.bot.on_guild_join(SimpleNamespace(id=guild_id, name=name))
 
@@ -8532,7 +8879,7 @@ class CommandRegistrationTests(BotModuleTestCase):
     def test_all_expected_commands_registered(self):
         names = {c.name for c in self.bot.tree.get_commands()}
         expected = {
-            "set-channels", "wager", "wager-against", "daily",
+            "set", "wager", "wager-against", "daily",
             "stats", "card-set", "shop", "shop-buy",
             "achievements",
             "leaderboard", "help", "make-teams", "report-correct-winner",
@@ -8540,8 +8887,7 @@ class CommandRegistrationTests(BotModuleTestCase):
             "roll", "tournament-create", "team-create", "team-set",
             "team-invite", "team-stats", "team-list", "my-teams",
             "tournament-register", "tournament-create-bracket",
-            "tournament-print-bracket", "tournament-start", "wager-set-channel", "team-use",
-            "set-betting-timer", "set-elo",
+            "tournament-print-bracket", "tournament-start", "team-use",
         }
         self.assertEqual(names, expected)
 
@@ -9038,27 +9384,6 @@ class CommandDelegationTests(BotModuleTestCase):
             await self._command("team-use").callback(ctx, "Red", "Blue", ranked=True)
         mock.assert_awaited_once_with(ctx, "Red", "Blue", True)
 
-    async def test_set_wager_channel_delegates(self):
-        ctx = self._ctx()
-        mock = AsyncMock()
-        with patch.object(self.bot.helperObj, "setWagerChannelHelper", mock):
-            await self._command("wager-set-channel").callback(ctx, "bets")
-        mock.assert_awaited_once_with(ctx, "bets")
-
-    async def test_set_team_channels_delegates(self):
-        ctx = self._ctx()
-        mock = AsyncMock()
-        with patch.object(self.bot.helperObj, "setTeamHelper", mock):
-            await self._command("set-channels").callback(ctx, team1="Red", team2="Blue")
-        mock.assert_awaited_once_with(ctx, "Red", "Blue", None)
-
-    async def test_set_team_channels_delegates_size(self):
-        ctx = self._ctx()
-        mock = AsyncMock()
-        with patch.object(self.bot.helperObj, "setTeamHelper", mock):
-            await self._command("set-channels").callback(ctx, team1="Red", team2="Blue", size=4)
-        mock.assert_awaited_once_with(ctx, "Red", "Blue", 4)
-
     async def test_choose_delegates_to_choose_func(self):
         ctx = self._ctx()
         target = FakeMember("Target")
@@ -9119,9 +9444,9 @@ class HelpCommandTests(BotModuleTestCase):
         self.assertEqual(names, set(self.bot.COMMAND_HELP.keys()))
 
 
-class SetTeamChannelsCommandTests(BotModuleTestCase):
+class AdminSetCommandTests(BotModuleTestCase):
     def test_requires_manage_guild_permission(self):
-        cmd = self._command("set-channels")
+        cmd = self._command("set")
         denied = SimpleNamespace(permissions=discord.Permissions.none())
 
         with self.assertRaises(app_commands.MissingPermissions):
@@ -9129,14 +9454,14 @@ class SetTeamChannelsCommandTests(BotModuleTestCase):
                 check(denied)
 
     def test_manage_guild_permission_is_sufficient(self):
-        cmd = self._command("set-channels")
+        cmd = self._command("set")
         allowed = SimpleNamespace(permissions=discord.Permissions(manage_guild=True))
 
         for check in cmd.checks:
             self.assertTrue(check(allowed))
 
     async def test_error_handler_gives_a_friendly_denial_message(self):
-        cmd = self._command("set-channels")
+        cmd = self._command("set")
         ctx = self._ctx()
 
         await cmd.on_error(ctx, app_commands.MissingPermissions(["manage_guild"]))
@@ -9145,27 +9470,36 @@ class SetTeamChannelsCommandTests(BotModuleTestCase):
         self.assertIn("Manage Server", ctx.response.send_message.call_args.args[0])
 
     async def test_error_handler_reraises_unrelated_errors(self):
-        cmd = self._command("set-channels")
+        cmd = self._command("set")
         ctx = self._ctx()
 
         with self.assertRaises(ValueError):
             await cmd.on_error(ctx, ValueError("boom"))
 
-    async def test_size_is_optional_and_defaults_to_unset(self):
-        guild_id = 902
-        await self._insert_guild_row(guild_id)
-        ctx = self._ctx(guild_id=guild_id)
+    async def test_delegates_every_field_to_the_helper(self):
+        ctx = self._ctx()
+        member = FakeMember("Target", id=555)
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "adminSetHelper", mock):
+            await self._command("set").callback(
+                ctx, team1="Red", team2="Blue", size=4, betting_timer=30,
+                wager_channel="bets", member=member, elo=1500, default_elo=1200,
+            )
+        mock.assert_awaited_once_with(ctx, "Red", "Blue", 4, 30, "bets", member, 1500, 1200)
 
-        await self._command("set-channels").callback(ctx, team1="Red", team2="Blue")
+    async def test_omitted_fields_default_to_none(self):
+        ctx = self._ctx()
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "adminSetHelper", mock):
+            await self._command("set").callback(ctx)
+        mock.assert_awaited_once_with(ctx, None, None, None, None, None, None, None, None)
 
-        ctx.response.send_message.assert_awaited_once_with("Channels set!")
-
-    async def test_updates_team_size_and_confirms(self):
+    async def test_updates_team_size_and_confirms_end_to_end(self):
         guild_id = 903
         await self._insert_guild_row(guild_id)
         ctx = self._ctx(guild_id=guild_id)
 
-        await self._command("set-channels").callback(ctx, team1="Red", team2="Blue", size=4)
+        await self._command("set").callback(ctx, team1="Red", team2="Blue", size=4)
 
         self.assertEqual(self.bot.helperObj.get(guild_id, "team_size"), 4)
         message = ctx.response.send_message.call_args.args[0]
@@ -9346,7 +9680,7 @@ class ClearCommandTests(BotModuleTestCase):
 
         self.assertEqual(self.bot.helperObj.getEconomy(guild_id, 901, "elo"), 1500)
         click.response.edit_message.assert_awaited_once_with(
-            content="Cancelled — nothing was reset.", view=view
+            content="Cancelled - nothing was reset.", view=view
         )
 
     async def test_clear_confirmation_view_rejects_non_invoker(self):
@@ -9574,100 +9908,31 @@ class ClearCommandTests(BotModuleTestCase):
         self.assertEqual(self.bot.helperObj.getEconomy(guild_id, 901, "balance"), 1000)
 
 
-class SetBettingTimerCommandTests(BotModuleTestCase):
-    def test_requires_manage_guild_permission(self):
-        cmd = self._command("set-betting-timer")
-        denied = SimpleNamespace(permissions=discord.Permissions.none())
-
-        with self.assertRaises(app_commands.MissingPermissions):
-            for check in cmd.checks:
-                check(denied)
-
-    def test_manage_guild_permission_is_sufficient(self):
-        cmd = self._command("set-betting-timer")
-        allowed = SimpleNamespace(permissions=discord.Permissions(manage_guild=True))
-
-        for check in cmd.checks:
-            self.assertTrue(check(allowed))
-
-    async def test_error_handler_gives_a_friendly_denial_message(self):
-        cmd = self._command("set-betting-timer")
-        ctx = self._ctx()
-
-        await cmd.on_error(ctx, app_commands.MissingPermissions(["manage_guild"]))
-
-        ctx.response.send_message.assert_awaited_once()
-        self.assertIn("Manage Server", ctx.response.send_message.call_args.args[0])
-
-    async def test_error_handler_reraises_unrelated_errors(self):
-        cmd = self._command("set-betting-timer")
-        ctx = self._ctx()
-
-        with self.assertRaises(ValueError):
-            await cmd.on_error(ctx, ValueError("boom"))
-
-    async def test_delegates_to_helper(self):
-        ctx = self._ctx()
-        mock = AsyncMock()
-        with patch.object(self.bot.helperObj, "setBettingTimerHelper", mock):
-            await self._command("set-betting-timer").callback(ctx, seconds=30)
-        mock.assert_awaited_once_with(ctx, 30)
-
-
-class SetEloCommandTests(BotModuleTestCase):
-    def test_requires_manage_guild_permission(self):
-        cmd = self._command("set-elo")
-        denied = SimpleNamespace(permissions=discord.Permissions.none())
-
-        with self.assertRaises(app_commands.MissingPermissions):
-            for check in cmd.checks:
-                check(denied)
-
-    def test_manage_guild_permission_is_sufficient(self):
-        cmd = self._command("set-elo")
-        allowed = SimpleNamespace(permissions=discord.Permissions(manage_guild=True))
-
-        for check in cmd.checks:
-            self.assertTrue(check(allowed))
-
-    async def test_error_handler_gives_a_friendly_denial_message(self):
-        cmd = self._command("set-elo")
-        ctx = self._ctx()
-
-        await cmd.on_error(ctx, app_commands.MissingPermissions(["manage_guild"]))
-
-        ctx.response.send_message.assert_awaited_once()
-        self.assertIn("Manage Server", ctx.response.send_message.call_args.args[0])
-
-    async def test_error_handler_reraises_unrelated_errors(self):
-        cmd = self._command("set-elo")
-        ctx = self._ctx()
-
-        with self.assertRaises(ValueError):
-            await cmd.on_error(ctx, ValueError("boom"))
-
-    async def test_delegates_to_helper(self):
-        ctx = self._ctx()
-        member = FakeMember("Target", id=555)
-        mock = AsyncMock()
-        with patch.object(self.bot.helperObj, "setEloHelper", mock):
-            await self._command("set-elo").callback(ctx, member=member, elo=1500)
-        mock.assert_awaited_once_with(ctx, member, 1500)
-
-
 class NotifyCommandTests(BotModuleTestCase):
     async def test_notify_member_confirms_by_name(self):
         guild_id = 904
         await self._insert_guild_row(guild_id)
-        ctx = self._ctx(guild_id=guild_id)
+        ctx = self._ctx_in_voice(guild_id=guild_id)
         target = FakeMember("Target")
 
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "notifyHelper", mock):
             await self._command("notify").callback(ctx, member=target)
 
-        mock.assert_awaited_once_with(ctx, target)
+        mock.assert_awaited_once_with(ctx, target, None)
         ctx.response.send_message.assert_awaited_once_with("Sent an invite to Target!")
+
+    async def test_notify_passes_a_custom_message_through(self):
+        guild_id = 907
+        await self._insert_guild_row(guild_id)
+        ctx = self._ctx_in_voice(guild_id=guild_id)
+        target = FakeMember("Target")
+
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "notifyHelper", mock):
+            await self._command("notify").callback(ctx, member=target, message="We need a 5th!")
+
+        mock.assert_awaited_once_with(ctx, target, "We need a 5th!")
 
     async def test_notify_role_notifies_every_member(self):
         # BUG FIX: the confirmation message used to unconditionally
@@ -9676,7 +9941,7 @@ class NotifyCommandTests(BotModuleTestCase):
         # in that case).
         guild_id = 905
         await self._insert_guild_row(guild_id)
-        ctx = self._ctx(guild_id=guild_id)
+        ctx = self._ctx_in_voice(guild_id=guild_id)
         role = SimpleNamespace(name="Squad", members=[FakeMember("A"), FakeMember("B")])
 
         mock = AsyncMock()
@@ -9684,12 +9949,13 @@ class NotifyCommandTests(BotModuleTestCase):
             await self._command("notify").callback(ctx, role=role)
 
         self.assertEqual(mock.await_count, 2)
+        mock.assert_awaited_with(ctx, role.members[-1], None)
         ctx.response.send_message.assert_awaited_once_with("Sent an invite to 2 members in Squad!")
 
     async def test_notify_role_with_a_single_member_uses_singular_wording(self):
         guild_id = 906
         await self._insert_guild_row(guild_id)
-        ctx = self._ctx(guild_id=guild_id)
+        ctx = self._ctx_in_voice(guild_id=guild_id)
         role = SimpleNamespace(name="Squad", members=[FakeMember("A")])
 
         mock = AsyncMock()
@@ -9701,17 +9967,48 @@ class NotifyCommandTests(BotModuleTestCase):
     async def test_notify_rejects_when_neither_member_nor_role_given(self):
         guild_id = 905
         await self._insert_guild_row(guild_id)
-        ctx = self._ctx(guild_id=guild_id)
+        ctx = self._ctx_in_voice(guild_id=guild_id)
         await self._command("notify").callback(ctx)
         ctx.response.send_message.assert_awaited_once_with("Mention a member or a role to invite.")
 
     async def test_notify_rejects_when_both_member_and_role_given(self):
         guild_id = 905
         await self._insert_guild_row(guild_id)
-        ctx = self._ctx(guild_id=guild_id)
+        ctx = self._ctx_in_voice(guild_id=guild_id)
         role = SimpleNamespace(members=[FakeMember("A")])
         await self._command("notify").callback(ctx, member=FakeMember("Target"), role=role)
         ctx.response.send_message.assert_awaited_once_with("Give a member or a role, not both.")
+
+    async def test_notify_rejects_when_not_in_a_voice_channel(self):
+        guild_id = 908
+        await self._insert_guild_row(guild_id)
+        ctx = self._ctx(guild_id=guild_id)  # ctx.user.voice is None by default
+        target = FakeMember("Target")
+
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "notifyHelper", mock):
+            await self._command("notify").callback(ctx, member=target)
+
+        mock.assert_not_awaited()
+        ctx.response.send_message.assert_awaited_once_with(
+            "You need to be in a voice channel to invite someone to it - join one and try again."
+        )
+
+    async def test_notify_rejects_when_voice_state_has_no_channel(self):
+        guild_id = 909
+        await self._insert_guild_row(guild_id)
+        ctx = self._ctx(guild_id=guild_id)
+        ctx.user.voice = FakeVoiceState(None)
+        target = FakeMember("Target")
+
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "notifyHelper", mock):
+            await self._command("notify").callback(ctx, member=target)
+
+        mock.assert_not_awaited()
+        ctx.response.send_message.assert_awaited_once_with(
+            "You need to be in a voice channel to invite someone to it - join one and try again."
+        )
 
 
 class MakeTeamsCommandTests(BotModuleTestCase):
@@ -9727,7 +10024,7 @@ class MakeTeamsCommandTests(BotModuleTestCase):
     async def test_random_split_announces_without_moving(self):
         guild_id = 907
         await self._setup_teams(guild_id)
-        ctx = self._ctx(guild_id=guild_id)
+        ctx = self._ctx_in_voice(guild_id=guild_id)
 
         with patch.object(self.bot.helperObj, "randomizeTeamHelper", AsyncMock()) as randomize_mock, \
              patch.object(
@@ -9749,10 +10046,31 @@ class MakeTeamsCommandTests(BotModuleTestCase):
         ctx.channel.send.assert_awaited_once()
         self.assertIn(helper_module.TEAM_START_EMOJI, ctx.channel.send.call_args.args[0])
 
+    async def test_rejects_when_not_in_a_voice_channel(self):
+        ctx = self._ctx()  # ctx.user.voice is None by default
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "randomizeTeamHelper", mock):
+            await self._command("make-teams").callback(ctx, use_roles=False)
+        mock.assert_not_awaited()
+        ctx.response.send_message.assert_awaited_once_with(
+            "You need to be in a voice channel to form teams from it - join one and try again."
+        )
+
+    async def test_rejects_when_voice_state_has_no_channel(self):
+        ctx = self._ctx()
+        ctx.user.voice = FakeVoiceState(None)
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "randomizeTeamHelper", mock):
+            await self._command("make-teams").callback(ctx, use_roles=False)
+        mock.assert_not_awaited()
+        ctx.response.send_message.assert_awaited_once_with(
+            "You need to be in a voice channel to form teams from it - join one and try again."
+        )
+
     async def test_use_roles_forwards_the_flag_to_print_embed_and_finalize(self):
         guild_id = 908
         await self._setup_teams(guild_id)
-        ctx = self._ctx(guild_id=guild_id)
+        ctx = self._ctx_in_voice(guild_id=guild_id)
 
         with patch.object(self.bot.helperObj, "randomizeTeamHelper", AsyncMock()) as randomize_mock, \
              patch.object(
@@ -9775,7 +10093,7 @@ class MakeTeamsCommandTests(BotModuleTestCase):
         # why no roles showed up.
         guild_id = 912
         await self._setup_teams(guild_id)
-        ctx = self._ctx(guild_id=guild_id)
+        ctx = self._ctx_in_voice(guild_id=guild_id)
 
         with patch.object(self.bot.helperObj, "randomizeTeamHelper", AsyncMock()), \
              patch.object(
@@ -9802,7 +10120,7 @@ class MakeTeamsCommandTests(BotModuleTestCase):
             team2.add_player(Player(200 + i, f"B{i}"))
         self.bot.helperObj.update(guild_id, "team1", team1.serializeTeam())
         self.bot.helperObj.update(guild_id, "team2", team2.serializeTeam())
-        ctx = self._ctx(guild_id=guild_id)
+        ctx = self._ctx_in_voice(guild_id=guild_id)
 
         with patch.object(self.bot.helperObj, "randomizeTeamHelper", AsyncMock()), \
              patch.object(
@@ -9819,7 +10137,7 @@ class MakeTeamsCommandTests(BotModuleTestCase):
 
 class RankedCommandTests(BotModuleTestCase):
     async def test_make_teams_ranked_delegates_to_ranked_team_helper(self):
-        ctx = self._ctx()
+        ctx = self._ctx_in_voice()
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "rankedTeamHelper", mock):
             await self._command("make-teams").callback(ctx, use_roles=False, ranked=True)
@@ -9828,7 +10146,7 @@ class RankedCommandTests(BotModuleTestCase):
     async def test_make_teams_ranked_ignores_use_roles(self):
         # ranked=True short-circuits before the random-split/use_roles flow
         # even runs — randomizeTeamHelper must never be touched.
-        ctx = self._ctx()
+        ctx = self._ctx_in_voice()
         with patch.object(self.bot.helperObj, "rankedTeamHelper", AsyncMock()), \
              patch.object(self.bot.helperObj, "randomizeTeamHelper", AsyncMock()) as random_mock:
             await self._command("make-teams").callback(ctx, use_roles=True, ranked=True)
@@ -9836,9 +10154,33 @@ class RankedCommandTests(BotModuleTestCase):
 
 
 class CaptainsCommandTests(BotModuleTestCase):
-    async def test_requires_at_least_two_in_voice_channel(self):
+    async def test_rejects_when_not_in_a_voice_channel(self):
         ctx = self._ctx()
         ctx.user.voice = None
+
+        await self._command("captains").callback(
+            ctx, captain_1=None, captain_2=None, use_random=False
+        )
+
+        ctx.response.send_message.assert_awaited_once_with(
+            "You need to be in a voice channel to start a captains draft - join one and try again."
+        )
+
+    async def test_rejects_when_voice_state_has_no_channel(self):
+        ctx = self._ctx()
+        ctx.user.voice = FakeVoiceState(None)
+
+        await self._command("captains").callback(
+            ctx, captain_1=None, captain_2=None, use_random=False
+        )
+
+        ctx.response.send_message.assert_awaited_once_with(
+            "You need to be in a voice channel to start a captains draft - join one and try again."
+        )
+
+    async def test_requires_at_least_two_in_voice_channel(self):
+        ctx = self._ctx()
+        ctx.user.voice = FakeVoiceState(FakeChannel("Lobby", members=[FakeMember("Solo")]))
 
         await self._command("captains").callback(
             ctx, captain_1=None, captain_2=None, use_random=False

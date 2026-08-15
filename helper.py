@@ -136,6 +136,13 @@ _bracket_logo_cache = None
 # `global` needed the way _bracket_logo_cache's None/False swap requires).
 _font_cache = {}
 
+# ELO tier badge images (see ELO_BADGE_DIR), loaded and resized once per
+# (path, size) and reused for the rest of the process — every trading card
+# draws exactly one of these, so this avoids re-opening/resizing the same
+# handful of small PNGs from disk on every single render. Same "mutate the
+# dict directly" reasoning _font_cache's own comment gives.
+_elo_badge_cache = {}
+
 BETTING_DURATION_SECONDS = 60
 # _openConcurrentTournamentBetting multiplies a guild's configured
 # per-match timer by however many matches are in the round — this caps
@@ -187,7 +194,7 @@ STATS_AVATAR_TOGGLE_EMOJI = "\U0001f5bc️"  # 🖼️
 # handleStatsReaction removes both reactions the moment the card goes up
 # and replaces them with STATS_RETURN_EMOJI below — a card isn't shaped
 # like a normal /stats embed, so neither toggle applies to it anymore.
-STATS_CARD_EMOJI = "\U0001f3b4"  # 🎴
+STATS_CARD_EMOJI = "\U0001F0CF"  # 🃏
 # Shown only once the trading card is up in place of STATS_AVATAR_TOGGLE_EMOJI
 # / STATS_CARD_EMOJI — the one action that makes sense from the card view,
 # swapping back to the plain /stats embed (which then gets its own two
@@ -314,29 +321,29 @@ CARD_MIN_ACCENT_CONTRAST = 45
 
 # League-style rank tiers for /stats. Each tier spans 250 elo, with
 # DEFAULT_ELO (1000) landing every new player in the middle at Platinum —
-# ascending order, (elo threshold, tier name, emoji, badge color, badge
-# shape). The badge color+shape stand in for the emoji on the trading card
-# (see _drawEloBadge) — PIL's bundled TTF fonts can't render color emoji
-# glyphs (same class of issue the roster's captain star ran into), so the
-# card draws a small tier-colored shape instead of the literal character.
-# "circle" is the default (matches the medal/gear/circle emoji closely
-# enough); Platinum and Diamond get "diamond" instead since \U0001f537 and
-# \U0001f48e are both actually diamond/gem-cut shapes, not circles — a
-# round badge there read as a shape mismatch against the real emoji shown
-# in the embed, not just a color one.
+# a global fallback; a guild can override its own starting elo via /set's
+# default_elo (see _defaultEloForGuild) without changing this ladder.
+# ascending order, (elo threshold, tier name, emoji, badge color). The
+# trading card (_drawEloBadge) pastes the tier's own real emoji artwork
+# (see ELO_BADGE_DIR) instead of the literal character — PIL's bundled TTF
+# fonts can't render color emoji glyphs (same class of issue the roster's
+# captain star ran into) — so there's no shape to hand-approximate here
+# anymore; badge_color now exists purely for the tier-reward trading-card
+# color scheme (see ELO_TIER_BADGE_COLORS/getUnlockedCardColorSchemes),
+# independent of whatever the badge image itself looks like.
 ELO_TIERS = [
-    (0, "Iron", "⚙️", (153, 170, 181), "circle"),
-    (250, "Bronze", "\U0001f949", (205, 127, 50), "circle"),
-    (500, "Silver", "\U0001f948", (192, 192, 192), "circle"),
-    (750, "Gold", "\U0001f947", (255, 204, 51), "circle"),
+    (0, "Iron", "⚙️", (153, 170, 181)),
+    (250, "Bronze", "\U0001f949", (205, 127, 50)),
+    (500, "Silver", "\U0001f948", (192, 192, 192)),
+    (750, "Gold", "\U0001f947", (255, 204, 51)),
     # BUG FIX: this used to be a cyan/teal (79, 209, 232) that read as
     # "Diamond" at a glance — closer to the actual color of the large blue
     # diamond emoji \U0001f537 itself, which is a clear blue, not cyan.
-    (1000, "Platinum", "\U0001f537", (41, 121, 255), "diamond"),
-    (1250, "Diamond", "\U0001f48e", (137, 207, 240), "diamond"),
-    (1500, "Master", "\U0001f7e3", (155, 60, 200), "circle"),
-    (1750, "Grandmaster", "\U0001f534", (221, 46, 68), "circle"),
-    (2000, "Challenger", "\U0001f451", (255, 199, 44), "circle"),
+    (1000, "Platinum", "\U0001f537", (41, 121, 255)),
+    (1250, "Diamond", "\U0001f48e", (137, 207, 240)),
+    (1500, "Master", "\U0001f7e3", (155, 60, 200)),
+    (1750, "Grandmaster", "\U0001f534", (221, 46, 68)),
+    (2000, "Challenger", "\U0001f451", (255, 199, 44)),
 ]
 
 # Divisions within a tier, lowest to highest — the same I/II/III/IV split
@@ -353,8 +360,13 @@ ELO_DIVISIONED_TIER_COUNT = 6
 # there's nothing here that can drift out of sync if ELO_TIERS' own values
 # ever change (the exact "stale duplicated constant" bug CARD_DEFAULT_*
 # ran into earlier is what this sidesteps).
-ELO_TIER_THRESHOLDS = {name: threshold for threshold, name, _emoji, _badge, _shape in ELO_TIERS}
-ELO_TIER_BADGE_COLORS = {name: badge for _threshold, name, _emoji, badge, _shape in ELO_TIERS}
+ELO_TIER_THRESHOLDS = {name: threshold for threshold, name, _emoji, _badge in ELO_TIERS}
+ELO_TIER_BADGE_COLORS = {name: badge for _threshold, name, _emoji, badge in ELO_TIERS}
+# Each tier's real emoji artwork (see the generation note above) — one PNG
+# per ELO_TIERS name, e.g. assets/elo-badges/Challenger.png — pasted onto
+# the trading card by eloRankBadgeImagePath/_drawEloBadge instead of a
+# hand-drawn approximation.
+ELO_BADGE_DIR = os.path.join(os.path.dirname(__file__), "assets", "elo-badges")
 
 # Trading-card rewards permanently unlocked (see card_unlocks,
 # _checkTierRewardUnlocks) the first time a player reaches each of these
@@ -662,7 +674,8 @@ class ConfirmResetView(discord.ui.View):
             )
         elif self.clear_elo:
             self.helperObj.resetEloHelper(self.guild_id)
-            results.append(f"Elo has been reset to {DEFAULT_ELO} for every player in **{self.guild_name}**.")
+            reset_elo = self.helperObj._defaultEloForGuild(self.guild_id)
+            results.append(f"Elo has been reset to {reset_elo} for every player in **{self.guild_name}**.")
         if self.clear_achievements:
             if self.target is not None:
                 self.helperObj.resetAchievementsHelper(self.guild_id, user_id=self.target.id)
@@ -694,7 +707,7 @@ class ConfirmResetView(discord.ui.View):
     async def cancel(self, interaction, button):
         self._disable_buttons()
         self.stop()
-        await interaction.response.edit_message(content="Cancelled — nothing was reset.", view=self)
+        await interaction.response.edit_message(content="Cancelled - nothing was reset.", view=self)
 
     async def on_timeout(self):
         self._disable_buttons()
@@ -745,7 +758,7 @@ class ConfirmTournamentOverwriteView(discord.ui.View):
         self._disable_buttons()
         self.stop()
         await interaction.response.edit_message(
-            content="Cancelled — the existing tournament was kept.", view=self
+            content="Cancelled - the existing tournament was kept.", view=self
         )
 
     async def on_timeout(self):
@@ -798,7 +811,7 @@ class ConfirmVoiceChannelOverwriteView(discord.ui.View):
         self._disable_buttons()
         self.stop()
         await interaction.response.edit_message(
-            content="Cancelled — run `/team-set` again with a different channel.", view=self
+            content="Cancelled - run `/team-set` again with a different channel.", view=self
         )
 
     async def on_timeout(self):
@@ -890,41 +903,55 @@ class helpers():
 
         return team1, team2
 
-    def averageElo(self, members, elo_by_id):
+    # What a brand new player's elo starts at in this guild — DEFAULT_ELO
+    # (1000) unless an admin has overridden it with /set's default_elo
+    # param (see adminSetHelper), in which case that value wins instead.
+    # The one place every other elo-defaulting call site in this file goes
+    # through, so a guild's configured default never has to be re-looked-up
+    # or duplicated by hand.
+    def _defaultEloForGuild(self, guild_id):
+        value = self.get(guild_id, "default_elo")
+        return value if value is not None else DEFAULT_ELO
+
+    def averageElo(self, members, elo_by_id, default_elo=DEFAULT_ELO):
         if not members:
-            return DEFAULT_ELO
+            return default_elo
         return round(sum(elo_by_id[m.id] for m in members) / len(members))
 
-    # The (emoji, plain-text label) behind eloRankLabel/eloRankLabelPlain —
-    # e.g. ("\U0001f537", "Platinum III") or ("\U0001f7e3", "Master") once
-    # divisions stop applying. ELO_TIERS is sorted ascending, so the last
-    # threshold at or below elo wins — e.g. exactly 1000 is Platinum, not
-    # Gold; anything above the top tier's threshold is still Challenger.
+    # The (emoji, plain-text label, badge color, bare tier name) behind
+    # eloRankLabel/eloRankLabelPlain/eloRankBadgeColor/
+    # eloRankBadgeImagePath — e.g. ("\U0001f537", "Platinum III", (41, 121,
+    # 255), "Platinum") once divisions stop applying. ELO_TIERS is sorted
+    # ascending, so the last threshold at or below elo wins — e.g. exactly
+    # 1000 is Platinum, not Gold; anything above the top tier's threshold
+    # is still Challenger. `tier_name` is always the bare name (no division
+    # suffix), unlike `label` — it's what eloRankBadgeImagePath looks the
+    # asset file up by.
     def _eloRankParts(self, elo):
         tier_index = 0
-        for i, (threshold, _name, _emoji, _badge, _shape) in enumerate(ELO_TIERS):
+        for i, (threshold, _name, _emoji, _badge) in enumerate(ELO_TIERS):
             if elo >= threshold:
                 tier_index = i
             else:
                 break
 
-        threshold, name, emoji, badge_color, badge_shape = ELO_TIERS[tier_index]
+        threshold, name, emoji, badge_color = ELO_TIERS[tier_index]
 
         if tier_index >= ELO_DIVISIONED_TIER_COUNT:
-            return emoji, name, badge_color, badge_shape
+            return emoji, name, badge_color, name
 
         span = ELO_TIERS[tier_index + 1][0] - threshold
         offset = max(elo - threshold, 0)
         segment_size = span / len(ELO_DIVISIONS)
         division_index = min(int(offset // segment_size), len(ELO_DIVISIONS) - 1)
 
-        return emoji, f"{name} {ELO_DIVISIONS[division_index]}", badge_color, badge_shape
+        return emoji, f"{name} {ELO_DIVISIONS[division_index]}", badge_color, name
 
     # Maps a raw elo number to a League-style "emoji tier division" label,
     # e.g. "\U0001f537 Platinum III" — what /stats and /leaderboard show,
     # since Discord's own client renders the emoji fine in embed text.
     def eloRankLabel(self, elo):
-        emoji, label, _badge, _shape = self._eloRankParts(elo)
+        emoji, label, _badge, _tier_name = self._eloRankParts(elo)
         return f"{emoji} {label}"
 
     # Same tier/division text, without the leading emoji — for the trading
@@ -936,13 +963,20 @@ class helpers():
     def eloRankLabelPlain(self, elo):
         return self._eloRankParts(elo)[1]
 
-    # The tier's badge color/shape (see ELO_TIERS) — the trading card's
-    # stand-in for the emoji eloRankLabel shows in a real embed.
+    # The tier's badge color (see ELO_TIERS) — used for the tier-reward
+    # trading-card color scheme (getUnlockedCardColorSchemes), independent
+    # of whatever image eloRankBadgeImagePath below points at.
     def eloRankBadgeColor(self, elo):
         return self._eloRankParts(elo)[2]
 
-    def eloRankBadgeShape(self, elo):
-        return self._eloRankParts(elo)[3]
+    # Path to this tier's real emoji artwork (see ELO_BADGE_DIR) — the
+    # trading card's stand-in for the emoji eloRankLabel shows in a real
+    # embed. Actual saved emoji images rather than a hand-drawn PIL
+    # approximation, so there's no shape/color to keep in sync with the
+    # real glyph by hand.
+    def eloRankBadgeImagePath(self, elo):
+        tier_name = self._eloRankParts(elo)[3]
+        return os.path.join(ELO_BADGE_DIR, f"{tier_name}.png")
 
     # Forms elo-balanced teams from the caller's voice channel and marks
     # the game as ranked, so elo actually gets updated when the winner is
@@ -954,12 +988,13 @@ class helpers():
 
         guild_id = ctx.guild.id
         channel = ctx.user.voice.channel
+        default_elo = self._defaultEloForGuild(guild_id)
 
         members_with_elo = []
         for member in channel.members:
             self.ensureEconomyRow(guild_id, member.id, member.name)
             elo = self.getEconomy(guild_id, member.id, "elo")
-            members_with_elo.append((member, elo if elo is not None else DEFAULT_ELO))
+            members_with_elo.append((member, elo if elo is not None else default_elo))
 
         team1_members, team2_members = self.formBalancedTeams(members_with_elo)
         elo_by_id = {member.id: elo for member, elo in members_with_elo}
@@ -978,8 +1013,8 @@ class helpers():
         self.update(guild_id, "mode", "Ranked")
         self.update(guild_id, "is_ranked", 1)
 
-        team1_avg = self.averageElo(team1_members, elo_by_id)
-        team2_avg = self.averageElo(team2_members, elo_by_id)
+        team1_avg = self.averageElo(team1_members, elo_by_id, default_elo)
+        team2_avg = self.averageElo(team2_members, elo_by_id, default_elo)
 
         await ctx.response.send_message(
             f"Ranked teams created! Team 1 avg elo **{team1_avg}**, Team 2 avg elo **{team2_avg}**. "
@@ -1040,65 +1075,128 @@ class helpers():
 
         return team1_message, team2_message
 
-    async def setTeamHelper(self, ctx, team1="Team 1", team2="Team 2", size=None):
+    # /set (admin-only, manage_guild — see bot.py): a single entry point for
+    # every server-tunable knob an admin might want to change (team
+    # channels/size, the betting timer, the wager-postings channel, and a
+    # direct elo correction), so tweaking one doesn't mean hunting down a
+    # handful of different commands. Every given field is validated before
+    # ANY of them is applied — same validate-then-apply-all pattern
+    # /card-set and /team-set use — so a bad value in one field can't leave
+    # another, genuinely valid field half-applied. team1/team2 and
+    # member/elo are each pairs (either both given or neither); size,
+    # betting_timer, and wager_channel each stand alone.
+    async def adminSetHelper(
+        self, ctx, team1, team2, size, betting_timer, wager_channel, member, elo, default_elo,
+    ):
         guild = ctx.guild
+        guild_id = guild.id
 
-        channel1 = discord.utils.get(ctx.guild.channels, name=team1)
+        if all(
+            v is None
+            for v in (team1, team2, size, betting_timer, wager_channel, member, elo, default_elo)
+        ):
+            await ctx.response.send_message(
+                "Give at least one setting to change: team1+team2, size, betting_timer, "
+                "wager_channel, member+elo, or default_elo."
+            )
+            return
 
-        if channel1 is None:
-            await guild.create_voice_channel(name=team1)
-            channel1 = discord.utils.get(ctx.guild.channels, name=team1)
+        if (team1 is None) != (team2 is None):
+            await ctx.response.send_message("Give both team1 and team2 together, or neither.")
+            return
 
-        channel2 = discord.utils.get(ctx.guild.channels, name=team2)
+        if (member is None) != (elo is None):
+            await ctx.response.send_message("Give both member and elo together, or neither.")
+            return
 
-        if channel2 is None:
-            await guild.create_voice_channel(name=team2)
-            channel2 = discord.utils.get(ctx.guild.channels, name=team2)
+        if betting_timer is not None:
+            if betting_timer <= 0:
+                await ctx.response.send_message("betting_timer must be greater than 0 seconds.")
+                return
+            if betting_timer > 600:
+                await ctx.response.send_message(
+                    "betting_timer can't be more than 600 seconds (10 minutes)."
+                )
+                return
 
-        self.update(guild.id, "channel1", str(team1))
-        self.update(guild.id, "channel2", str(team2))
+        if default_elo is not None and default_elo <= 0:
+            await ctx.response.send_message("default_elo must be greater than 0.")
+            return
+
+        applied = []
+
+        if team1 is not None:
+            channel1 = discord.utils.get(guild.channels, name=team1)
+            if channel1 is None:
+                channel1 = await guild.create_voice_channel(name=team1)
+            channel2 = discord.utils.get(guild.channels, name=team2)
+            if channel2 is None:
+                channel2 = await guild.create_voice_channel(name=team2)
+            self.update(guild_id, "channel1", str(team1))
+            self.update(guild_id, "channel2", str(team2))
+            applied.append(f"team channels to {channel1.mention}/{channel2.mention}")
 
         if size is not None:
-            self.update(guild.id, "team_size", size)
-            await ctx.response.send_message(f"Channels set! Team size set to {size}.")
-            return
+            self.update(guild_id, "team_size", size)
+            applied.append(f"team size to **{size}**")
 
-        await ctx.response.send_message("Channels set!")
+        # For a simultaneous-mode tournament round with several matches
+        # open at once, betting_timer is the PER-MATCH base — see
+        # _openConcurrentTournamentBetting, which multiplies it by however
+        # many matches are in that round (capped so a big base times a big
+        # bracket's first round can't leave betting open for absurdly long).
+        if betting_timer is not None:
+            self.update(guild_id, "betting_timer_seconds", betting_timer)
+            applied.append(f"the betting window to **{betting_timer} seconds**")
 
-    # Points every future betting posting (open/closed/winner-report — see
-    # _openBetting) at a specific text channel instead of wherever /start
-    # or a tournament match happens to run. Creates the channel if a text
-    # channel with that name doesn't already exist.
-    async def setWagerChannelHelper(self, ctx, channel_name):
-        guild = ctx.guild
+        # Points every future betting posting (open/closed/winner-report —
+        # see _openBetting) at a specific text channel instead of wherever
+        # a game or a tournament match happens to run.
+        if wager_channel is not None:
+            channel = discord.utils.get(guild.text_channels, name=wager_channel)
+            if channel is None:
+                channel = await guild.create_text_channel(wager_channel)
+            self.update(guild_id, "wager_channel", channel.name)
+            applied.append(f"the wager channel to {channel.mention}")
 
-        channel = discord.utils.get(guild.text_channels, name=channel_name)
-        if channel is None:
-            channel = await guild.create_text_channel(channel_name)
+        # Sets `member`'s elo to an exact value rather than a +/- delta, for
+        # correcting a broken rating directly rather than fighting the
+        # match-result math to get there. Still runs _checkTierRewardUnlocks
+        # afterward, the same as any other path that changes elo
+        # (applyGameDeltas, the lazy self-heal in _buildStatsEmbed) — an
+        # admin manually setting someone to Diamond+ should credit that
+        # tier's reward exactly like earning it normally would.
+        if member is not None:
+            user_id = member.id
+            self.ensureEconomyRow(guild_id, user_id, member.name)
+            self.cursor.execute(
+                "UPDATE economy SET elo=? WHERE guildId=? AND userId=?", (elo, guild_id, user_id)
+            )
+            self.db.commit()
+            self._checkTierRewardUnlocks(guild_id, user_id, elo)
+            applied.append(f"{member.mention}'s elo to **{elo}**")
 
-        self.update(guild.id, "wager_channel", channel.name)
+        # What a brand new player's elo starts at in this guild — see
+        # _defaultEloForGuild. Doesn't touch anyone's existing rating; use
+        # /clear (clear_elo) to reset current players to the new default.
+        if default_elo is not None:
+            self.update(guild_id, "default_elo", default_elo)
+            applied.append(f"the default starting elo to **{default_elo}**")
 
-        await ctx.response.send_message(f"All wager postings will now go to {channel.mention}.")
+        if len(applied) == 1:
+            summary = applied[0]
+        elif len(applied) == 2:
+            summary = f"{applied[0]} and {applied[1]}"
+        else:
+            summary = f"{', '.join(applied[:-1])}, and {applied[-1]}"
 
-    # How long a betting window stays open, replacing the previously-fixed
-    # BETTING_DURATION_SECONDS. For a simultaneous-mode tournament round
-    # with several matches open at once, this is the PER-MATCH base — see
-    # _openConcurrentTournamentBetting, which multiplies it by however many
-    # matches are in that round (capped so a big base times a big bracket's
-    # first round can't leave betting open for absurdly long).
-    async def setBettingTimerHelper(self, ctx, seconds):
-        if seconds <= 0:
-            await ctx.response.send_message("Betting timer must be greater than 0 seconds.")
-            return
-        if seconds > 600:
-            await ctx.response.send_message("Betting timer can't be more than 600 seconds (10 minutes).")
-            return
-
-        self.update(ctx.guild.id, "betting_timer_seconds", seconds)
-        await ctx.response.send_message(
-            f"Betting windows now stay open for {seconds} seconds. For a tournament round with several "
-            f"matches happening at once, that's multiplied by the number of matches in the round."
-        )
+        message = f"Updated {summary}."
+        if betting_timer is not None:
+            message += (
+                " For a tournament round with several matches happening at once, that's "
+                "multiplied by the number of matches in the round."
+            )
+        await ctx.response.send_message(message)
 
     # Turns a just-posted, actually-final roster (not a captains draft still
     # mid-pick) into a live control: 🔄 to reroll roles (only if the roster
@@ -1554,14 +1652,19 @@ class helpers():
         # when the winner is eventually reported.
         self.update(guild_id, "is_ranked", 0)
 
-    async def notifyHelper(self, ctx, member: discord.Member):
+    # `message`, when given, replaces the default "You've been invited..."
+    # line entirely rather than being appended alongside it — the invite
+    # link and a "Sent by" attribution line (since a custom message might
+    # not mention the sender at all) still always follow it.
+    async def notifyHelper(self, ctx, member: discord.Member, message: str = None):
         channel = await member.create_dm()
         invite_channel = ctx.user.voice.channel
         invite_link = await invite_channel.create_invite(max_uses=1, unique=True)
+
+        body = message if message is not None else "You've been invited to play in a game!"
         content = (
-            ctx.user.global_name
-            + " has invited you to play in a game! Join their voice channel here: "
-            + str(invite_link)
+            f"{body} Join the voice channel here: {invite_link}\n\n"
+            f"Sent by {ctx.user.global_name}"
         )
         await channel.send(content)
 
@@ -1604,7 +1707,7 @@ class helpers():
             "(guildId, userId, username, balance, wins, losses, gold_wagered, gold_won, gold_lost, "
             "game_wins, game_losses, elo, last_daily) "
             "VALUES(?, ?, ?, 0, 0, 0, 0, 0, 0, 0, 0, ?, NULL)",
-            (guild_id, user_id, username, DEFAULT_ELO)
+            (guild_id, user_id, username, self._defaultEloForGuild(guild_id))
         )
         self.cursor.execute(
             "UPDATE economy SET username=? WHERE guildId=? AND userId=?",
@@ -1620,12 +1723,12 @@ class helpers():
         self.cursor.execute("DELETE FROM economy WHERE guildId=?", (guild_id,))
         self.db.commit()
 
-    # Resets every existing player's elo back to DEFAULT_ELO for a guild,
-    # leaving balance/wins/losses/gold untouched — unlike resetEconomyHelper,
-    # which wipes the whole row.
+    # Resets every existing player's elo back to this guild's configured
+    # default (see _defaultEloForGuild), leaving balance/wins/losses/gold
+    # untouched — unlike resetEconomyHelper, which wipes the whole row.
     def resetEloHelper(self, guild_id):
         self.cursor.execute(
-            "UPDATE economy SET elo=? WHERE guildId=?", (DEFAULT_ELO, guild_id)
+            "UPDATE economy SET elo=? WHERE guildId=?", (self._defaultEloForGuild(guild_id), guild_id)
         )
         self.db.commit()
 
@@ -1714,8 +1817,9 @@ class helpers():
                 f"**{ctx.guild.name}**."
             )
         elif clear_elo:
+            reset_elo = self._defaultEloForGuild(ctx.guild.id)
             warnings.append(
-                f"This will **reset elo back to {DEFAULT_ELO}** for **every player** "
+                f"This will **reset elo back to {reset_elo}** for **every player** "
                 f"in **{ctx.guild.name}**."
             )
         if clear_achievements:
@@ -1850,7 +1954,7 @@ class helpers():
             )
             await ctx.response.send_message(
                 f"Tournament **{existing.get_name()}** is already set up for this server. "
-                f"Creating **{name}** will overwrite it — are you sure?",
+                f"Creating **{name}** will overwrite it - are you sure?",
                 view=view
             )
             view.message = await ctx.original_response()
@@ -1874,7 +1978,7 @@ class helpers():
         tournament = self.getTournament(guild_id)
         if tournament is None:
             await ctx.response.send_message(
-                "No tournament set up for this server — use /tournament-create first."
+                "No tournament set up for this server - use /tournament-create first."
             )
             return
 
@@ -2126,7 +2230,7 @@ class helpers():
         tournament = self.getTournament(guild_id)
         if tournament is None:
             await ctx.response.send_message(
-                "No tournament set up for this server — use /tournament-create first."
+                "No tournament set up for this server - use /tournament-create first."
             )
             return
 
@@ -2164,7 +2268,7 @@ class helpers():
                 " Losers bracket rounds are interleaved with the winners bracket as they're unlocked."
             )
         await ctx.response.send_message(
-            f"Bracket created for **{tournament.get_name()}** — {len(teams)} teams, "
+            f"Bracket created for **{tournament.get_name()}** - {len(teams)} teams, "
             f"{elim_style} elimination.{timing_note}"
         )
         await self._sendBracketText(ctx.channel, tournament, guild_id)
@@ -3361,7 +3465,7 @@ class helpers():
         tournament = self.getTournament(ctx.guild.id)
         if tournament is None:
             await ctx.response.send_message(
-                "No tournament set up for this server — use /tournament-create first."
+                "No tournament set up for this server - use /tournament-create first."
             )
             return
         await ctx.response.send_message(
@@ -3383,7 +3487,7 @@ class helpers():
         if bracket_type == "losers":
             return self._losersRoundName(round_index)
         if bracket_type == "finals":
-            return "Grand Finals" if round_index == 0 else "Grand Finals — Bracket Reset"
+            return "Grand Finals" if round_index == 0 else "Grand Finals - Bracket Reset"
         top_round_index = len(self._bracketRounds(tournament.get_bracket())) - 1
         return self._roundName(round_index, top_round_index)
 
@@ -3405,7 +3509,7 @@ class helpers():
             f"match_{match_id}_vs.png"
         )
         msg = await channel.send(
-            f"**Match #{match_id}:** {team1.get_name()} vs {team2.get_name()} — react with "
+            f"**Match #{match_id}:** {team1.get_name()} vs {team2.get_name()} - react with "
             f"{TOURNAMENT_READY_EMOJI} when ready to play (either captain)!",
             file=matchup_file
         )
@@ -3438,7 +3542,7 @@ class helpers():
             f"match_{match_id}_vs.png"
         )
         msg = await channel.send(
-            f"**Match #{match_id}:** {team1.get_name()} vs {team2.get_name()} — react with "
+            f"**Match #{match_id}:** {team1.get_name()} vs {team2.get_name()} - react with "
             f"{TEAM_EMOJIS[1]} if {team1.get_name()} won, or {TEAM_EMOJIS[2]} if {team2.get_name()} won.",
             file=matchup_file
         )
@@ -3739,7 +3843,7 @@ class helpers():
             match_ids.append(self.cursor.lastrowid)
 
         plural = "es" if len(match_ids) != 1 else ""
-        await channel.send(f"__Round {round_index + 1}__ — {len(match_ids)} match{plural} to play.")
+        await channel.send(f"__Round {round_index + 1}__ - {len(match_ids)} match{plural} to play.")
 
         if mode == "sequential":
             await self._postReadyCheck(guild_id, match_ids[0], channel)
@@ -3811,7 +3915,7 @@ class helpers():
 
         plural = "es" if len(match_ids) != 1 else ""
         await channel.send(
-            f"__Losers Bracket Round {round_index + 1}__ — {len(match_ids)} match{plural} to play."
+            f"__Losers Bracket Round {round_index + 1}__ - {len(match_ids)} match{plural} to play."
         )
 
         if mode == "sequential":
@@ -3837,7 +3941,7 @@ class helpers():
         if not reset:
             await channel.send(
                 f"\U0001f3c6 **Grand Finals:** {wb_champion.get_name()} (undefeated) vs "
-                f"{lb_champion.get_name()} (one loss) — {lb_champion.get_name()} must win twice "
+                f"{lb_champion.get_name()} (one loss) - {lb_champion.get_name()} must win twice "
                 f"to take the title."
             )
 
@@ -3915,19 +4019,19 @@ class helpers():
         tournament = self.getTournament(guild_id)
         if tournament is None:
             await ctx.response.send_message(
-                "No tournament set up for this server — use /tournament-create first."
+                "No tournament set up for this server - use /tournament-create first."
             )
             return
 
         bracket = tournament.get_bracket()
         if not bracket:
-            await ctx.response.send_message("No bracket has been created yet — use /tournament-create-bracket first.")
+            await ctx.response.send_message("No bracket has been created yet - use /tournament-create-bracket first.")
             return
 
         champion_name = self._tournamentChampionName(guild_id, tournament)
         if champion_name is not None:
             await ctx.response.send_message(
-                f"**{tournament.get_name()}** is already finished — **{champion_name}** is the champion!"
+                f"**{tournament.get_name()}** is already finished - **{champion_name}** is the champion!"
             )
             return
 
@@ -3939,7 +4043,7 @@ class helpers():
             return
 
         await ctx.response.send_message(
-            f"Starting **{tournament.get_name()}** — {mode} mode."
+            f"Starting **{tournament.get_name()}** - {mode} mode."
         )
         await self._startRound(guild_id, tournament, 0, mode, ctx.channel)
 
@@ -4234,7 +4338,7 @@ class helpers():
         if bracket_type != "winners":
             await ctx.response.send_message(
                 f"Match #{match_id} is a {'losers bracket' if bracket_type == 'losers' else 'Grand Finals'} "
-                f"match — correcting those isn't supported yet."
+                f"match - correcting those isn't supported yet."
             )
             return
 
@@ -4252,7 +4356,7 @@ class helpers():
         )
         if self.cursor.fetchone()[0] > 0:
             await ctx.response.send_message(
-                f"Can't correct Match #{match_id} — the next round has already started."
+                f"Can't correct Match #{match_id} - the next round has already started."
             )
             return
 
@@ -4394,7 +4498,7 @@ class helpers():
             games = team.wins + team.losses
             win_rate = f"{(team.wins / games) * 100:.1f}%" if games > 0 else "N/A"
             lines.append(
-                f"**#{rank}.** {team.get_name()} — {roster_size} players | "
+                f"**#{rank}.** {team.get_name()} - {roster_size} players | "
                 f"{team.wins}W-{team.losses}L ({win_rate})"
             )
 
@@ -4613,7 +4717,7 @@ class helpers():
         self._saveNewTeam(guild_id, team)
 
         await ctx.response.send_message(
-            f"Team **{name}** created! {ctx.user.mention} is the captain — looking for {team_size} player"
+            f"Team **{name}** created! {ctx.user.mention} is the captain - looking for {team_size} player"
             f"{'s' if team_size != 1 else ''} total."
         )
 
@@ -4664,7 +4768,7 @@ class helpers():
             logo_path = self._resolveLogoPath(logo)
             if logo_path is None:
                 await ctx.response.send_message(
-                    f"No logo named **{logo}** — pick one from the autocomplete list."
+                    f"No logo named **{logo}** - pick one from the autocomplete list."
                 )
                 return
 
@@ -4757,7 +4861,7 @@ class helpers():
                     await ctx.response.send_message(f"{member.display_name} is already on **{team_name}**.")
                 return
             reasons = "; ".join(f"{member.display_name} ({reason})" for member, reason in skipped)
-            await ctx.response.send_message(f"Nobody to invite — {reasons}.")
+            await ctx.response.send_message(f"Nobody to invite - {reasons}.")
             return
 
         mentions = ", ".join(member.mention for member in valid)
@@ -5319,11 +5423,11 @@ class helpers():
             wins, losses = records[team.get_name()]
             games = wins + losses
             win_rate = f"{(wins / games) * 100:.1f}%" if games > 0 else "N/A"
-            lines.append(f"**#{i}.** {team.get_name()} — {wins}W-{losses}L ({win_rate})")
+            lines.append(f"**#{i}.** {team.get_name()} - {wins}W-{losses}L ({win_rate})")
 
         title = f"\U0001f3c6 {tournament.get_name()} Results"
         if guild_name:
-            title += f" — {guild_name}"
+            title += f" - {guild_name}"
         return discord.Embed(title=title, description="\n".join(lines), color=discord.Color.gold())
 
     # Posts the tournament-scoped results embed right after a tournament
@@ -5374,7 +5478,7 @@ class helpers():
         if ranked:
             self.update(guild_id, "is_ranked", 1)
 
-        ranked_note = " (ranked — elo will update when the winner is reported)" if ranked else ""
+        ranked_note = " (ranked - elo will update when the winner is reported)" if ranked else ""
         await ctx.response.send_message(
             f"**{team1_name}** vs **{team2_name}** loaded{ranked_note}. "
             f"React {TEAM_START_EMOJI} on the roster below when you're ready to move everyone and open betting."
@@ -5389,27 +5493,6 @@ class helpers():
         )
         row = self.cursor.fetchone()
         return row[0] if row is not None else None
-
-    # /set-elo (admin-only, manage_guild — see bot.py): sets `member`'s elo
-    # to an exact value rather than a +/- delta, for correcting a broken
-    # rating directly rather than fighting the match-result math to get
-    # there. Still runs _checkTierRewardUnlocks afterward, the same as any
-    # other path that changes elo (applyGameDeltas, the lazy self-heal in
-    # _buildStatsEmbed) — an admin manually setting someone to Diamond+
-    # should credit that tier's reward exactly like earning it normally
-    # would.
-    async def setEloHelper(self, ctx, member, elo):
-        guild_id = ctx.guild.id
-        user_id = member.id
-
-        self.ensureEconomyRow(guild_id, user_id, member.name)
-        self.cursor.execute(
-            "UPDATE economy SET elo=? WHERE guildId=? AND userId=?", (elo, guild_id, user_id)
-        )
-        self.db.commit()
-        self._checkTierRewardUnlocks(guild_id, user_id, elo)
-
-        await ctx.response.send_message(f"Set {member.mention}'s elo to **{elo}**.")
 
     async def dailyHelper(self, ctx):
         guild_id = ctx.guild.id
@@ -5458,13 +5541,15 @@ class helpers():
         player_ids |= {uid for uid, _name in self.getRosterPlayers(guild_id, "team2")}
         return user_id in player_ids
 
-    # Current elo for each (user_id, name) in `roster`, defaulting to
-    # DEFAULT_ELO for anyone without an economy row yet.
+    # Current elo for each (user_id, name) in `roster`, defaulting to this
+    # guild's configured default (see _defaultEloForGuild) for anyone
+    # without an economy row yet.
     def getEloLookup(self, guild_id, roster):
+        default_elo = self._defaultEloForGuild(guild_id)
         lookup = {}
         for user_id, _name in roster:
             elo = self.getEconomy(guild_id, user_id, "elo")
-            lookup[user_id] = elo if elo is not None else DEFAULT_ELO
+            lookup[user_id] = elo if elo is not None else default_elo
         return lookup
 
     # `match_id`, when given, bets on that ONE specific tournament match
@@ -5763,7 +5848,8 @@ class helpers():
         is_ranked = bool(self.get(guild_id, "is_ranked"))
 
         deltas, summary = self.computeGameDeltas(
-            allWagers, team1_roster, team2_roster, elo_lookup, winning_team, is_ranked
+            allWagers, team1_roster, team2_roster, elo_lookup, winning_team, is_ranked,
+            default_elo=self._defaultEloForGuild(guild_id),
         )
         newly_unlocked = self.applyGameDeltas(guild_id, deltas)
         self.saveLastResult(
@@ -5896,7 +5982,7 @@ class helpers():
             self.cursor.execute("DELETE FROM duels WHERE id=?", (duel_id,))
             self.db.commit()
             await channel.send(
-                f"Wager cancelled — one of you no longer has {amount} gold to cover it."
+                f"Wager cancelled - one of you no longer has {amount} gold to cover it."
             )
             return
 
@@ -5912,7 +5998,7 @@ class helpers():
 
         pot = amount * 2
         msg = await channel.send(
-            f"\U0001f4b0 **{challenger_name}** vs **{target_name}** — {pot} gold on the line! "
+            f"\U0001f4b0 **{challenger_name}** vs **{target_name}** - {pot} gold on the line! "
             f"React with {DUEL_CHALLENGER_EMOJI} if {challenger_name} won, "
             f"or {DUEL_TARGET_EMOJI} if {target_name} won."
         )
@@ -5984,7 +6070,10 @@ class helpers():
     #           ranked_wins (see getLeaderboardEntries), so there's nothing
     #           separate to track for that side.
     #   summary: display-only info for formatResultMessage().
-    def computeGameDeltas(self, wagers, team1_roster, team2_roster, elo_lookup, winning_team, is_ranked=False):
+    def computeGameDeltas(
+        self, wagers, team1_roster, team2_roster, elo_lookup, winning_team, is_ranked=False,
+        default_elo=DEFAULT_ELO,
+    ):
         deltas = {}
 
         def bump(user_id, username, **kwargs):
@@ -6019,10 +6108,10 @@ class helpers():
         if team1_roster or team2_roster:
             elo_delta1 = elo_delta2 = 0
             if is_ranked:
-                team1_elos = [elo_lookup.get(uid, DEFAULT_ELO) for uid, _name in team1_roster]
-                team2_elos = [elo_lookup.get(uid, DEFAULT_ELO) for uid, _name in team2_roster]
-                team1_avg = sum(team1_elos) / len(team1_elos) if team1_elos else DEFAULT_ELO
-                team2_avg = sum(team2_elos) / len(team2_elos) if team2_elos else DEFAULT_ELO
+                team1_elos = [elo_lookup.get(uid, default_elo) for uid, _name in team1_roster]
+                team2_elos = [elo_lookup.get(uid, default_elo) for uid, _name in team2_roster]
+                team1_avg = sum(team1_elos) / len(team1_elos) if team1_elos else default_elo
+                team2_avg = sum(team2_elos) / len(team2_elos) if team2_elos else default_elo
 
                 expected1 = 1 / (1 + 10 ** ((team2_avg - team1_avg) / 400))
                 actual1 = 1 if winning_team == 1 else 0
@@ -6144,7 +6233,7 @@ class helpers():
         if summary["no_bets"]:
             lines.append("No bets were placed on this game.")
         elif summary["no_winning_bets"]:
-            lines.append("Nobody bet on the winning team — all bets were lost.")
+            lines.append("Nobody bet on the winning team - all bets were lost.")
         else:
             lines.append("Paying out bets...")
             for username, payout, amount in summary["winning_bettors"]:
@@ -6216,7 +6305,7 @@ class helpers():
 
         if last["winning_team"] == correct_team:
             await ctx.response.send_message(
-                f"Team {correct_team} is already the recorded winner — nothing to correct."
+                f"Team {correct_team} is already the recorded winner - nothing to correct."
             )
             return
 
@@ -6227,7 +6316,8 @@ class helpers():
         is_ranked = last["is_ranked"]
         elo_lookup = self.getEloLookup(guild_id, team1_roster + team2_roster)
         new_deltas, summary = self.computeGameDeltas(
-            last["wagers"], team1_roster, team2_roster, elo_lookup, correct_team, is_ranked
+            last["wagers"], team1_roster, team2_roster, elo_lookup, correct_team, is_ranked,
+            default_elo=self._defaultEloForGuild(guild_id),
         )
         newly_unlocked = self.applyGameDeltas(guild_id, new_deltas)
         self.saveLastResult(
@@ -7097,12 +7187,12 @@ class helpers():
                 if item["type"] != item_type:
                     continue
                 status = "✅ Owned" if item["owned"] else f"{item['price']} gold"
-                lines.append(f"**{item['name']}** — {status}")
+                lines.append(f"**{item['name']}** - {status}")
             # __underline__ (Discord markdown) rather than just bold, so
             # each category heading reads distinctly from the item lines'
             # own bolded names underneath it.
             embed.add_field(name=f"__{label}__", value="\n".join(lines), inline=False)
-        embed.set_footer(text="/shop-buy to purchase — equip with /card-set")
+        embed.set_footer(text="/shop-buy to purchase - equip with /card-set")
         await ctx.response.send_message(embed=embed)
 
     # Every CARD_ACHIEVEMENT_TITLES entry as {key, name, description,
@@ -7146,7 +7236,7 @@ class helpers():
         def render(key):
             item = catalog[key]
             status = "✅" if item["earned"] else "🔒"
-            return f"{status} **{item['name']}** — {item['description']}"
+            return f"{status} **{item['name']}** - {item['description']}"
 
         embed = discord.Embed(title="Achievements", color=discord.Color.gold())
 
@@ -7205,27 +7295,41 @@ class helpers():
             f"Purchased **{item}** for {price} gold! Equip it with /card-set."
         )
 
-    # A small filled circle standing in for the elo tier emoji (see
-    # ELO_TIERS' own comment on why — PIL's bundled TTF fonts can't render
-    # color emoji glyphs), positioned to the left of wherever the ELO
-    # value text starts.
-    def _drawEloBadge(self, draw, x, y, elo):
-        badge_color = self.eloRankBadgeColor(elo)
-        badge_shape = self.eloRankBadgeShape(elo)
-        if badge_shape == "diamond":
-            draw.polygon(
-                [
-                    (x, y - CARD_ELO_BADGE_RADIUS), (x + CARD_ELO_BADGE_RADIUS, y),
-                    (x, y + CARD_ELO_BADGE_RADIUS), (x - CARD_ELO_BADGE_RADIUS, y),
-                ],
-                fill=badge_color
-            )
-        else:
-            draw.ellipse(
-                [x - CARD_ELO_BADGE_RADIUS, y - CARD_ELO_BADGE_RADIUS,
-                 x + CARD_ELO_BADGE_RADIUS, y + CARD_ELO_BADGE_RADIUS],
-                fill=badge_color
-            )
+    # This tier's real emoji artwork (see ELO_BADGE_DIR), loaded, resized to
+    # fit CARD_ELO_BADGE_RADIUS, and cached (_elo_badge_cache) so repeat
+    # calls for the same tier — the overwhelmingly common case, since most
+    # cards render for whichever handful of tiers this guild's players
+    # actually sit at — don't re-hit disk. Returns None (nothing to paste)
+    # if the asset is missing, e.g. a dev checkout that hasn't generated
+    # assets/elo-badges/ — same "degrade instead of crash" reasoning
+    # listAvailableLogos' own empty-folder handling uses.
+    def _eloBadgeImage(self, elo):
+        path = self.eloRankBadgeImagePath(elo)
+        size = CARD_ELO_BADGE_RADIUS * 2
+        cache_key = (path, size)
+        if cache_key not in _elo_badge_cache:
+            if os.path.isfile(path):
+                badge = Image.open(path).convert("RGBA")
+                badge.thumbnail((size, size), Image.LANCZOS)
+                _elo_badge_cache[cache_key] = badge
+            else:
+                _elo_badge_cache[cache_key] = None
+        return _elo_badge_cache[cache_key]
+
+    # Pastes this tier's real emoji artwork centered at (x, y), standing in
+    # for the emoji eloRankLabel shows in a real embed — PIL's bundled TTF
+    # fonts can't render color emoji glyphs (same class of issue the
+    # roster's captain star ran into), so the card pastes the actual saved
+    # image (see ELO_BADGE_DIR) instead of hand-drawing an approximation of
+    # it. Silently draws nothing if the asset's missing rather than
+    # crashing the whole card render over one small badge.
+    def _drawEloBadge(self, image, x, y, elo):
+        badge = self._eloBadgeImage(elo)
+        if badge is None:
+            return
+        paste_x = int(x - badge.width / 2)
+        paste_y = int(y - badge.height / 2)
+        image.paste(badge, (paste_x, paste_y), badge)
 
     # Pure rendering: a portrait trading card built entirely from already-
     # fetched data (no DB/network access here — see _swapStatsForTradingCard
@@ -7338,7 +7442,7 @@ class helpers():
             draw.text((BRACKET_MARGIN, row_y), label, font=label_font, fill=accent_color, anchor="lm")
             text_x = value_x
             if label == "ELO":
-                self._drawEloBadge(draw, value_x + CARD_ELO_BADGE_RADIUS, row_y, stats["elo"])
+                self._drawEloBadge(image, value_x + CARD_ELO_BADGE_RADIUS, row_y, stats["elo"])
                 text_x = value_x + CARD_ELO_BADGE_RADIUS * 2 + BRACKET_PADDING / 2
             draw.text((text_x, row_y), value, font=value_font, fill=text_color, anchor="lm")
 
@@ -7650,8 +7754,8 @@ class helpers():
         page_entries = entries_sorted[start:start + LEADERBOARD_PAGE_SIZE]
 
         title = (
-            f"\U0001f3c6 {guild_name} Leaderboard — Overview" if stat is None
-            else f"\U0001f3c6 {guild_name} Leaderboard — {LEADERBOARD_STAT_LABELS[stat]}"
+            f"\U0001f3c6 {guild_name} Leaderboard - Overview" if stat is None
+            else f"\U0001f3c6 {guild_name} Leaderboard - {LEADERBOARD_STAT_LABELS[stat]}"
         )
 
         lines = []
@@ -7659,12 +7763,12 @@ class helpers():
             rank = start + i + 1
             if stat is None:
                 lines.append(
-                    f"**#{rank}.** {entry['username']} — Elo: {entry['elo']} | "
+                    f"**#{rank}.** {entry['username']} - Elo: {entry['elo']} | "
                     f"Record: {entry['game_wins']}W-{entry['game_losses']}L"
                 )
             else:
                 lines.append(
-                    f"**#{rank}.** {entry['username']} — {self._formatLeaderboardStat(entry, stat)}"
+                    f"**#{rank}.** {entry['username']} - {self._formatLeaderboardStat(entry, stat)}"
                 )
 
         embed = discord.Embed(

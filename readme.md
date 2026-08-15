@@ -85,10 +85,10 @@ Clicking ▶️ runs `_startRosterViaReaction`: since a reaction has no
 to later" is found by scanning the roster's own players for whichever one
 is *currently* sitting in a voice channel (`_findRosterVoiceChannel`),
 rather than assuming the clicker themselves is in voice — anyone can click
-it, not just someone at the table. `channel1`/`channel2` (set by
-`/set-channels`, an admin-only command) are looked up next; if either is
-missing — `/set-channels` was never run, or the named channel got deleted
-— `_ensureDefaultTeamChannels` self-heals onto `DEFAULT_TEAM_CHANNEL_NAMES`
+it, not just someone at the table. `channel1`/`channel2` (set by `/set`'s
+`team1`/`team2` params, admin-only) are looked up next; if either is
+missing — `/set` was never run, or the named channel got deleted —
+`_ensureDefaultTeamChannels` self-heals onto `DEFAULT_TEAM_CHANNEL_NAMES`
 (`"Team-1"`/`"Team-2"`), creating whichever one doesn't already exist and
 writing them back to `channel1`/`channel2` so this only happens once per
 guild, rather than refusing to start the game at all.
@@ -195,7 +195,10 @@ the raw number into a League-style tier via `eloRankLabel` — nine tiers
 spaced 250 elo apart (1000 default elo lands new players in Platinum),
 with Iron through Diamond further split into four divisions each; Master
 and above show no division, matching League's switch to raw LP at that
-point.
+point. That 1000 is only the global fallback — an admin can move where new
+players start with `/set`'s `default_elo` param (`_defaultEloForGuild`),
+per guild; it only affects brand-new players (`ensureEconomyRow`) and
+`/clear`'s `clear_elo` reset, never anyone's already-tracked rating.
 
 ### Correcting a misreported winner
 
@@ -235,7 +238,7 @@ message. Missing stats (e.g. a win rate with zero games played) sort to
 the bottom regardless of ascending/descending order, rather than a
 `None`/0 value looking like the best or worst score on the board.
 
-### Redirecting where bets get posted (`/wager-set-channel`)
+### Redirecting where bets get posted (`/set`'s `wager_channel`)
 
 By default every betting message (the combined open+report message,
 the closed notice, and either a reported result or a cancellation) goes
@@ -501,7 +504,7 @@ the round simultaneously.
 `_openConcurrentTournamentBetting` opens one combined window covering
 every match `_startRound`/`_startLosersRound`/`_startGrandFinals` just
 queued for the round: the guild's configured per-match base
-(`_getBettingTimerSeconds`, backing `/set-betting-timer`) times how many
+(`_getBettingTimerSeconds`, backing `/set`'s `betting_timer` param) times how many
 matches are in the round, capped by `MAX_CONCURRENT_BETTING_SECONDS` so a
 generous base times a big bracket's first round can't leave betting open
 for an unreasonable stretch. `/wager` takes an optional `match_id` to say
@@ -551,7 +554,7 @@ per-server override if one's set — and the new `_resolveGlobalAvatarUrl`
 for the regular half, which deliberately fetches the plain `discord.User`
 behind the member, bypassing any guild avatar override; comparing the
 embed's current thumbnail URL against a freshly-resolved server URL is
-what tells the handler which direction to flip), and 🎴 throws the whole
+what tells the handler which direction to flip), and 🃏 throws the whole
 embed away and replaces it with
 a rendered trading card (`_renderTradingCardImage`) — Shockwave's logo and
 the server's name across the top (the exact same `_drawBracketHeader` every
@@ -566,20 +569,30 @@ sharing a column, so a long value never clips), and
 finally — if they're rostered on any — their persistent teams, each with
 its own logo pasted alongside its name (same self-healing `_ensureLogo`
 every other team-logo display already relies on). The elo line's tier
-"emoji" is actually a small filled shape in a per-tier color
-(`ELO_TIERS`' 4th/5th elements, `_drawEloBadge`) rather than the literal
-character `eloRankLabel` uses in a real embed — PIL's bundled TTF fonts
-can't render color emoji glyphs (`eloRankLabelPlain` strips it for exactly
-this reason). It's a circle for most tiers, but a diamond for Platinum
-(`\U0001f537`) and Diamond (`\U0001f48e`) — both of those are actually
-diamond/gem-cut shapes, not circles, in the real emoji, so a round badge
-there was a shape mismatch against the embed, not just a color one.
-🎴 itself doesn't apply anymore once the card is up (there's no "show the
+"emoji" is a real, saved image of that tier's actual emoji
+(`assets/elo-badges/<Tier>.png`, one PNG per `ELO_TIERS` entry, pasted by
+`_drawEloBadge`/`_eloBadgeImage`) rather than the literal character
+`eloRankLabel` uses in a real embed — PIL's bundled TTF fonts can't render
+color emoji glyphs (`eloRankLabelPlain` strips it for exactly this
+reason), and an earlier hand-drawn approximation (a small filled shape —
+circle, diamond, crown, or medal depending on tier) kept drifting out of
+sync with what the real emoji actually looks like. The assets themselves
+were generated once, offline, by rendering each tier's real emoji
+character through a color emoji font (Segoe UI Emoji), auto-cropping to
+its glyph bounding box, and saving the result — a one-time step, not
+something the bot does at runtime, so there's no color-emoji-font
+dependency in production. `_eloBadgeImage` loads, resizes, and caches each
+tier's PNG the first time it's needed (`_elo_badge_cache`, same
+module-level "load once, reuse for the rest of the process" idea
+`_bracket_logo_cache`/`_font_cache` already use) — every card only ever
+needs one of a fixed handful of tier images, so repeat renders never hit
+disk again for it.
+🃏 itself doesn't apply anymore once the card is up (there's no "show the
 card again" to offer), so `handleStatsReaction` removes just that one
 reaction the moment it fires and adds a single 🪪 in its place; clicking
 that rebuilds the plain `/stats` embed (`_buildStatsEmbed`, the same code
 `statsHelper` itself calls) via `_swapTradingCardForStats`, sets
-`stats_views.cardShown` back to 0, and restores 🎴 — a real back-and-forth
+`stats_views.cardShown` back to 0, and restores 🃏 — a real back-and-forth
 toggle rather than a one-way trip. 🖼️ is deliberately *not* touched by
 either swap, since the avatar toggle applies on both sides of the
 embed/card divide: `handleStatsReaction` branches on `cardShown` when 🖼️
@@ -1065,7 +1078,7 @@ guarantee `after_winners` mode has always had.
 
 | Table | Scope | Holds |
 |---|---|---|
-| `servers` | one row per guild | current team rosters, channel names, betting state, `is_ranked`, `wager_channel`, `active_tournament_match_id`, `betting_timer_seconds` (`/set-betting-timer`) |
+| `servers` | one row per guild | current team rosters, channel names, betting state, `is_ranked`, `wager_channel`, `active_tournament_match_id`, `betting_timer_seconds` (all admin-configurable via `/set`) |
 | `economy` | one row per (guild, player) | balance, elo, bet & game win/loss counts, gold wagered/won/lost |
 | `wagers` | active team-game bets (singleton — one per (guild, player)) | cleared out (paid or refunded) once the game resolves |
 | `tournament_wagers` | active simultaneous-tournament-match bets (one per (match, player)) | cleared out once that specific match resolves — see "Concurrent tournament betting" |
