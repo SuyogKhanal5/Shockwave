@@ -53,6 +53,11 @@ run the commands — for that, see shockwave.netlify.app.
 `/make-teams` and `/captains` both end up building two `Team` objects
 seeded from whoever is in the caller's voice channel, then serializing
 them into the `team1`/`team2` columns on `servers` — nothing is moved yet.
+Both commands check `ctx.user.voice`/`.channel` up front and reply with a
+plain explanation ("You need to be in a voice channel to...") instead of
+letting the `AttributeError` that used to happen reach the caller as a
+silent failure; `/captains` additionally still needs at least two people
+in that channel once the voice check itself passes.
 `ranked:true` on either command does the same thing but calls
 `formBalancedTeams` first (for `/make-teams`, routing straight to
 `rankedTeamHelper` instead of the random/roles flow — see `fullRandom` in

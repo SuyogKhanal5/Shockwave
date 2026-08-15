@@ -269,8 +269,8 @@ TEAM_ROLES_REROLL_EMOJI = "\U0001f504"  # 🔄
 TEAM_START_EMOJI = "▶️"  # ▶️
 # Fallback voice channel names ▶️ self-heals onto a guild's `channel1`/
 # `channel2` (see _ensureDefaultTeamChannels) if a game is started before
-# /set-channels has ever been run — created on demand the same way
-# /set-channels itself creates a missing channel.
+# /set's team1/team2 have ever been given — created on demand the same way
+# /set itself creates a missing channel.
 DEFAULT_TEAM_CHANNEL_NAMES = ("Team-1", "Team-2")
 
 # Team-card layout (see _renderTeamCardImage) — same card shape/width as
@@ -981,8 +981,8 @@ class helpers():
     # Forms elo-balanced teams from the caller's voice channel and marks
     # the game as ranked, so elo actually gets updated when the winner is
     # eventually reported (see computeGameDeltas/recordResult). Everything
-    # else — moving players, opening betting — is still /start's job, same
-    # as /make-teams.
+    # else — moving players, opening betting — is still the posted roster's
+    # ▶️ reaction's job, same as /make-teams.
     async def rankedTeamHelper(self, ctx):
         await self.clearTeamsHelper(ctx)
 
@@ -1276,7 +1276,7 @@ class helpers():
 
     # Finds (or creates) DEFAULT_TEAM_CHANNEL_NAMES and points this guild's
     # channel1/channel2 at them — the self-heal ▶️ falls back to instead of
-    # refusing to start a game just because /set-channels was never run.
+    # refusing to start a game just because /set's team1/team2 were never given.
     async def _ensureDefaultTeamChannels(self, guild):
         name1, name2 = DEFAULT_TEAM_CHANNEL_NAMES
 
@@ -1320,8 +1320,8 @@ class helpers():
         channel1 = discord.utils.get(guild.channels, name=channel1name)
         channel2 = discord.utils.get(guild.channels, name=channel2name)
         if channel1 is None or channel2 is None:
-            # /set-channels was never run (or named channels got deleted) —
-            # rather than refuse to start the game, fall back to
+            # /set's team1/team2 were never given (or the named channels got
+            # deleted) — rather than refuse to start the game, fall back to
             # DEFAULT_TEAM_CHANNEL_NAMES, creating them if they don't
             # already exist, and remember them as this guild's own from
             # here on so this only happens once.
@@ -5533,9 +5533,9 @@ class helpers():
         team.deserializeTeam(serialized)
         return [(p.get_id(), p.get_name()) for p in team.get_players()]
 
-    # True if `user_id` is a rostered player (either side) in the game
-    # /start most recently moved into channels — used to stop players from
-    # betting on their own game.
+    # True if `user_id` is a rostered player (either side) in the game the
+    # roster's ▶️ reaction most recently moved into channels — used to stop
+    # players from betting on their own game.
     def isPlayerInCurrentGame(self, guild_id, user_id):
         player_ids = {uid for uid, _name in self.getRosterPlayers(guild_id, "team1")}
         player_ids |= {uid for uid, _name in self.getRosterPlayers(guild_id, "team2")}
@@ -5663,8 +5663,8 @@ class helpers():
         await ctx.response.send_message(f"You wagered {amount} gold on Team {team} for match #{match_id}!")
 
 
-    # This guild's own configured betting-window length (/set-betting-timer),
-    # or BETTING_DURATION_SECONDS for a guild that's never set one. Doesn't
+    # This guild's own configured betting-window length (/set's betting_timer
+    # param), or BETTING_DURATION_SECONDS for a guild that's never set one. Doesn't
     # go through self.get() — that crashes outright if there's no `servers`
     # row for this guild at all, which a real guild always has by the time
     # any command can run (see on_guild_join), but /test's simulated
@@ -5692,8 +5692,9 @@ class helpers():
     # is OPEN or CLOSED, so a fast game can be reported before the window
     # even closes.
     async def _openBetting(self, guild_id, channel):
-        # /wager-set-channel redirects the whole cycle (open/closed/report)
-        # there instead of wherever /start (or a tournament match) ran —
+        # /set's wager_channel param redirects the whole cycle (open/closed/
+        # report) there instead of wherever the roster's ▶️ reaction (or a
+        # tournament match) ran —
         # once betting_channel_id below points at it, everything
         # downstream (the timer, the winner report, recordResult) just
         # follows the same channel through naturally.
