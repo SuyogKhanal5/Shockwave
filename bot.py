@@ -614,6 +614,21 @@ async def cardSet(ctx, title: str = None, color_scheme: str = None, font_style: 
 
 
 @tree.command(
+    name="preview",
+    description="See every option for a customization type at once, in one image"
+)
+@app_commands.describe(type="What to preview")
+@app_commands.choices(type=[
+    app_commands.Choice(name="Logos", value="Logos"),
+    app_commands.Choice(name="Card Titles", value="Card Titles"),
+    app_commands.Choice(name="Color Schemes", value="Color Schemes"),
+    app_commands.Choice(name="Fonts", value="Fonts"),
+])
+async def preview(ctx, type: app_commands.Choice[str]):
+    await helperObj.previewHelper(ctx, type.value)
+
+
+@tree.command(
     name="shop",
     description="Browse trading-card cosmetics purchasable with gold"
 )
@@ -698,8 +713,8 @@ SITE_COMMANDS_URL = "https://shockwave.netlify.app/commands.html"
 COMMAND_HELP = {
     "set": "Admin one-stop for server settings: team1+team2 names the two voice channels teams get moved into (creates them if missing), size sets how many players make up one side, betting_timer sets how long a betting window stays open (1-600 seconds, multiplied by the number of matches for a concurrent tournament round), wager_channel redirects every betting posting to one specific text channel, member+elo sets a player's elo directly to an exact value (still credits any Diamond+ tier reward the new elo qualifies for), and default_elo sets what a brand new player in this server starts at (1000 by default; doesn't touch anyone's existing elo - use /clear's clear_elo to reset current players to it). Give any combination in one call - team1/team2 and member/elo must each be given as a pair. Requires the Manage Server permission.",
     "clear": "Wipes the current teams/draft so you can start a fresh session. clear_tournament deletes this server's tournament entirely. clear_elo and clear_economy reset data for every player; clear_achievements and clear_card_unlocks do too unless a user is given, which narrows either to just them. Requires the Manage Server permission.",
-    "make-teams": "Randomly splits everyone in your voice channel into two even teams and posts the roster, with a ▶️ reaction on it to move everyone and open betting when you're ready (🔄 to reroll roles too, if use_roles was set). ranked:true forms roughly elo-balanced teams instead, and tracks elo once a winner is reported.",
-    "captains": "Starts a live captain draft. Name two captains, or use_random to pick two automatically; everyone else lands in a pool picked from with /choose. Once both teams are set, react ▶️ on the roster to move everyone and open betting. ranked:true tracks elo for the resulting game.",
+    "make-teams": "Randomly splits everyone in your voice channel into two even teams and posts the roster, with a ▶️ reaction on it to move everyone and open betting when you're ready (⚡ to open betting without moving anyone; 🔄 to reroll roles too, if use_roles was set). ranked:true forms roughly elo-balanced teams instead, and tracks elo once a winner is reported.",
+    "captains": "Starts a live captain draft. Name two captains, or use_random to pick two automatically; everyone else lands in a pool picked from with /choose. Once both teams are set, react ▶️ on the roster to move everyone and open betting, or ⚡ to open betting without moving anyone. ranked:true tracks elo for the resulting game.",
     "choose": "Captains only. Picks one player from the draft pool onto your team, then passes the turn to the other captain.",
     "notify": "DMs a one-time invite link to your voice channel - to one member, or to everyone holding a given role. message optionally replaces the default invite text; either way it's signed \"Sent by\" you. You must be sitting in a voice channel yourself to run this.",
     "wager": "Bets gold on one team winning the current game - or, with a match id, on a specific tournament match. Only while betting is open, one bet per player per game/match.",
@@ -707,24 +722,29 @@ COMMAND_HELP = {
     "daily": "Claims 1000 free gold. Once per calendar day, per player.",
     "stats": "Shows a player's elo, ranked/casual/game record, betting record, balance, and net gold - defaults to you. React with \U0001f5bc️ to toggle the avatar between this server's own profile picture and their regular account-wide one, or \U0001F0CF to replace the whole embed with a customizable trading card; \U0001faaa swaps back.",
     "card-set": "Equips your unlocked trading-card title, color scheme, and/or font in one go (see /stats' \U0001F0CF reaction) - set any combination of the three at once. Reaching Diamond, Master, Grandmaster, or Challenger permanently unlocks that tier's own title and scheme, even if you derank afterward; \"Default\" is always available for both. Fonts are purchased from /shop.",
+    "preview": "Shows every option for one customization type - Logos, Card Titles, Color Schemes, or Fonts - in a single gallery image (a few images only if there are too many to fit), regardless of what you've personally unlocked yet.",
     "shop": "Browse every trading-card title, color scheme, and font purchasable with gold, and what you already own.",
     "achievements": "Browse every gameplay achievement, what it takes to earn it, and whether you already have. Earning one unlocks its title for /card-set and posts a one-time announcement in the channel.",
     "shop-buy": "Purchases a trading-card cosmetic with gold, permanently unlocking it for /card-set. Refuses if you already own it or can't afford it.",
     "leaderboard": "Ranks the server by a stat, including ranked-only and casual-only wins/losses/win rate. Omit filter for an elo-sorted overview. Reactions page through the results.",
-    "report-correct-winner": "Fixes a misreported winner - undoes and reapplies the payouts, records, and elo. Requires Manage Server.",
-    "team-create": "Creates a persistent team with you as its captain.",
-    "team-set": "Sets a persistent team's voice channel and/or logo, any combination in one call. new_voice_channel creates a fresh one named after the team. Captain-only.",
-    "team-invite": "Invites one or more members (up to 5 per call) to a team you captain. Captain-only - each invitee must accept before joining.",
+    "report-correct-winner": "Fixes a misreported winner - undoes and reapplies the payouts, records, and elo. invalidate undoes the last game entirely instead (bets refunded, nothing reapplied), as if it never happened. Requires Manage Server.",
+    "team-create": "Creates a persistent team with you as its captain, or captain as its captain if given.",
+    "team-set": "Sets a persistent team's voice channel and/or logo, any combination in one call. new_voice_channel creates a fresh one named after the team. The team's captain, or anyone with Manage Server, can do this.",
+    "team-rename": "Renames a persistent team. The new name can't already belong to another team in this server. The team's captain, or anyone with Manage Server, can do this.",
+    "team-delete": "Deletes a persistent team - its roster, record, and any pending invites go with it. The team's captain, or anyone with Manage Server, can do this; confirmation required. Doesn't affect a tournament it's already registered in.",
+    "team-invite": "Invites one or more members (up to 5 per call) to a team. Each invitee must accept before joining. The team's captain, or anyone with Manage Server, can do this.",
     "my-teams": "Lists the teams you're a rostered player on in this server, with paging to flip through each one's full stats card.",
     "team-stats": "Shows a persistent team's captain, roster, voice channel, and win/loss record. React with \U0001f6e1️ to swap it for a team card - its logo as the focal point, colors sampled from that logo, captain/roster/record/win rate. ↩️ swaps back.",
     "team-list": "Browse every team in the server with filtering (name search, recruiting-only) and sorting (name, wins, losses, win rate, roster size - sort:\"Win Rate\" order:\"Descending\" for the old /team-leaderboard ranking). React to page through it.",
-    "team-use": "Loads two persistent teams straight into a casual or ranked game, skipping the random-split-or-draft step.",
+    "team-use": "Loads two persistent teams straight into a casual or ranked game, skipping the random-split-or-draft step. Posts a roster with the same ▶️/⚡ reactions as /make-teams to start it.",
+    "reuse": "Re-posts the exact same two teams from whichever of /make-teams, /captains, or /team-use ran last, instead of drawing a fresh random split or captains draft. Stays ranked if the last game was ranked, casual if it was casual. Cancels an actively in-progress game from those same teams first (refund + move back) if there is one.",
     "tournament-create": "Creates an empty tournament shell for this server - name, team size, and bracket size. One tournament per server.",
-    "tournament-register": "Registers one of your teams for the server's tournament. Captain-only.",
+    "tournament-register": "Registers one of your teams for the server's tournament. The team's captain, or anyone with Manage Server, can do this.",
     "tournament-create-bracket": "Builds the tournament bracket from whichever teams are currently registered, seeded randomly. Rerunning it rerolls the bracket. For double elimination, losers_bracket_timing picks whether the losers bracket waits for the whole winners bracket to finish, or interleaves as each round unlocks.",
     "tournament-print-bracket": "Prints the current bracket.",
     "tournament-start": "Starts playing the current round of the bracket. mode is Sequential (one match at a time) or Simultaneous (all at once, no betting).",
     "roll": "Rolls a random number between 1 and num.",
+    "dev-give-gold": "Temporary developer-only tool for testing the economy - grants yourself 1000 gold. Only usable by the hardcoded DEV_USER_ID.",
     "help": "Shows this message, or details on one command.",
 }
 
@@ -832,25 +852,30 @@ async def makeTeams(ctx, use_roles: bool = False, ranked: bool = False):
     # actually looking once they're done reading the teams.
     await ctx.channel.send(
         f"📣 **Ready?** React {helper.TEAM_START_EMOJI} on the roster above to move everyone into their "
-        "channels and open betting."
+        f"channels and open betting, or {helper.TEAM_START_NO_MOVE_EMOJI} to open betting without "
+        "moving anyone."
     )
 
 
 @tree.command(
     name="report-correct-winner",
-    description="Admin: fix a misreported winner for the last game and adjust stats/payouts"
+    description="Admin: fix a misreported winner, or invalidate the last game entirely"
 )
 @app_commands.describe(
-    team="The team that actually won",
-    match_id="Optional: correct a specific tournament match instead of the last game"
+    team="The team that actually won - omit if invalidating instead",
+    match_id="Optional: correct a specific tournament match instead of the last game",
+    invalidate="Undo the last game entirely instead of picking a winner - refunds bets, undoes elo/records/gold",
 )
 @app_commands.choices(team=[
     app_commands.Choice(name="Team 1", value=1),
     app_commands.Choice(name="Team 2", value=2),
 ])
 @app_commands.checks.has_permissions(manage_guild=True)
-async def reportCorrectWinner(ctx, team: app_commands.Choice[int], match_id: int = None):
-    await helperObj.reportCorrectWinnerHelper(ctx, team.value, match_id)
+async def reportCorrectWinner(
+    ctx, team: app_commands.Choice[int] = None, match_id: int = None, invalidate: bool = False
+):
+    team_value = team.value if team is not None else None
+    await helperObj.reportCorrectWinnerHelper(ctx, team_value, match_id, invalidate)
 
 
 @reportCorrectWinner.error
@@ -1013,6 +1038,40 @@ async def clearAll_error(ctx, error):
         raise error
 
 
+# The caller's own captained teams only — for team-name params on commands
+# that require being that team's captain. Same "only suggest what's
+# actually usable" idea cardTitleAutocomplete uses for card unlocks, just
+# scoped to captaincy (getTeamsCaptainedBy) instead. Doesn't stop someone
+# from typing a different name by hand — Discord's autocomplete is a
+# suggestion list, not a restriction to it — the backing helpers still do
+# their own captain check either way. A member with Manage Server can act
+# on any team (see the helpers' own "or manage_guild" override), so they
+# get every team suggested here too, not just ones they happen to captain.
+async def myCaptainedTeamAutocomplete(ctx, current: str):
+    current = current.lower()
+    if ctx.user.guild_permissions.manage_guild:
+        teams = helperObj.getTeamsForGuild(ctx.guild.id)
+    else:
+        teams = helperObj.getTeamsCaptainedBy(ctx.guild.id, ctx.user.id)
+    names = [team.get_name() for _team_id, team in teams if current in team.get_name().lower()]
+    return [app_commands.Choice(name=n, value=n) for n in names[:25]]
+
+
+# Same shape as myCaptainedTeamAutocomplete, but for team-name params that
+# only read a team rather than requiring captaincy of it (/team-stats,
+# /team-use) — every team the caller is rostered on at all (getTeamsForPlayer),
+# captain or not. Same Manage Server carve-out as myCaptainedTeamAutocomplete:
+# an admin sees every team in the guild here too, not just ones they're on.
+async def myTeamAutocomplete(ctx, current: str):
+    current = current.lower()
+    if ctx.user.guild_permissions.manage_guild:
+        teams = helperObj.getTeamsForGuild(ctx.guild.id)
+    else:
+        teams = helperObj.getTeamsForPlayer(ctx.guild.id, ctx.user.id)
+    names = [team.get_name() for _team_id, team in teams if current in team.get_name().lower()]
+    return [app_commands.Choice(name=n, value=n) for n in names[:25]]
+
+
 @tree.command(
     name="tournament-create",
     description="Create a tournament for this server"
@@ -1032,6 +1091,7 @@ async def createTournament(ctx, name: str, teamsize: int, numteams: int, double_
     description="Register a team for this server's tournament"
 )
 @app_commands.describe(team="Name of the team to register")
+@app_commands.autocomplete(team=myCaptainedTeamAutocomplete)
 async def registerTeam(ctx, team: str):
     await helperObj.registerTeamHelper(ctx, team)
 
@@ -1087,9 +1147,12 @@ async def startTournament(ctx, mode: app_commands.Choice[str]):
     name="team-create",
     description="Create a persistent team you're the captain of"
 )
-@app_commands.describe(name="Team name", team_size="How many players the team is looking for")
-async def createTeam(ctx, name: str, team_size: int):
-    await helperObj.createTeamHelper(ctx, name, team_size)
+@app_commands.describe(
+    name="Team name", team_size="How many players the team is looking for",
+    captain="Optional: make this member the captain instead of you",
+)
+async def createTeam(ctx, name: str, team_size: int, captain: discord.Member = None):
+    await helperObj.createTeamHelper(ctx, name, team_size, captain)
 
 
 @tree.command(
@@ -1104,6 +1167,7 @@ async def createTeam(ctx, name: str, team_size: int):
     member_4="Another member to invite (optional)",
     member_5="Another member to invite (optional)",
 )
+@app_commands.autocomplete(team=myCaptainedTeamAutocomplete)
 async def teamInvite(
     ctx, team: str, member_1: discord.Member,
     member_2: discord.Member = None, member_3: discord.Member = None,
@@ -1132,7 +1196,7 @@ async def logoAutocomplete(ctx, current: str):
     new_voice_channel="Create a brand new voice channel named after the team",
     logo="Which built-in logo to use",
 )
-@app_commands.autocomplete(logo=logoAutocomplete)
+@app_commands.autocomplete(logo=logoAutocomplete, team=myCaptainedTeamAutocomplete)
 async def setTeam(
     ctx, team: str, voice_channel: discord.VoiceChannel = None,
     new_voice_channel: bool = False, logo: str = None,
@@ -1141,10 +1205,31 @@ async def setTeam(
 
 
 @tree.command(
+    name="team-rename",
+    description="Rename a persistent team you captain"
+)
+@app_commands.describe(team="Current name of the team", new_name="New name for the team")
+@app_commands.autocomplete(team=myCaptainedTeamAutocomplete)
+async def renameTeam(ctx, team: str, new_name: str):
+    await helperObj.teamRenameHelper(ctx, team, new_name)
+
+
+@tree.command(
+    name="team-delete",
+    description="Delete a persistent team you captain (confirmation required)"
+)
+@app_commands.describe(team="Name of the team to delete")
+@app_commands.autocomplete(team=myCaptainedTeamAutocomplete)
+async def deleteTeam(ctx, team: str):
+    await helperObj.teamDeleteHelper(ctx, team)
+
+
+@tree.command(
     name="team-stats",
     description="View a team's roster and record"
 )
 @app_commands.describe(team="Name of the team")
+@app_commands.autocomplete(team=myTeamAutocomplete)
 async def teamStats(ctx, team: str):
     await helperObj.teamStatsHelper(ctx, team)
 
@@ -1196,8 +1281,17 @@ async def teamList(
     team2="Name of the second persistent team",
     ranked="Track elo for this game - defaults to casual"
 )
+@app_commands.autocomplete(team1=myTeamAutocomplete, team2=myTeamAutocomplete)
 async def useTeams(ctx, team1: str, team2: str, ranked: bool = False):
     await helperObj.useTeamsHelper(ctx, team1, team2, ranked)
+
+
+@tree.command(
+    name="reuse",
+    description="Re-post the last game's two teams instead of making a fresh split/draft"
+)
+async def reuseTeams(ctx):
+    await helperObj.reuseTeamsHelper(ctx)
 
 
 @tree.command(
@@ -1251,6 +1345,24 @@ async def roll(ctx, *, num: int):
         await ctx.response.send_message("You rolled " + str(rand))
     else:
         await ctx.response.send_message("Please use a number greater than 1.")
+
+
+# TEMPORARY dev tool for testing the economy without grinding /daily or
+# real games — hardcoded to one Discord user id rather than a permission
+# check, since this isn't a real admin feature anyone else should be able
+# to run. Remove this command (and DEV_USER_ID) once it's no longer needed.
+DEV_USER_ID = 217743368959164416
+
+
+@tree.command(
+    name="dev-give-gold",
+    description="Temporary developer tool: grants yourself 1000 gold for testing"
+)
+async def devGiveGold(ctx):
+    if ctx.user.id != DEV_USER_ID:
+        await ctx.response.send_message("This command is not available.")
+        return
+    await helperObj.devGiveGoldHelper(ctx)
 
 
 # Guarded so tests.py can import this module (to exercise command callbacks

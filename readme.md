@@ -58,6 +58,22 @@ plain explanation ("You need to be in a voice channel to...") instead of
 letting the `AttributeError` that used to happen reach the caller as a
 silent failure; `/captains` additionally still needs at least two people
 in that channel once the voice check itself passes.
+Each `Team`'s `.name` comes from `_rosterTeamNames(guild_id)` — an admin's
+configured `channel1`/`channel2` names (`/set`'s `team1`/`team2` params) if
+there are any, otherwise the generic "Team 1"/"Team 2" fallback. That name
+is what `printEmbed` titles the roster with, what `_renderMatchupImage`
+labels the matchup graphic with, and — threaded through
+`computeGameDeltas`/`recordResult`/`saveLastResult` all the way to
+`formatResultMessage` and `reportCorrectWinnerHelper` — what the win
+announcement, the elo-change line, and a later correction all say too, so
+a server that's named its channels "Red"/"Blue" sees "Red"/"Blue"
+everywhere a game touches, not a mix of that and "Team 1"/"Team 2".
+`getRosterName(guild_id, column, fallback)` is the read-side counterpart —
+`recordResult` and `/wager`'s confirmation both use it to recover the
+*currently loaded* roster's name, while `saveLastResult` snapshots the
+names actually shown at the time so a correction later still says the
+right thing even if a newer roster (with different names) has since been
+formed.
 `ranked:true` on either command does the same thing but calls
 `formBalancedTeams` first (for `/make-teams`, routing straight to
 `rankedTeamHelper` instead of the random/roles flow — see `fullRandom` in
@@ -69,6 +85,39 @@ matchup every time. Forming a roster through any of these always runs
 `clearTeamsHelper` first, which (among other things) resets `is_ranked` to
 0 — only `ranked:true` sets it back to 1, which is what
 later gates whether a reported result touches anyone's elo at all.
+
+**BUG FIX:** `clearTeamsHelper` used to wipe `team1`/`team2`/
+`original_channel` unconditionally, with no check for whether a game built
+from them was still actively being bet on or played out. Since every
+team-formation command *and* `/clear` itself all funnel through here,
+simply starting a fresh roster while a previous one's bets hadn't
+resolved yet — or running `/clear` for something as unrelated as
+`clear_elo` — silently orphaned the game in progress: `getRosterPlayers`
+would find nothing once a winner was finally reported, so no elo/game-
+record/win-loss-gold ever applied (no "Elo:" line in the result message
+either) and `moveMembersToOriginalChannel` would find `original_channel`
+already blanked out (no "Moved everyone back" message), both without any
+error or explanation. `clearTeamsHelper` now checks `betting_state`
+first and calls `cancelGameHelper` (the same refund + move-back + "Game
+cancelled" notice 🛑's own reaction triggers) before wiping anything, so
+an in-flight game is always cleanly resolved rather than silently
+destroyed.
+
+`/reuse` (`reuseTeamsHelper`) re-posts whichever two rosters `/make-teams`,
+`/captains`, or `/team-use` most recently produced, without drawing a
+fresh random split, elo-balanced split, or captains draft. This works
+because nothing clears `team1`/`team2` just because a game *resolved* —
+only the next team-forming command's `clearTeamsHelper` call does that
+(see the bug fix above) — so they already hold exactly the last game's
+roster right up until something overwrites them. `/reuse` reads them
+back, along with `mode`/`is_ranked`/`roster_use_roles`, and never writes
+any of the three: a reused ranked game stays ranked, a casual one stays
+casual, and a role-eligible roster keeps showing role labels, matching
+whatever the original game actually was rather than some `/reuse`
+default. If a game built from those same teams is still being bet on or
+played, it's cancelled first (`cancelGameHelper` — refund + move back),
+the same safety net `clearTeamsHelper` uses, just without the team1/team2
+wipe that comes with it, since reusing them is the entire point.
 
 ### Voice moves & the betting window
 
@@ -84,38 +133,56 @@ which message is still live" shape `betting_message_id` already used for
 the winner-report reaction, and for the same reason: it's what lets
 `handleRosterReaction` tell a stale roster's ▶️ apart from the current
 one, since forming a new roster just overwrites those columns.
+`_finalizeRoster` also adds a ⚡ reaction (`TEAM_START_NO_MOVE_EMOJI`)
+right alongside ▶️ — same message, same guard columns — for a group
+that's already elsewhere (a stage channel, another platform, in person)
+and doesn't want Shockwave touching anyone's voice state at all.
 
-Clicking ▶️ runs `_startRosterViaReaction`: since a reaction has no
-`ctx.user` the way an Interaction does, the "channel to send everyone back
-to later" is found by scanning the roster's own players for whichever one
-is *currently* sitting in a voice channel (`_findRosterVoiceChannel`),
-rather than assuming the clicker themselves is in voice — anyone can click
-it, not just someone at the table. `channel1`/`channel2` (set by `/set`'s
-`team1`/`team2` params, admin-only) are looked up next; if either is
-missing — `/set` was never run, or the named channel got deleted —
-`_ensureDefaultTeamChannels` self-heals onto `DEFAULT_TEAM_CHANNEL_NAMES`
-(`"Team-1"`/`"Team-2"`), creating whichever one doesn't already exist and
-writing them back to `channel1`/`channel2` so this only happens once per
-guild, rather than refusing to start the game at all.
+Clicking either reaction runs `_startRosterViaReaction(guild_id, channel,
+payload, move)`, `move=True` for ▶️ and `move=False` for ⚡ — the same
+function either way, just with the whole channel-move block skipped for
+⚡. For ▶️, since a reaction has no `ctx.user` the way an Interaction does,
+the "channel to send everyone back to later" is found by scanning the
+roster's own players for whichever one is *currently* sitting in a voice
+channel (`_findRosterVoiceChannel`), rather than assuming the clicker
+themselves is in voice — anyone can click it, not just someone at the
+table. `channel1`/`channel2` (set by `/set`'s `team1`/`team2` params,
+admin-only) are looked up next; if either is missing — `/set` was never
+run, or the named channel got deleted — `_ensureDefaultTeamChannels`
+self-heals onto `DEFAULT_TEAM_CHANNEL_NAMES` (`"Team-1"`/`"Team-2"`),
+creating whichever one doesn't already exist and writing them back to
+`channel1`/`channel2` so this only happens once per guild, rather than
+refusing to start the game at all. ⚡ skips all of that — nobody has to be
+in a voice channel at all to click it — and explicitly clears
+`original_channel` back to `""` rather than leaving it alone, so
+`moveMembersToOriginalChannel` no-ops once the game ends (winner reported
+or cancelled): nothing moved at the start, nothing to move back either.
+That clear matters even though ⚡ itself never *sets* `original_channel` —
+`captainsHelper` captures the drafting caller's voice channel the moment a
+`/captains` draft starts (in case everyone's since left voice by the time
+a reaction is finally clicked), and a stale value from an earlier ▶️ game
+is possible too, so ⚡ has to override whatever's already there rather than
+just not touching it.
 `roster_team2_message_id` is cleared
-**synchronously**, before any `await`, the moment the checks above it
-pass — the same "flip before doing anything async" shape
+**synchronously**, before any `await`, the moment the (▶️-only) checks
+above it pass — the same "flip before doing anything async" shape
 `handleGameReportReaction`'s own `betting_message_id` clear uses, so two
-near-simultaneous ▶️ clicks can't both pass the guard and start the game
-twice. Once the moves are done, it posts the same matchup graphic a
-tournament match gets (`_sendMatchupImage` → the tournament path's own
-`_renderMatchupImage`, just with no match id or tournament name in the
-subtitle) and calls `_openBetting`. Betting has to stay open for 60
-seconds while the bot keeps responding to *other* commands, so the
-countdown runs as its own `asyncio.create_task` (`_bettingTimer`), tracked
-per-guild in `self.bettingTasks` so CANCEL_GAME_EMOJI or a fresh ▶️ click
-can cancel it instead of leaving it to fire later against a game that no
-longer exists. The headline text comes from whichever `mode` string
+near-simultaneous ▶️/⚡ clicks can't both pass the guard and start the game
+twice. Once the moves are done (or skipped, for ⚡), it posts the same
+matchup graphic a tournament match gets (`_sendMatchupImage` → the
+tournament path's own `_renderMatchupImage`, just with no match id or
+tournament name in the subtitle) and calls `_openBetting`. Betting has to
+stay open for 60 seconds while the bot keeps responding to *other*
+commands, so the countdown runs as its own `asyncio.create_task`
+(`_bettingTimer`), tracked per-guild in `self.bettingTasks` so
+CANCEL_GAME_EMOJI or a fresh ▶️/⚡ click can cancel it instead of leaving
+it to fire later against a game that no longer exists. The headline text
+comes from whichever `mode` string
 (`"Normal"`/`"Ranked"`/`"Captains"`/`"Ranked Captains"`) the most recent
 team-forming command left in `servers` (`_matchupLabelForMode`), so it
 reads correctly no matter how the two teams got there.
 
-A 🔄 reaction (`TEAM_ROLES_REROLL_EMOJI`) sits alongside ▶️ on that same
+A 🔄 reaction (`TEAM_ROLES_REROLL_EMOJI`) sits alongside ▶️/⚡ on that same
 message, but only when the roster actually qualifies (`use_roles` was set
 *and* both teams landed at exactly 5 — the same condition
 `makeEmbedString` already used to decide whether to draw roles at all).
@@ -178,15 +245,50 @@ The same flip-before-await-anything pattern shows up again in
 ### The economy
 
 Payouts are pari-mutuel: everyone who bet on the winning team splits the
-losing team's entire pool, proportional to their own wager, on top of
-getting their own wager back
-(`payout = amount + (amount / winningPool) * losingPool`) — so a bet on
-the side fewer people backed pays out more than the same-sized bet on the
-favorite. `computeGameDeltas` is a **pure function**: given the wagers and
-rosters, it returns a plain dict of `{user_id: {balance, wins, losses, …}}`
-deltas without touching the database at all. `recordResult` is what
-actually calls `applyGameDeltas` to write them. Keeping the math and the
-writing separate is what makes `/report-correct-winner` possible (below).
+losing team's pool, proportional to their own wager, on top of getting
+their own wager back
+(`payout = amount + (amount / winningPool) * rakedLosingPool`) — so a bet
+on the side fewer people backed still pays out more than the same-sized
+bet on the favorite. `computeGameDeltas` is a **pure function**: given the
+wagers and rosters, it returns a plain dict of
+`{user_id: {balance, wins, losses, …}}` deltas without touching the
+database at all. `recordResult` is what actually calls `applyGameDeltas`
+to write them. Keeping the math and the writing separate is what makes
+`/report-correct-winner` possible (below).
+
+`rakedLosingPool` isn't just `losingPool` — an unraked 100%-payout split
+turned out to be too profitable for a "safe" bettor: anyone who could
+reliably spot the favorite (visible elo, an obviously stacked roster, ...)
+collected a low-risk, positive-EV income stream indefinitely, since
+nothing was ever removed from circulation to offset it. `_imbalanceRakeFraction(winning_pool, losing_pool)`
+takes a cut that scales with how lopsided the pool was — 0% at an even
+50/50 split (a genuine coin-flip still pays full odds), up to
+`MAX_IMBALANCE_RAKE` (50%) at a maximally one-sided pool (almost everyone
+backed the winner) — so the tax lands specifically on "safe" betting,
+never on real risk-taking; a pool where the eventual winners were actually
+the *minority* (a real upset) isn't raked at all. The raked share isn't
+paid to anyone — it was already deducted from losers' balances the moment
+they placed those bets, so simply not crediting it to the winners removes
+it from the economy outright, which also helps offset the inflation
+`GAME_WIN_GOLD`/`GAME_LOSS_GOLD` (below) introduce on their own. The same
+helper backs both `computeGameDeltas` (casual/ranked/sequential-tournament
+games) and `_matchWagerDeltas` (simultaneous-tournament match wagers),
+which used to duplicate the unraked formula independently.
+
+Separately from wagering, every rostered player gets gold just for
+finishing the game — `GAME_WIN_GOLD` (300) for being on the winning side,
+`GAME_LOSS_GOLD` (150) for the losing side — the moment a game resolves,
+ranked or casual, whether they bet on it or not. It's folded into the same
+`balance` delta `computeGameDeltas` already produces per player (right
+alongside `game_wins`/`game_losses`/`elo` in the team1_roster/team2_roster
+loop, picking whichever constant matches `winning_team`) rather than being
+its own separate write, so it rides along for free with
+`applyGameDeltas`/`reportCorrectWinnerHelper`'s existing apply/reverse/
+reapply cycle — undoing and correcting a misreported winner doesn't
+double- or zero-out it by accident, and correctly *flips* which rostered
+players get the win amount vs. the loss amount along with everything else
+a correction re-derives. `gold_wagered`/`gold_won`/`gold_lost` stay
+wager-only and never see it.
 
 ### Elo & ranked play
 
@@ -217,6 +319,26 @@ Correcting a result means: apply the saved deltas with `sign=-1` to undo
 them exactly, recompute fresh deltas against the now-restored elo values
 for the *correct* winner, apply those, and save a new snapshot — so a
 second correction is possible from the new baseline too.
+
+`team` and `invalidate` are mutually exclusive — `reportCorrectWinnerHelper`
+rejects giving both, or neither. `invalidate` stops after the undo step:
+`_invalidateLastResult` reverses `last["deltas"]` the exact same way (bet
+payouts, records, elo, `GAME_WIN_GOLD`/`GAME_LOSS_GOLD`), but never
+recomputes or reapplies anything for either team, and then deletes the
+`last_result` row outright rather than saving a new snapshot — there's no
+"corrected winner" for a further correction to work from once a game's
+been invalidated. Reversing the deltas alone isn't a *refund* for a
+bettor, though: a winner's stored delta credited their whole payout
+(stake plus winnings), so undoing it removes the payout entirely and
+leaves them down by exactly their stake — the same state as if they'd
+lost. `_invalidateLastResult` adds each wager's original `amount` back
+afterward specifically to fix that, landing every bettor (winner or
+loser) back at their exact pre-bet balance, the same "add the stake back"
+refund `cancelBettingHelper` already does for a bet round that never
+resolved at all. Not supported yet for a `match_id`-scoped tournament
+match — invalidating one would also mean un-advancing whatever it fed
+into the bracket, a bigger change than reversing a guild-wide economy
+snapshot.
 
 ### Heads-up wagers (`/wager-against`)
 
@@ -322,7 +444,23 @@ game produces, `/team-create` writes a row to a dedicated `teams` table —
 one per named team, keyed by its own autoincrement id, with a serialized
 `Team` (captain, roster, target size, voice channel) as its payload. A
 player can sit on more than one team's roster in this table; nothing
-about team membership itself is exclusive. `/team-invite` uses the same
+about team membership itself is exclusive. `/team-create` normally makes
+the caller the captain, but an optional `captain` member argument lets
+someone stand a team up on another player's behalf (e.g. an admin or
+manager registering a team for someone else) — when given, that member
+becomes the sole initial roster entry and captain instead of
+`ctx.user`. Team names are unique per
+guild **case-insensitively**: `getTeamRow` looks a team up with `name = ?
+COLLATE NOCASE`, so "red" finds "Red" and `/team-create`'s (and
+`/team-rename`'s) own uniqueness check rejects "red" as taken if "Red"
+already exists. The one exception is renaming a team to a pure
+capitalization change of its own current name ("Red" → "RED") —
+`teamRenameHelper` special-cases that (comparing `.lower()` first) rather
+than letting the collision check find the team colliding with *itself* and
+wrongly calling it already taken. `/team-use` compares its two team-name
+params the same case-insensitive way before ever calling `getTeamRow`, so
+picking "Red" and "red" is still caught as "the same team twice" instead
+of quietly resolving both to the same row. `/team-invite` uses the same
 react-to-accept pattern as everything else that needs a specific person's
 consent (`TEAM_INVITE_ACCEPT_EMOJI`, its own `team_invites` table keyed by
 message id) — the captain check on both invites and voice-channel changes
@@ -332,6 +470,67 @@ shortcut: it loads two persistent teams straight into `team1`/`team2` so
 a casual or ranked game can start immediately, without cloning any state
 back into the `teams` table — the in-memory copy gets `set_id(1)`/`set_id(2)`
 purely for `_startRosterViaReaction`'s sake.
+
+BUG FIX: a team name is free text, and Discord parses markdown emphasis
+markers (`_`/`*`) across an *entire* message, not per line — an
+unescaped underscore or asterisk in one team's name could pair up with
+an unrelated marker later in the same message (most often the other
+team's own name) and render everything in between in unintended
+italics/bold, e.g. `/team-use`'s "**Fire_Squad** vs **Ice*Wolves**
+loaded" confirmation, the win/elo announcement, a wager confirmation, or
+a `/report-correct-winner` correction. Fixed by running every persistent
+team name through `discord.utils.escape_markdown` right before it's
+dropped into message text — `getRosterName` (the one place the roster's
+stored name is read back out for display) and `/team-use`'s own messages
+are the two spots this actually mattered, since the stored name itself
+is left untouched and every other display path already reads it back
+through one of those two.
+
+`/team-rename`, `/team-set`, `/team-invite`, `/team-delete`, and
+`/tournament-register` are all captain-gated the same way (`isTeamCaptain`),
+but every one of them also lets any member with the **Manage Server**
+permission through — `not isTeamCaptain(...) and not
+ctx.user.guild_permissions.manage_guild`, same check repeated at each
+command — so a team whose captain has gone inactive, left the server, or
+just isn't around isn't stuck: an admin can rename it, change its voice
+channel/logo, invite players, register it for a tournament, or delete it
+without needing to be added to the roster first. `myCaptainedTeamAutocomplete`
+(the suggestion list backing all five commands' `team` param) checks the
+same permission and switches from `getTeamsCaptainedBy` to
+`getTeamsForGuild` for an admin, so they can actually find a team they
+don't captain to type in, rather than only being able to act on it by
+typing the exact name from memory. `myTeamAutocomplete` (backing
+`/team-stats` and `/team-use`, which don't require captaincy/rostering at
+all — that scoping was only ever a suggestion-list convenience) gets the
+same admin carve-out, swapping `getTeamsForPlayer` for `getTeamsForGuild`.
+Renaming has to update
+the `teams` row's own
+`name` **column** and the `name` embedded in its serialized `data`
+together (`_renameTeam`) — `getTeamRow` looks a team up by the column, so
+letting the two drift apart would make the renamed team invisible under
+its new name while a stale row still answered to the old one.
+Deleting is destructive and irreversible, so it goes through the same
+confirm/cancel button pattern `/clear` and `/tournament-create`'s overwrite
+path use (`ConfirmTeamDeleteView`) rather than running immediately; on
+confirm, it also deletes any pending `/team-invite` rows for that team
+(`_deleteTeam`) so nobody can later "accept" an invite into a team that's
+already gone (`handleTeamInviteReaction`'s own `getTeamById(...) is None`
+guard would otherwise just eat the click silently instead of telling
+them). A tournament this team is already registered in is untouched —
+`register_team` snapshots a *copy* of the `Team` at registration time
+(see below), not a live reference back into the `teams` table, so the
+bracket entry plays out exactly as registered either way.
+
+Both autocomplete functions above predate the admin carve-out — same
+per-caller-scoped idea `/card-set`'s title/scheme/font params already use
+(`cardTitleAutocomplete`, only ever suggesting what the caller has
+personally unlocked); `myTeamAutocomplete` (`getTeamsForPlayer`)
+specifically already existed for `/my-teams` before `/team-stats`/
+`/team-use` needed it too. Either way, Discord's autocomplete is only a
+suggestion list, not a hard restriction — typing a name that isn't
+offered still submits fine, so this doesn't (and shouldn't) replace the
+backing helpers' own captain/existence checks; it just means someone
+usually doesn't have to remember exact spelling for their own teams.
 
 **Bugs fixed to make this possible:** `Team.deserializeTeam` never parsed
 its `id` or `captain` fields back to real types after a database
@@ -826,6 +1025,43 @@ alongside the same `embed=`/`file=` pair. Simpler than
 `/card-set` is always a real, currently-present member (they're the one
 running it), so there's no "member left the guild" fallback to handle the
 way that function needs.
+
+`/preview type:<Logos|Card Titles|Color Schemes|Fonts>` (`previewHelper`)
+is the "what are my options" counterpart to `/card-set`/`/team-set` — a
+single gallery image showing every option for one type, not just what a
+given player has personally unlocked (unlike `getAvailableCard*`, which
+are always per-player). Logos and Color Schemes are real
+`PREVIEW_COLUMNS`-wide grids (`_renderPreviewGridPage`, shared by both —
+they only differ in what `draw_cell` puts inside a cell: a pasted-in logo
+image for Logos, a background-fill-plus-accent-circle swatch of the
+scheme's own two colors for Color Schemes) with each item's exact
+name/key underneath, so it doubles as a lookup table for what to actually
+type. Fonts and Card Titles skip the grid entirely — a font style has a
+real typeface to show (`_cardFontPaths`, the same lookup an equipped card
+uses, so it's rendered in its own actual typeface rather than just
+labeled) but nothing to lay out in columns, and a title has no visual
+difference at all beyond the text — so both are simple one-column lists
+instead. `_paginateGridItems` splits a grid onto more than one image if
+its height would clear `PREVIEW_MAX_PAGE_HEIGHT`, though none of the four
+types are anywhere close to that today (51 logos and ~21 schemes both
+still fit on one page). Nothing here reads a specific player's unlocks —
+Logos comes from `listAvailableLogos()`, Color Schemes from
+`CARD_DEFAULT_SCHEME_NAME` plus every `CARD_SHOP_COLOR_SCHEMES` entry,
+Fonts from `CARD_DEFAULT_FONT_STYLE` plus every `CARD_SHOP_FONT_STYLES`
+key, Card Titles from `CARD_DEFAULT_TITLE` plus every `CARD_TITLE_CATALOG`
+value (achievement titles included, since `CARD_ACHIEVEMENT_TITLES` folds
+into that same catalog) — so the gallery always shows the complete
+catalog, purchasable-but-not-yet-owned items included.
+
+Each type is rendered once and cached to `PREVIEW_DIR`
+(`assets/previews/`) as `<stem>-1.png`, `<stem>-2.png`, ... —
+`_cachedPreviewFiles` just probes sequentially until the next page is
+missing, so `/preview` never re-runs Pillow on a later call unless the
+cached file(s) are deleted by hand (or the folder doesn't exist yet at
+all). None of these four catalogs change without a code change, so
+there's no cache-invalidation logic beyond that — deleting the relevant
+file(s) is how a developer forces a regenerate after actually adding a
+new logo/scheme/font/title.
 
 ### Achievements
 
