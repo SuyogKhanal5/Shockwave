@@ -53,9 +53,18 @@ BRACKET_LINE_WIDTH = 2 * BRACKET_SUPERSAMPLE
 BRACKET_RULE_WIDTH = 1 * BRACKET_SUPERSAMPLE
 BRACKET_LOGO_PATH = os.path.join(os.path.dirname(__file__), "shockwave-site", "assets", "img", "logo-mark.png")
 # Built-in Clash faction/region logos a team can pick from (see
-# /team-set-logo and _ensureLogo) — one file per available logo, named after
+# /team-set and _ensureLogo) — one file per available logo, named after
 # it (e.g. "Demacia.png"), no subfolders.
 TEAM_LOGO_DIR = os.path.join(os.path.dirname(__file__), "assets", "clash-logos")
+
+# /preview's cache — logos/color-schemes/fonts/titles never change without
+# a code change, so each type is rendered once and reused from disk on
+# every later call instead of re-running Pillow on every single request
+# (see previewHelper/_cachedPreviewFiles). Deleting a file here (or the
+# whole folder) just makes the next /preview for that type regenerate it -
+# same "no source of truth but the assets folder itself" idea TEAM_LOGO_DIR
+# already relies on.
+PREVIEW_DIR = os.path.join(os.path.dirname(__file__), "assets", "previews")
 
 # Real TTF fonts instead of PIL's built-in default font, which is a small
 # bitmap face that looks noticeably rough/pixelated once scaled up to
@@ -79,6 +88,15 @@ IBM_PLEX_SANS = os.path.join(FONTS_DIR, "IBMPlexSans.ttf")  # variable weight �
 RUSSO_ONE = os.path.join(FONTS_DIR, "RussoOne-Regular.ttf")
 CINZEL = os.path.join(FONTS_DIR, "Cinzel-Variable.ttf")
 ORBITRON = os.path.join(FONTS_DIR, "Orbitron-Variable.ttf")
+# Second wave of shop fonts — same "genuinely distinct typeface, not just a
+# weight" bar the three above set, all single-static-weight Google/SIL-OFL
+# fonts (no `_variation` to pass, same as Russo One). Chosen to each read
+# as a completely different mood at a glance: Press Start 2P is an actual
+# pixel-grid bitmap-style face (8-bit/arcade), Creepster is a dripping
+# horror-poster face, Black Ops One is a blocky military stencil face.
+PRESS_START_2P = os.path.join(FONTS_DIR, "PressStart2P-Regular.ttf")
+CREEPSTER = os.path.join(FONTS_DIR, "Creepster-Regular.ttf")
+BLACK_OPS_ONE = os.path.join(FONTS_DIR, "BlackOpsOne-Regular.ttf")
 
 # Colors lifted straight from shockwave-site/assets/styles.css's :root
 # palette, so the bracket image reads as part of the same brand instead of
@@ -136,16 +154,49 @@ _bracket_logo_cache = None
 # `global` needed the way _bracket_logo_cache's None/False swap requires).
 _font_cache = {}
 
+# ELO tier badge images (see ELO_BADGE_DIR), loaded and resized once per
+# (path, size) and reused for the rest of the process — every trading card
+# draws exactly one of these, so this avoids re-opening/resizing the same
+# handful of small PNGs from disk on every single render. Same "mutate the
+# dict directly" reasoning _font_cache's own comment gives.
+_elo_badge_cache = {}
+
 BETTING_DURATION_SECONDS = 60
 # _openConcurrentTournamentBetting multiplies a guild's configured
 # per-match timer by however many matches are in the round — this caps
 # the result so a generous base times a big bracket's first round can't
 # leave betting open for an unreasonable stretch.
 MAX_CONCURRENT_BETTING_SECONDS = 1800
-WINNER_REPORT_DELAY_SECONDS = 3
 DAILY_GOLD_AMOUNT = 1000
+# TEMPORARY: how much /dev-give-gold hands out — see bot.py's DEV_USER_ID
+# guard. Remove alongside that command once it's no longer needed.
+DEV_GIVE_GOLD_AMOUNT = 1000
+# Reward every rostered player gets in computeGameDeltas for simply
+# finishing a game — casual or ranked, regardless of anything they bet
+# themselves — split by whether their side won or lost. Not a
+# gold_won/gold_wagered/gold_lost figure (those are wager-specific), just
+# balance.
+GAME_WIN_GOLD = 300
+GAME_LOSS_GOLD = 150
+# The pari-mutuel payout (see _imbalanceRakeFraction) used to hand winners
+# 100% of the losing pool — free money for anyone who could reliably spot
+# the favorite (visible elo, an obviously stacked roster, ...), since nothing
+# was ever removed from circulation to offset it. This caps how much of the
+# losing pool gets raked off before the split, scaling with how lopsided
+# the pool was: 0 at an even 50/50 split (a genuine coin-flip pays full
+# odds), this fraction at a maximally one-sided pool (almost everyone
+# backed the winner) — taxing the "safe" bets specifically rather than
+# genuine risk-taking. The raked share isn't paid to anyone; it was already
+# deducted from losers' balances at bet time, so simply not crediting it
+# to the winners removes it from the economy outright.
+MAX_IMBALANCE_RAKE = 0.5
 TEAM_EMOJIS = {1: "🔵", 2: "🔴"}   # blue for team 1, red for team 2 — matches TEAM1_ACCENT_COLOR/TEAM2_ACCENT_COLOR
 WINNER_EMOJIS = {emoji: team for team, emoji in TEAM_EMOJIS.items()}
+# Cancels the current game (refunds any bets, moves everyone back to the
+# original channel) — the reaction replacement for the old /return
+# command, living on the exact same message TEAM_EMOJIS' own winner-report
+# reactions do (see _openBetting/handleGameReportReaction).
+CANCEL_GAME_EMOJI = "\U0001F6D1"  # 🛑
 DEFAULT_ELO = 1000
 ELO_K_FACTOR = 32
 # +/- range randomly added to each player's elo before balancing ranked
@@ -157,7 +208,7 @@ ELO_BALANCE_JITTER = 100
 CLEAR_CONFIRM_TIMEOUT_SECONDS = 30
 # Same idea for /tournament-create's overwrite confirmation.
 TOURNAMENT_CONFIRM_TIMEOUT_SECONDS = 30
-# ...and for /team-set-voice-channel's already-in-use confirmation.
+# ...and for /team-set's already-in-use voice channel confirmation.
 TEAM_CONFIRM_TIMEOUT_SECONDS = 30
 # /team-invite: react to accept, same idea as duel/team-game acceptance.
 TEAM_INVITE_ACCEPT_EMOJI = "✅"
@@ -168,22 +219,23 @@ TEAM_INVITE_ACCEPT_EMOJI = "✅"
 # tournament_matches row instead of the guild's single betting_message_id.
 TOURNAMENT_READY_EMOJI = "✅"
 
-# /stats: react to toggle the shown avatar between the player's real one
-# and a generic placeholder (see handleStatsReaction) — same reaction
-# either direction, flipping based on whichever's currently showing.
-# Discord's own "embed/avatars/0.png" is one of its built-in default-avatar
-# images (0-5, no real user tied to it), so this needs no locally-hosted
-# asset for the placeholder half of the toggle.
-STATS_PLACEHOLDER_EMOJI = "\U0001f5bc️"  # 🖼️
-STATS_PLACEHOLDER_AVATAR_URL = "https://cdn.discordapp.com/embed/avatars/0.png"
+# /stats: react to toggle the shown avatar between this server's own
+# per-server profile picture (if the player has set one — same as the
+# card/embed shows by default) and their regular, account-wide avatar (see
+# handleStatsReaction/_resolveGlobalAvatarUrl) — same reaction either
+# direction, flipping based on whichever's currently showing. Both are
+# resolved live (not snapshotted at /stats time) so a player who changes
+# either avatar later and toggles sees their current one, same as a fresh
+# /stats would.
+STATS_AVATAR_TOGGLE_EMOJI = "\U0001f5bc️"  # 🖼️
 # /stats: react to blow the whole embed away and replace it with the
 # player's trading card (see _renderTradingCardImage). Both this and the
 # avatar toggle above only make sense on the plain /stats embed, so
 # handleStatsReaction removes both reactions the moment the card goes up
 # and replaces them with STATS_RETURN_EMOJI below — a card isn't shaped
 # like a normal /stats embed, so neither toggle applies to it anymore.
-STATS_CARD_EMOJI = "\U0001f3b4"  # 🎴
-# Shown only once the trading card is up in place of STATS_PLACEHOLDER_EMOJI
+STATS_CARD_EMOJI = "\U0001F0CF"  # 🃏
+# Shown only once the trading card is up in place of STATS_AVATAR_TOGGLE_EMOJI
 # / STATS_CARD_EMOJI — the one action that makes sense from the card view,
 # swapping back to the plain /stats embed (which then gets its own two
 # reactions restored, so the whole thing is a real back-and-forth toggle
@@ -199,6 +251,13 @@ CARD_WIDTH = 420 * BRACKET_SUPERSAMPLE
 CARD_AVATAR_SIZE = 176 * BRACKET_SUPERSAMPLE
 CARD_AVATAR_BORDER = 3 * BRACKET_SUPERSAMPLE
 CARD_NAME_FONT_SIZE = 20 * BRACKET_SUPERSAMPLE
+# Floor _fitNameFont shrinks toward — see that method's own comment for
+# why a floor is needed at all now (PRESS_START_2P's unusually wide,
+# near-monospace glyphs). Low enough that even Discord's absolute worst
+# case — a full 32-character username in PRESS_START_2P — still actually
+# clears the card's width once shrunk this far (768px at 24pt, still over
+# CARD_WIDTH's ~760px usable width; comfortably under it by 20pt).
+CARD_NAME_MIN_FONT_SIZE = 10 * BRACKET_SUPERSAMPLE
 CARD_TITLE_FONT_SIZE = 14 * BRACKET_SUPERSAMPLE
 CARD_STAT_LABEL_FONT_SIZE = 12 * BRACKET_SUPERSAMPLE
 CARD_STAT_VALUE_FONT_SIZE = 15 * BRACKET_SUPERSAMPLE
@@ -233,14 +292,10 @@ CARD_DEFAULT_ACCENT_COLOR = "#EDC643"      # --gold, same as BRACKET_TITLE_COLOR
 CARD_DEFAULT_BACKGROUND_COLOR = "#251A5B"
 CARD_DEFAULT_TEXT_COLOR = "#F3EFFA"        # --text, same as BRACKET_TEXT_COLOR
 CARD_DEFAULT_FONT_STYLE = "default"        # Chakra Petch + IBM Plex Sans — see _cardFontPaths
-# /card-set-color-scheme's name for reverting to the palette above — always
-# offered (see getAvailableCardColorSchemes) the same way CARD_DEFAULT_
-# TITLE always is for /card-set-title, since it needs no unlocking either.
+# /card-set's name for reverting to the palette above — always offered
+# (see getAvailableCardColorSchemes) the same way CARD_DEFAULT_TITLE always
+# is, since it needs no unlocking either.
 CARD_DEFAULT_SCHEME_NAME = "Default"
-# Discord caps a single message at 10 file attachments — /card-test (see
-# cardTestHelper) batches its per-scheme renders to this size, spreading
-# anything past the first batch across follow-up messages.
-CARD_TEST_BATCH_SIZE = 10
 
 # /team-stats: react to swap the embed for a team card (see
 # _renderTeamCardImage), the team's own counterpart to /stats' trading
@@ -249,6 +304,26 @@ CARD_TEST_BATCH_SIZE = 10
 # reusing stats_views (a team, not a player, is what's shown on the card).
 TEAM_CARD_EMOJI = "\U0001f6e1️"    # 🛡️
 TEAM_CARD_RETURN_EMOJI = "↩️"  # ↩️
+
+# Roster action reactions — replace the old standalone /start and
+# /randomize-roles commands. Posted on the SECOND team embed only (see
+# printEmbed/_finalizeRoster) once a roster is actually final (not mid-
+# draft), tracked via roster_team1_message_id/roster_team2_message_id on
+# `servers` so a stale reaction from an earlier roster can't act on
+# whatever team1/team2 happen to be loaded now. TEAM_ROLES_REROLL_EMOJI
+# only gets added when the roster is role-eligible (see _finalizeRoster).
+TEAM_ROLES_REROLL_EMOJI = "\U0001f504"  # 🔄
+TEAM_START_EMOJI = "▶️"  # ▶️
+# Same as TEAM_START_EMOJI (posts the matchup image, opens betting) but
+# skips moving anyone into team channels — for a group that's already
+# elsewhere (a stage channel, external voice, in person, ...) and doesn't
+# want Shockwave touching anyone's voice state. See _startRosterViaReaction.
+TEAM_START_NO_MOVE_EMOJI = "⚡"  # ⚡
+# Fallback voice channel names ▶️ self-heals onto a guild's `channel1`/
+# `channel2` (see _ensureDefaultTeamChannels) if a game is started before
+# /set's team1/team2 have ever been given — created on demand the same way
+# /set itself creates a missing channel.
+DEFAULT_TEAM_CHANNEL_NAMES = ("Team-1", "Team-2")
 
 # Team-card layout (see _renderTeamCardImage) — same card shape/width as
 # the player trading card above (CARD_WIDTH, CARD_NAME_FONT_SIZE, CARD_
@@ -298,29 +373,29 @@ CARD_MIN_ACCENT_CONTRAST = 45
 
 # League-style rank tiers for /stats. Each tier spans 250 elo, with
 # DEFAULT_ELO (1000) landing every new player in the middle at Platinum —
-# ascending order, (elo threshold, tier name, emoji, badge color, badge
-# shape). The badge color+shape stand in for the emoji on the trading card
-# (see _drawEloBadge) — PIL's bundled TTF fonts can't render color emoji
-# glyphs (same class of issue the roster's captain star ran into), so the
-# card draws a small tier-colored shape instead of the literal character.
-# "circle" is the default (matches the medal/gear/circle emoji closely
-# enough); Platinum and Diamond get "diamond" instead since \U0001f537 and
-# \U0001f48e are both actually diamond/gem-cut shapes, not circles — a
-# round badge there read as a shape mismatch against the real emoji shown
-# in the embed, not just a color one.
+# a global fallback; a guild can override its own starting elo via /set's
+# default_elo (see _defaultEloForGuild) without changing this ladder.
+# ascending order, (elo threshold, tier name, emoji, badge color). The
+# trading card (_drawEloBadge) pastes the tier's own real emoji artwork
+# (see ELO_BADGE_DIR) instead of the literal character — PIL's bundled TTF
+# fonts can't render color emoji glyphs (same class of issue the roster's
+# captain star ran into) — so there's no shape to hand-approximate here
+# anymore; badge_color now exists purely for the tier-reward trading-card
+# color scheme (see ELO_TIER_BADGE_COLORS/getUnlockedCardColorSchemes),
+# independent of whatever the badge image itself looks like.
 ELO_TIERS = [
-    (0, "Iron", "⚙️", (153, 170, 181), "circle"),
-    (250, "Bronze", "\U0001f949", (205, 127, 50), "circle"),
-    (500, "Silver", "\U0001f948", (192, 192, 192), "circle"),
-    (750, "Gold", "\U0001f947", (255, 204, 51), "circle"),
+    (0, "Iron", "⚙️", (153, 170, 181)),
+    (250, "Bronze", "\U0001f949", (205, 127, 50)),
+    (500, "Silver", "\U0001f948", (192, 192, 192)),
+    (750, "Gold", "\U0001f947", (255, 204, 51)),
     # BUG FIX: this used to be a cyan/teal (79, 209, 232) that read as
     # "Diamond" at a glance — closer to the actual color of the large blue
     # diamond emoji \U0001f537 itself, which is a clear blue, not cyan.
-    (1000, "Platinum", "\U0001f537", (41, 121, 255), "diamond"),
-    (1250, "Diamond", "\U0001f48e", (137, 207, 240), "diamond"),
-    (1500, "Master", "\U0001f7e3", (155, 60, 200), "circle"),
-    (1750, "Grandmaster", "\U0001f534", (221, 46, 68), "circle"),
-    (2000, "Challenger", "\U0001f451", (255, 199, 44), "circle"),
+    (1000, "Platinum", "\U0001f537", (41, 121, 255)),
+    (1250, "Diamond", "\U0001f48e", (137, 207, 240)),
+    (1500, "Master", "\U0001f7e3", (155, 60, 200)),
+    (1750, "Grandmaster", "\U0001f534", (221, 46, 68)),
+    (2000, "Challenger", "\U0001f451", (255, 199, 44)),
 ]
 
 # Divisions within a tier, lowest to highest — the same I/II/III/IV split
@@ -337,8 +412,13 @@ ELO_DIVISIONED_TIER_COUNT = 6
 # there's nothing here that can drift out of sync if ELO_TIERS' own values
 # ever change (the exact "stale duplicated constant" bug CARD_DEFAULT_*
 # ran into earlier is what this sidesteps).
-ELO_TIER_THRESHOLDS = {name: threshold for threshold, name, _emoji, _badge, _shape in ELO_TIERS}
-ELO_TIER_BADGE_COLORS = {name: badge for _threshold, name, _emoji, badge, _shape in ELO_TIERS}
+ELO_TIER_THRESHOLDS = {name: threshold for threshold, name, _emoji, _badge in ELO_TIERS}
+ELO_TIER_BADGE_COLORS = {name: badge for _threshold, name, _emoji, badge in ELO_TIERS}
+# Each tier's real emoji artwork (see the generation note above) — one PNG
+# per ELO_TIERS name, e.g. assets/elo-badges/Challenger.png — pasted onto
+# the trading card by eloRankBadgeImagePath/_drawEloBadge instead of a
+# hand-drawn approximation.
+ELO_BADGE_DIR = os.path.join(os.path.dirname(__file__), "assets", "elo-badges")
 
 # Trading-card rewards permanently unlocked (see card_unlocks,
 # _checkTierRewardUnlocks) the first time a player reaches each of these
@@ -424,21 +504,45 @@ CARD_SHOP_COLOR_SCHEMES = {
 }
 # Genuinely different typefaces for the card's name/title (see
 # _cardFontPaths) — RUSSO_ONE/CINZEL/ORBITRON, not just different weights
-# of the same Chakra Petch font as before (see that BUG FIX note).
+# of the same Chakra Petch font as before (see that BUG FIX note). Retail/
+# Villain/Military are priced the same as the original three (matching,
+# not escalating, cosmetic tiers) despite arriving later.
 CARD_SHOP_FONT_STYLES = {
     "Bold": 3000,
     "Elegant": 3000,
     "Cyber": 3000,
+    "Retro": 3000,
+    "Villain": 3000,
+    "Military": 3000,
 }
 # Every card_unlocks itemKey that resolves to a real title — tier-earned,
 # specially-granted, or purchased alike — the one place getUnlockedCardTitles
-# and /card-set-title's own validation both read from, so all three
+# and /card-set's own validation both read from, so all three
 # catalogs above only ever need combining in one place. Shop titles have
 # no separate display text of their own (unlike a tier's flavor title),
 # so each just maps to itself.
 CARD_TITLE_CATALOG = {
     **CARD_TIER_REWARD_TITLES, **CARD_SPECIAL_TITLES, **{name: name for name in CARD_SHOP_TITLES},
 }
+
+# /preview's grid layout (Logos, Color Schemes) — cell footprint plus the
+# label under it, gapped and margined the same way _renderTeamCardImage's
+# own BRACKET_* spacing constants shape everything else this file renders.
+# Titles/Fonts don't use a grid at all (see _renderCardTitlePreviewImage/
+# _renderFontPreviewImage) - there's nothing image-shaped to lay out in
+# columns for either, just one row of text per option.
+PREVIEW_COLUMNS = 6
+PREVIEW_CELL_SIZE = 140
+PREVIEW_CELL_LABEL_HEIGHT = 30
+PREVIEW_CELL_GAP = 18
+PREVIEW_MARGIN = 30
+PREVIEW_TITLE_FONT_SIZE = 32
+PREVIEW_LABEL_FONT_SIZE = 15
+# Soft cap on a single page's height before _paginatePreviewItems splits
+# the rest onto another image entirely — Discord still renders a much
+# taller image fine, but past this it stops reading as "one glanceable
+# grid" and starts needing real scrolling to take in.
+PREVIEW_MAX_PAGE_HEIGHT = 2200
 
 # Achievements: a fourth path into card_unlocks (title only) alongside a
 # tier reward, a special grant, and a shop purchase — same table, same
@@ -447,7 +551,7 @@ CARD_TITLE_CATALOG = {
 # applyGameDeltas) rather than earned by rank or bought with gold. Unlike
 # the other three, unlocking one also posts a Discord notification (see
 # _announceAchievements) — these are meant to feel like a moment worth
-# noticing, not just another option quietly waiting in /card-set-title's
+# noticing, not just another option quietly waiting in /card-set's
 # own autocomplete.
 #
 # Gold-based achievements are deliberately keyed off a single
@@ -599,16 +703,17 @@ roles = {
 }
 
 
-# Confirm/cancel buttons for /clear's clear_elo, clear_economy, and
-# clear_achievements flags. clear_elo/clear_economy always reset state for
-# every player in the server; clear_achievements normally does too, but
-# can be narrowed to a single `achievements_target` member instead (see
-# /clear's own `user` parameter) — none of the three actually run until
-# whoever ran the command clicks "Confirm reset" on this view.
+# Confirm/cancel buttons for /clear's clear_elo, clear_economy,
+# clear_achievements, and clear_card_unlocks flags. clear_elo/clear_economy
+# always reset state for every player in the server; clear_achievements and
+# clear_card_unlocks normally do too, but both share the same optional
+# `target` member instead (see /clear's own `user` parameter) — none of the
+# four actually run until whoever ran the command clicks "Confirm reset" on
+# this view.
 class ConfirmResetView(discord.ui.View):
     def __init__(
         self, helperObj, guild_id, guild_name, invoker_id,
-        clear_economy, clear_elo, clear_achievements, achievements_target=None,
+        clear_economy, clear_elo, clear_achievements, clear_card_unlocks=False, target=None,
     ):
         super().__init__(timeout=CLEAR_CONFIRM_TIMEOUT_SECONDS)
         self.helperObj = helperObj
@@ -618,7 +723,8 @@ class ConfirmResetView(discord.ui.View):
         self.clear_economy = clear_economy
         self.clear_elo = clear_elo
         self.clear_achievements = clear_achievements
-        self.achievements_target = achievements_target
+        self.clear_card_unlocks = clear_card_unlocks
+        self.target = target
         self.message = None
 
     async def interaction_check(self, interaction):
@@ -644,15 +750,29 @@ class ConfirmResetView(discord.ui.View):
             )
         elif self.clear_elo:
             self.helperObj.resetEloHelper(self.guild_id)
-            results.append(f"Elo has been reset to {DEFAULT_ELO} for every player in **{self.guild_name}**.")
+            reset_elo = self.helperObj._defaultEloForGuild(self.guild_id)
+            results.append(f"Elo has been reset to {reset_elo} for every player in **{self.guild_name}**.")
         if self.clear_achievements:
-            if self.achievements_target is not None:
-                self.helperObj.resetAchievementsHelper(self.guild_id, user_id=self.achievements_target.id)
-                results.append(f"Every earned achievement has been reset for {self.achievements_target.mention}.")
+            if self.target is not None:
+                self.helperObj.resetAchievementsHelper(self.guild_id, user_id=self.target.id)
+                results.append(f"Every earned achievement has been reset for {self.target.mention}.")
             else:
                 self.helperObj.resetAchievementsHelper(self.guild_id)
                 results.append(
                     f"Every earned achievement has been reset for every player in **{self.guild_name}**."
+                )
+        if self.clear_card_unlocks:
+            if self.target is not None:
+                self.helperObj.resetCardUnlocksHelper(self.guild_id, user_id=self.target.id)
+                results.append(
+                    f"Every trading-card unlock has been reset for {self.target.mention}, and their card "
+                    "restored to Shockwave's defaults."
+                )
+            else:
+                self.helperObj.resetCardUnlocksHelper(self.guild_id)
+                results.append(
+                    f"Every trading-card unlock has been reset for every player in **{self.guild_name}**, "
+                    "and their cards restored to Shockwave's defaults."
                 )
         result = " ".join(results)
         self._disable_buttons()
@@ -663,7 +783,7 @@ class ConfirmResetView(discord.ui.View):
     async def cancel(self, interaction, button):
         self._disable_buttons()
         self.stop()
-        await interaction.response.edit_message(content="Cancelled — nothing was reset.", view=self)
+        await interaction.response.edit_message(content="Cancelled - nothing was reset.", view=self)
 
     async def on_timeout(self):
         self._disable_buttons()
@@ -714,7 +834,7 @@ class ConfirmTournamentOverwriteView(discord.ui.View):
         self._disable_buttons()
         self.stop()
         await interaction.response.edit_message(
-            content="Cancelled — the existing tournament was kept.", view=self
+            content="Cancelled - the existing tournament was kept.", view=self
         )
 
     async def on_timeout(self):
@@ -723,8 +843,8 @@ class ConfirmTournamentOverwriteView(discord.ui.View):
             await self.message.edit(view=self)
 
 
-# Confirm/cancel buttons for /team-set-voice-channel when the requested
-# channel is already another team's. "Yes" assigns it to this team anyway
+# Confirm/cancel buttons for /team-set when the requested voice channel is
+# already another team's. "Yes" assigns it to this team anyway
 # (the other team's own assignment is left alone — this doesn't enforce
 # exclusivity, just warns); "No" leaves everything as it was and tells the
 # invoker to run the command again with a different channel.
@@ -742,7 +862,7 @@ class ConfirmVoiceChannelOverwriteView(discord.ui.View):
     async def interaction_check(self, interaction):
         if interaction.user.id != self.invoker_id:
             await interaction.response.send_message(
-                "Only the person who ran /team-set-voice-channel can confirm this.", ephemeral=True
+                "Only the person who ran /team-set can confirm this.", ephemeral=True
             )
             return False
         return True
@@ -767,7 +887,61 @@ class ConfirmVoiceChannelOverwriteView(discord.ui.View):
         self._disable_buttons()
         self.stop()
         await interaction.response.edit_message(
-            content="Cancelled — run `/team-set-voice-channel` again with a different channel.", view=self
+            content="Cancelled - run `/team-set` again with a different channel.", view=self
+        )
+
+    async def on_timeout(self):
+        self._disable_buttons()
+        if self.message is not None:
+            await self.message.edit(view=self)
+
+
+# Confirm/cancel buttons for /team-delete — deleting a persistent team is
+# destructive (its roster/record/logo are gone, and any pending
+# /team-invite for it becomes unacceptable), so it doesn't happen until the
+# captain who ran the command clicks "Delete team" here, same pattern
+# ConfirmResetView established for /clear. Doesn't touch a tournament this
+# team may already be registered in — register_team snapshots a copy of
+# the Team at registration time (see registerTeamHelper), not a live
+# reference, so a deleted team's bracket entry plays out exactly as
+# registered either way.
+class ConfirmTeamDeleteView(discord.ui.View):
+    def __init__(self, helperObj, guild_id, invoker_id, team_id, team_name):
+        super().__init__(timeout=TEAM_CONFIRM_TIMEOUT_SECONDS)
+        self.helperObj = helperObj
+        self.guild_id = guild_id
+        self.invoker_id = invoker_id
+        self.team_id = team_id
+        self.team_name = team_name
+        self.message = None
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.invoker_id:
+            await interaction.response.send_message(
+                "Only the person who ran /team-delete can confirm this.", ephemeral=True
+            )
+            return False
+        return True
+
+    def _disable_buttons(self):
+        for item in self.children:
+            item.disabled = True
+
+    @discord.ui.button(label="Delete team", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction, button):
+        self.helperObj._deleteTeam(self.guild_id, self.team_id)
+        self._disable_buttons()
+        self.stop()
+        await interaction.response.edit_message(
+            content=f"**{self.team_name}** has been deleted.", view=self
+        )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction, button):
+        self._disable_buttons()
+        self.stop()
+        await interaction.response.edit_message(
+            content=f"Cancelled - **{self.team_name}** was kept.", view=self
         )
 
     async def on_timeout(self):
@@ -786,8 +960,8 @@ class helpers():
         # messages.
         self.client = None
         # guildId -> asyncio.Task for the currently running betting timer,
-        # so a /return (or a fresh /start) mid-game can cancel it instead of
-        # letting a stale "betting closed" / winner-report message fire later.
+        # so CANCEL_GAME_EMOJI (or a fresh ▶️ click) mid-game can cancel it
+        # instead of letting a stale "betting closed" message fire later.
         self.bettingTasks = {}
 
     # SQL get template function
@@ -802,49 +976,18 @@ class helpers():
                     "=? WHERE guildId=?", (value, guild_id))
         self.db.commit()
 
-    # move players into their corresponding team channels
-    #
-    # BUG FIX: this makes one Discord API call per member via move_to(),
-    # which for a big enough group can take longer than the 3-second
-    # window Discord allows before the interaction that triggered it must
-    # be acknowledged. Callers are responsible for calling
-    # `await ctx.response.defer()` *before* invoking this, so the
-    # interaction is acknowledged immediately regardless of how long the
-    # moves take. This function itself no longer calls
-    # ctx.response.send_message (that can only be called once, and would
-    # conflict with a caller that already deferred) — it uses
-    # ctx.channel.send for its own messages instead.
-    async def movefunc(self, ctx):
-        channel1name = self.get(ctx.guild.id, "channel1")
-        channel2name = self.get(ctx.guild.id, "channel2")
-        team1 = self.get(ctx.guild.id, "team1")
-        team2 = self.get(ctx.guild.id, "team2")
-        new_og = str(ctx.user.voice.channel)
-
-        self.update(ctx.guild.id, "original_channel", new_og)
-
-        team1Obj = Team()
-        team1Obj.set_id(1)
-        team1Obj.deserializeTeam(team1)
-        team2Obj = Team()
-        team2Obj.set_id(2)
-        team2Obj.deserializeTeam(team2)
-
-        channel1 = discord.utils.get(ctx.guild.channels, name=channel1name)
-        channel2 = discord.utils.get(ctx.guild.channels, name=channel2name)
-
-        if channel1 is not None and channel2 is not None:
-            for player in team1Obj.players:
-                member = discord.utils.get(ctx.guild.members, id=player.id)
-                if member is not None:
-                    await member.move_to(channel1)
-
-            for player in team2Obj.players:
-                member = discord.utils.get(ctx.guild.members, id=player.id)
-                if member is not None:
-                    await member.move_to(channel2)
-        else:
-            await ctx.channel.send('Team Channels Not Set! Use "/team-set-channels" to set teams.')
+    # Team objects formed by /make-teams, /captains, etc. use these as their
+    # .name — read by printEmbed (the roster embed titles) and
+    # _renderMatchupImage (the matchup graphic), and later handed to
+    # computeGameDeltas/formatResultMessage so the win/elo-change summary
+    # says the same names too. An admin-configured channel1/channel2 name
+    # (see /set's team1/team2 params) reads a lot better than a bare
+    # "Team 1"/"Team 2"; falls back to that for a guild that's never named
+    # its channels.
+    def _rosterTeamNames(self, guild_id):
+        name1 = self.get(guild_id, "channel1")
+        name2 = self.get(guild_id, "channel2")
+        return name1 or "Team 1", name2 or "Team 2"
 
     async def randomizeTeamHelper(self, ctx):
         await self.clearTeamsHelper(ctx)
@@ -852,8 +995,7 @@ class helpers():
         members = []
         team1 = Team()
         team2 = Team()
-        team1.name = "Team 1"
-        team2.name = "Team 2"
+        team1.name, team2.name = self._rosterTeamNames(ctx.guild.id)
 
         channel = ctx.user.voice.channel
 
@@ -903,41 +1045,55 @@ class helpers():
 
         return team1, team2
 
-    def averageElo(self, members, elo_by_id):
+    # What a brand new player's elo starts at in this guild — DEFAULT_ELO
+    # (1000) unless an admin has overridden it with /set's default_elo
+    # param (see adminSetHelper), in which case that value wins instead.
+    # The one place every other elo-defaulting call site in this file goes
+    # through, so a guild's configured default never has to be re-looked-up
+    # or duplicated by hand.
+    def _defaultEloForGuild(self, guild_id):
+        value = self.get(guild_id, "default_elo")
+        return value if value is not None else DEFAULT_ELO
+
+    def averageElo(self, members, elo_by_id, default_elo=DEFAULT_ELO):
         if not members:
-            return DEFAULT_ELO
+            return default_elo
         return round(sum(elo_by_id[m.id] for m in members) / len(members))
 
-    # The (emoji, plain-text label) behind eloRankLabel/eloRankLabelPlain —
-    # e.g. ("\U0001f537", "Platinum III") or ("\U0001f7e3", "Master") once
-    # divisions stop applying. ELO_TIERS is sorted ascending, so the last
-    # threshold at or below elo wins — e.g. exactly 1000 is Platinum, not
-    # Gold; anything above the top tier's threshold is still Challenger.
+    # The (emoji, plain-text label, badge color, bare tier name) behind
+    # eloRankLabel/eloRankLabelPlain/eloRankBadgeColor/
+    # eloRankBadgeImagePath — e.g. ("\U0001f537", "Platinum III", (41, 121,
+    # 255), "Platinum") once divisions stop applying. ELO_TIERS is sorted
+    # ascending, so the last threshold at or below elo wins — e.g. exactly
+    # 1000 is Platinum, not Gold; anything above the top tier's threshold
+    # is still Challenger. `tier_name` is always the bare name (no division
+    # suffix), unlike `label` — it's what eloRankBadgeImagePath looks the
+    # asset file up by.
     def _eloRankParts(self, elo):
         tier_index = 0
-        for i, (threshold, _name, _emoji, _badge, _shape) in enumerate(ELO_TIERS):
+        for i, (threshold, _name, _emoji, _badge) in enumerate(ELO_TIERS):
             if elo >= threshold:
                 tier_index = i
             else:
                 break
 
-        threshold, name, emoji, badge_color, badge_shape = ELO_TIERS[tier_index]
+        threshold, name, emoji, badge_color = ELO_TIERS[tier_index]
 
         if tier_index >= ELO_DIVISIONED_TIER_COUNT:
-            return emoji, name, badge_color, badge_shape
+            return emoji, name, badge_color, name
 
         span = ELO_TIERS[tier_index + 1][0] - threshold
         offset = max(elo - threshold, 0)
         segment_size = span / len(ELO_DIVISIONS)
         division_index = min(int(offset // segment_size), len(ELO_DIVISIONS) - 1)
 
-        return emoji, f"{name} {ELO_DIVISIONS[division_index]}", badge_color, badge_shape
+        return emoji, f"{name} {ELO_DIVISIONS[division_index]}", badge_color, name
 
     # Maps a raw elo number to a League-style "emoji tier division" label,
     # e.g. "\U0001f537 Platinum III" — what /stats and /leaderboard show,
     # since Discord's own client renders the emoji fine in embed text.
     def eloRankLabel(self, elo):
-        emoji, label, _badge, _shape = self._eloRankParts(elo)
+        emoji, label, _badge, _tier_name = self._eloRankParts(elo)
         return f"{emoji} {label}"
 
     # Same tier/division text, without the leading emoji — for the trading
@@ -949,40 +1105,49 @@ class helpers():
     def eloRankLabelPlain(self, elo):
         return self._eloRankParts(elo)[1]
 
-    # The tier's badge color/shape (see ELO_TIERS) — the trading card's
-    # stand-in for the emoji eloRankLabel shows in a real embed.
+    # The tier's badge color (see ELO_TIERS) — used for the tier-reward
+    # trading-card color scheme (getUnlockedCardColorSchemes), independent
+    # of whatever image eloRankBadgeImagePath below points at.
     def eloRankBadgeColor(self, elo):
         return self._eloRankParts(elo)[2]
 
-    def eloRankBadgeShape(self, elo):
-        return self._eloRankParts(elo)[3]
+    # Path to this tier's real emoji artwork (see ELO_BADGE_DIR) — the
+    # trading card's stand-in for the emoji eloRankLabel shows in a real
+    # embed. Actual saved emoji images rather than a hand-drawn PIL
+    # approximation, so there's no shape/color to keep in sync with the
+    # real glyph by hand.
+    def eloRankBadgeImagePath(self, elo):
+        tier_name = self._eloRankParts(elo)[3]
+        return os.path.join(ELO_BADGE_DIR, f"{tier_name}.png")
 
     # Forms elo-balanced teams from the caller's voice channel and marks
     # the game as ranked, so elo actually gets updated when the winner is
     # eventually reported (see computeGameDeltas/recordResult). Everything
-    # else — moving players, opening betting — is still /start's job, same
-    # as /make-teams.
+    # else — moving players, opening betting — is still the posted roster's
+    # ▶️ reaction's job, same as /make-teams.
     async def rankedTeamHelper(self, ctx):
         await self.clearTeamsHelper(ctx)
 
         guild_id = ctx.guild.id
         channel = ctx.user.voice.channel
+        default_elo = self._defaultEloForGuild(guild_id)
 
         members_with_elo = []
         for member in channel.members:
             self.ensureEconomyRow(guild_id, member.id, member.name)
             elo = self.getEconomy(guild_id, member.id, "elo")
-            members_with_elo.append((member, elo if elo is not None else DEFAULT_ELO))
+            members_with_elo.append((member, elo if elo is not None else default_elo))
 
         team1_members, team2_members = self.formBalancedTeams(members_with_elo)
         elo_by_id = {member.id: elo for member, elo in members_with_elo}
 
+        name1, name2 = self._rosterTeamNames(guild_id)
         team1 = Team()
-        team1.name = "Team 1"
+        team1.name = name1
         for member in team1_members:
             team1.add_player(Player(member.id, member.name))
         team2 = Team()
-        team2.name = "Team 2"
+        team2.name = name2
         for member in team2_members:
             team2.add_player(Player(member.id, member.name))
 
@@ -991,14 +1156,16 @@ class helpers():
         self.update(guild_id, "mode", "Ranked")
         self.update(guild_id, "is_ranked", 1)
 
-        team1_avg = self.averageElo(team1_members, elo_by_id)
-        team2_avg = self.averageElo(team2_members, elo_by_id)
+        team1_avg = self.averageElo(team1_members, elo_by_id, default_elo)
+        team2_avg = self.averageElo(team2_members, elo_by_id, default_elo)
 
         await ctx.response.send_message(
             f"Ranked teams created! Team 1 avg elo **{team1_avg}**, Team 2 avg elo **{team2_avg}**. "
-            'Use "/start" when you\'re ready to move everyone and open betting.'
+            f"React {TEAM_START_EMOJI} on the roster below when you're ready to move everyone and open "
+            f"betting, or {TEAM_START_NO_MOVE_EMOJI} to open betting without moving anyone."
         )
-        await self.printEmbed(ctx, team1, team2)
+        team1_message, team2_message = await self.printEmbed(ctx, team1, team2)
+        await self._finalizeRoster(ctx.guild.id, team1_message, team2_message, team1, team2, use_roles=False)
 
     def makeEmbedString(self, team: Team, useRoles=False):
         teamString = ""
@@ -1014,11 +1181,16 @@ class helpers():
 
     # prints teams in discord channel
     # DO NOT PASS NULL TEAMS
+    # Returns (team1_message, team2_message) so a caller whose roster is
+    # actually final (not a captains draft still in progress) can pass them
+    # to _finalizeRoster to turn the second one into a live reroll/start
+    # control. Callers that don't care (a draft's own in-progress reposts)
+    # just discard the return value.
     async def printEmbed(self, ctx, team1: Team, team2: Team, playersTeam=None, useRoles=False):
         # BUG FIX: this always called makeEmbedString() with its default
         # useRoles=False, so /make-teams use_roles:True computed and stored
-        # role-shuffled results (see randomRoleHelper) that the embed it
-        # actually posts never displayed. Forward the flag through.
+        # role-shuffled results (see the old randomRoleHelper) that the
+        # embed it actually posts never displayed. Forward the flag through.
         team1_embedString = self.makeEmbedString(team1, useRoles)
         team2_embedString = self.makeEmbedString(team2, useRoles)
 
@@ -1035,8 +1207,8 @@ class helpers():
         # earlier in the flow, so calling send_message again would raise.
         # Use channel.send for both embeds here and let the caller decide
         # if/when to do the initial interaction response.
-        await ctx.channel.send(embed=team1_embed)
-        await ctx.channel.send(embed=team2_embed)
+        team1_message = await ctx.channel.send(embed=team1_embed)
+        team2_message = await ctx.channel.send(embed=team2_embed)
 
         if playersTeam is not None and len(playersTeam.get_players()) > 0:
             playerString = self.makeEmbedString(playersTeam)
@@ -1045,98 +1217,346 @@ class helpers():
             )
             await ctx.channel.send(embed=player_embed)
 
-    async def setTeamHelper(self, ctx, team1="Team 1", team2="Team 2"):
+        return team1_message, team2_message
+
+    # /set (admin-only, manage_guild — see bot.py): a single entry point for
+    # every server-tunable knob an admin might want to change (team
+    # channels/size, the betting timer, the wager-postings channel, and a
+    # direct elo correction), so tweaking one doesn't mean hunting down a
+    # handful of different commands. Every given field is validated before
+    # ANY of them is applied — same validate-then-apply-all pattern
+    # /card-set and /team-set use — so a bad value in one field can't leave
+    # another, genuinely valid field half-applied. team1/team2 and
+    # member/elo are each pairs (either both given or neither); size,
+    # betting_timer, and wager_channel each stand alone.
+    async def adminSetHelper(
+        self, ctx, team1, team2, size, betting_timer, wager_channel, member, elo, default_elo,
+    ):
         guild = ctx.guild
+        guild_id = guild.id
 
-        channel1 = discord.utils.get(ctx.guild.channels, name=team1)
-
-        if channel1 is None:
-            await guild.create_voice_channel(name=team1)
-            channel1 = discord.utils.get(ctx.guild.channels, name=team1)
-
-        channel2 = discord.utils.get(ctx.guild.channels, name=team2)
-
-        if channel2 is None:
-            await guild.create_voice_channel(name=team2)
-            channel2 = discord.utils.get(ctx.guild.channels, name=team2)
-
-        self.update(guild.id, "channel1", str(team1))
-        self.update(guild.id, "channel2", str(team2))
-
-        await ctx.response.send_message("Channels set!")
-
-    # Points every future betting posting (open/closed/winner-report — see
-    # _openBetting) at a specific text channel instead of wherever /start
-    # or a tournament match happens to run. Creates the channel if a text
-    # channel with that name doesn't already exist.
-    async def setWagerChannelHelper(self, ctx, channel_name):
-        guild = ctx.guild
-
-        channel = discord.utils.get(guild.text_channels, name=channel_name)
-        if channel is None:
-            channel = await guild.create_text_channel(channel_name)
-
-        self.update(guild.id, "wager_channel", channel.name)
-
-        await ctx.response.send_message(f"All wager postings will now go to {channel.mention}.")
-
-    # How long a betting window stays open, replacing the previously-fixed
-    # BETTING_DURATION_SECONDS. For a simultaneous-mode tournament round
-    # with several matches open at once, this is the PER-MATCH base — see
-    # _openConcurrentTournamentBetting, which multiplies it by however many
-    # matches are in that round (capped so a big base times a big bracket's
-    # first round can't leave betting open for absurdly long).
-    async def setBettingTimerHelper(self, ctx, seconds):
-        if seconds <= 0:
-            await ctx.response.send_message("Betting timer must be greater than 0 seconds.")
-            return
-        if seconds > 600:
-            await ctx.response.send_message("Betting timer can't be more than 600 seconds (10 minutes).")
+        if all(
+            v is None
+            for v in (team1, team2, size, betting_timer, wager_channel, member, elo, default_elo)
+        ):
+            await ctx.response.send_message(
+                "Give at least one setting to change: team1+team2, size, betting_timer, "
+                "wager_channel, member+elo, or default_elo."
+            )
             return
 
-        self.update(ctx.guild.id, "betting_timer_seconds", seconds)
-        await ctx.response.send_message(
-            f"Betting windows now stay open for {seconds} seconds. For a tournament round with several "
-            f"matches happening at once, that's multiplied by the number of matches in the round."
-        )
+        if (team1 is None) != (team2 is None):
+            await ctx.response.send_message("Give both team1 and team2 together, or neither.")
+            return
 
-    async def both(self, ctx):
-        await self.randomizeTeamHelper(ctx)
-        await self.randomRoleHelper(ctx)
+        if (member is None) != (elo is None):
+            await ctx.response.send_message("Give both member and elo together, or neither.")
+            return
 
-    async def randomRoleHelper(self, ctx):
-        # BUG FIX: this used to fetch the *serialized string* for team1/team2
-        # and call random.shuffle() directly on that string, which raises
-        # (strings are immutable, shuffle needs a mutable sequence). Then it
-        # indexed into the string with team1[i % 5], grabbing a single raw
-        # character instead of an actual player. Deserialize into real Team
-        # objects and shuffle/read the player list instead.
-        result1 = ""
-        result2 = ""
+        if betting_timer is not None:
+            if betting_timer <= 0:
+                await ctx.response.send_message("betting_timer must be greater than 0 seconds.")
+                return
+            if betting_timer > 600:
+                await ctx.response.send_message(
+                    "betting_timer can't be more than 600 seconds (10 minutes)."
+                )
+                return
 
-        team1Ser = self.get(ctx.guild.id, "team1")
-        team2Ser = self.get(ctx.guild.id, "team2")
+        if default_elo is not None and default_elo <= 0:
+            await ctx.response.send_message("default_elo must be greater than 0.")
+            return
+
+        applied = []
+
+        if team1 is not None:
+            channel1 = discord.utils.get(guild.channels, name=team1)
+            if channel1 is None:
+                channel1 = await guild.create_voice_channel(name=team1)
+            channel2 = discord.utils.get(guild.channels, name=team2)
+            if channel2 is None:
+                channel2 = await guild.create_voice_channel(name=team2)
+            self.update(guild_id, "channel1", str(team1))
+            self.update(guild_id, "channel2", str(team2))
+            applied.append(f"team channels to {channel1.mention}/{channel2.mention}")
+
+        if size is not None:
+            self.update(guild_id, "team_size", size)
+            applied.append(f"team size to **{size}**")
+
+        # For a simultaneous-mode tournament round with several matches
+        # open at once, betting_timer is the PER-MATCH base — see
+        # _openConcurrentTournamentBetting, which multiplies it by however
+        # many matches are in that round (capped so a big base times a big
+        # bracket's first round can't leave betting open for absurdly long).
+        if betting_timer is not None:
+            self.update(guild_id, "betting_timer_seconds", betting_timer)
+            applied.append(f"the betting window to **{betting_timer} seconds**")
+
+        # Points every future betting posting (open/closed/winner-report —
+        # see _openBetting) at a specific text channel instead of wherever
+        # a game or a tournament match happens to run.
+        if wager_channel is not None:
+            channel = discord.utils.get(guild.text_channels, name=wager_channel)
+            if channel is None:
+                channel = await guild.create_text_channel(wager_channel)
+            self.update(guild_id, "wager_channel", channel.name)
+            applied.append(f"the wager channel to {channel.mention}")
+
+        # Sets `member`'s elo to an exact value rather than a +/- delta, for
+        # correcting a broken rating directly rather than fighting the
+        # match-result math to get there. Still runs _checkTierRewardUnlocks
+        # afterward, the same as any other path that changes elo
+        # (applyGameDeltas, the lazy self-heal in _buildStatsEmbed) — an
+        # admin manually setting someone to Diamond+ should credit that
+        # tier's reward exactly like earning it normally would.
+        if member is not None:
+            user_id = member.id
+            self.ensureEconomyRow(guild_id, user_id, member.name)
+            self.cursor.execute(
+                "UPDATE economy SET elo=? WHERE guildId=? AND userId=?", (elo, guild_id, user_id)
+            )
+            self.db.commit()
+            self._checkTierRewardUnlocks(guild_id, user_id, elo)
+            applied.append(f"{member.mention}'s elo to **{elo}**")
+
+        # What a brand new player's elo starts at in this guild — see
+        # _defaultEloForGuild. Doesn't touch anyone's existing rating; use
+        # /clear (clear_elo) to reset current players to the new default.
+        if default_elo is not None:
+            self.update(guild_id, "default_elo", default_elo)
+            applied.append(f"the default starting elo to **{default_elo}**")
+
+        if len(applied) == 1:
+            summary = applied[0]
+        elif len(applied) == 2:
+            summary = f"{applied[0]} and {applied[1]}"
+        else:
+            summary = f"{', '.join(applied[:-1])}, and {applied[-1]}"
+
+        message = f"Updated {summary}."
+        if betting_timer is not None:
+            message += (
+                " For a tournament round with several matches happening at once, that's "
+                "multiplied by the number of matches in the round."
+            )
+        await ctx.response.send_message(message)
+
+    # Turns a just-posted, actually-final roster (not a captains draft still
+    # mid-pick) into a live control: 🔄 to reroll roles (only if the roster
+    # actually qualifies — see below), ▶️ to move everyone and open
+    # betting, and ⚡ to open betting without moving anyone — ▶️ and 🔄
+    # replace the old standalone /randomize-roles and /start commands
+    # respectively. All reactions live on `team2_message` only (team1's own
+    # message stays a plain, unreactive embed) — see handleRosterReaction
+    # for why one message is enough to drive both teams' state.
+    # `roster_team1_message_id`/`roster_team2_message_id` on `servers` is
+    # what makes a reaction on an OLD roster message inert once a newer one
+    # has been posted: each new call here overwrites them, so a stale
+    # message's reactions simply fail the id check and no-op.
+    async def _finalizeRoster(self, guild_id, team1_message, team2_message, team1, team2, use_roles):
+        roles_eligible = use_roles and len(team1.get_players()) == 5 and len(team2.get_players()) == 5
+
+        self.update(guild_id, "roster_team1_message_id", team1_message.id)
+        self.update(guild_id, "roster_team2_message_id", team2_message.id)
+        self.update(guild_id, "roster_channel_id", team2_message.channel.id)
+        self.update(guild_id, "roster_use_roles", 1 if roles_eligible else 0)
+
+        if roles_eligible:
+            await team2_message.add_reaction(TEAM_ROLES_REROLL_EMOJI)
+        await team2_message.add_reaction(TEAM_START_EMOJI)
+        await team2_message.add_reaction(TEAM_START_NO_MOVE_EMOJI)
+
+    # The voice channel to send everyone back to once the game ends (see
+    # moveMembersToOriginalChannel) — the old /start command took this from
+    # ctx.user.voice.channel, but the ▶️ reaction can be clicked by anyone
+    # (not necessarily someone in voice, see the design discussion this
+    # feature shipped with), so this scans the roster itself for the first
+    # rostered player who's actually sitting in a voice channel right now.
+    def _findRosterVoiceChannel(self, guild, team1, team2):
+        for player in team1.get_players() + team2.get_players():
+            member = discord.utils.get(guild.members, id=player.get_id())
+            if member is not None and member.voice is not None and member.voice.channel is not None:
+                return member.voice.channel
+        return None
+
+    # 🔄's whole implementation — genuinely shuffles both teams' player
+    # order (unlike the old randomRoleHelper this replaces, which computed
+    # a shuffled result1/result2 text pair that nothing displayed and never
+    # wrote the shuffle back to team1/team2 at all — /make-teams' own
+    # embeds silently kept showing the un-shuffled split order no matter
+    # how many times /randomize-roles ran). This one persists the shuffle
+    # to team1/team2 and edits both live embeds in place, so what's on
+    # screen is always what a /start-equivalent click would actually use.
+    async def _rerollRoster(self, guild_id, channel):
+        team1_msg_id = self.get(guild_id, "roster_team1_message_id")
+        team2_msg_id = self.get(guild_id, "roster_team2_message_id")
+        if team1_msg_id is None or team2_msg_id is None:
+            return
 
         team1 = Team()
-        team1.deserializeTeam(team1Ser)
+        team1.deserializeTeam(self.get(guild_id, "team1"))
         team2 = Team()
-        team2.deserializeTeam(team2Ser)
+        team2.deserializeTeam(self.get(guild_id, "team2"))
 
-        players1 = team1.get_players()
-        players2 = team2.get_players()
+        random.shuffle(team1.get_players())
+        random.shuffle(team2.get_players())
 
-        random.shuffle(players1)
-        random.shuffle(players2)
+        self.update(guild_id, "team1", team1.serializeTeam())
+        self.update(guild_id, "team2", team2.serializeTeam())
 
-        # TODO: hardcoded to 5 roles; extend for other team sizes/games.
-        for i in range(min(5, len(players1))):
-            result1 += roles.get(i) + players1[i].get_name() + "\n"
+        team1_embed = discord.Embed(
+            title=team1.get_name(), description=self.makeEmbedString(team1, True), color=discord.Color.blue()
+        )
+        team2_embed = discord.Embed(
+            title=team2.get_name(), description=self.makeEmbedString(team2, True), color=discord.Color.red()
+        )
 
-        for i in range(min(5, len(players2))):
-            result2 += roles.get(i) + players2[i].get_name() + "\n"
+        try:
+            team1_message = await channel.fetch_message(int(team1_msg_id))
+            await team1_message.edit(embed=team1_embed)
+        except discord.HTTPException:
+            pass
+        team2_message = await channel.fetch_message(int(team2_msg_id))
+        await team2_message.edit(embed=team2_embed)
 
-        self.update(ctx.guild.id, "result1", result1)
-        self.update(ctx.guild.id, "result2", result2)
+    # Finds (or creates) DEFAULT_TEAM_CHANNEL_NAMES and points this guild's
+    # channel1/channel2 at them — the self-heal ▶️ falls back to instead of
+    # refusing to start a game just because /set's team1/team2 were never given.
+    async def _ensureDefaultTeamChannels(self, guild):
+        name1, name2 = DEFAULT_TEAM_CHANNEL_NAMES
+
+        channel1 = discord.utils.get(guild.channels, name=name1)
+        if channel1 is None:
+            channel1 = await guild.create_voice_channel(name=name1)
+
+        channel2 = discord.utils.get(guild.channels, name=name2)
+        if channel2 is None:
+            channel2 = await guild.create_voice_channel(name=name2)
+
+        self.update(guild.id, "channel1", name1)
+        self.update(guild.id, "channel2", name2)
+
+        return channel1, channel2
+
+    # ▶️'s whole implementation — everything the old /start command did
+    # (movefunc + sendCurrentMatchupImage + startBettingHelper), just
+    # working from guild/channel directly instead of an Interaction, since
+    # a reaction handler has neither. `move=False` is ⚡'s version of the
+    # same thing: posts the matchup image and opens betting exactly the
+    # same way, but skips the whole "find where to move everyone" dance —
+    # nobody has to be in a voice channel at all to click it, and there's
+    # no "original channel" to send anyone back to once the game ends
+    # (moveMembersToOriginalChannel simply no-ops for a game started this way).
+    async def _startRosterViaReaction(self, guild_id, channel, payload, move=True):
+        guild = self.client.get_guild(guild_id)
+        if guild is None:
+            return
+
+        team1 = Team()
+        team1.deserializeTeam(self.get(guild_id, "team1"))
+        team2 = Team()
+        team2.deserializeTeam(self.get(guild_id, "team2"))
+
+        channel1 = channel2 = original_channel = None
+        if move:
+            original_channel = self._findRosterVoiceChannel(guild, team1, team2)
+            if original_channel is None:
+                await channel.send(
+                    "Nobody from the roster is currently in a voice channel, so there's nowhere to move "
+                    f"them. Join a voice channel with the group and click {TEAM_START_EMOJI} again, or "
+                    f"{TEAM_START_NO_MOVE_EMOJI} to start without moving anyone."
+                )
+                return
+
+            channel1name = self.get(guild_id, "channel1")
+            channel2name = self.get(guild_id, "channel2")
+            channel1 = discord.utils.get(guild.channels, name=channel1name)
+            channel2 = discord.utils.get(guild.channels, name=channel2name)
+            if channel1 is None or channel2 is None:
+                # /set's team1/team2 were never given (or the named channels
+                # got deleted) — rather than refuse to start the game, fall
+                # back to DEFAULT_TEAM_CHANNEL_NAMES, creating them if they
+                # don't already exist, and remember them as this guild's own
+                # from here on so this only happens once.
+                channel1, channel2 = await self._ensureDefaultTeamChannels(guild)
+
+        # BUG-PRONE PATTERN AVOIDED: flip this synchronously, with no
+        # `await` between it and the checks above, so a second
+        # near-simultaneous ▶️/⚡ click can't also pass those checks and
+        # start the game twice — same reasoning handleGameReportReaction's
+        # own betting_message_id clear documents.
+        self.update(guild_id, "roster_team2_message_id", None)
+
+        if move:
+            self.update(guild_id, "original_channel", str(original_channel))
+
+            for player in team1.get_players():
+                member = discord.utils.get(guild.members, id=player.get_id())
+                if member is not None:
+                    await member.move_to(channel1)
+            for player in team2.get_players():
+                member = discord.utils.get(guild.members, id=player.get_id())
+                if member is not None:
+                    await member.move_to(channel2)
+
+            await channel.send("Moved!")
+        else:
+            # Overwrite whatever original_channel might already be on
+            # record (captainsHelper captures the drafting caller's voice
+            # channel the moment a draft starts, in case everyone's since
+            # left voice by the time a reaction is finally clicked; a
+            # leftover value from an earlier game is possible too) — ⚡
+            # deliberately moved nobody, so moveMembersToOriginalChannel
+            # must no-op for this game once it resolves, the same way it
+            # already does for a guild that's never started a game at all.
+            self.update(guild_id, "original_channel", "")
+
+        label = self._matchupLabelForMode(self.get(guild_id, "mode"))
+        await self._sendMatchupImage(channel, team1, team2, label)
+        await self._openBetting(guild_id, channel)
+
+        try:
+            team2_message = await channel.fetch_message(payload.message_id)
+            await team2_message.clear_reaction(TEAM_ROLES_REROLL_EMOJI)
+            await team2_message.clear_reaction(TEAM_START_EMOJI)
+            await team2_message.clear_reaction(TEAM_START_NO_MOVE_EMOJI)
+        except discord.HTTPException:
+            pass
+
+    async def handleRosterReaction(self, payload):
+        guild_id = payload.guild_id
+        if guild_id is None:
+            return
+
+        emoji = str(payload.emoji)
+        if emoji not in (TEAM_ROLES_REROLL_EMOJI, TEAM_START_EMOJI, TEAM_START_NO_MOVE_EMOJI):
+            return
+
+        stored_message_id = self.get(guild_id, "roster_team2_message_id")
+        if stored_message_id is None or int(stored_message_id) != payload.message_id:
+            return
+
+        channel = self.client.get_channel(payload.channel_id)
+        if channel is None:
+            channel = await self.client.fetch_channel(payload.channel_id)
+
+        if emoji == TEAM_ROLES_REROLL_EMOJI:
+            # A prankster can react with 🔄 on any message, including ones
+            # the bot itself never put it on — only actually reroll if this
+            # roster was eligible for it in the first place (see
+            # _finalizeRoster).
+            if not self.get(guild_id, "roster_use_roles"):
+                return
+            await self._rerollRoster(guild_id, channel)
+            try:
+                message = await channel.fetch_message(payload.message_id)
+                await self._clearPagingReaction(message, payload)
+            except discord.HTTPException:
+                pass
+            return
+
+        await self._startRosterViaReaction(guild_id, channel, payload, move=emoji == TEAM_START_EMOJI)
 
     async def captainsHelper(self, ctx, captain_1, captain_2, ranked=False):
         # BUG FIX: this validation used to run *after* clearTeamsHelper and
@@ -1174,8 +1594,7 @@ class helpers():
         team1.add_player(captain1)
         team2.add_player(captain2)
 
-        team1.name = "Team 1"
-        team2.name = "Team 2"
+        team1.name, team2.name = self._rosterTeamNames(ctx.guild.id)
 
         self.update(ctx.guild.id, "team1", team1.serializeTeam())
         self.update(ctx.guild.id, "team2", team2.serializeTeam())
@@ -1299,6 +1718,7 @@ class helpers():
 
         switch = True
         player = Player(member.id, member.name)
+        team1_message = team2_message = None
 
         team1ids = [p.get_id() for p in team1.get_players()]
         team2ids = [p.get_id() for p in team2.get_players()]
@@ -1326,7 +1746,7 @@ class helpers():
             self.update(ctx.guild.id, "players", players.serializeTeam())
 
             await ctx.response.send_message(f"{member.name} added to team {turn}!")
-            await self.printEmbed(ctx, team1, team2, players)
+            team1_message, team2_message = await self.printEmbed(ctx, team1, team2, players)
         else:
             switch = False
             await ctx.response.send_message(
@@ -1348,8 +1768,11 @@ class helpers():
             and len(team2.get_players()) >= team_size
         )
         if len(players.get_players()) == 0 or teams_full:
+            if team2_message is not None:
+                await self._finalizeRoster(ctx.guild.id, team1_message, team2_message, team1, team2, use_roles=False)
             await ctx.channel.send(
-                'Both teams are set! Use "/start" to move everyone to the channels!'
+                f"Both teams are set! React {TEAM_START_EMOJI} on the roster above to move everyone "
+                f"to the channels, or {TEAM_START_NO_MOVE_EMOJI} to open betting without moving anyone!"
             )
             return
 
@@ -1379,8 +1802,26 @@ class helpers():
                 )
 
     # clears all current teams
+    #
+    # BUG FIX: this used to wipe team1/team2/original_channel unconditionally,
+    # even while a game built from them was still actively being bet on or
+    # played out (betting_state OPEN/CLOSED) — every team-formation command
+    # (/make-teams, /captains, /team-use) and /clear itself all funnel
+    # through here, so simply starting a new roster, or running /clear for
+    # something as unrelated as clear_elo, silently orphaned the game in
+    # progress: getRosterPlayers would find nothing once the winner was
+    # finally reported (no elo/game-record/win-loss-gold applied, no "Elo:"
+    # line in the result message), and moveMembersToOriginalChannel would
+    # find original_channel already blanked out (no "Moved everyone back"
+    # either) — both silently, with no error or explanation anywhere. Now
+    # an in-progress game is cancelled cleanly first (same refund + move-
+    # back cancelGameHelper's own 🛑 reaction does, with the same "Game
+    # cancelled" notice) so nothing is silently lost.
     async def clearTeamsHelper(self, ctx):
         guild_id = ctx.guild.id
+
+        if self.get(guild_id, "betting_state") in ("OPEN", "CLOSED"):
+            await self.cancelGameHelper(guild_id, ctx.channel, ctx.guild)
 
         self.update(guild_id, "original_channel", "")
         self.update(guild_id, "team1", "")
@@ -1396,27 +1837,29 @@ class helpers():
         # when the winner is eventually reported.
         self.update(guild_id, "is_ranked", 0)
 
-    async def notifyHelper(self, ctx, member: discord.Member):
-        team_size = self.get(ctx.guild.id, "team_size")
+    # `message`, when given, replaces the default "You've been invited..."
+    # line entirely rather than being appended alongside it — the invite
+    # link and a "Sent by" attribution line (since a custom message might
+    # not mention the sender at all) still always follow it.
+    async def notifyHelper(self, ctx, member: discord.Member, message: str = None):
         channel = await member.create_dm()
         invite_channel = ctx.user.voice.channel
         invite_link = await invite_channel.create_invite(max_uses=1, unique=True)
+
+        body = message if message is not None else "You've been invited to play in a game!"
         content = (
-            ctx.user.global_name
-            + " has invited you to a "
-            + str(team_size * 2)
-            + " man!\n\n"
-            + str(invite_link)
+            f"{body} Join the voice channel here: {invite_link}\n\n"
+            f"Sent by {ctx.user.global_name}"
         )
         await channel.send(content)
 
     # Moves everyone currently in either team channel (+ spectators) back
     # to the channel they started in. Takes a discord.Guild rather than an
-    # Interaction so it can run both from /return and automatically once a
-    # winner is reported (recordResult), neither of which always has a
-    # command Interaction to work with. Returns False (and moves nobody)
-    # if the server was never /start'd — there's no "original channel" on
-    # record to send anyone back to.
+    # Interaction so it can run both from cancelGameHelper (CANCEL_GAME_EMOJI)
+    # and automatically once a winner is reported (recordResult), neither of
+    # which always has a command Interaction to work with. Returns False
+    # (and moves nobody) if the server was never started — there's no
+    # "original channel" on record to send anyone back to.
     async def moveMembersToOriginalChannel(self, guild):
         guild_id = guild.id
         og = self.get(guild_id, "original_channel")
@@ -1441,27 +1884,6 @@ class helpers():
 
         return True
 
-    # move everyone in the team channels (+ spectators) back to the
-    # channel they started in, refunding any bets from a game that never
-    # got a recorded winner.
-    async def returnHelper(self, ctx):
-        og = self.get(ctx.guild.id, "original_channel")
-        if discord.utils.get(ctx.guild.channels, name=og) is None:
-            await ctx.response.send_message(
-                'You have not been seperated into team voice channels! Use "/start" first.'
-            )
-            return
-
-        # See the BUG FIX note that used to live on the /return command in
-        # bot.py: move_to() is one API call per member, so defer immediately
-        # to avoid blowing the 3-second interaction window.
-        await ctx.response.defer()
-
-        await self.moveMembersToOriginalChannel(ctx.guild)
-        await self.cancelBettingHelper(ctx.guild.id, ctx.channel)
-
-        await ctx.followup.send('Moved!')
-
     # ---------------- Economy ----------------
 
     def ensureEconomyRow(self, guild_id, user_id, username):
@@ -1470,7 +1892,7 @@ class helpers():
             "(guildId, userId, username, balance, wins, losses, gold_wagered, gold_won, gold_lost, "
             "game_wins, game_losses, elo, last_daily) "
             "VALUES(?, ?, ?, 0, 0, 0, 0, 0, 0, 0, 0, ?, NULL)",
-            (guild_id, user_id, username, DEFAULT_ELO)
+            (guild_id, user_id, username, self._defaultEloForGuild(guild_id))
         )
         self.cursor.execute(
             "UPDATE economy SET username=? WHERE guildId=? AND userId=?",
@@ -1486,12 +1908,12 @@ class helpers():
         self.cursor.execute("DELETE FROM economy WHERE guildId=?", (guild_id,))
         self.db.commit()
 
-    # Resets every existing player's elo back to DEFAULT_ELO for a guild,
-    # leaving balance/wins/losses/gold untouched — unlike resetEconomyHelper,
-    # which wipes the whole row.
+    # Resets every existing player's elo back to this guild's configured
+    # default (see _defaultEloForGuild), leaving balance/wins/losses/gold
+    # untouched — unlike resetEconomyHelper, which wipes the whole row.
     def resetEloHelper(self, guild_id):
         self.cursor.execute(
-            "UPDATE economy SET elo=? WHERE guildId=?", (DEFAULT_ELO, guild_id)
+            "UPDATE economy SET elo=? WHERE guildId=?", (self._defaultEloForGuild(guild_id), guild_id)
         )
         self.db.commit()
 
@@ -1503,9 +1925,9 @@ class helpers():
     # `user_id=None` (the default) resets every player in the guild — the
     # /clear counterpart to resetEconomyHelper/resetEloHelper above; a real
     # `user_id` narrows it to just that one player instead, for /clear's
-    # own optional `user` parameter. Unlike /card-clear-unlocks (a single
-    # targeted player, but EVERYTHING they've unlocked), both modes here
-    # are achievements-only.
+    # own optional `user` parameter. Unlike resetCardUnlocksHelper below
+    # (which wipes EVERYTHING a player's unlocked), both modes here are
+    # achievements-only.
     def resetAchievementsHelper(self, guild_id, user_id=None):
         achievement_keys = list(CARD_ACHIEVEMENT_TITLES.keys())
         placeholders = ",".join("?" for _ in achievement_keys)
@@ -1522,19 +1944,55 @@ class helpers():
             )
         self.db.commit()
 
+    # Resets EVERY trading-card unlock (title/color scheme/font, however
+    # earned — tier reward, special grant, or shop purchase) for a guild,
+    # and resets the equipped `trading_cards` row back to Shockwave's own
+    # defaults so it isn't left pointed at something no longer unlocked —
+    # the /clear counterpart to resetAchievementsHelper above, just for the
+    # whole unlock table instead of achievements alone. `user_id=None` (the
+    # default) resets every player in the guild; a real `user_id` narrows
+    # it to just that one player, replacing the old standalone
+    # /card-clear-unlocks admin command this folded into /clear.
+    def resetCardUnlocksHelper(self, guild_id, user_id=None):
+        if user_id is None:
+            self.cursor.execute("DELETE FROM card_unlocks WHERE guildId=?", (guild_id,))
+            self.cursor.execute(
+                "UPDATE trading_cards SET title=?, accent_color=?, background_color=?, text_color=?, "
+                "font_style=?, customized=0, color_scheme_name=NULL WHERE guildId=?",
+                (
+                    CARD_DEFAULT_TITLE, CARD_DEFAULT_ACCENT_COLOR, CARD_DEFAULT_BACKGROUND_COLOR,
+                    CARD_DEFAULT_TEXT_COLOR, CARD_DEFAULT_FONT_STYLE, guild_id,
+                )
+            )
+        else:
+            self.cursor.execute(
+                "DELETE FROM card_unlocks WHERE guildId=? AND userId=?", (guild_id, user_id)
+            )
+            self.cursor.execute(
+                "UPDATE trading_cards SET title=?, accent_color=?, background_color=?, text_color=?, "
+                "font_style=?, customized=0, color_scheme_name=NULL WHERE guildId=? AND userId=?",
+                (
+                    CARD_DEFAULT_TITLE, CARD_DEFAULT_ACCENT_COLOR, CARD_DEFAULT_BACKGROUND_COLOR,
+                    CARD_DEFAULT_TEXT_COLOR, CARD_DEFAULT_FONT_STYLE, guild_id, user_id,
+                )
+            )
+        self.db.commit()
+
     # Posts the confirm/cancel view for /clear's clear_elo, clear_economy,
-    # and clear_achievements flags — none of them actually touch player
-    # data until the invoker clicks "Confirm reset" on the message this
-    # sends. clear_economy takes priority over clear_elo when both are set
-    # (the whole-row wipe already resets elo too, so there's nothing left
-    # for clear_elo to do); clear_achievements is independent of both and
-    # can combine with either. `achievements_target` (None, or a
-    # discord.Member) narrows clear_achievements to just that one player —
-    # clear_elo/clear_economy always stay whole-server regardless, so a
-    # combined run mixes "for every player" and "for @member" sentences
-    # rather than trying to force everything to one shared scope.
+    # clear_achievements, and clear_card_unlocks flags — none of them
+    # actually touch player data until the invoker clicks "Confirm reset"
+    # on the message this sends. clear_economy takes priority over
+    # clear_elo when both are set (the whole-row wipe already resets elo
+    # too, so there's nothing left for clear_elo to do); clear_achievements
+    # and clear_card_unlocks are independent of both and of each other, and
+    # can combine with any of the others. `target` (None, or a
+    # discord.Member) narrows clear_achievements/clear_card_unlocks to just
+    # that one player — clear_elo/clear_economy always stay whole-server
+    # regardless, so a combined run mixes "for every player" and "for
+    # @member" sentences rather than trying to force everything to one
+    # shared scope.
     async def confirmDestructiveClearHelper(
-        self, ctx, clear_economy, clear_elo, clear_achievements, achievements_target=None
+        self, ctx, clear_economy, clear_elo, clear_achievements, clear_card_unlocks=False, target=None
     ):
         warnings = []
         if clear_economy:
@@ -1544,24 +2002,36 @@ class helpers():
                 f"**{ctx.guild.name}**."
             )
         elif clear_elo:
+            reset_elo = self._defaultEloForGuild(ctx.guild.id)
             warnings.append(
-                f"This will **reset elo back to {DEFAULT_ELO}** for **every player** "
+                f"This will **reset elo back to {reset_elo}** for **every player** "
                 f"in **{ctx.guild.name}**."
             )
         if clear_achievements:
-            if achievements_target is not None:
+            if target is not None:
                 warnings.append(
-                    f"This will **reset every earned achievement** for {achievements_target.mention}."
+                    f"This will **reset every earned achievement** for {target.mention}."
                 )
             else:
                 warnings.append(
                     f"This will **reset every earned achievement** for **every player** "
                     f"in **{ctx.guild.name}**."
                 )
+        if clear_card_unlocks:
+            if target is not None:
+                warnings.append(
+                    f"This will **wipe every trading-card unlock** for {target.mention} and reset "
+                    "their card to Shockwave's defaults."
+                )
+            else:
+                warnings.append(
+                    f"This will **wipe every trading-card unlock** for **every player** in "
+                    f"**{ctx.guild.name}** and reset their cards to Shockwave's defaults."
+                )
         warning = " ".join(warnings) + " This can't be undone."
         view = ConfirmResetView(
             self, ctx.guild.id, ctx.guild.name, ctx.user.id,
-            clear_economy, clear_elo, clear_achievements, achievements_target,
+            clear_economy, clear_elo, clear_achievements, clear_card_unlocks, target,
         )
         view.message = await ctx.followup.send(warning, view=view)
 
@@ -1669,7 +2139,7 @@ class helpers():
             )
             await ctx.response.send_message(
                 f"Tournament **{existing.get_name()}** is already set up for this server. "
-                f"Creating **{name}** will overwrite it — are you sure?",
+                f"Creating **{name}** will overwrite it - are you sure?",
                 view=view
             )
             view.message = await ctx.original_response()
@@ -1693,7 +2163,7 @@ class helpers():
         tournament = self.getTournament(guild_id)
         if tournament is None:
             await ctx.response.send_message(
-                "No tournament set up for this server — use /tournament-create first."
+                "No tournament set up for this server - use /tournament-create first."
             )
             return
 
@@ -1703,9 +2173,10 @@ class helpers():
             return
         _, team = result
 
-        if not self.isTeamCaptain(team, ctx.user.id):
+        if not self.isTeamCaptain(team, ctx.user.id) and not ctx.user.guild_permissions.manage_guild:
             await ctx.response.send_message(
-                f"Only **{team_name}**'s captain can register it for the tournament."
+                f"Only **{team_name}**'s captain or a member with the Manage Server permission can "
+                "register it for the tournament."
             )
             return
 
@@ -1945,7 +2416,7 @@ class helpers():
         tournament = self.getTournament(guild_id)
         if tournament is None:
             await ctx.response.send_message(
-                "No tournament set up for this server — use /tournament-create first."
+                "No tournament set up for this server - use /tournament-create first."
             )
             return
 
@@ -1983,7 +2454,7 @@ class helpers():
                 " Losers bracket rounds are interleaved with the winners bracket as they're unlocked."
             )
         await ctx.response.send_message(
-            f"Bracket created for **{tournament.get_name()}** — {len(teams)} teams, "
+            f"Bracket created for **{tournament.get_name()}** - {len(teams)} teams, "
             f"{elim_style} elimination.{timing_note}"
         )
         await self._sendBracketText(ctx.channel, tournament, guild_id)
@@ -3005,11 +3476,29 @@ class helpers():
         roster2 = self._orderedRoster(team2)
         rows = max(len(roster1), len(roster2), 1)
 
+        # The captain's star is drawn to the LEFT of their name, outside the
+        # name's own text box (see _drawMatchupColumn's star_cx formula) —
+        # a name centered on cx that's already as wide as the column leaves
+        # no room for it, clipping the star (and sometimes the name itself)
+        # off the left edge. The name always stays centered on cx regardless
+        # of the star, so keeping the column symmetric around cx means
+        # matching that one-sided overhang — BRACKET_PADDING/2 + 2×radius
+        # (offset to the star's center, plus its own radius again to reach
+        # its far edge) — on the *other* side too, i.e. doubled.
+        captain_star_radius = BRACKET_FONT_SIZE / 3
+        captain_star_overhang = BRACKET_PADDING / 2 + 2 * captain_star_radius
+        captain_star_allowance = 2 * captain_star_overhang
+
         def column_width(team, roster):
             name_width = measurer.textlength(team.get_name(), font=team_font)
-            roster_width = max(
-                (measurer.textlength(p.get_name(), font=name_font) for p in roster), default=0
-            )
+            captain = team.get_captain()
+            captain_id = captain.get_id() if isinstance(captain, Player) else None
+            roster_width = 0
+            for p in roster:
+                player_width = measurer.textlength(p.get_name(), font=name_font)
+                if captain_id is not None and p.get_id() == captain_id:
+                    player_width += captain_star_allowance
+                roster_width = max(roster_width, player_width)
             return max(name_width, roster_width, MATCHUP_LOGO_SIZE)
 
         column_width_px = max(column_width(team1, roster1), column_width(team2, roster2))
@@ -3180,7 +3669,7 @@ class helpers():
         tournament = self.getTournament(ctx.guild.id)
         if tournament is None:
             await ctx.response.send_message(
-                "No tournament set up for this server — use /tournament-create first."
+                "No tournament set up for this server - use /tournament-create first."
             )
             return
         await ctx.response.send_message(
@@ -3202,7 +3691,7 @@ class helpers():
         if bracket_type == "losers":
             return self._losersRoundName(round_index)
         if bracket_type == "finals":
-            return "Grand Finals" if round_index == 0 else "Grand Finals — Bracket Reset"
+            return "Grand Finals" if round_index == 0 else "Grand Finals - Bracket Reset"
         top_round_index = len(self._bracketRounds(tournament.get_bracket())) - 1
         return self._roundName(round_index, top_round_index)
 
@@ -3224,7 +3713,7 @@ class helpers():
             f"match_{match_id}_vs.png"
         )
         msg = await channel.send(
-            f"**Match #{match_id}:** {team1.get_name()} vs {team2.get_name()} — react with "
+            f"**Match #{match_id}:** {team1.get_name()} vs {team2.get_name()} - react with "
             f"{TOURNAMENT_READY_EMOJI} when ready to play (either captain)!",
             file=matchup_file
         )
@@ -3257,7 +3746,7 @@ class helpers():
             f"match_{match_id}_vs.png"
         )
         msg = await channel.send(
-            f"**Match #{match_id}:** {team1.get_name()} vs {team2.get_name()} — react with "
+            f"**Match #{match_id}:** {team1.get_name()} vs {team2.get_name()} - react with "
             f"{TEAM_EMOJIS[1]} if {team1.get_name()} won, or {TEAM_EMOJIS[2]} if {team2.get_name()} won.",
             file=matchup_file
         )
@@ -3292,11 +3781,12 @@ class helpers():
         asyncio.create_task(self._concurrentBettingTimer(match_ids, channel, duration))
 
     # No cancellation path (unlike cancelBettingHelper for the singleton
-    # flow) — tournament rounds have no "/return"-equivalent to cancel one
-    # mid-flight. If every match in the round has already resolved by the
-    # time this fires, the UPDATE below just touches already-RESOLVED rows
-    # harmlessly; each match's own wagers were already settled and cleared
-    # at resolution time regardless of what this timer does.
+    # flow) — tournament rounds have no CANCEL_GAME_EMOJI-equivalent to
+    # cancel one mid-flight. If every match in the round has already
+    # resolved by the time this fires, the UPDATE below just touches
+    # already-RESOLVED rows harmlessly; each match's own wagers were
+    # already settled and cleared at resolution time regardless of what
+    # this timer does.
     async def _concurrentBettingTimer(self, match_ids, channel, duration):
         await asyncio.sleep(duration)
         placeholders = ",".join("?" * len(match_ids))
@@ -3306,12 +3796,29 @@ class helpers():
         self.db.commit()
         await channel.send("\U0001f512 Betting is now closed for this round's matches!")
 
+    # What fraction of the losing pool gets raked off before it's split
+    # among winners — see MAX_IMBALANCE_RAKE. 0 at an even 50/50 split
+    # (winning_pool == losing_pool), scaling linearly up to
+    # MAX_IMBALANCE_RAKE at a maximally lopsided one (losing_pool -> 0
+    # relative to winning_pool); never negative, since a pool where the
+    # eventual WINNERS were actually the minority (a real upset) shouldn't
+    # be taxed at all. Shared by computeGameDeltas and _matchWagerDeltas —
+    # the two places that otherwise duplicate this exact pari-mutuel split.
+    def _imbalanceRakeFraction(self, winning_pool, losing_pool):
+        total_pool = winning_pool + losing_pool
+        if total_pool <= 0:
+            return 0.0
+        favorite_share = winning_pool / total_pool
+        imbalance = max(0.0, (favorite_share - 0.5) / 0.5)
+        return MAX_IMBALANCE_RAKE * imbalance
+
     # Pure computation of one match's pari-mutuel payouts (winners split the
-    # losing pool proportional to their own wager, on top of getting it
-    # back) as a deltas dict in the exact shape applyGameDeltas expects —
-    # shared by _settleMatchWagers (the normal path) and
-    # _correctTournamentMatchHelper, which reverses this against the
-    # original winner and reapplies it against the corrected one.
+    # losing pool, minus an imbalance rake (_imbalanceRakeFraction),
+    # proportional to their own wager, on top of getting it back) as a
+    # deltas dict in the exact shape applyGameDeltas expects — shared by
+    # _settleMatchWagers (the normal path) and _correctTournamentMatchHelper,
+    # which reverses this against the original winner and reapplies it
+    # against the corrected one.
     def _matchWagerDeltas(self, wagers, winning_team):
         deltas = {}
 
@@ -3328,9 +3835,10 @@ class helpers():
         losing_bets = [w for w in wagers if w[2] != winning_team]
         winning_pool = sum(w[3] for w in winning_bets)
         losing_pool = sum(w[3] for w in losing_bets)
+        raked_losing_pool = losing_pool * (1 - self._imbalanceRakeFraction(winning_pool, losing_pool))
 
         for user_id, username, _team, amount in winning_bets:
-            payout = round(amount + (amount / winning_pool) * losing_pool) if winning_pool > 0 else amount
+            payout = round(amount + (amount / winning_pool) * raked_losing_pool) if winning_pool > 0 else amount
             bump(user_id, username, balance=payout, wins=1, gold_wagered=amount, gold_won=payout - amount)
         for user_id, username, _team, amount in losing_bets:
             bump(user_id, username, losses=1, gold_wagered=amount, gold_lost=amount)
@@ -3557,7 +4065,7 @@ class helpers():
             match_ids.append(self.cursor.lastrowid)
 
         plural = "es" if len(match_ids) != 1 else ""
-        await channel.send(f"__Round {round_index + 1}__ — {len(match_ids)} match{plural} to play.")
+        await channel.send(f"__Round {round_index + 1}__ - {len(match_ids)} match{plural} to play.")
 
         if mode == "sequential":
             await self._postReadyCheck(guild_id, match_ids[0], channel)
@@ -3629,7 +4137,7 @@ class helpers():
 
         plural = "es" if len(match_ids) != 1 else ""
         await channel.send(
-            f"__Losers Bracket Round {round_index + 1}__ — {len(match_ids)} match{plural} to play."
+            f"__Losers Bracket Round {round_index + 1}__ - {len(match_ids)} match{plural} to play."
         )
 
         if mode == "sequential":
@@ -3655,7 +4163,7 @@ class helpers():
         if not reset:
             await channel.send(
                 f"\U0001f3c6 **Grand Finals:** {wb_champion.get_name()} (undefeated) vs "
-                f"{lb_champion.get_name()} (one loss) — {lb_champion.get_name()} must win twice "
+                f"{lb_champion.get_name()} (one loss) - {lb_champion.get_name()} must win twice "
                 f"to take the title."
             )
 
@@ -3733,19 +4241,19 @@ class helpers():
         tournament = self.getTournament(guild_id)
         if tournament is None:
             await ctx.response.send_message(
-                "No tournament set up for this server — use /tournament-create first."
+                "No tournament set up for this server - use /tournament-create first."
             )
             return
 
         bracket = tournament.get_bracket()
         if not bracket:
-            await ctx.response.send_message("No bracket has been created yet — use /tournament-create-bracket first.")
+            await ctx.response.send_message("No bracket has been created yet - use /tournament-create-bracket first.")
             return
 
         champion_name = self._tournamentChampionName(guild_id, tournament)
         if champion_name is not None:
             await ctx.response.send_message(
-                f"**{tournament.get_name()}** is already finished — **{champion_name}** is the champion!"
+                f"**{tournament.get_name()}** is already finished - **{champion_name}** is the champion!"
             )
             return
 
@@ -3757,7 +4265,7 @@ class helpers():
             return
 
         await ctx.response.send_message(
-            f"Starting **{tournament.get_name()}** — {mode} mode."
+            f"Starting **{tournament.get_name()}** - {mode} mode."
         )
         await self._startRound(guild_id, tournament, 0, mode, ctx.channel)
 
@@ -4052,7 +4560,7 @@ class helpers():
         if bracket_type != "winners":
             await ctx.response.send_message(
                 f"Match #{match_id} is a {'losers bracket' if bracket_type == 'losers' else 'Grand Finals'} "
-                f"match — correcting those isn't supported yet."
+                f"match - correcting those isn't supported yet."
             )
             return
 
@@ -4070,7 +4578,7 @@ class helpers():
         )
         if self.cursor.fetchone()[0] > 0:
             await ctx.response.send_message(
-                f"Can't correct Match #{match_id} — the next round has already started."
+                f"Can't correct Match #{match_id} - the next round has already started."
             )
             return
 
@@ -4108,11 +4616,13 @@ class helpers():
     # ---------------- Persistent teams ----------------
 
     # (team_id, Team) for the named team in this guild, or None. Team names
-    # are unique per guild — enforced by createTeamHelper — so this is
-    # always at most one row.
+    # are unique per guild case-insensitively — enforced by
+    # createTeamHelper/teamRenameHelper — so this is always at most one
+    # row; COLLATE NOCASE means "red" finds "Red" here too, not just an
+    # exact-case match.
     def getTeamRow(self, guild_id, name):
         self.cursor.execute(
-            "SELECT id, data FROM teams WHERE guildId=? AND name=?", (guild_id, name)
+            "SELECT id, data FROM teams WHERE guildId=? AND name = ? COLLATE NOCASE", (guild_id, name)
         )
         row = self.cursor.fetchone()
         if row is None:
@@ -4157,6 +4667,21 @@ class helpers():
             if any(player.get_id() == user_id for player in team.get_players())
         ]
         return sorted(mine, key=lambda entry: entry[0])
+
+    # Narrower than getTeamsForPlayer above — only teams `user_id` actually
+    # captains, not just any team they're rostered on. Backs the
+    # autocomplete on team-name params for commands that require being
+    # that team's captain (/team-set, /team-rename, /team-delete,
+    # /team-invite, /tournament-register) — same "only suggest what's
+    # actually usable" idea cardTitleAutocomplete's own comment describes,
+    # just scoped to captaincy instead of unlocks. Sorted by team_id for
+    # the same stability reason getTeamsForPlayer is.
+    def getTeamsCaptainedBy(self, guild_id, user_id):
+        teams = self.getTeamsForGuild(guild_id)
+        captained = [
+            (team_id, team) for team_id, team in teams if self.isTeamCaptain(team, user_id)
+        ]
+        return sorted(captained, key=lambda entry: entry[0])
 
     # ---------------- /team-list ----------------
 
@@ -4212,7 +4737,7 @@ class helpers():
             games = team.wins + team.losses
             win_rate = f"{(team.wins / games) * 100:.1f}%" if games > 0 else "N/A"
             lines.append(
-                f"**#{rank}.** {team.get_name()} — {roster_size} players | "
+                f"**#{rank}.** {team.get_name()} - {roster_size} players | "
                 f"{team.wins}W-{team.losses}L ({win_rate})"
             )
 
@@ -4318,7 +4843,7 @@ class helpers():
         self.db.commit()
 
     # Every built-in logo's name (filename minus extension), e.g. "Demacia"
-    # for assets/clash-logos/Demacia.png — what /team-set-logo's autocomplete
+    # for assets/clash-logos/Demacia.png — what /team-set's logo autocomplete
     # offers and validates against. Empty if the folder isn't there at all
     # (e.g. a dev checkout that never fetched it) rather than raising.
     def listAvailableLogos(self):
@@ -4410,7 +4935,7 @@ class helpers():
     # the ephemeral team1/team2 a game gets, this one sticks around across
     # sessions and is what /tournament-create's roster registration and
     # /team-invite work against.
-    async def createTeamHelper(self, ctx, name, team_size):
+    async def createTeamHelper(self, ctx, name, team_size, captain_member=None):
         guild_id = ctx.guild.id
 
         if team_size <= 0:
@@ -4421,17 +4946,19 @@ class helpers():
             await ctx.response.send_message(f"A team named **{name}** already exists in this server.")
             return
 
+        captain_user = captain_member if captain_member is not None else ctx.user
+
         team = Team()
         team.set_name(name)
         team.set_team_size(team_size)
-        captain = Player(ctx.user.id, ctx.user.name)
+        captain = Player(captain_user.id, captain_user.name)
         team.add_player(captain)
         team.set_captain(captain)
 
         self._saveNewTeam(guild_id, team)
 
         await ctx.response.send_message(
-            f"Team **{name}** created! {ctx.user.mention} is the captain — looking for {team_size} player"
+            f"Team **{name}** created! {captain_user.mention} is the captain - looking for {team_size} player"
             f"{'s' if team_size != 1 else ''} total."
         )
 
@@ -4443,11 +4970,18 @@ class helpers():
                 return team
         return None
 
-    # Sets (or creates) a team's voice channel. Only the team's captain can
-    # do this. Passing no channel creates a brand new one named after the
-    # team; passing one that's already assigned to a different team asks
-    # for confirmation before reusing it, rather than silently doing it.
-    async def setTeamVoiceChannelHelper(self, ctx, team_name, channel):
+    # /team-set: sets any combination of a persistent team's voice channel
+    # and/or logo in one call — captain-only. `new_voice_channel` creates a
+    # fresh channel named after the team (mutually exclusive with passing
+    # an existing `voice_channel`); passing an existing channel that's
+    # already assigned to a different team asks for confirmation before
+    # reusing it (see ConfirmVoiceChannelOverwriteView), rather than
+    # silently doing it. `logo` is resolved and validated against
+    # listAvailableLogos() before anything is applied, same "gate it, don't
+    # trust free text" reasoning cardSetHelper's own comment gives, since a
+    # client can send an arbitrary string for a slash command option even
+    # when it's autocomplete-backed.
+    async def teamSetHelper(self, ctx, team_name, voice_channel, new_voice_channel, logo):
         guild_id = ctx.guild.id
 
         result = self.getTeamRow(guild_id, team_name)
@@ -4456,67 +4990,71 @@ class helpers():
             return
         team_id, team = result
 
-        if not self.isTeamCaptain(team, ctx.user.id):
-            await ctx.response.send_message(f"Only **{team_name}**'s captain can set its voice channel.")
-            return
-
-        if channel is None:
-            new_channel = await ctx.guild.create_voice_channel(team.get_name())
-            team.set_voice_channel(new_channel)
-            self.updateTeamData(team_id, team)
+        if not self.isTeamCaptain(team, ctx.user.id) and not ctx.user.guild_permissions.manage_guild:
             await ctx.response.send_message(
-                f"Created {new_channel.mention} and set it as **{team_name}**'s voice channel."
+                f"Only **{team_name}**'s captain or a member with the Manage Server permission can "
+                "change its settings."
             )
             return
 
-        conflicting = self._findTeamUsingChannel(guild_id, str(channel), team_id)
-        if conflicting is not None:
-            view = ConfirmVoiceChannelOverwriteView(self, guild_id, ctx.user.id, team_id, team_name, channel)
+        if voice_channel is None and not new_voice_channel and logo is None:
             await ctx.response.send_message(
-                f"**{channel.name}** is already **{conflicting.get_name()}**'s voice channel. "
+                "Give at least one of voice_channel, new_voice_channel, or logo to set."
+            )
+            return
+
+        if voice_channel is not None and new_voice_channel:
+            await ctx.response.send_message("Pick either voice_channel or new_voice_channel, not both.")
+            return
+
+        logo_path = None
+        if logo is not None:
+            logo_path = self._resolveLogoPath(logo)
+            if logo_path is None:
+                await ctx.response.send_message(
+                    f"No logo named **{logo}** - pick one from the autocomplete list."
+                )
+                return
+
+        conflicting = None
+        if voice_channel is not None:
+            conflicting = self._findTeamUsingChannel(guild_id, str(voice_channel), team_id)
+
+        applied = []
+        if logo_path is not None:
+            team.set_logo_path(logo_path)
+            self.updateTeamData(team_id, team)
+            applied.append(f'logo **{os.path.splitext(os.path.basename(logo_path))[0]}**')
+
+        if new_voice_channel:
+            new_channel = await ctx.guild.create_voice_channel(team.get_name())
+            team.set_voice_channel(new_channel)
+            self.updateTeamData(team_id, team)
+            applied.append(f'voice channel {new_channel.mention}')
+        elif voice_channel is not None and conflicting is None:
+            team.set_voice_channel(voice_channel)
+            self.updateTeamData(team_id, team)
+            applied.append(f'voice channel {voice_channel.mention}')
+
+        if len(applied) == 2:
+            summary = f"{applied[0]} and {applied[1]}"
+        else:
+            summary = applied[0] if applied else ""
+
+        logo_file = discord.File(logo_path) if logo_path is not None else None
+
+        if conflicting is not None:
+            prefix = f"Set {summary}. " if applied else ""
+            view = ConfirmVoiceChannelOverwriteView(self, guild_id, ctx.user.id, team_id, team_name, voice_channel)
+            await ctx.response.send_message(
+                f"{prefix}**{voice_channel.name}** is already **{conflicting.get_name()}**'s voice channel. "
                 f"Set it as **{team_name}**'s too?",
-                view=view
+                view=view, file=logo_file
             )
             view.message = await ctx.original_response()
             return
 
-        team.set_voice_channel(channel)
-        self.updateTeamData(team_id, team)
-        await ctx.response.send_message(f"**{team_name}**'s voice channel is now {channel.mention}.")
-
-    # Sets a team's logo to one of the built-in Clash logos (assets/clash-
-    # logos) — captain-only, same as the voice-channel/invite commands.
-    # `logo_name` is validated against listAvailableLogos() rather than
-    # trusted outright, since a client can send an arbitrary string for a
-    # slash command option even when it's autocomplete-backed.
-    async def setTeamLogoHelper(self, ctx, team_name, logo_name):
-        guild_id = ctx.guild.id
-
-        result = self.getTeamRow(guild_id, team_name)
-        if result is None:
-            await ctx.response.send_message(f"No team named **{team_name}** in this server.")
-            return
-        team_id, team = result
-
-        if not self.isTeamCaptain(team, ctx.user.id):
-            await ctx.response.send_message(f"Only **{team_name}**'s captain can set its logo.")
-            return
-
-        logo_path = self._resolveLogoPath(logo_name)
-        if logo_path is None:
-            await ctx.response.send_message(
-                f"No logo named **{logo_name}** — pick one from the autocomplete list."
-            )
-            return
-
-        team.set_logo_path(logo_path)
-        self.updateTeamData(team_id, team)
-
-        logo_display_name = os.path.splitext(os.path.basename(logo_path))[0]
-        await ctx.response.send_message(
-            f"Set **{team_name}**'s logo to **{logo_display_name}**.",
-            file=discord.File(logo_path)
-        )
+        await ctx.response.send_message(content=f"**{team_name}**: set {summary}.", file=logo_file)
 
     # Invites `members` (one or more) to a team the caller captains — posts
     # a single message mentioning everyone valid and reacts once with
@@ -4527,7 +5065,16 @@ class helpers():
     # team are filtered out rather than failing the whole command — with
     # exactly one member given, the old single-invite error messages are
     # preserved verbatim rather than folded into the multi-invite phrasing.
-    async def teamInviteHelper(self, ctx, team_name, members):
+    # `force` (Manage Server only, checked separately from — and on top of
+    # — the ordinary captain-or-admin gate above, so a captain who isn't
+    # also an admin still can't skip anyone's consent) adds every valid
+    # member straight to the roster instead: no posted invite, no ✅
+    # reaction, no team_invites row for anyone to accept later — same
+    # add_player + updateTeamData pair handleTeamInviteReaction itself
+    # commits once a real invite is actually accepted, just run
+    # immediately instead of waiting on a reaction that force is
+    # specifically here to skip.
+    async def teamInviteHelper(self, ctx, team_name, members, force=False):
         guild_id = ctx.guild.id
 
         result = self.getTeamRow(guild_id, team_name)
@@ -4536,8 +5083,18 @@ class helpers():
             return
         team_id, team = result
 
-        if not self.isTeamCaptain(team, ctx.user.id):
-            await ctx.response.send_message(f"Only **{team_name}**'s captain can invite players.")
+        if not self.isTeamCaptain(team, ctx.user.id) and not ctx.user.guild_permissions.manage_guild:
+            await ctx.response.send_message(
+                f"Only **{team_name}**'s captain or a member with the Manage Server permission can "
+                "invite players."
+            )
+            return
+
+        if force and not ctx.user.guild_permissions.manage_guild:
+            await ctx.response.send_message(
+                "Only a member with the Manage Server permission can force-add players - "
+                "everyone else still needs the invitee's own confirmation."
+            )
             return
 
         seen_ids = set()
@@ -4567,7 +5124,20 @@ class helpers():
                     await ctx.response.send_message(f"{member.display_name} is already on **{team_name}**.")
                 return
             reasons = "; ".join(f"{member.display_name} ({reason})" for member, reason in skipped)
-            await ctx.response.send_message(f"Nobody to invite — {reasons}.")
+            await ctx.response.send_message(f"Nobody to invite - {reasons}.")
+            return
+
+        if force:
+            for member in valid:
+                team.add_player(Player(member.id, member.name))
+            self.updateTeamData(team_id, team)
+
+            mentions = ", ".join(member.mention for member in valid)
+            message = f"{mentions} added to **{team_name}** by {ctx.user.mention} - no confirmation needed."
+            if skipped:
+                reasons = "; ".join(f"{member.display_name} ({reason})" for member, reason in skipped)
+                message += f"\n(Not added: {reasons}.)"
+            await ctx.response.send_message(message)
             return
 
         mentions = ", ".join(member.mention for member in valid)
@@ -4591,6 +5161,146 @@ class helpers():
                 (guild_id, ctx.channel.id, msg.id, team_id, team_name, ctx.user.id, member.id, member.name)
             )
         self.db.commit()
+
+    # /team-leave: the self-service counterpart to /team-invite — no
+    # captain/admin gate at all, since removing *yourself* needs nobody
+    # else's permission. The captain can't use this one, though: unlike
+    # every other team command, there's no "who's in charge now" answer to
+    # fall back to (no transfer-captaincy command exists yet), so leaving a
+    # non-empty team captain-less would break isTeamCaptain everywhere else
+    # it's checked (rename/set/invite/delete) down to just "whoever has
+    # Manage Server." /team-delete is the captain's own way out instead —
+    # it already has to answer "what happens to this team" regardless of
+    # roster size.
+    async def teamLeaveHelper(self, ctx, team_name):
+        guild_id = ctx.guild.id
+
+        result = self.getTeamRow(guild_id, team_name)
+        if result is None:
+            await ctx.response.send_message(f"No team named **{team_name}** in this server.")
+            return
+        team_id, team = result
+
+        if self.isTeamCaptain(team, ctx.user.id):
+            await ctx.response.send_message(
+                f"You're **{team_name}**'s captain - use /team-delete instead if you want to leave it, "
+                "since there's nobody else to hand the captaincy to yet."
+            )
+            return
+
+        # remove_player() relies on __eq__/identity match — same "find the
+        # actual roster object by id first" pattern chooseFunc's own
+        # players.remove_player call already has to use.
+        player = next((p for p in team.get_players() if p.get_id() == ctx.user.id), None)
+        if player is None:
+            await ctx.response.send_message(f"You're not on **{team_name}**.")
+            return
+
+        team.remove_player(player)
+        self.updateTeamData(team_id, team)
+
+        await ctx.response.send_message(f"You've left **{team_name}**.")
+
+    # Renames a persistent team both in the `name` column (what getTeamRow
+    # looks it up by) and inside its own serialized `data` blob — those two
+    # have to move together, or a later getTeamRow(guild_id, new_name) call
+    # would miss the row while the Team object it eventually does find
+    # under the old name claims a different name than the one it's stored
+    # under. updateTeamData alone only ever touches `data`, which is why
+    # this is its own method rather than a set_name() + updateTeamData()
+    # call site would naively reach for.
+    def _renameTeam(self, team_id, team):
+        self.cursor.execute(
+            "UPDATE teams SET name=?, data=? WHERE id=?",
+            (team.get_name(), team.serializeTeam(), team_id)
+        )
+        self.db.commit()
+
+    # /team-rename: captain-only, same "must not collide with an existing
+    # team name in this guild" rule createTeamHelper enforces on creation —
+    # case-insensitively, same as getTeamRow's own lookup, so "red" is
+    # rejected as taken if "Red" already exists. The one exception is a
+    # pure capitalization change of THIS team's own name ("Red" -> "RED"):
+    # that's still allowed, since without excluding it the collision check
+    # below would just find this same team (case-insensitively) and wrongly
+    # call it already taken. Doesn't touch anything else about the team
+    # (voice channel, logo, roster, record) — those are independent of the
+    # name once set, same as /team-set already treats them.
+    async def teamRenameHelper(self, ctx, team_name, new_name):
+        guild_id = ctx.guild.id
+
+        result = self.getTeamRow(guild_id, team_name)
+        if result is None:
+            await ctx.response.send_message(f"No team named **{team_name}** in this server.")
+            return
+        team_id, team = result
+        current_name = team.get_name()
+
+        if not self.isTeamCaptain(team, ctx.user.id) and not ctx.user.guild_permissions.manage_guild:
+            await ctx.response.send_message(
+                f"Only **{current_name}**'s captain or a member with the Manage Server permission can "
+                "rename it."
+            )
+            return
+
+        if new_name == current_name:
+            await ctx.response.send_message(f"**{current_name}** is already named that.")
+            return
+
+        if new_name.lower() != current_name.lower():
+            if self.getTeamRow(guild_id, new_name) is not None:
+                await ctx.response.send_message(
+                    f"A team named **{new_name}** already exists in this server."
+                )
+                return
+
+        team.set_name(new_name)
+        self._renameTeam(team_id, team)
+
+        await ctx.response.send_message(f"**{current_name}** has been renamed to **{new_name}**.")
+
+    # Deletes a team's row and any pending /team-invite for it (a stale
+    # invite would otherwise just silently no-op the moment someone
+    # accepted it — see handleTeamInviteReaction's own team-lookup guard —
+    # rather than telling them it's gone). Doesn't touch a tournament this
+    # team's already registered in; see ConfirmTeamDeleteView for why that's
+    # safe to leave alone.
+    def _deleteTeam(self, guild_id, team_id):
+        self.cursor.execute("DELETE FROM teams WHERE guildId=? AND id=?", (guild_id, team_id))
+        self.cursor.execute("DELETE FROM team_invites WHERE guildId=? AND teamId=?", (guild_id, team_id))
+        self.db.commit()
+
+    # /team-delete: the team's own captain, or any member with the Manage
+    # Server permission (so a team whose captain has left, gone inactive,
+    # or is being abusive isn't stuck undeletable) — either way,
+    # confirmation-gated (see ConfirmTeamDeleteView) since it can't be
+    # undone. Checked inline rather than with an
+    # @app_commands.checks.has_permissions decorator (which would make
+    # Manage Server required outright) since a plain captain has to be
+    # allowed through too — same "check manage_guild by hand" shape
+    # createTournamentHelper's overwrite-confirmation uses.
+    async def teamDeleteHelper(self, ctx, team_name):
+        guild_id = ctx.guild.id
+
+        result = self.getTeamRow(guild_id, team_name)
+        if result is None:
+            await ctx.response.send_message(f"No team named **{team_name}** in this server.")
+            return
+        team_id, team = result
+
+        if not self.isTeamCaptain(team, ctx.user.id) and not ctx.user.guild_permissions.manage_guild:
+            await ctx.response.send_message(
+                f"Only **{team_name}**'s captain or a member with the Manage Server permission can delete it."
+            )
+            return
+
+        view = ConfirmTeamDeleteView(self, guild_id, ctx.user.id, team_id, team_name)
+        await ctx.response.send_message(
+            f"Delete **{team_name}**? This can't be undone - its roster, record, and any pending "
+            "invites will all be gone.",
+            view=view,
+        )
+        view.message = await ctx.original_response()
 
     # Called from bot.py's on_raw_reaction_add — no-ops unless the emoji/
     # message match a pending invite for the reactor specifically. Several
@@ -5129,11 +5839,11 @@ class helpers():
             wins, losses = records[team.get_name()]
             games = wins + losses
             win_rate = f"{(wins / games) * 100:.1f}%" if games > 0 else "N/A"
-            lines.append(f"**#{i}.** {team.get_name()} — {wins}W-{losses}L ({win_rate})")
+            lines.append(f"**#{i}.** {team.get_name()} - {wins}W-{losses}L ({win_rate})")
 
         title = f"\U0001f3c6 {tournament.get_name()} Results"
         if guild_name:
-            title += f" — {guild_name}"
+            title += f" - {guild_name}"
         return discord.Embed(title=title, description="\n".join(lines), color=discord.Color.gold())
 
     # Posts the tournament-scoped results embed right after a tournament
@@ -5148,132 +5858,36 @@ class helpers():
         if embed is not None:
             await channel.send(embed=embed)
 
-    # /test-achievements' whole implementation — forces every achievement
-    # threshold for the caller and then runs the REAL check/unlock/announce
-    # pipeline (_checkAchievements, applyGameDeltas,
-    # _grantTournamentChampionAchievement, _announceAchievements) instead
-    # of poking card_unlocks directly, so a bug in any of those functions
-    # shows up here rather than only surfacing in a live game.
-    #
-    # This DOES touch real data: it overwrites the caller's own economy row
-    # (game_wins/game_losses/current_win_streak/wins/losses) and
-    # card_unlocks, and persists a couple of "TEST Team N" rows (same
-    # clearly-fake naming the old /test tournament simulator used) so
-    # team_player/captain have real rosters to count. Nothing is cleaned up
-    # afterward — see /test-achievements in bot.py for the caller-facing
-    # warning about that.
-    async def runSimulatedAchievementsHelper(self, ctx):
-        guild_id = ctx.guild.id
-        user_id = ctx.user.id
-        username = ctx.user.name
-        self.ensureEconomyRow(guild_id, user_id, username)
-
-        # Clear this caller's own achievement unlocks first so a repeat run
-        # always shows everything as freshly unlocked again, instead of
-        # _unlockAchievement's own IGNORE branch silently eating every
-        # achievement past the first run.
-        self.cursor.execute(
-            "DELETE FROM card_unlocks WHERE guildId=? AND userId=? AND itemKey IN ({})".format(
-                ",".join("?" for _ in CARD_ACHIEVEMENT_TITLES)
-            ),
-            (guild_id, user_id, *CARD_ACHIEVEMENT_TITLES.keys())
-        )
-
-        # Parked one short of the TOP of the veteran/on_fire ladders (and
-        # the gambler/iron_will thresholds) — the single applyGameDeltas
-        # call below supplies the "+1" that crosses every rung of both
-        # ladders at once, the same way one real winning game would, while
-        # iron_will (game_losses) is set outright since nothing else here
-        # ever touches it.
-        self.cursor.execute(
-            "UPDATE economy SET game_wins=?, game_losses=?, current_win_streak=?, wins=?, losses=0 "
-            "WHERE guildId=? AND userId=?",
-            (
-                CARD_ACHIEVEMENT_VETERAN_IMMORTAL_WINS - 1, CARD_ACHIEVEMENT_IRON_WILL_LOSSES,
-                CARD_ACHIEVEMENT_ON_FIRE_UNTOUCHABLE_STREAK - 1, CARD_ACHIEVEMENT_GAMBLER_BETS - 1,
-                guild_id, user_id,
-            )
-        )
-        self.db.commit()
-
-        # team_player: GLOB-cleaned "TEST Team N" rows, the same throwaway
-        # naming convention the old /test tournament simulator used, so
-        # these are still easy to spot and clean up by hand afterward.
-        self.cursor.execute(
-            "DELETE FROM teams WHERE guildId=? AND name GLOB 'TEST Team [0-9]*'", (guild_id,)
-        )
-        for i in range(CARD_ACHIEVEMENT_TEAM_PLAYER_TEAMS):
-            team = Team()
-            team.set_name(f"TEST Team {i + 1}")
-            player = Player(user_id, username)
-            team.add_player(player)
-            team.set_captain(player)
-            self._saveNewTeam(guild_id, team)
-
-        # big_spender: real card_unlocks rows in the exact shape
-        # shopBuyHelper itself writes, against real CARD_SHOP_TITLES keys,
-        # rather than anything achievement-specific.
-        for key in list(CARD_SHOP_TITLES)[:CARD_ACHIEVEMENT_BIG_SPENDER_ITEMS]:
-            self.cursor.execute(
-                "INSERT OR IGNORE INTO card_unlocks(guildId, userId, itemType, itemKey) VALUES(?, ?, 'title', ?)",
-                (guild_id, user_id, key)
-            )
-        self.db.commit()
-
-        newly_unlocked = [(user_id, key) for key in self._checkAchievements(guild_id, user_id)]
-
-        # Every remaining achievement keys off a single win delta's own
-        # context — one real applyGameDeltas call crosses the top of both
-        # ladders (game_wins/current_win_streak up by 1) and the gambler
-        # bet count at once, plus a high-roller/jackpot-sized payout and an
-        # underdog-sized elo swing, the same way one very lucky real game
-        # would.
-        win_deltas = {
-            user_id: {
-                "username": username, "balance": 0, "wins": 1, "losses": 0,
-                "gold_wagered": CARD_ACHIEVEMENT_HIGH_ROLLER_GOLD,
-                "gold_won": CARD_ACHIEVEMENT_JACKPOT_PAYOUT_MULTIPLIER * CARD_ACHIEVEMENT_HIGH_ROLLER_GOLD,
-                "gold_lost": 0,
-                "game_wins": 1, "game_losses": 0, "ranked_wins": 0, "ranked_losses": 0,
-                "elo": CARD_ACHIEVEMENT_UNDERDOG_ELO_GAIN,
-            }
-        }
-        newly_unlocked += self.applyGameDeltas(guild_id, win_deltas)
-
-        # tournament_champion has no economy-row condition at all — grant
-        # it directly through the exact same hook a real tournament's
-        # completion announcement calls.
-        champion_team = Team()
-        champion_team.set_name("TEST Team Champions")
-        champion_team.add_player(Player(user_id, username))
-        newly_unlocked += self._grantTournamentChampionAchievement(guild_id, champion_team)
-
-        await ctx.response.send_message(
-            f"\U0001f9ea Forced every achievement threshold for {ctx.user.mention} and ran the real "
-            f"check/unlock/announce pipeline — {len(newly_unlocked)} newly unlocked below."
-        )
-        await self._announceAchievements(ctx.channel, newly_unlocked)
-
     # Loads two persistent teams straight into team1/team2 for a casual or
     # ranked game — the "quickly reuse a tournament team" path, skipping
     # /make-teams'/`/ranked`'s random-split-or-draft entirely. Same
-    # "build the roster, then /start" contract as those commands: nobody
-    # is moved and no elo/betting starts until /start is run.
+    # "build the roster, then click ▶️" contract as those commands: nobody
+    # is moved and no elo/betting starts until the roster's ▶️ reaction
+    # (see _finalizeRoster) is clicked.
     async def useTeamsHelper(self, ctx, team1_name, team2_name, ranked):
         guild_id = ctx.guild.id
 
-        if team1_name == team2_name:
+        # Case-insensitive, matching getTeamRow's own lookup — "Red" and
+        # "red" resolve to the same team, so comparing the raw strings
+        # byte-for-byte would let that pair slip through as "different"
+        # right up until both getTeamRow calls below returned the exact
+        # same row.
+        if team1_name.lower() == team2_name.lower():
             await ctx.response.send_message("Pick two different teams.")
             return
 
         result1 = self.getTeamRow(guild_id, team1_name)
         if result1 is None:
-            await ctx.response.send_message(f"No team named **{team1_name}** in this server.")
+            await ctx.response.send_message(
+                f"No team named **{discord.utils.escape_markdown(team1_name)}** in this server."
+            )
             return
 
         result2 = self.getTeamRow(guild_id, team2_name)
         if result2 is None:
-            await ctx.response.send_message(f"No team named **{team2_name}** in this server.")
+            await ctx.response.send_message(
+                f"No team named **{discord.utils.escape_markdown(team2_name)}** in this server."
+            )
             return
 
         _, team1 = result1
@@ -5289,12 +5903,72 @@ class helpers():
         if ranked:
             self.update(guild_id, "is_ranked", 1)
 
-        ranked_note = " (ranked — elo will update when the winner is reported)" if ranked else ""
+        ranked_note = " (ranked - elo will update when the winner is reported)" if ranked else ""
+        # escape_markdown on the actual resolved names (not the raw args)
+        # so this reflects what /team-create stored even if the caller
+        # typed different casing - and so a stray underscore/asterisk in
+        # either name can't bleed italics/bold into the rest of the line.
         await ctx.response.send_message(
-            f"**{team1_name}** vs **{team2_name}** loaded{ranked_note}. "
-            'Use "/start" when you\'re ready to move everyone and open betting.'
+            f"**{discord.utils.escape_markdown(team1.get_name())}** vs "
+            f"**{discord.utils.escape_markdown(team2.get_name())}** loaded{ranked_note}. "
+            f"React {TEAM_START_EMOJI} on the roster below when you're ready to move everyone and open "
+            f"betting, or {TEAM_START_NO_MOVE_EMOJI} to open betting without moving anyone."
         )
-        await self.printEmbed(ctx, team1, team2)
+        team1_message, team2_message = await self.printEmbed(ctx, team1, team2)
+        await self._finalizeRoster(guild_id, team1_message, team2_message, team1, team2, use_roles=False)
+
+    # /reuse: re-posts whichever two rosters /make-teams, /captains, or
+    # /team-use most recently produced, instead of drawing a fresh random
+    # split, elo-balanced split, or captains draft. team1/team2 already
+    # hold that exact roster until the next team-forming command
+    # overwrites them (nothing clears them just because a game resolved -
+    # see clearTeamsHelper's own bug-fix note), so this only has to read
+    # them back rather than reconstruct anything. mode/is_ranked/
+    # roster_use_roles are read but never written here, so a reused ranked
+    # game stays ranked, a casual one stays casual, and a roles-eligible
+    # roster keeps showing role labels - "ranked behavior stays" the same
+    # as whatever the original game was, not whatever /reuse defaults to.
+    async def reuseTeamsHelper(self, ctx):
+        guild_id = ctx.guild.id
+
+        team1_data = self.get(guild_id, "team1")
+        team2_data = self.get(guild_id, "team2")
+        if not team1_data or not team2_data:
+            await ctx.response.send_message(
+                "No previous teams to reuse - make some first with /make-teams, /captains, or "
+                "/team-use."
+            )
+            return
+
+        # A game still being bet on or played from these same teams gets
+        # cancelled cleanly first (refund + move back), same as every
+        # other team-forming command does via clearTeamsHelper - just
+        # without clearTeamsHelper's own team1/team2 wipe, since reusing
+        # them is the whole point here.
+        if self.get(guild_id, "betting_state") in ("OPEN", "CLOSED"):
+            await self.cancelGameHelper(guild_id, ctx.channel, ctx.guild)
+
+        team1 = Team()
+        team1.deserializeTeam(team1_data)
+        team2 = Team()
+        team2.deserializeTeam(team2_data)
+
+        is_ranked = bool(self.get(guild_id, "is_ranked"))
+        use_roles = bool(self.get(guild_id, "roster_use_roles"))
+
+        self.update(guild_id, "original_channel", "")
+
+        ranked_note = " (ranked - elo will update when the winner is reported)" if is_ranked else ""
+        await ctx.response.send_message(
+            f"Reusing **{discord.utils.escape_markdown(team1.get_name())}** vs "
+            f"**{discord.utils.escape_markdown(team2.get_name())}**{ranked_note}. "
+            f"React {TEAM_START_EMOJI} on the roster below when you're ready to move everyone and open "
+            f"betting, or {TEAM_START_NO_MOVE_EMOJI} to open betting without moving anyone."
+        )
+        team1_message, team2_message = await self.printEmbed(ctx, team1, team2, useRoles=use_roles)
+        await self._finalizeRoster(
+            guild_id, team1_message, team2_message, team1, team2, use_roles=use_roles
+        )
 
     def getEconomy(self, guild_id, user_id, column):
         self.cursor.execute(
@@ -5303,58 +5977,6 @@ class helpers():
         )
         row = self.cursor.fetchone()
         return row[0] if row is not None else None
-
-    # /set-elo (admin-only, manage_guild — see bot.py): sets `member`'s elo
-    # to an exact value rather than a +/- delta, for correcting a broken
-    # rating directly rather than fighting the match-result math to get
-    # there. Still runs _checkTierRewardUnlocks afterward, the same as any
-    # other path that changes elo (applyGameDeltas, the lazy self-heal in
-    # _buildStatsEmbed) — an admin manually setting someone to Diamond+
-    # should credit that tier's reward exactly like earning it normally
-    # would.
-    async def setEloHelper(self, ctx, member, elo):
-        guild_id = ctx.guild.id
-        user_id = member.id
-
-        self.ensureEconomyRow(guild_id, user_id, member.name)
-        self.cursor.execute(
-            "UPDATE economy SET elo=? WHERE guildId=? AND userId=?", (elo, guild_id, user_id)
-        )
-        self.db.commit()
-        self._checkTierRewardUnlocks(guild_id, user_id, elo)
-
-        await ctx.response.send_message(f"Set {member.mention}'s elo to **{elo}**.")
-
-    # /card-clear-unlocks (admin-only, manage_guild — see bot.py): wipes
-    # every title/color scheme/font `member` has unlocked in this guild —
-    # a targeted undo for a bad grant or an exploited unlock, not the
-    # whole-server resets /clear's own clear_elo/clear_economy flags do.
-    # Also resets their equipped trading_cards row back to Shockwave's own
-    # defaults (customized=0, color_scheme_name cleared) rather than
-    # leaving it pointed at something they no longer actually own — the
-    # same "don't leave the equipped state inconsistent with what's
-    # unlocked" reasoning _resyncEquippedColorScheme exists for, just
-    # triggered by an admin action instead of a catalog change.
-    async def clearCardUnlocksHelper(self, ctx, member):
-        guild_id = ctx.guild.id
-        user_id = member.id
-
-        self.cursor.execute(
-            "DELETE FROM card_unlocks WHERE guildId=? AND userId=?", (guild_id, user_id)
-        )
-        self.cursor.execute(
-            "UPDATE trading_cards SET title=?, accent_color=?, background_color=?, text_color=?, "
-            "font_style=?, customized=0, color_scheme_name=NULL WHERE guildId=? AND userId=?",
-            (
-                CARD_DEFAULT_TITLE, CARD_DEFAULT_ACCENT_COLOR, CARD_DEFAULT_BACKGROUND_COLOR,
-                CARD_DEFAULT_TEXT_COLOR, CARD_DEFAULT_FONT_STYLE, guild_id, user_id,
-            )
-        )
-        self.db.commit()
-
-        await ctx.response.send_message(
-            f"Cleared all trading-card unlocks for {member.mention} and reset their card to Shockwave's defaults."
-        )
 
     async def dailyHelper(self, ctx):
         guild_id = ctx.guild.id
@@ -5382,6 +6004,25 @@ class helpers():
             f"You claimed your daily {DAILY_GOLD_AMOUNT} gold! Your balance is now {new_balance}."
         )
 
+    # TEMPORARY: backs /dev-give-gold (see bot.py's DEV_USER_ID guard,
+    # which is the only thing gating who can reach this) — remove both
+    # once no longer needed for testing.
+    async def devGiveGoldHelper(self, ctx):
+        guild_id = ctx.guild.id
+        user_id = ctx.user.id
+
+        self.ensureEconomyRow(guild_id, user_id, ctx.user.name)
+        self.cursor.execute(
+            "UPDATE economy SET balance = balance + ? WHERE guildId=? AND userId=?",
+            (DEV_GIVE_GOLD_AMOUNT, guild_id, user_id)
+        )
+        self.db.commit()
+
+        new_balance = self.getEconomy(guild_id, user_id, "balance")
+        await ctx.response.send_message(
+            f"Gave yourself {DEV_GIVE_GOLD_AMOUNT} gold! Your balance is now {new_balance}."
+        )
+
     # ---------------- Betting ----------------
 
     # Returns [(user_id, name), ...] for a team column ("team1"/"team2"), or
@@ -5395,21 +6036,44 @@ class helpers():
         team.deserializeTeam(serialized)
         return [(p.get_id(), p.get_name()) for p in team.get_players()]
 
-    # True if `user_id` is a rostered player (either side) in the game
-    # /start most recently moved into channels — used to stop players from
-    # betting on their own game.
+    # The Team's own .name for a team column — same "team1"/"team2" a
+    # roster was formed into, but its display name rather than its player
+    # list (see getRosterPlayers). recordResult uses this so the win/
+    # elo-change summary says the same name the roster embed and matchup
+    # image already showed (see _rosterTeamNames). `fallback` for a column
+    # that's unset or (defensively) came back with an empty name.
+    def getRosterName(self, guild_id, column, fallback):
+        serialized = self.get(guild_id, column)
+        if not serialized:
+            return fallback
+        team = Team()
+        team.deserializeTeam(serialized)
+        name = team.get_name() or fallback
+        # Team names are free text (/team-create, /team-rename). Escaped
+        # here rather than at creation so the stored name stays exact -
+        # an unescaped underscore/asterisk from one team's name can pair
+        # up across the whole message with a marker from unrelated text
+        # later in the same string (e.g. the other team's name), putting
+        # everything in between into unintended italics/bold.
+        return discord.utils.escape_markdown(name)
+
+    # True if `user_id` is a rostered player (either side) in the game the
+    # roster's ▶️ reaction most recently moved into channels — used to stop
+    # players from betting on their own game.
     def isPlayerInCurrentGame(self, guild_id, user_id):
         player_ids = {uid for uid, _name in self.getRosterPlayers(guild_id, "team1")}
         player_ids |= {uid for uid, _name in self.getRosterPlayers(guild_id, "team2")}
         return user_id in player_ids
 
-    # Current elo for each (user_id, name) in `roster`, defaulting to
-    # DEFAULT_ELO for anyone without an economy row yet.
+    # Current elo for each (user_id, name) in `roster`, defaulting to this
+    # guild's configured default (see _defaultEloForGuild) for anyone
+    # without an economy row yet.
     def getEloLookup(self, guild_id, roster):
+        default_elo = self._defaultEloForGuild(guild_id)
         lookup = {}
         for user_id, _name in roster:
             elo = self.getEconomy(guild_id, user_id, "elo")
-            lookup[user_id] = elo if elo is not None else DEFAULT_ELO
+            lookup[user_id] = elo if elo is not None else default_elo
         return lookup
 
     # `match_id`, when given, bets on that ONE specific tournament match
@@ -5432,7 +6096,8 @@ class helpers():
         state = self.get(guild_id, "betting_state")
         if state != "OPEN":
             await ctx.response.send_message(
-                "Betting is not currently open. Use \"/start\" to start a game and open betting."
+                f"Betting is not currently open. React {TEAM_START_EMOJI} on the roster message to "
+                "start a game and open betting."
             )
             return
 
@@ -5466,7 +6131,8 @@ class helpers():
         )
         self.db.commit()
 
-        await ctx.response.send_message(f"You wagered {amount} gold on Team {team}!")
+        team_name = self.getRosterName(guild_id, "team1" if team == 1 else "team2", f"Team {team}")
+        await ctx.response.send_message(f"You wagered {amount} gold on **{team_name}**!")
 
     # wagerHelper's match_id path. Same shape as the block above it (state
     # check, self-bet guard, balance check, duplicate-bet guard, escrow,
@@ -5521,24 +6187,9 @@ class helpers():
 
         await ctx.response.send_message(f"You wagered {amount} gold on Team {team} for match #{match_id}!")
 
-    # Kicks off the betting window for the game that was just /start'd.
-    async def startBettingHelper(self, ctx):
-        await self._openBetting(ctx.guild.id, ctx.channel)
 
-    # Posts the matchup graphic for whatever's currently loaded into
-    # team1/team2 — used by /start, right as the match actually begins,
-    # using whichever mode (/make-teams, /captains, /team-use, ranked or
-    # not) most recently set them up.
-    async def sendCurrentMatchupImage(self, ctx):
-        team1 = Team()
-        team1.deserializeTeam(self.get(ctx.guild.id, "team1"))
-        team2 = Team()
-        team2.deserializeTeam(self.get(ctx.guild.id, "team2"))
-        label = self._matchupLabelForMode(self.get(ctx.guild.id, "mode"))
-        await self._sendMatchupImage(ctx.channel, team1, team2, label)
-
-    # This guild's own configured betting-window length (/set-betting-timer),
-    # or BETTING_DURATION_SECONDS for a guild that's never set one. Doesn't
+    # This guild's own configured betting-window length (/set's betting_timer
+    # param), or BETTING_DURATION_SECONDS for a guild that's never set one. Doesn't
     # go through self.get() — that crashes outright if there's no `servers`
     # row for this guild at all, which a real guild always has by the time
     # any command can run (see on_guild_join), but /test's simulated
@@ -5555,9 +6206,20 @@ class helpers():
     # too, from a reaction handler that has no ctx to hand it. Cancels/
     # refunds any previous unresolved game first so re-opening never
     # leaves an orphaned timer or stranded bets behind.
+    #
+    # The winner-report message goes out immediately, right alongside the
+    # "betting is open" one, rather than waiting for the timer to close
+    # betting first — a real game doesn't wait for a 60-second countdown to
+    # finish before anyone knows who won, so TEAM_EMOJIS' reactions (and
+    # CANCEL_GAME_EMOJI, the reaction replacement for the old /return
+    # command) are live on this same message from the moment the game
+    # starts. handleGameReportReaction accepts either while betting_state
+    # is OPEN or CLOSED, so a fast game can be reported before the window
+    # even closes.
     async def _openBetting(self, guild_id, channel):
-        # /wager-set-channel redirects the whole cycle (open/closed/report)
-        # there instead of wherever /start (or a tournament match) ran —
+        # /set's wager_channel param redirects the whole cycle (open/closed/
+        # report) there instead of wherever the roster's ▶️ reaction (or a
+        # tournament match) ran —
         # once betting_channel_id below points at it, everything
         # downstream (the timer, the winner report, recordResult) just
         # follows the same channel through naturally.
@@ -5572,77 +6234,93 @@ class helpers():
         await self.cancelBettingHelper(guild_id, channel)
 
         self.update(guild_id, "betting_state", "OPEN")
-        self.update(guild_id, "betting_message_id", None)
         self.update(guild_id, "betting_channel_id", channel.id)
 
         duration = self._getBettingTimerSeconds(guild_id)
-        await channel.send(
-            "🎲 Betting is now open! Use `/wager <amount> <team>` to bet on this game. "
-            f"Betting closes in {duration} seconds."
+        msg = await channel.send(
+            f"🎲 Betting is open! Use `/wager <amount> <team>` to bet on this game (closes in "
+            f"{duration} seconds). React {TEAM_EMOJIS[1]} for Team 1 or {TEAM_EMOJIS[2]} for Team 2 "
+            f"once the game ends to record the result and pay out bets, or {CANCEL_GAME_EMOJI} to "
+            "cancel the game."
         )
+        await msg.add_reaction(TEAM_EMOJIS[1])
+        await msg.add_reaction(TEAM_EMOJIS[2])
+        await msg.add_reaction(CANCEL_GAME_EMOJI)
+
+        self.update(guild_id, "betting_message_id", msg.id)
 
         # BUG-PRONE PATTERN AVOIDED: awaiting asyncio.sleep() directly inside
         # this command handler would still (technically) let other
         # interactions run, since asyncio.sleep() yields control. But it
         # would keep this command's own Interaction/task alive and blocked
-        # for a full minute, and a cancelled game (/return) would have no
-        # way to stop it from firing later. Running it as its own Task makes
-        # both of those explicit and lets cancelBettingHelper cancel it.
+        # for a full minute, and a cancelled game (CANCEL_GAME_EMOJI) would
+        # have no way to stop it from firing later. Running it as its own
+        # Task makes both of those explicit and lets cancelBettingHelper
+        # cancel it.
         task = asyncio.create_task(self._bettingTimer(guild_id, channel, duration))
         self.bettingTasks[guild_id] = task
 
+    # Just closes the betting window once the configured duration elapses —
+    # the winner-report message (and its reactions) already went out with
+    # the "betting is open" one in _openBetting, so there's nothing left
+    # for this to post beyond the closed notice itself.
     async def _bettingTimer(self, guild_id, channel, duration):
         try:
             await asyncio.sleep(duration)
 
             self.update(guild_id, "betting_state", "CLOSED")
             await channel.send("🔒 Betting is now closed! No more wagers will be accepted for this game.")
-
-            await asyncio.sleep(WINNER_REPORT_DELAY_SECONDS)
-
-            msg = await channel.send(
-                f"Which team won? React with {TEAM_EMOJIS[1]} for Team 1 or {TEAM_EMOJIS[2]} for Team 2 "
-                f"to record the result and pay out bets."
-            )
-            await msg.add_reaction(TEAM_EMOJIS[1])
-            await msg.add_reaction(TEAM_EMOJIS[2])
-
-            self.update(guild_id, "betting_state", "AWAITING_RESULT")
-            self.update(guild_id, "betting_message_id", msg.id)
-            self.update(guild_id, "betting_channel_id", channel.id)
         except asyncio.CancelledError:
-            # /return (or a fresh /start) cancelled the game before betting
-            # closed or a winner was reported — cancelBettingHelper already
-            # handles the refund, nothing more to do here.
+            # CANCEL_GAME_EMOJI (or a fresh ▶️ click) ended the game before
+            # betting closed — cancelBettingHelper already handles the
+            # refund, nothing more to do here.
             pass
         finally:
             self.bettingTasks.pop(guild_id, None)
 
-    # Called from bot.py's on_raw_reaction_add. Resolves the winner from a
-    # TEAM_EMOJIS reaction on the stored betting message and pays out bets.
-    async def handleWinnerReaction(self, payload):
+    # Stops the running betting timer (if any) without touching wagers or
+    # betting_state — the one piece cancelBettingHelper and
+    # handleGameReportReaction both need before they go on to actually
+    # resolve or cancel the round, since a winner can now be reported (or
+    # the game cancelled) while the timer's still counting down.
+    def _cancelBettingTimerTask(self, guild_id):
+        task = self.bettingTasks.pop(guild_id, None)
+        if task is not None and not task.done():
+            task.cancel()
+
+    # Called from bot.py's on_raw_reaction_add. Handles both reactions that
+    # can land on the winner-report message: a TEAM_EMOJIS pick records the
+    # result and pays out bets, CANCEL_GAME_EMOJI cancels the game outright
+    # (refunding any bets and moving everyone back — the reaction
+    # replacement for the old /return command). Valid while betting_state
+    # is OPEN or CLOSED, not just after the timer's own window has closed.
+    async def handleGameReportReaction(self, payload):
         guild_id = payload.guild_id
         if guild_id is None:
             return
 
         emoji = str(payload.emoji)
-        winning_team = WINNER_EMOJIS.get(emoji)
-        if winning_team is None:
+        is_cancel = emoji == CANCEL_GAME_EMOJI
+        winning_team = None if is_cancel else WINNER_EMOJIS.get(emoji)
+        if not is_cancel and winning_team is None:
             return
 
         state = self.get(guild_id, "betting_state")
-        if state != "AWAITING_RESULT":
+        if state not in ("OPEN", "CLOSED"):
             return
 
         stored_message_id = self.get(guild_id, "betting_message_id")
         if stored_message_id is None or int(stored_message_id) != payload.message_id:
             return
 
-        # BUG-PRONE PATTERN AVOIDED: flip the state before doing anything
-        # async below, so a second reaction (e.g. both TEAM_EMOJIS clicked
-        # near-simultaneously) can't also pass the check above and pay out
-        # twice.
-        self.update(guild_id, "betting_state", "NONE")
+        # BUG-PRONE PATTERN AVOIDED: clear the stored message id before
+        # doing anything async below, so a second reaction on this same
+        # message (another TEAM_EMOJIS pick, or the cancel emoji) can't
+        # also pass the check above and double-process the same game.
+        # Cleared here rather than flipping betting_state itself, since the
+        # cancel path below still needs to read betting_state as it
+        # actually is to decide whether there's anything to refund.
+        self.update(guild_id, "betting_message_id", None)
 
         channel = self.client.get_channel(payload.channel_id)
         if channel is None:
@@ -5650,14 +6328,34 @@ class helpers():
 
         guild = self.client.get_guild(guild_id)
 
+        self._cancelBettingTimerTask(guild_id)
+
+        if is_cancel:
+            await self.cancelGameHelper(guild_id, channel, guild)
+            return
+
         await self.recordResult(guild_id, winning_team, channel, guild)
+
+    # The CANCEL_GAME_EMOJI half of handleGameReportReaction — refunds any
+    # open bets and moves everyone back to the original channel, the same
+    # two things the old /return command did. `cancelBettingHelper` handles
+    # the refund/state-reset/tournament-hook-clear; this just adds the
+    # voice-channel move on top, since cancelBettingHelper alone is also
+    # used by _openBetting to silently clear a stale round before opening a
+    # fresh one, where moving anyone would be wrong.
+    async def cancelGameHelper(self, guild_id, channel, guild):
+        await channel.send(f"{CANCEL_GAME_EMOJI} Game cancelled.")
+        await self.cancelBettingHelper(guild_id, channel)
+
+        if guild is not None and await self.moveMembersToOriginalChannel(guild):
+            await channel.send("Moved everyone back to the original channel!")
 
     # Pari-mutuel payout: winners split the losing side's pool proportional
     # to their own wager, on top of getting their own wager back — so a bet
     # on the less-backed (riskier) side pays out more than a bet on the
     # heavily-favored side. Also moves everyone back to the original
     # channel once the result is settled — reporting a winner ends the
-    # game, so no separate /return is needed. `guild` is optional only so
+    # game, no separate cancel/return needed. `guild` is optional only so
     # callers/tests that don't care about the move can omit it.
     async def recordResult(self, guild_id, winning_team, channel, guild=None):
         self.cursor.execute(
@@ -5672,15 +6370,20 @@ class helpers():
 
         team1_roster = self.getRosterPlayers(guild_id, "team1")
         team2_roster = self.getRosterPlayers(guild_id, "team2")
+        team1_name = self.getRosterName(guild_id, "team1", "Team 1")
+        team2_name = self.getRosterName(guild_id, "team2", "Team 2")
         elo_lookup = self.getEloLookup(guild_id, team1_roster + team2_roster)
         is_ranked = bool(self.get(guild_id, "is_ranked"))
 
         deltas, summary = self.computeGameDeltas(
-            allWagers, team1_roster, team2_roster, elo_lookup, winning_team, is_ranked
+            allWagers, team1_roster, team2_roster, elo_lookup, winning_team, is_ranked,
+            default_elo=self._defaultEloForGuild(guild_id),
+            team1_name=team1_name, team2_name=team2_name,
         )
         newly_unlocked = self.applyGameDeltas(guild_id, deltas)
         self.saveLastResult(
-            guild_id, winning_team, allWagers, team1_roster, team2_roster, deltas, is_ranked
+            guild_id, winning_team, allWagers, team1_roster, team2_roster, deltas, is_ranked,
+            team1_name=team1_name, team2_name=team2_name,
         )
 
         await channel.send(self.formatResultMessage(winning_team, summary))
@@ -5809,7 +6512,7 @@ class helpers():
             self.cursor.execute("DELETE FROM duels WHERE id=?", (duel_id,))
             self.db.commit()
             await channel.send(
-                f"Wager cancelled — one of you no longer has {amount} gold to cover it."
+                f"Wager cancelled - one of you no longer has {amount} gold to cover it."
             )
             return
 
@@ -5825,7 +6528,7 @@ class helpers():
 
         pot = amount * 2
         msg = await channel.send(
-            f"\U0001f4b0 **{challenger_name}** vs **{target_name}** — {pot} gold on the line! "
+            f"\U0001f4b0 **{challenger_name}** vs **{target_name}** - {pot} gold on the line! "
             f"React with {DUEL_CHALLENGER_EMOJI} if {challenger_name} won, "
             f"or {DUEL_TARGET_EMOJI} if {target_name} won."
         )
@@ -5879,25 +6582,34 @@ class helpers():
             f"\U0001f3c6 **{winner_name}** wins the wager against **{loser_name}** and takes home **{pot} gold**!"
         )
 
-    # Pari-mutuel betting payouts (winners split the losing side's pool
-    # proportional to their own wager, on top of getting their own wager
-    # back) plus a simple team-average elo update for whoever was actually
-    # rostered on team1/team2. Pure computation — no DB writes — so the
-    # exact same result can be applied once by recordResult and later
-    # reversed/reapplied by reportCorrectWinnerHelper without re-deriving
-    # the math (which would go wrong once elo ratings have moved on).
+    # Pari-mutuel betting payouts (winners split the losing side's pool,
+    # after an imbalance rake — see _imbalanceRakeFraction — proportional
+    # to their own wager, on top of getting their own wager back),
+    # GAME_WIN_GOLD/GAME_LOSS_GOLD for every rostered player depending on
+    # which side of the result they landed on, and a simple team-average
+    # elo update for whoever was actually rostered on team1/team2. Pure
+    # computation — no DB writes — so the exact same result can be applied
+    # once by recordResult and later reversed/reapplied by
+    # reportCorrectWinnerHelper without re-deriving the math (which would
+    # go wrong once elo ratings have moved on).
     #
     # Returns (deltas, summary):
     #   deltas: user_id -> {username, balance, wins, losses, gold_wagered,
     #           gold_won, gold_lost, game_wins, game_losses, ranked_wins,
     #           ranked_losses, elo} — all values are deltas to ADD to that
-    #           user's economy row. ranked_wins/ranked_losses are the
+    #           user's economy row. `balance` here is bet payouts/losses
+    #           AND GAME_WIN_GOLD/GAME_LOSS_GOLD combined, not just one or
+    #           the other — gold_wagered/gold_won/gold_lost stay wager-only.
+    #           ranked_wins/ranked_losses are the
     #           RANKED subset of game_wins/game_losses (0 for a casual
     #           game) — a casual win/loss count is just game_wins minus
     #           ranked_wins (see getLeaderboardEntries), so there's nothing
     #           separate to track for that side.
     #   summary: display-only info for formatResultMessage().
-    def computeGameDeltas(self, wagers, team1_roster, team2_roster, elo_lookup, winning_team, is_ranked=False):
+    def computeGameDeltas(
+        self, wagers, team1_roster, team2_roster, elo_lookup, winning_team, is_ranked=False,
+        default_elo=DEFAULT_ELO, team1_name="Team 1", team2_name="Team 2",
+    ):
         deltas = {}
 
         def bump(user_id, username, **kwargs):
@@ -5913,13 +6625,14 @@ class helpers():
         losingBets = [w for w in wagers if w[2] != winning_team]
         winningPool = sum(w[3] for w in winningBets)
         losingPool = sum(w[3] for w in losingBets)
+        rakedLosingPool = losingPool * (1 - self._imbalanceRakeFraction(winningPool, losingPool))
 
         for user_id, username, _team, amount in losingBets:
             bump(user_id, username, losses=1, gold_wagered=amount, gold_lost=amount)
 
         winning_bettors = []
         for user_id, username, _team, amount in winningBets:
-            payout = round(amount + (amount / winningPool) * losingPool) if winningPool > 0 else amount
+            payout = round(amount + (amount / winningPool) * rakedLosingPool) if winningPool > 0 else amount
             bump(user_id, username, balance=payout, wins=1, gold_wagered=amount, gold_won=payout - amount)
             winning_bettors.append((username, payout, amount))
 
@@ -5927,15 +6640,20 @@ class helpers():
         # game regardless of ranked status. Elo is not — it's exclusive to
         # games started with ranked:true (is_ranked=True),
         # so a casual /make-teams or /captains game never moves anyone's
-        # rating.
+        # rating. GAME_WIN_GOLD/GAME_LOSS_GOLD follow game_wins/game_losses'
+        # lead here too — every rostered player gets one or the other, win
+        # or lose, ranked or casual, entirely independent of anything they
+        # wagered.
         elo_changes = []
+        winner_count = 0
+        loser_count = 0
         if team1_roster or team2_roster:
             elo_delta1 = elo_delta2 = 0
             if is_ranked:
-                team1_elos = [elo_lookup.get(uid, DEFAULT_ELO) for uid, _name in team1_roster]
-                team2_elos = [elo_lookup.get(uid, DEFAULT_ELO) for uid, _name in team2_roster]
-                team1_avg = sum(team1_elos) / len(team1_elos) if team1_elos else DEFAULT_ELO
-                team2_avg = sum(team2_elos) / len(team2_elos) if team2_elos else DEFAULT_ELO
+                team1_elos = [elo_lookup.get(uid, default_elo) for uid, _name in team1_roster]
+                team2_elos = [elo_lookup.get(uid, default_elo) for uid, _name in team2_roster]
+                team1_avg = sum(team1_elos) / len(team1_elos) if team1_elos else default_elo
+                team2_avg = sum(team2_elos) / len(team2_elos) if team2_elos else default_elo
 
                 expected1 = 1 / (1 + 10 ** ((team2_avg - team1_avg) / 400))
                 actual1 = 1 if winning_team == 1 else 0
@@ -5945,6 +6663,7 @@ class helpers():
             for user_id, username in team1_roster:
                 bump(
                     user_id, username, elo=elo_delta1,
+                    balance=GAME_WIN_GOLD if winning_team == 1 else GAME_LOSS_GOLD,
                     game_wins=1 if winning_team == 1 else 0,
                     game_losses=0 if winning_team == 1 else 1,
                     ranked_wins=(1 if winning_team == 1 else 0) if is_ranked else 0,
@@ -5953,23 +6672,30 @@ class helpers():
             for user_id, username in team2_roster:
                 bump(
                     user_id, username, elo=elo_delta2,
+                    balance=GAME_WIN_GOLD if winning_team == 2 else GAME_LOSS_GOLD,
                     game_wins=1 if winning_team == 2 else 0,
                     game_losses=0 if winning_team == 2 else 1,
                     ranked_wins=(1 if winning_team == 2 else 0) if is_ranked else 0,
                     ranked_losses=(0 if winning_team == 2 else 1) if is_ranked else 0,
                 )
+            winner_count = len(team1_roster) if winning_team == 1 else len(team2_roster)
+            loser_count = len(team2_roster) if winning_team == 1 else len(team1_roster)
 
             if is_ranked:
                 if team1_roster:
-                    elo_changes.append(("Team 1", elo_delta1))
+                    elo_changes.append((team1_name, elo_delta1))
                 if team2_roster:
-                    elo_changes.append(("Team 2", elo_delta2))
+                    elo_changes.append((team2_name, elo_delta2))
 
         summary = {
             "no_bets": not wagers,
             "no_winning_bets": bool(wagers) and not winning_bettors,
             "winning_bettors": winning_bettors,
             "elo_changes": elo_changes,
+            "winner_gold_count": winner_count,
+            "loser_gold_count": loser_count,
+            "team1_name": team1_name,
+            "team2_name": team2_name,
         }
         return deltas, summary
 
@@ -6052,12 +6778,16 @@ class helpers():
         return newly_unlocked
 
     def formatResultMessage(self, winning_team, summary):
-        lines = [f"**Team {winning_team}** wins!"]
+        # .get(...) with a fallback rather than summary[...] so a caller
+        # that hasn't threaded real names through computeGameDeltas still
+        # gets a sensible label instead of a KeyError.
+        winner_name = summary.get(f"team{winning_team}_name") or f"Team {winning_team}"
+        lines = [f"**{winner_name}** wins!"]
 
         if summary["no_bets"]:
             lines.append("No bets were placed on this game.")
         elif summary["no_winning_bets"]:
-            lines.append("Nobody bet on the winning team — all bets were lost.")
+            lines.append("Nobody bet on the winning team - all bets were lost.")
         else:
             lines.append("Paying out bets...")
             for username, payout, amount in summary["winning_bettors"]:
@@ -6068,13 +6798,29 @@ class helpers():
                 "Elo: " + ", ".join(f"{name} {delta:+d}" for name, delta in summary["elo_changes"])
             )
 
+        winner_count = summary.get("winner_gold_count", 0)
+        loser_count = summary.get("loser_gold_count", 0)
+        if winner_count or loser_count:
+            parts = []
+            if winner_count:
+                word = "player" if winner_count == 1 else "players"
+                parts.append(f"{winner_count} winning {word} earned {GAME_WIN_GOLD} gold each")
+            if loser_count:
+                word = "player" if loser_count == 1 else "players"
+                parts.append(f"{loser_count} losing {word} earned {GAME_LOSS_GOLD} gold each")
+            lines.append(" and ".join(parts) + " just for playing.")
+
         return "\n".join(lines)
 
     # Snapshots exactly what was applied for a resolved game — the wagers,
-    # both rosters, and the deltas computeGameDeltas() produced — so
-    # reportCorrectWinnerHelper can reverse it precisely later. One row per
-    # guild; a new result overwrites the previous snapshot.
-    def saveLastResult(self, guild_id, winning_team, wagers, team1_roster, team2_roster, deltas, is_ranked=False):
+    # both rosters, the deltas computeGameDeltas() produced, and the team
+    # names shown at the time — so reportCorrectWinnerHelper can reverse it
+    # precisely (and keep saying the same names) later. One row per guild;
+    # a new result overwrites the previous snapshot.
+    def saveLastResult(
+        self, guild_id, winning_team, wagers, team1_roster, team2_roster, deltas, is_ranked=False,
+        team1_name="Team 1", team2_name="Team 2",
+    ):
         payload = {
             "winning_team": winning_team,
             "wagers": [list(w) for w in wagers],
@@ -6082,6 +6828,8 @@ class helpers():
             "team2_roster": [list(p) for p in team2_roster],
             "deltas": {str(uid): d for uid, d in deltas.items()},
             "is_ranked": is_ranked,
+            "team1_name": team1_name,
+            "team2_name": team2_name,
         }
         self.cursor.execute(
             "INSERT OR REPLACE INTO last_result(guildId, data) VALUES(?, ?)",
@@ -6103,6 +6851,28 @@ class helpers():
         payload.setdefault("is_ranked", False)
         return payload
 
+    # Fully undoes the last resolved game — reverses last["deltas"] the
+    # same way a correction's first step does (bet payouts, win/loss
+    # records, elo, GAME_WIN_GOLD/GAME_LOSS_GOLD) — but without reapplying
+    # anything for either team, and refunds every wager's exact original
+    # stake back to balance on top of that. The reversal alone isn't
+    # "refund" for a bettor: a winner's stored delta credited their whole
+    # *payout* (stake plus winnings), so reversing it removes the payout
+    # entirely and leaves them down by exactly their stake — indistinguishable
+    # from having lost. Adding the stake back afterward is what actually
+    # returns everyone, winners and losers alike, to their pre-bet balance.
+    # Clears last_result entirely afterward: once invalidated, there's no
+    # "last game" left for a further correction to flip between team1/team2.
+    def _invalidateLastResult(self, guild_id, last):
+        self.applyGameDeltas(guild_id, last["deltas"], sign=-1)
+        for user_id, _username, _team, amount in last["wagers"]:
+            self.cursor.execute(
+                "UPDATE economy SET balance = balance + ? WHERE guildId=? AND userId=?",
+                (amount, guild_id, user_id)
+            )
+        self.cursor.execute("DELETE FROM last_result WHERE guildId=?", (guild_id,))
+        self.db.commit()
+
     # Admin correction for a misreported /start winner: undoes exactly what
     # was applied for the last resolved game in this guild (bet payouts,
     # win/loss records, elo) and re-applies the same wagers/rosters against
@@ -6111,13 +6881,34 @@ class helpers():
     # pre-match value — recomputing against that gives the correct
     # alternate-history rating, not a stale or double-applied one.
     #
+    # `invalidate=True` is the other path: instead of flipping the winner,
+    # it undoes the game entirely (see _invalidateLastResult) — for a game
+    # that shouldn't have counted at all rather than one that just recorded
+    # the wrong side. Mutually exclusive with `correct_team`.
+    #
     # match_id, when given, corrects a specific tournament match instead —
     # a separate, narrower path (see _correctTournamentMatchHelper) that
     # only touches that match's bracket node, not the guild-wide economy
-    # snapshot below.
-    async def reportCorrectWinnerHelper(self, ctx, correct_team, match_id=None):
+    # snapshot below. invalidate isn't supported there yet, since undoing a
+    # match would also mean un-advancing whatever it fed into the bracket.
+    async def reportCorrectWinnerHelper(self, ctx, correct_team, match_id=None, invalidate=False):
         if match_id is not None:
+            if invalidate:
+                await ctx.response.send_message(
+                    "Invalidating isn't supported for a specific tournament match yet - correct it "
+                    "to the other team instead."
+                )
+                return
             await self._correctTournamentMatchHelper(ctx, match_id, correct_team)
+            return
+
+        if invalidate and correct_team is not None:
+            await ctx.response.send_message("Give team or invalidate, not both.")
+            return
+        if not invalidate and correct_team is None:
+            await ctx.response.send_message(
+                "Give team (who actually won), or invalidate to undo the game entirely."
+            )
             return
 
         guild_id = ctx.guild.id
@@ -6127,9 +6918,25 @@ class helpers():
             await ctx.response.send_message("There's no recent game result to correct.")
             return
 
+        # .get(...) with a fallback rather than last[...]: an older
+        # last_result snapshot saved before team1_name/team2_name existed
+        # won't have these keys, and shouldn't crash a correction over it.
+        team1_name = last.get("team1_name", "Team 1")
+        team2_name = last.get("team2_name", "Team 2")
+
+        if invalidate:
+            self._invalidateLastResult(guild_id, last)
+            await ctx.response.send_message(
+                f"**{team1_name}** vs **{team2_name}** has been invalidated - bets refunded and "
+                "elo/records/gold undone, as if the game never happened."
+            )
+            return
+
+        correct_name = team1_name if correct_team == 1 else team2_name
+
         if last["winning_team"] == correct_team:
             await ctx.response.send_message(
-                f"Team {correct_team} is already the recorded winner — nothing to correct."
+                f"**{correct_name}** is already the recorded winner - nothing to correct."
             )
             return
 
@@ -6140,16 +6947,20 @@ class helpers():
         is_ranked = last["is_ranked"]
         elo_lookup = self.getEloLookup(guild_id, team1_roster + team2_roster)
         new_deltas, summary = self.computeGameDeltas(
-            last["wagers"], team1_roster, team2_roster, elo_lookup, correct_team, is_ranked
+            last["wagers"], team1_roster, team2_roster, elo_lookup, correct_team, is_ranked,
+            default_elo=self._defaultEloForGuild(guild_id),
+            team1_name=team1_name, team2_name=team2_name,
         )
         newly_unlocked = self.applyGameDeltas(guild_id, new_deltas)
         self.saveLastResult(
-            guild_id, correct_team, last["wagers"], team1_roster, team2_roster, new_deltas, is_ranked
+            guild_id, correct_team, last["wagers"], team1_roster, team2_roster, new_deltas, is_ranked,
+            team1_name=team1_name, team2_name=team2_name,
         )
 
+        previous_name = team1_name if last["winning_team"] == 1 else team2_name
         await ctx.response.send_message(
-            f"Correction recorded: **Team {correct_team}** actually won (previously recorded as "
-            f"Team {last['winning_team']}). Balances, records, and elo have been adjusted."
+            f"Correction recorded: **{correct_name}** actually won (previously recorded as "
+            f"{previous_name}). Balances, records, and elo have been adjusted."
         )
         await ctx.channel.send(self.formatResultMessage(correct_team, summary))
         await self._announceAchievements(ctx.channel, newly_unlocked)
@@ -6259,7 +7070,7 @@ class helpers():
 
         await ctx.response.send_message(embed=embed)
         msg = await ctx.original_response()
-        await msg.add_reaction(STATS_PLACEHOLDER_EMOJI)
+        await msg.add_reaction(STATS_AVATAR_TOGGLE_EMOJI)
         await msg.add_reaction(STATS_CARD_EMOJI)
 
         self.cursor.execute(
@@ -6286,18 +7097,33 @@ class helpers():
         except Exception:
             return None
 
-    # The real avatar half of handleStatsReaction's toggle — re-fetched
-    # live (rather than snapshotted at /stats time) so a player who
-    # changes their avatar later and toggles back off the placeholder sees
-    # their current one, same as a fresh /stats would. None if the member
-    # can't be resolved at all — the caller just leaves the placeholder
-    # showing rather than erroring out over what's ultimately a cosmetic
-    # toggle.
+    # The per-server half of handleStatsReaction's avatar toggle —
+    # display_avatar resolves this server's own profile picture if the
+    # player has set one, falling back to their regular account-wide
+    # avatar otherwise (the same avatar /stats itself shows by default).
+    # None if the member can't be resolved at all — the caller just leaves
+    # whatever's currently showing rather than erroring out over what's
+    # ultimately a cosmetic toggle.
     async def _resolveMemberAvatarUrl(self, guild_id, user_id):
         member = await self._resolveGuildMember(guild_id, user_id)
         if member is None:
             return None
         return member.display_avatar.with_format("png").url
+
+    # The regular/global half of the same toggle — the account-wide avatar
+    # a discord.User carries, deliberately bypassing any per-server
+    # override a discord.Member might have (that's the whole point of this
+    # half). Cached users are used first; a real fetch only happens for
+    # someone not already in the client's cache. None if the user can't be
+    # resolved at all (e.g. their account no longer exists).
+    async def _resolveGlobalAvatarUrl(self, user_id):
+        user = self.client.get_user(user_id) if self.client is not None else None
+        if user is None:
+            try:
+                user = await self.client.fetch_user(user_id)
+            except discord.HTTPException:
+                return None
+        return user.display_avatar.with_format("png").url
 
     # Converts a "#RRGGBB" hex string (trading_cards' own storage format —
     # portable and human-editable, unlike a raw RGB tuple) back to the
@@ -6338,7 +7164,8 @@ class helpers():
     # a glance, and every body element always used the same three
     # hardcoded weights regardless of font_style at all. CARD_SHOP_FONT_
     # STYLES now backs each style with a genuinely different bundled
-    # typeface (RUSSO_ONE/CINZEL/ORBITRON, all Google Fonts, SIL Open Font
+    # typeface (RUSSO_ONE/CINZEL/ORBITRON, then PRESS_START_2P/CREEPSTER/
+    # BLACK_OPS_ONE in a second wave, all Google Fonts, SIL Open Font
     # License) for name/title, and shifts every body element's weight
     # together too — there's still only the one bundled body typeface
     # (IBM_PLEX_SANS, a variable font — see _loadFont), so "a different
@@ -6369,6 +7196,27 @@ class helpers():
                 "title_font": ORBITRON, "title_variation": "SemiBold",
                 "body_font": IBM_PLEX_SANS,
                 "label_weight": "SemiBold", "value_weight": "Medium", "team_weight": "Regular",
+            }
+        if font_style == "Retro":
+            return {
+                "name_font": PRESS_START_2P, "name_variation": None,
+                "title_font": PRESS_START_2P, "title_variation": None,
+                "body_font": IBM_PLEX_SANS,
+                "label_weight": "SemiBold", "value_weight": "Medium", "team_weight": "Medium",
+            }
+        if font_style == "Villain":
+            return {
+                "name_font": CREEPSTER, "name_variation": None,
+                "title_font": CREEPSTER, "title_variation": None,
+                "body_font": IBM_PLEX_SANS,
+                "label_weight": "Bold", "value_weight": "Regular", "team_weight": "Regular",
+            }
+        if font_style == "Military":
+            return {
+                "name_font": BLACK_OPS_ONE, "name_variation": None,
+                "title_font": BLACK_OPS_ONE, "title_variation": None,
+                "body_font": IBM_PLEX_SANS,
+                "label_weight": "Bold", "value_weight": "SemiBold", "team_weight": "SemiBold",
             }
         return {
             "name_font": CHAKRA_PETCH_BOLD, "name_variation": None,
@@ -6418,7 +7266,7 @@ class helpers():
         self.db.commit()
 
     # A row picking a NAMED color scheme (color_scheme_name set, by
-    # /card-set-color-scheme — see setCardColorScheme) tracks that scheme's
+    # /card-set — see setCardColorScheme) tracks that scheme's
     # current colors on every call here, the same "follow the source of
     # truth instead of freezing at equip time" idea the customized=0
     # branch above already applies to the whole default palette. Without
@@ -6647,7 +7495,7 @@ class helpers():
     # guild, as display-ready strings (CARD_TITLE_CATALOG's values, not the
     # raw itemKeys stored in card_unlocks — a tier name for a rank reward,
     # or a CARD_SPECIAL_TITLES key for a manually-granted one) — read by
-    # /card-set-title to offer as choices. CARD_DEFAULT_TITLE isn't
+    # /card-set to offer as choices. CARD_DEFAULT_TITLE isn't
     # included here since it needs no unlocking (see getAvailableCardTitles).
     def getUnlockedCardTitles(self, guild_id, user_id):
         self.cursor.execute(
@@ -6665,7 +7513,7 @@ class helpers():
             titles.append(CARD_SPECIAL_TITLES["Developer"])
         return titles
 
-    # /card-set-title's own choice list: CARD_DEFAULT_TITLE (always
+    # /card-set's own title choice list: CARD_DEFAULT_TITLE (always
     # available — it needs no unlocking, it's just the base title) plus
     # whatever this player has actually unlocked.
     def getAvailableCardTitles(self, guild_id, user_id):
@@ -6686,7 +7534,7 @@ class helpers():
         self.db.commit()
 
     # Sets `user_id`'s equipped trading-card title. Trusts `title` is
-    # already validated (see cardSetTitleHelper, the command boundary that
+    # already validated (see cardSetHelper, the command boundary that
     # checks it against getAvailableCardTitles) — this is the internal
     # write half only. Also marks the row customized=1, the same flag
     # ensureCardSettings' own resync-to-defaults check respects; without
@@ -6748,29 +7596,6 @@ class helpers():
         embed.set_image(url=f"attachment://{file.filename}")
         return embed, file
 
-    # /card-set-title: equips any title the caller has unlocked (or the
-    # base CARD_DEFAULT_TITLE, always available) as their trading card's
-    # epithet. Rejects anything else rather than trusting free text here —
-    # unlike a raw hex color, a title is exactly the kind of thing
-    # card_unlocks exists to gate.
-    async def cardSetTitleHelper(self, ctx, title):
-        guild_id = ctx.guild.id
-        user_id = ctx.user.id
-
-        available = self.getAvailableCardTitles(guild_id, user_id)
-        if title not in available:
-            await ctx.response.send_message(
-                f"You haven't unlocked **{title}**. Pick one of your unlocked titles from the "
-                "autocomplete list, or check /stats to see what you've earned."
-            )
-            return
-
-        self.setCardTitle(guild_id, user_id, title)
-        embed, file = await self._cardPreviewEmbedAndFile(ctx, ctx.user)
-        await ctx.response.send_message(
-            content=f'Your trading card title is now **"{title}"**.', embed=embed, file=file
-        )
-
     # Every trading-card color scheme `user_id` has permanently unlocked in
     # this guild — {name, accent_color, background_color}, hex-encoded the
     # same way trading_cards itself stores colors, ready to write straight
@@ -6824,7 +7649,7 @@ class helpers():
             })
         return schemes
 
-    # /card-set-color-scheme's own choice list: CARD_DEFAULT_SCHEME_NAME
+    # /card-set's own color scheme choice list: CARD_DEFAULT_SCHEME_NAME
     # (Shockwave's own palette, always available — needs no unlocking) plus
     # whatever this player has actually unlocked, same shape
     # getAvailableCardTitles has to getUnlockedCardTitles.
@@ -6838,7 +7663,7 @@ class helpers():
 
     # Sets `user_id`'s equipped trading-card accent/background colors.
     # Trusts `accent_color`/`background_color` are already validated (see
-    # cardSetColorSchemeHelper, the command boundary that resolves a
+    # cardSetHelper, the command boundary that resolves a
     # scheme name against getAvailableCardColorSchemes) — this is the
     # internal write half only. Also marks the row customized=1, same
     # reasoning setCardTitle's own comment gives: without it, the very
@@ -6856,33 +7681,6 @@ class helpers():
         )
         self.db.commit()
 
-    # /card-set-color-scheme: equips any color scheme the caller has
-    # unlocked (or CARD_DEFAULT_SCHEME_NAME, always available) as their
-    # trading card's accent/background. `scheme` is looked up by name
-    # rather than taking raw hex directly — same "gate it, don't trust
-    # free text" reasoning cardSetTitleHelper's own comment gives, and it
-    # keeps the two customization commands symmetrical.
-    async def cardSetColorSchemeHelper(self, ctx, scheme):
-        guild_id = ctx.guild.id
-        user_id = ctx.user.id
-
-        available = {s["name"]: s for s in self.getAvailableCardColorSchemes(guild_id, user_id)}
-        if scheme not in available:
-            await ctx.response.send_message(
-                f"You haven't unlocked the **{scheme}** color scheme. Pick one of your unlocked "
-                "schemes from the autocomplete list, or check /stats to see what you've earned."
-            )
-            return
-
-        chosen = available[scheme]
-        self.setCardColorScheme(
-            guild_id, user_id, chosen["accent_color"], chosen["background_color"], scheme_name=scheme
-        )
-        embed, file = await self._cardPreviewEmbedAndFile(ctx, ctx.user)
-        await ctx.response.send_message(
-            content=f'Your trading card now uses the **{scheme}** color scheme.', embed=embed, file=file
-        )
-
     # Every trading-card font style `user_id` has purchased in this guild
     # (see /shop) — unlike titles/color schemes there's no elo-tier path to
     # one of these at all, only the shop, so this is a straight itemKey
@@ -6895,15 +7693,249 @@ class helpers():
         )
         return [key for (key,) in self.cursor.fetchall() if key in CARD_SHOP_FONT_STYLES]
 
-    # /card-set-font's own choice list: CARD_DEFAULT_FONT_STYLE (always
+    # /card-set's own font choice list: CARD_DEFAULT_FONT_STYLE (always
     # available — needs no unlocking) plus whatever this player has
     # actually purchased, same shape getAvailableCardTitles/
     # getAvailableCardColorSchemes have to their own unlocked-items lookup.
     def getAvailableCardFontStyles(self, guild_id, user_id):
         return [CARD_DEFAULT_FONT_STYLE] + self.getUnlockedCardFontStyles(guild_id, user_id)
 
+    # /preview: the four things worth seeing all at once before spending
+    # gold or picking a name blind — every built-in logo, every card title,
+    # every color scheme, and every font, regardless of what any specific
+    # player has actually unlocked (unlike getAvailableCard*, which are
+    # deliberately per-player). Cached to PREVIEW_DIR (see
+    # _cachedPreviewFiles) since none of these change without a code
+    # change, so there's no reason to re-render on every call.
+    PREVIEW_FILE_STEMS = {
+        "Logos": "logos",
+        "Card Titles": "card-titles",
+        "Color Schemes": "color-schemes",
+        "Fonts": "fonts",
+    }
+
+    # Sequential `<stem>-1.png`, `<stem>-2.png`, ... rather than a glob/
+    # regex scan — probes until the next page is simply missing, so a
+    # partially-deleted cache (someone removed page 2 by hand) just looks
+    # like "only 1 page exists" instead of needing any special handling.
+    def _cachedPreviewFiles(self, stem):
+        paths = []
+        page = 1
+        while True:
+            path = os.path.join(PREVIEW_DIR, f"{stem}-{page}.png")
+            if not os.path.isfile(path):
+                break
+            paths.append(path)
+            page += 1
+        return paths
+
+    # How many of `items` fit on one page before PREVIEW_MAX_PAGE_HEIGHT is
+    # exceeded, given a PREVIEW_COLUMNS-wide grid of PREVIEW_CELL_SIZE
+    # cells — used by both the logo and color-scheme previews (the two
+    # that are actually grids; titles/fonts are short one-column lists that
+    # never come close to needing this).
+    def _paginateGridItems(self, items):
+        row_height = PREVIEW_CELL_SIZE + PREVIEW_CELL_LABEL_HEIGHT + PREVIEW_CELL_GAP
+        header_height = PREVIEW_MARGIN * 2 + PREVIEW_TITLE_FONT_SIZE + PREVIEW_CELL_GAP
+        rows_per_page = max(1, (PREVIEW_MAX_PAGE_HEIGHT - header_height) // row_height)
+        cells_per_page = int(rows_per_page * PREVIEW_COLUMNS)
+        if not items:
+            return [[]]
+        return [items[i:i + cells_per_page] for i in range(0, len(items), cells_per_page)]
+
+    # Renders one page of a PREVIEW_COLUMNS-wide grid — `draw_cell(image,
+    # draw, x, y, size, item)` draws whatever goes inside each cell (a
+    # pasted logo, a color swatch, ...), `label(item)` supplies the text
+    # under it. Shared by the logo and color-scheme previews, which only
+    # differ in what a cell actually looks like.
+    def _renderPreviewGridPage(self, title, items, draw_cell, label):
+        accent_color = self._hexToRgb(CARD_DEFAULT_ACCENT_COLOR, TEAM_CARD_FALLBACK_ACCENT_COLOR)
+        background_color = self._hexToRgb(CARD_DEFAULT_BACKGROUND_COLOR, (37, 26, 91))
+        text_color = self._hexToRgb(CARD_DEFAULT_TEXT_COLOR, BRACKET_TEXT_COLOR)
+
+        title_font = self._loadFont(CHAKRA_PETCH_BOLD, PREVIEW_TITLE_FONT_SIZE)
+        label_font = self._loadFont(IBM_PLEX_SANS, PREVIEW_LABEL_FONT_SIZE, "Medium")
+
+        rows = math.ceil(len(items) / PREVIEW_COLUMNS) if items else 1
+        row_height = PREVIEW_CELL_SIZE + PREVIEW_CELL_LABEL_HEIGHT + PREVIEW_CELL_GAP
+        header_height = PREVIEW_MARGIN * 2 + PREVIEW_TITLE_FONT_SIZE + PREVIEW_CELL_GAP
+        width = PREVIEW_MARGIN * 2 + PREVIEW_COLUMNS * PREVIEW_CELL_SIZE + (PREVIEW_COLUMNS - 1) * PREVIEW_CELL_GAP
+        height = int(header_height + rows * row_height + PREVIEW_MARGIN - PREVIEW_CELL_GAP)
+
+        image = Image.new("RGB", (width, height), background_color)
+        draw = ImageDraw.Draw(image)
+        draw.text((width / 2, PREVIEW_MARGIN), title, font=title_font, fill=accent_color, anchor="ma")
+        rule_y = PREVIEW_MARGIN + PREVIEW_TITLE_FONT_SIZE + PREVIEW_CELL_GAP / 2
+        draw.line([(PREVIEW_MARGIN, rule_y), (width - PREVIEW_MARGIN, rule_y)], fill=accent_color, width=2)
+
+        for i, item in enumerate(items):
+            col, row = i % PREVIEW_COLUMNS, i // PREVIEW_COLUMNS
+            x = PREVIEW_MARGIN + col * (PREVIEW_CELL_SIZE + PREVIEW_CELL_GAP)
+            y = header_height + row * row_height
+            draw_cell(image, draw, x, y, PREVIEW_CELL_SIZE, item)
+            draw.text(
+                (x + PREVIEW_CELL_SIZE / 2, y + PREVIEW_CELL_SIZE + PREVIEW_CELL_LABEL_HEIGHT / 2),
+                label(item), font=label_font, fill=text_color, anchor="mm"
+            )
+
+        return image
+
+    def _drawLogoPreviewCell(self, image, draw, x, y, size, logo_name):
+        accent_color = self._hexToRgb(CARD_DEFAULT_ACCENT_COLOR, TEAM_CARD_FALLBACK_ACCENT_COLOR)
+        draw.rounded_rectangle([x, y, x + size, y + size], radius=14, outline=accent_color, width=2)
+
+        logo_path = self._resolveLogoPath(logo_name)
+        if logo_path is None:
+            return
+        logo = Image.open(logo_path).convert("RGBA")
+        logo.thumbnail((size - 20, size - 20), Image.LANCZOS)
+        image.paste(logo, (x + (size - logo.width) // 2, y + (size - logo.height) // 2), logo)
+
+    # Every logo in TEAM_LOGO_DIR, gridded with its own name underneath —
+    # the exact string /team-set's logo param (and its autocomplete) takes,
+    # so this doubles as a lookup table for "what do I actually type" as
+    # well as a gallery.
+    def _renderLogoPreviewImages(self):
+        names = self.listAvailableLogos()
+        pages = self._paginateGridItems(names)
+        return [
+            self._renderPreviewGridPage(
+                "Logos" if len(pages) == 1 else f"Logos ({i}/{len(pages)})",
+                page_names, self._drawLogoPreviewCell, lambda n: n,
+            )
+            for i, page_names in enumerate(pages, start=1)
+        ]
+
+    def _drawColorSchemePreviewCell(self, image, draw, x, y, size, scheme):
+        _name, accent_hex, background_hex = scheme
+        accent = self._hexToRgb(accent_hex, TEAM_CARD_FALLBACK_ACCENT_COLOR)
+        background = self._hexToRgb(background_hex, (37, 26, 91))
+        draw.rounded_rectangle([x, y, x + size, y + size], radius=14, fill=background)
+        inner = size * 0.45
+        ix, iy = x + (size - inner) / 2, y + (size - inner) / 2
+        draw.ellipse([ix, iy, ix + inner, iy + inner], fill=accent)
+
+    # Every color scheme's own background as the swatch's fill and its
+    # accent as the circle in the middle — the same two colors that
+    # actually drive an equipped card (background + accent), rather than
+    # some unrelated stand-in shape.
+    def _renderColorSchemePreviewImages(self):
+        schemes = [(CARD_DEFAULT_SCHEME_NAME, CARD_DEFAULT_ACCENT_COLOR, CARD_DEFAULT_BACKGROUND_COLOR)]
+        schemes += [
+            (name, info["accent_color"], info["background_color"])
+            for name, info in CARD_SHOP_COLOR_SCHEMES.items()
+        ]
+        pages = self._paginateGridItems(schemes)
+        return [
+            self._renderPreviewGridPage(
+                "Color Schemes" if len(pages) == 1 else f"Color Schemes ({i}/{len(pages)})",
+                page_schemes, self._drawColorSchemePreviewCell, lambda s: s[0],
+            )
+            for i, page_schemes in enumerate(pages, start=1)
+        ]
+
+    # No grid — a font style has nothing to lay out in columns, just one
+    # sample line per style, each actually rendered in its own typeface
+    # (via _cardFontPaths, the same lookup an equipped card itself uses)
+    # so this is a genuine preview of the difference, not just a label
+    # list. The style's own key is drawn in a neutral font beside its
+    # sample, since "Cyber" rendered only in Orbitron could otherwise be
+    # hard to make out as a word at a glance.
+    def _renderFontPreviewImage(self):
+        font_styles = [CARD_DEFAULT_FONT_STYLE] + list(CARD_SHOP_FONT_STYLES.keys())
+        accent_color = self._hexToRgb(CARD_DEFAULT_ACCENT_COLOR, TEAM_CARD_FALLBACK_ACCENT_COLOR)
+        background_color = self._hexToRgb(CARD_DEFAULT_BACKGROUND_COLOR, (37, 26, 91))
+        text_color = self._hexToRgb(CARD_DEFAULT_TEXT_COLOR, BRACKET_TEXT_COLOR)
+
+        title_font = self._loadFont(CHAKRA_PETCH_BOLD, PREVIEW_TITLE_FONT_SIZE)
+        key_font = self._loadFont(IBM_PLEX_SANS, PREVIEW_LABEL_FONT_SIZE, "Medium")
+        sample_size = 40
+        row_height = sample_size + PREVIEW_CELL_GAP * 2
+
+        header_height = PREVIEW_MARGIN * 2 + PREVIEW_TITLE_FONT_SIZE + PREVIEW_CELL_GAP
+        width = 640
+        height = int(header_height + len(font_styles) * row_height + PREVIEW_MARGIN)
+
+        image = Image.new("RGB", (width, height), background_color)
+        draw = ImageDraw.Draw(image)
+        draw.text((width / 2, PREVIEW_MARGIN), "Fonts", font=title_font, fill=accent_color, anchor="ma")
+        rule_y = PREVIEW_MARGIN + PREVIEW_TITLE_FONT_SIZE + PREVIEW_CELL_GAP / 2
+        draw.line([(PREVIEW_MARGIN, rule_y), (width - PREVIEW_MARGIN, rule_y)], fill=accent_color, width=2)
+
+        for i, font_style in enumerate(font_styles):
+            paths = self._cardFontPaths(font_style)
+            sample_font = self._loadFont(paths["name_font"], sample_size, paths["name_variation"])
+            display_key = "Default" if font_style == CARD_DEFAULT_FONT_STYLE else font_style
+            row_y = header_height + i * row_height + row_height / 2
+            draw.text((PREVIEW_MARGIN, row_y), display_key, font=sample_font, fill=text_color, anchor="lm")
+            draw.text(
+                (width - PREVIEW_MARGIN, row_y), f"({display_key})", font=key_font, fill=accent_color,
+                anchor="rm"
+            )
+
+        return image
+
+    # Also no grid — a title is just an equippable string, nothing visual
+    # differs between two titles beyond the text itself, so this is a
+    # plain list rendered in the card's own default title font for a
+    # consistent feel rather than a plain unstyled listing.
+    def _renderCardTitlePreviewImage(self):
+        titles = [CARD_DEFAULT_TITLE] + list(CARD_TITLE_CATALOG.values())
+        accent_color = self._hexToRgb(CARD_DEFAULT_ACCENT_COLOR, TEAM_CARD_FALLBACK_ACCENT_COLOR)
+        background_color = self._hexToRgb(CARD_DEFAULT_BACKGROUND_COLOR, (37, 26, 91))
+        text_color = self._hexToRgb(CARD_DEFAULT_TEXT_COLOR, BRACKET_TEXT_COLOR)
+
+        title_font = self._loadFont(CHAKRA_PETCH_BOLD, PREVIEW_TITLE_FONT_SIZE)
+        item_font = self._loadFont(CHAKRA_PETCH_SEMIBOLD, 26)
+        row_height = 26 + PREVIEW_CELL_GAP * 2
+
+        header_height = PREVIEW_MARGIN * 2 + PREVIEW_TITLE_FONT_SIZE + PREVIEW_CELL_GAP
+        width = 500
+        height = int(header_height + len(titles) * row_height + PREVIEW_MARGIN)
+
+        image = Image.new("RGB", (width, height), background_color)
+        draw = ImageDraw.Draw(image)
+        draw.text((width / 2, PREVIEW_MARGIN), "Card Titles", font=title_font, fill=accent_color, anchor="ma")
+        rule_y = PREVIEW_MARGIN + PREVIEW_TITLE_FONT_SIZE + PREVIEW_CELL_GAP / 2
+        draw.line([(PREVIEW_MARGIN, rule_y), (width - PREVIEW_MARGIN, rule_y)], fill=accent_color, width=2)
+
+        for i, title in enumerate(titles):
+            row_y = header_height + i * row_height + row_height / 2
+            draw.text((width / 2, row_y), title, font=item_font, fill=text_color, anchor="mm")
+
+        return image
+
+    def _renderPreviewImages(self, preview_type):
+        if preview_type == "Logos":
+            return self._renderLogoPreviewImages()
+        if preview_type == "Color Schemes":
+            return self._renderColorSchemePreviewImages()
+        if preview_type == "Fonts":
+            return [self._renderFontPreviewImage()]
+        return [self._renderCardTitlePreviewImage()]
+
+    # Renders (if not already cached — see _cachedPreviewFiles) and posts
+    # every option for `preview_type`, as one or more attachments. Nothing
+    # here is guild- or player-specific (unlike /card-set's own choice
+    # lists), so the same cached files serve every server.
+    async def previewHelper(self, ctx, preview_type):
+        stem = self.PREVIEW_FILE_STEMS[preview_type]
+        cached = self._cachedPreviewFiles(stem)
+
+        if not cached:
+            images = self._renderPreviewImages(preview_type)
+            os.makedirs(PREVIEW_DIR, exist_ok=True)
+            for i, image in enumerate(images, start=1):
+                path = os.path.join(PREVIEW_DIR, f"{stem}-{i}.png")
+                image.save(path, format="PNG")
+                cached.append(path)
+
+        files = [discord.File(path) for path in cached]
+        page_note = f" ({len(files)} images)" if len(files) > 1 else ""
+        await ctx.response.send_message(f"**{preview_type}** preview{page_note}:", files=files)
+
     # Sets `user_id`'s equipped trading-card font. Trusts `font_style` is
-    # already validated (see cardSetFontHelper) — this is the internal
+    # already validated (see cardSetHelper) — this is the internal
     # write half only, same shape setCardTitle/setCardColorScheme have.
     # Also marks the row customized=1 for the same reason those two do.
     def setCardFontStyle(self, guild_id, user_id, font_style):
@@ -6914,25 +7946,67 @@ class helpers():
         )
         self.db.commit()
 
-    # /card-set-font: equips any font style the caller has purchased (or
-    # CARD_DEFAULT_FONT_STYLE, always available). Same "gate it, don't
-    # trust free text" shape as the other two customization commands.
-    async def cardSetFontHelper(self, ctx, font_style):
+    # /card-set: equips any combination of an unlocked title, color scheme,
+    # and/or font in one call. Every provided field is validated against
+    # its own unlock catalog before ANY of them is applied, so a bad value
+    # in one field (a typo'd font, say) can't leave the other two
+    # half-applied — either the whole call goes through or none of it does.
+    async def cardSetHelper(self, ctx, title, color_scheme, font_style):
         guild_id = ctx.guild.id
         user_id = ctx.user.id
 
-        available = self.getAvailableCardFontStyles(guild_id, user_id)
-        if font_style not in available:
+        if title is None and color_scheme is None and font_style is None:
+            await ctx.response.send_message(
+                "Give at least one of title, color_scheme, or font_style to equip."
+            )
+            return
+
+        if title is not None and title not in self.getAvailableCardTitles(guild_id, user_id):
+            await ctx.response.send_message(
+                f"You haven't unlocked **{title}**. Pick one of your unlocked titles from the "
+                "autocomplete list, or check /stats to see what you've earned."
+            )
+            return
+
+        schemes = {s["name"]: s for s in self.getAvailableCardColorSchemes(guild_id, user_id)}
+        if color_scheme is not None and color_scheme not in schemes:
+            await ctx.response.send_message(
+                f"You haven't unlocked the **{color_scheme}** color scheme. Pick one of your unlocked "
+                "schemes from the autocomplete list, or check /stats to see what you've earned."
+            )
+            return
+
+        if font_style is not None and font_style not in self.getAvailableCardFontStyles(guild_id, user_id):
             await ctx.response.send_message(
                 f"You haven't unlocked the **{font_style}** font. Pick one of your unlocked fonts "
                 "from the autocomplete list, or check /shop to see what's available."
             )
             return
 
-        self.setCardFontStyle(guild_id, user_id, font_style)
+        applied = []
+        if title is not None:
+            self.setCardTitle(guild_id, user_id, title)
+            applied.append(f'title **"{title}"**')
+        if color_scheme is not None:
+            chosen = schemes[color_scheme]
+            self.setCardColorScheme(
+                guild_id, user_id, chosen["accent_color"], chosen["background_color"], scheme_name=color_scheme
+            )
+            applied.append(f'the **{color_scheme}** color scheme')
+        if font_style is not None:
+            self.setCardFontStyle(guild_id, user_id, font_style)
+            applied.append(f'the **{font_style}** font')
+
+        if len(applied) == 1:
+            summary = applied[0]
+        elif len(applied) == 2:
+            summary = f"{applied[0]} and {applied[1]}"
+        else:
+            summary = f"{', '.join(applied[:-1])}, and {applied[-1]}"
+
         embed, file = await self._cardPreviewEmbedAndFile(ctx, ctx.user)
         await ctx.response.send_message(
-            content=f'Your trading card now uses the **{font_style}** font.', embed=embed, file=file
+            content=f'Your trading card now uses {summary}.', embed=embed, file=file
         )
 
     # Whether `user_id` already owns `item_key` (any shop item type) in
@@ -6981,80 +8055,6 @@ class helpers():
             return "font_style", CARD_SHOP_FONT_STYLES[item]
         return None, None
 
-    # /card-test: renders the caller's own card once per color scheme —
-    # CARD_DEFAULT_SCHEME_NAME plus the whole CARD_SHOP_COLOR_SCHEMES
-    # catalog, regardless of what they've actually unlocked — so browsing
-    # the shop's color options doesn't mean guessing from a hex code. Each
-    # render's own title field is overridden to the scheme's name (rather
-    # than the caller's real equipped title) so the image is self-labeled
-    # without needing to cross-reference a filename. Stats/teams/avatar
-    # are fetched once and reused across every render — only the color
-    # scheme actually changes between them.
-    async def cardTestHelper(self, ctx):
-        # Rendering every scheme (17 today) comfortably blows past
-        # Discord's 3-second interaction window — same BUG FIX shape
-        # returnHelper's own defer() comment describes, just for PIL
-        # rendering instead of one move_to() call per member.
-        await ctx.response.defer()
-
-        guild_id = ctx.guild.id
-        guild_name = ctx.guild.name if ctx.guild is not None else ""
-        member = ctx.user
-
-        base_settings = self.getCardSettings(guild_id, member.id)
-
-        self.ensureEconomyRow(guild_id, member.id, member.display_name)
-        self.cursor.execute(
-            "SELECT elo, ranked_wins, ranked_losses FROM economy WHERE guildId=? AND userId=?",
-            (guild_id, member.id)
-        )
-        elo, ranked_wins, ranked_losses = self.cursor.fetchone()
-        ranked_games = ranked_wins + ranked_losses
-        stats = {
-            "elo": elo, "elo_rank": self.eloRankLabelPlain(elo),
-            "ranked_wins": ranked_wins, "ranked_losses": ranked_losses,
-            "ranked_win_rate": f"{(ranked_wins / ranked_games) * 100:.1f}%" if ranked_games > 0 else "N/A",
-        }
-        teams = [team for _, team in self.getTeamsForPlayer(guild_id, member.id)]
-        try:
-            avatar_bytes = await member.display_avatar.with_format("png").read()
-            avatar_image = Image.open(io.BytesIO(avatar_bytes))
-        except Exception:
-            avatar_image = Image.new("RGBA", (CARD_AVATAR_SIZE, CARD_AVATAR_SIZE), BRACKET_BACKGROUND_CENTER)
-
-        schemes = [{
-            "name": CARD_DEFAULT_SCHEME_NAME, "accent_color": CARD_DEFAULT_ACCENT_COLOR,
-            "background_color": CARD_DEFAULT_BACKGROUND_COLOR,
-        }]
-        for name, entry in CARD_SHOP_COLOR_SCHEMES.items():
-            accent_rgb = self._hexToRgb(entry["accent_color"], TEAM_CARD_FALLBACK_ACCENT_COLOR)
-            background_rgb = self._hexToRgb(entry["background_color"], (0, 0, 0))
-            schemes.append({
-                "name": name,
-                "accent_color": self._readableAccentHex(accent_rgb, background_rgb),
-                "background_color": entry["background_color"],
-            })
-
-        files = []
-        for scheme in schemes:
-            settings = dict(base_settings)
-            settings["title"] = scheme["name"]
-            settings["accent_color"] = scheme["accent_color"]
-            settings["background_color"] = scheme["background_color"]
-            card_image = self._renderTradingCardImage(
-                guild_name, member.display_name, avatar_image, settings, stats, teams, username=member.name
-            )
-            safe_name = scheme["name"].replace(" ", "_")
-            files.append(self._imageToFile(card_image, f"card_{safe_name}.png"))
-
-        await ctx.followup.send(
-            content=f"Previewing all {len(files)} color schemes on your card:", files=files[:CARD_TEST_BATCH_SIZE]
-        )
-        # Discord caps a single message at 10 attachments — the rest go
-        # out as follow-up messages in the same channel.
-        for i in range(CARD_TEST_BATCH_SIZE, len(files), CARD_TEST_BATCH_SIZE):
-            await ctx.channel.send(files=files[i:i + CARD_TEST_BATCH_SIZE])
-
     # /shop: every purchasable cosmetic, grouped by category, with its
     # price or an "owned" marker and the caller's current balance so they
     # can see at a glance what they can actually afford.
@@ -7077,14 +8077,12 @@ class helpers():
                 if item["type"] != item_type:
                     continue
                 status = "✅ Owned" if item["owned"] else f"{item['price']} gold"
-                lines.append(f"**{item['name']}** — {status}")
+                lines.append(f"**{item['name']}** - {status}")
             # __underline__ (Discord markdown) rather than just bold, so
             # each category heading reads distinctly from the item lines'
             # own bolded names underneath it.
             embed.add_field(name=f"__{label}__", value="\n".join(lines), inline=False)
-        embed.set_footer(
-            text="/shop-buy to purchase — equip with /card-set-title, /card-set-color-scheme, or /card-set-font"
-        )
+        embed.set_footer(text="/shop-buy to purchase - equip with /card-set")
         await ctx.response.send_message(embed=embed)
 
     # Every CARD_ACHIEVEMENT_TITLES entry as {key, name, description,
@@ -7128,7 +8126,7 @@ class helpers():
         def render(key):
             item = catalog[key]
             status = "✅" if item["earned"] else "🔒"
-            return f"{status} **{item['name']}** — {item['description']}"
+            return f"{status} **{item['name']}** - {item['description']}"
 
         embed = discord.Embed(title="Achievements", color=discord.Color.gold())
 
@@ -7143,7 +8141,7 @@ class helpers():
         other_lines = [render(key) for key in CARD_ACHIEVEMENT_TITLES if key not in ladder_keys]
         embed.add_field(name="__Other__", value="\n".join(other_lines), inline=False)
 
-        embed.set_footer(text="Earned achievements unlock their title for /card-set-title")
+        embed.set_footer(text="Earned achievements unlock their title for /card-set")
         await ctx.response.send_message(embed=embed)
 
     # /shop-buy: spends gold to permanently unlock one CARD_SHOP_* item —
@@ -7183,34 +8181,68 @@ class helpers():
         )
         self.db.commit()
 
-        equip_command = {
-            "title": "/card-set-title", "color_scheme": "/card-set-color-scheme", "font_style": "/card-set-font",
-        }[item_type]
         await ctx.response.send_message(
-            f"Purchased **{item}** for {price} gold! Equip it with {equip_command}."
+            f"Purchased **{item}** for {price} gold! Equip it with /card-set."
         )
 
-    # A small filled circle standing in for the elo tier emoji (see
-    # ELO_TIERS' own comment on why — PIL's bundled TTF fonts can't render
-    # color emoji glyphs), positioned to the left of wherever the ELO
-    # value text starts.
-    def _drawEloBadge(self, draw, x, y, elo):
-        badge_color = self.eloRankBadgeColor(elo)
-        badge_shape = self.eloRankBadgeShape(elo)
-        if badge_shape == "diamond":
-            draw.polygon(
-                [
-                    (x, y - CARD_ELO_BADGE_RADIUS), (x + CARD_ELO_BADGE_RADIUS, y),
-                    (x, y + CARD_ELO_BADGE_RADIUS), (x - CARD_ELO_BADGE_RADIUS, y),
-                ],
-                fill=badge_color
-            )
-        else:
-            draw.ellipse(
-                [x - CARD_ELO_BADGE_RADIUS, y - CARD_ELO_BADGE_RADIUS,
-                 x + CARD_ELO_BADGE_RADIUS, y + CARD_ELO_BADGE_RADIUS],
-                fill=badge_color
-            )
+    # This tier's real emoji artwork (see ELO_BADGE_DIR), loaded, resized to
+    # fit CARD_ELO_BADGE_RADIUS, and cached (_elo_badge_cache) so repeat
+    # calls for the same tier — the overwhelmingly common case, since most
+    # cards render for whichever handful of tiers this guild's players
+    # actually sit at — don't re-hit disk. Returns None (nothing to paste)
+    # if the asset is missing, e.g. a dev checkout that hasn't generated
+    # assets/elo-badges/ — same "degrade instead of crash" reasoning
+    # listAvailableLogos' own empty-folder handling uses.
+    def _eloBadgeImage(self, elo):
+        path = self.eloRankBadgeImagePath(elo)
+        size = CARD_ELO_BADGE_RADIUS * 2
+        cache_key = (path, size)
+        if cache_key not in _elo_badge_cache:
+            if os.path.isfile(path):
+                badge = Image.open(path).convert("RGBA")
+                badge.thumbnail((size, size), Image.LANCZOS)
+                _elo_badge_cache[cache_key] = badge
+            else:
+                _elo_badge_cache[cache_key] = None
+        return _elo_badge_cache[cache_key]
+
+    # Pastes this tier's real emoji artwork centered at (x, y), standing in
+    # for the emoji eloRankLabel shows in a real embed — PIL's bundled TTF
+    # fonts can't render color emoji glyphs (same class of issue the
+    # roster's captain star ran into), so the card pastes the actual saved
+    # image (see ELO_BADGE_DIR) instead of hand-drawing an approximation of
+    # it. Silently draws nothing if the asset's missing rather than
+    # crashing the whole card render over one small badge.
+    def _drawEloBadge(self, image, x, y, elo):
+        badge = self._eloBadgeImage(elo)
+        if badge is None:
+            return
+        paste_x = int(x - badge.width / 2)
+        paste_y = int(y - badge.height / 2)
+        image.paste(badge, (paste_x, paste_y), badge)
+
+    # Every other bundled font stays comfortably under the card's width even
+    # for a full 32-character Discord username at CARD_NAME_FONT_SIZE —
+    # PRESS_START_2P ("Retro") is the one exception, its near-monospace,
+    # unusually-wide-per-glyph metrics can push a long real username well
+    # past the card's edge (a 22-character name measured at exactly
+    # CARD_WIDTH itself in testing, with nowhere left to safely draw a
+    # border). Rather than special-case that one font, this shrinks
+    # whichever font/variation was actually chosen down toward
+    # CARD_NAME_MIN_FONT_SIZE until it fits — a no-op in practice for every
+    # other style, since they're never close to the limit to begin with.
+    # Only the drawn font size changes; name_y/title_y and the rest of the
+    # layout stay anchored to the fixed CARD_NAME_FONT_SIZE slot regardless,
+    # so a shrunk name just leaves a little extra breathing room under it
+    # rather than needing the whole card re-laid-out.
+    def _fitNameFont(self, font_path, variation, text, max_width):
+        size = CARD_NAME_FONT_SIZE
+        font = self._loadFont(font_path, size, variation)
+        measurer = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+        while size > CARD_NAME_MIN_FONT_SIZE and measurer.textlength(text, font=font) > max_width:
+            size -= 2 * BRACKET_SUPERSAMPLE
+            font = self._loadFont(font_path, size, variation)
+        return font
 
     # Pure rendering: a portrait trading card built entirely from already-
     # fetched data (no DB/network access here — see _swapStatsForTradingCard
@@ -7234,7 +8266,9 @@ class helpers():
         background_color = self._hexToRgb(settings["background_color"], BRACKET_BACKGROUND)
         fonts = self._cardFontPaths(settings["font_style"])
 
-        name_font = self._loadFont(fonts["name_font"], CARD_NAME_FONT_SIZE, fonts["name_variation"])
+        name_font = self._fitNameFont(
+            fonts["name_font"], fonts["name_variation"], display_name, CARD_WIDTH - BRACKET_MARGIN * 2
+        )
         title_font = self._loadFont(fonts["title_font"], CARD_TITLE_FONT_SIZE, fonts["title_variation"])
         label_font = self._loadFont(fonts["body_font"], CARD_STAT_LABEL_FONT_SIZE, fonts["label_weight"])
         value_font = self._loadFont(fonts["body_font"], CARD_STAT_VALUE_FONT_SIZE, fonts["value_weight"])
@@ -7323,7 +8357,7 @@ class helpers():
             draw.text((BRACKET_MARGIN, row_y), label, font=label_font, fill=accent_color, anchor="lm")
             text_x = value_x
             if label == "ELO":
-                self._drawEloBadge(draw, value_x + CARD_ELO_BADGE_RADIUS, row_y, stats["elo"])
+                self._drawEloBadge(image, value_x + CARD_ELO_BADGE_RADIUS, row_y, stats["elo"])
                 text_x = value_x + CARD_ELO_BADGE_RADIUS * 2 + BRACKET_PADDING / 2
             draw.text((text_x, row_y), value, font=value_font, fill=text_color, anchor="lm")
 
@@ -7351,13 +8385,43 @@ class helpers():
 
         return image
 
+    # The avatar-fetching half shared by _swapStatsForTradingCard and its
+    # own avatar-toggle re-render — `use_global_avatar` picks between
+    # `member`'s per-server picture (the default) and the account-wide one
+    # a plain discord.User carries, mirroring _resolveMemberAvatarUrl/
+    # _resolveGlobalAvatarUrl's own server-vs-global split for the plain
+    # /stats embed's thumbnail toggle. Falls back to None (caller draws a
+    # plain tile) rather than failing the whole card over one image
+    # request — a missing/unfetchable avatar shouldn't be fatal.
+    async def _resolveCardAvatarImage(self, member, use_global_avatar):
+        source = member
+        if use_global_avatar and member is not None:
+            global_user = self.client.get_user(member.id) if self.client is not None else None
+            if global_user is None:
+                try:
+                    global_user = await self.client.fetch_user(member.id)
+                except discord.HTTPException:
+                    global_user = None
+            if global_user is not None:
+                source = global_user
+        if source is None:
+            return None
+        try:
+            avatar_bytes = await source.display_avatar.with_format("png").read()
+            return Image.open(io.BytesIO(avatar_bytes))
+        except Exception:
+            return None
+
     # The async half of the trading card: gathers everything
     # _renderTradingCardImage needs (a live member for the avatar/display
     # name, fresh economy stats, persistent teams, and card_settings) and
     # posts the result in place of the /stats embed. A missing/unfetchable
     # avatar falls back to a plain tile rather than failing the whole card
-    # over one image request.
-    async def _swapStatsForTradingCard(self, message, guild_id, guild_name, target_user_id):
+    # over one image request. `use_global_avatar` is the trading-card half
+    # of the same STATS_AVATAR_TOGGLE_EMOJI reaction the plain embed uses —
+    # see handleStatsReaction, which re-calls this in place to redraw the
+    # card with the other avatar rather than posting a new message.
+    async def _swapStatsForTradingCard(self, message, guild_id, guild_name, target_user_id, use_global_avatar=False):
         member = await self._resolveGuildMember(guild_id, target_user_id)
         display_name = member.display_name if member is not None else f"Player {target_user_id}"
 
@@ -7377,13 +8441,7 @@ class helpers():
         teams = [team for _, team in self.getTeamsForPlayer(guild_id, target_user_id)]
         settings = self.getCardSettings(guild_id, target_user_id)
 
-        avatar_image = None
-        if member is not None:
-            try:
-                avatar_bytes = await member.display_avatar.with_format("png").read()
-                avatar_image = Image.open(io.BytesIO(avatar_bytes))
-            except Exception:
-                avatar_image = None
+        avatar_image = await self._resolveCardAvatarImage(member, use_global_avatar)
         if avatar_image is None:
             avatar_image = Image.new("RGBA", (CARD_AVATAR_SIZE, CARD_AVATAR_SIZE), BRACKET_BACKGROUND_CENTER)
 
@@ -7413,38 +8471,43 @@ class helpers():
     # Called from bot.py's on_raw_reaction_add for every reaction — no-ops
     # unless the emoji/message match a /stats embed still tracked in
     # stats_views. STATS_CARD_EMOJI hands off to _swapStatsForTradingCard
-    # and marks cardShown, swapping STATS_PLACEHOLDER_EMOJI/STATS_CARD_EMOJI
-    # out for STATS_RETURN_EMOJI (neither the avatar toggle nor "show card
-    # again" makes sense once the card is already up). STATS_RETURN_EMOJI
-    # does the reverse via _swapTradingCardForStats, restoring the original
-    # pair. STATS_PLACEHOLDER_EMOJI (only reachable pre-card) toggles the
-    # thumbnail based on whichever's currently showing (comparing against
-    # STATS_PLACEHOLDER_AVATAR_URL exactly, set by this same handler or by
-    # statsHelper's own real-avatar URL) — leaving everything else on the
-    # embed untouched either way.
+    # and marks cardShown, swapping STATS_CARD_EMOJI out for STATS_RETURN_EMOJI
+    # ("show card again" doesn't apply once it's already up — STATS_AVATAR_
+    # TOGGLE_EMOJI stays either way, since both the embed and the card have
+    # their own avatar to toggle). STATS_RETURN_EMOJI does the reverse via
+    # _swapTradingCardForStats, restoring STATS_CARD_EMOJI. STATS_AVATAR_
+    # TOGGLE_EMOJI itself branches on cardShown: off the card, it flips the
+    # embed's thumbnail between the per-server and regular avatar
+    # (comparing the embed's own thumbnail URL against a freshly-resolved
+    # server URL); on the card, it flips cardAvatarGlobal and re-renders the
+    # whole card image in place, since the avatar there is baked into a PNG
+    # rather than a swappable embed thumbnail URL.
     async def handleStatsReaction(self, payload):
         guild_id = payload.guild_id
         if guild_id is None:
             return
 
         emoji = str(payload.emoji)
-        if emoji not in (STATS_PLACEHOLDER_EMOJI, STATS_CARD_EMOJI, STATS_RETURN_EMOJI):
+        if emoji not in (STATS_AVATAR_TOGGLE_EMOJI, STATS_CARD_EMOJI, STATS_RETURN_EMOJI):
             return
 
         self.cursor.execute(
-            "SELECT targetUserId, cardShown FROM stats_views WHERE guildId=? AND messageId=?",
+            "SELECT targetUserId, cardShown, cardAvatarGlobal FROM stats_views "
+            "WHERE guildId=? AND messageId=?",
             (guild_id, payload.message_id)
         )
         row = self.cursor.fetchone()
         if row is None:
             return
-        target_user_id, card_shown = row
+        target_user_id, card_shown, card_avatar_global = row
 
-        # Each emoji only applies on one side of the embed/card divide —
-        # the reactions themselves are swapped out below to enforce this
-        # in the UI, but a reaction click already in flight when that swap
-        # happens could still slip through, so check again here too.
-        if card_shown and emoji in (STATS_PLACEHOLDER_EMOJI, STATS_CARD_EMOJI):
+        # STATS_CARD_EMOJI/STATS_RETURN_EMOJI each only apply on one side of
+        # the embed/card divide — the reactions themselves are swapped out
+        # below to enforce this in the UI, but a reaction click already in
+        # flight when that swap happens could still slip through, so check
+        # again here too. STATS_AVATAR_TOGGLE_EMOJI applies on both sides,
+        # so it has no such guard.
+        if card_shown and emoji == STATS_CARD_EMOJI:
             return
         if not card_shown and emoji == STATS_RETURN_EMOJI:
             return
@@ -7460,26 +8523,25 @@ class helpers():
             guild_name = channel.guild.name if channel.guild is not None else ""
             await self._swapStatsForTradingCard(message, guild_id, guild_name, target_user_id)
             self.cursor.execute(
-                "UPDATE stats_views SET cardShown=1 WHERE guildId=? AND messageId=?",
+                "UPDATE stats_views SET cardShown=1, cardAvatarGlobal=0 WHERE guildId=? AND messageId=?",
                 (guild_id, payload.message_id)
             )
             self.db.commit()
-            # Neither /stats-embed-only reaction applies to a trading card
-            # — remove both outright rather than leaving a reaction sitting
-            # there that just silently no-ops when clicked, and offer the
-            # one action that does apply from here instead.
-            for stale_emoji in (STATS_PLACEHOLDER_EMOJI, STATS_CARD_EMOJI):
-                try:
-                    await message.clear_reaction(stale_emoji)
-                except discord.HTTPException:
-                    pass
+            # STATS_CARD_EMOJI ("show the card") is the one reaction that
+            # doesn't apply anymore once the card is already up — remove
+            # just that one rather than leaving it sitting there silently
+            # no-opping, and offer the one new action that does apply.
+            try:
+                await message.clear_reaction(STATS_CARD_EMOJI)
+            except discord.HTTPException:
+                pass
             await message.add_reaction(STATS_RETURN_EMOJI)
             return
 
         if emoji == STATS_RETURN_EMOJI:
             await self._swapTradingCardForStats(message, guild_id, target_user_id)
             self.cursor.execute(
-                "UPDATE stats_views SET cardShown=0 WHERE guildId=? AND messageId=?",
+                "UPDATE stats_views SET cardShown=0, cardAvatarGlobal=0 WHERE guildId=? AND messageId=?",
                 (guild_id, payload.message_id)
             )
             self.db.commit()
@@ -7487,21 +8549,35 @@ class helpers():
                 await message.clear_reaction(STATS_RETURN_EMOJI)
             except discord.HTTPException:
                 pass
-            await message.add_reaction(STATS_PLACEHOLDER_EMOJI)
             await message.add_reaction(STATS_CARD_EMOJI)
             return
 
-        embed = message.embeds[0]
-        currently_placeholder = (
-            embed.thumbnail is not None and embed.thumbnail.url == STATS_PLACEHOLDER_AVATAR_URL
-        )
+        if card_shown:
+            guild_name = channel.guild.name if channel.guild is not None else ""
+            new_global = not card_avatar_global
+            await self._swapStatsForTradingCard(
+                message, guild_id, guild_name, target_user_id, use_global_avatar=new_global
+            )
+            self.cursor.execute(
+                "UPDATE stats_views SET cardAvatarGlobal=? WHERE guildId=? AND messageId=?",
+                (1 if new_global else 0, guild_id, payload.message_id)
+            )
+            self.db.commit()
+            await self._clearPagingReaction(message, payload)
+            return
 
-        if currently_placeholder:
-            new_url = await self._resolveMemberAvatarUrl(guild_id, target_user_id)
+        embed = message.embeds[0]
+        server_url = await self._resolveMemberAvatarUrl(guild_id, target_user_id)
+        if server_url is None:
+            return
+        currently_server = embed.thumbnail is not None and embed.thumbnail.url == server_url
+
+        if currently_server:
+            new_url = await self._resolveGlobalAvatarUrl(target_user_id)
             if new_url is None:
                 return
         else:
-            new_url = STATS_PLACEHOLDER_AVATAR_URL
+            new_url = server_url
 
         embed.set_thumbnail(url=new_url)
         await message.edit(embed=embed)
@@ -7593,8 +8669,8 @@ class helpers():
         page_entries = entries_sorted[start:start + LEADERBOARD_PAGE_SIZE]
 
         title = (
-            f"\U0001f3c6 {guild_name} Leaderboard — Overview" if stat is None
-            else f"\U0001f3c6 {guild_name} Leaderboard — {LEADERBOARD_STAT_LABELS[stat]}"
+            f"\U0001f3c6 {guild_name} Leaderboard - Overview" if stat is None
+            else f"\U0001f3c6 {guild_name} Leaderboard - {LEADERBOARD_STAT_LABELS[stat]}"
         )
 
         lines = []
@@ -7602,12 +8678,12 @@ class helpers():
             rank = start + i + 1
             if stat is None:
                 lines.append(
-                    f"**#{rank}.** {entry['username']} — Elo: {entry['elo']} | "
+                    f"**#{rank}.** {entry['username']} - Elo: {entry['elo']} | "
                     f"Record: {entry['game_wins']}W-{entry['game_losses']}L"
                 )
             else:
                 lines.append(
-                    f"**#{rank}.** {entry['username']} — {self._formatLeaderboardStat(entry, stat)}"
+                    f"**#{rank}.** {entry['username']} - {self._formatLeaderboardStat(entry, stat)}"
                 )
 
         embed = discord.Embed(
@@ -7699,16 +8775,21 @@ class helpers():
         self.db.commit()
 
     # Cancels the running betting timer (if any) and, if the game had an
-    # unresolved bet round (open, closed-but-unreported, or awaiting a
-    # winner reaction), refunds every active bet.
+    # unresolved bet round (open or closed-but-unreported), refunds every
+    # active bet. Also clears active_tournament_match_id — whatever match
+    # this round belonged to (if any) is being abandoned along with it, so
+    # a later, unrelated recordResult shouldn't inherit its bracket-advance
+    # hook. Used both by cancelGameHelper (an explicit cancel) and by
+    # _openBetting itself, to silently clear out a stale previous round
+    # before a fresh one opens — this alone never moves anyone back to the
+    # original channel, since a stale-round clear isn't the same as the
+    # player-facing "the game was cancelled" cancelGameHelper handles.
     async def cancelBettingHelper(self, guild_id, channel):
         state = self.get(guild_id, "betting_state")
 
-        task = self.bettingTasks.pop(guild_id, None)
-        if task is not None and not task.done():
-            task.cancel()
+        self._cancelBettingTimerTask(guild_id)
 
-        if state not in ("OPEN", "CLOSED", "AWAITING_RESULT"):
+        if state not in ("OPEN", "CLOSED"):
             return
 
         self.cursor.execute(
@@ -7725,6 +8806,7 @@ class helpers():
         self.cursor.execute("DELETE FROM wagers WHERE guildId=?", (guild_id,))
         self.update(guild_id, "betting_state", "NONE")
         self.update(guild_id, "betting_message_id", None)
+        self.update(guild_id, "active_tournament_match_id", None)
         self.db.commit()
 
         if refunds:

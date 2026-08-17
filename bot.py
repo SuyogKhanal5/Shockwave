@@ -51,15 +51,20 @@ if not db_already_existed:
         "players, channel1, channel2, mode, turn, team_size, tournament, elo, "
         "result1, result2, captain1, captain2, "
         "betting_state, betting_message_id, betting_channel_id, is_ranked, "
-        "active_tournament_match_id, wager_channel, betting_timer_seconds)"
+        "active_tournament_match_id, wager_channel, betting_timer_seconds, "
+        "roster_team1_message_id, roster_team2_message_id, roster_channel_id, roster_use_roles, "
+        "default_elo)"
     )
     # BUG FIX: the original CREATE TABLE call was never committed.
     mainDB.commit()
 else:
-    # BUG FIX: /randomize-roles (randomRoleHelper) writes to "result1" and
-    # "result2", but these were never columns on `servers` — on any
-    # pre-existing database, that command has always crashed with
+    # LEGACY: the now-removed /randomize-roles command (randomRoleHelper)
+    # used to write to "result1"/"result2", but these were never columns on
+    # `servers` — on any pre-existing database, that command crashed with
     # "sqlite3.OperationalError: no such column: result1" the moment it ran.
+    # Left in place (nothing reads/writes them anymore) rather than
+    # attempting a column drop, matching this file's additive-only
+    # migration approach elsewhere.
     ensure_column("servers", "result1", "TEXT")
     ensure_column("servers", "result2", "TEXT")
     # BUG FIX: same story for "captain1"/"captain2" — captainsHelper and
@@ -78,17 +83,31 @@ else:
     # tells recordResult to also advance the tournament bracket once the
     # normal betting/elo resolution for that game finishes.
     ensure_column("servers", "active_tournament_match_id", "INTEGER")
-    # /wager-set-channel: when set, all betting postings (open/closed/
-    # winner-report) go here instead of wherever /start (or a tournament
-    # match) happened to run.
+    # /set's wager_channel param: when set, all betting postings (open/
+    # closed/winner-report) go here instead of wherever a game (or a
+    # tournament match) happened to start.
     ensure_column("servers", "wager_channel", "TEXT")
-    # /set-betting-timer: how long a betting window stays open (replaces
+    # /set's betting_timer param: how long a betting window stays open (replaces
     # the previously-hardcoded BETTING_DURATION_SECONDS). For a
     # simultaneous-mode tournament round with several concurrent matches,
     # this is the PER-MATCH base — the round's actual window is this times
     # however many matches are open at once (see
     # _openConcurrentTournamentBetting).
     ensure_column("servers", "betting_timer_seconds", "INTEGER", str(helper.BETTING_DURATION_SECONDS))
+    # The live "reroll roles / start the game" reaction control on a just-
+    # posted, actually-final roster — see _finalizeRoster/handleRosterReaction
+    # (replaces the old standalone /randomize-roles and /start commands).
+    # roster_team2_message_id is what a reaction is actually checked
+    # against; overwriting it on every new roster is what makes an older
+    # roster's reactions inert once a newer one has been posted.
+    ensure_column("servers", "roster_team1_message_id", "INTEGER")
+    ensure_column("servers", "roster_team2_message_id", "INTEGER")
+    ensure_column("servers", "roster_channel_id", "INTEGER")
+    ensure_column("servers", "roster_use_roles", "INTEGER", "0")
+    # /set's default_elo param: what a brand new player's elo starts at in
+    # this guild (see helpers._defaultEloForGuild) — NULL until an admin
+    # sets it, meaning "use the global helper.DEFAULT_ELO (1000)".
+    ensure_column("servers", "default_elo", "INTEGER")
 
 # Per-member currency: gold balance plus win/loss and wagering stats, one
 # row per (guild, user).
@@ -170,7 +189,13 @@ cursor.execute(
 # would just make a mess of it.
 ensure_column("stats_views", "targetUserId")
 ensure_column("stats_views", "cardShown", "INTEGER", "0")
-# A player's trading-card look (see /stats' \U0001f3b4 reaction and
+# Which avatar the trading card is currently rendered with — 0 (default)
+# for this server's own profile picture, 1 for the regular account-wide
+# one. Only meaningful once cardShown=1; reset to 0 every time the card is
+# (re-)entered so it always starts on the server avatar, matching the
+# plain /stats embed's own default (see handleStatsReaction).
+ensure_column("stats_views", "cardAvatarGlobal", "INTEGER", "0")
+# A player's trading-card look (see /stats' \U0001F0CF reaction and
 # _renderTradingCardImage) — one row per (guild, player), created with
 # Shockwave's own defaults the first time it's needed. Colors are stored as
 # "#RRGGBB" hex, font_style is a named preset _cardFontPaths knows how to
@@ -189,7 +214,7 @@ cursor.execute(
 )
 ensure_column("trading_cards", "customized", "INTEGER", "0")
 # Which CARD_SHOP_COLOR_SCHEMES/tier-name a row's colors were last equipped
-# from via /card-set-color-scheme, or NULL for a hand-edited custom hex
+# from via /card-set, or NULL for a hand-edited custom hex
 # value with nothing to track (see _resyncEquippedColorScheme). Lets an
 # already-equipped scheme keep following that scheme's current colors
 # instead of freezing at whatever they were the moment it was picked.
@@ -351,10 +376,38 @@ async def syncCommandsToGuild(guild):
     await tree.sync(guild=guild)
 
 
+# BUG FIX: the four roster_* columns (added later via ensure_column, see
+# above) meant the plain positional INSERT below started supplying fewer
+# values than the table actually has — sqlite3.OperationalError on every
+# single on_guild_join, silently swallowed by discord.py's own event-error
+# logging, so the guild's servers row was simply never created. Every
+# command that reads a column via helperObj.get() (a bare
+# cursor.fetchone()[0]) then crashed with "'NoneType' object is not
+# subscriptable" the moment anyone tried to use the bot in that guild.
+# ensure_guild_row is now the one place that inserts a row — check first,
+# insert only if missing, so it's safe to call from on_ready too (self-
+# healing any guild whose row never got created, or was lost to a wiped/
+# restored database) without ever creating a duplicate row for a guild
+# that already has one (servers.guildId has no UNIQUE constraint to lean
+# on INSERT OR IGNORE for).
+def ensure_guild_row(guild_id, guild_name):
+    cursor.execute("SELECT 1 FROM servers WHERE guildId=?", (guild_id,))
+    if cursor.fetchone() is not None:
+        return
+    cursor.execute(
+        "INSERT INTO servers VALUES(?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, "
+        "NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'NONE', NULL, NULL, 0, NULL, NULL, ?, "
+        "NULL, NULL, NULL, 0, NULL)",
+        (guild_id, guild_name, helper.BETTING_DURATION_SECONDS)
+    )
+    mainDB.commit()
+
+
 @client.event
 async def on_ready():
     for guild in client.guilds:
         await syncCommandsToGuild(guild)
+        ensure_guild_row(guild.id, guild.name)
     if not rotateStatus.is_running():
         rotateStatus.start()
     print('Command: Shockwave')
@@ -363,13 +416,7 @@ async def on_ready():
 @client.event
 async def on_guild_join(ctx):
     await syncCommandsToGuild(ctx)
-
-    cursor.execute(
-        "INSERT INTO servers VALUES(?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, "
-        "NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'NONE', NULL, NULL, 0, NULL, NULL, ?)",
-        (ctx.id, ctx.name, helper.BETTING_DURATION_SECONDS)
-    )
-    mainDB.commit()
+    ensure_guild_row(ctx.id, ctx.name)
 
 
 @client.event
@@ -384,21 +431,22 @@ async def on_guild_remove(ctx):
 # is cheap. They're called individually rather than in a loop over a plain
 # list of callables so each one's name still shows up in a traceback.
 REACTION_HANDLERS = (
-    "handleWinnerReaction", "handleDuelReaction", "handleLeaderboardReaction",
+    "handleGameReportReaction", "handleDuelReaction", "handleLeaderboardReaction",
     "handleMyTeamsReaction", "handleTeamListReaction", "handleTeamInviteReaction",
     "handleTournamentReaction", "handleStatsReaction", "handleTeamStatsReaction",
+    "handleRosterReaction",
 )
 
 
 @client.event
 async def on_raw_reaction_add(payload):
-    # Ignore the bot's own TEAM_EMOJIS reactions on the winner-report
-    # message, and DM reactions (no guild).
+    # Ignore the bot's own TEAM_EMOJIS/CANCEL_GAME_EMOJI reactions on the
+    # winner-report message, and DM reactions (no guild).
     if payload.member is None or payload.member.bot or payload.guild_id is None:
         return
 
     # BUG FIX: these used to run as one unguarded sequence of awaits — an
-    # exception raised by any one of them (say, handleWinnerReaction on a
+    # exception raised by any one of them (say, handleGameReportReaction on a
     # malformed payload) skipped every handler after it for that same
     # reaction, with nothing telling the user their click didn't do
     # anything. Each now gets its own try/except so a bug in one handler
@@ -444,123 +492,48 @@ async def on_app_command_error(interaction, error):
 
 
 @tree.command(
-    name="team-set-size",
-    description="Set the size of the teams"
-)
-@app_commands.describe(sizechange="Number of players per team")
-async def setTeamSize(ctx, *, sizechange: int):
-    helperObj.update(ctx.guild.id, "team_size", sizechange)
-    await ctx.response.send_message("Set team size!")
-
-
-@tree.command(
-    name="team-set-channels",
-    description="Set the team channels"
+    name="set",
+    description="Admin: change server settings - channels, betting timer, wager channel, elo, default elo"
 )
 @app_commands.describe(
-    team1="Name for the first team's voice channel",
-    team2="Name for the second team's voice channel",
-)
-async def setTeamChannels(ctx, *, team1: str, team2: str):
-    await helperObj.setTeamHelper(ctx, team1, team2)
-
-
-@tree.command(
-    name="wager-set-channel",
-    description="Direct all wager/betting postings to a specific text channel"
-)
-@app_commands.describe(channel_name="Name of the text channel to use — created if it doesn't exist")
-async def setWagerChannel(ctx, channel_name: str):
-    await helperObj.setWagerChannelHelper(ctx, channel_name)
-
-
-@tree.command(
-    name="set-betting-timer",
-    description="Admin: set how long a betting window stays open (1-600 seconds)"
-)
-@app_commands.describe(
-    seconds="Seconds a betting window stays open — for a tournament round with several concurrent "
-            "matches, this is multiplied by the number of matches"
+    team1="Name for the first team's voice channel - give together with team2",
+    team2="Name for the second team's voice channel - give together with team1",
+    size="Number of players per team",
+    betting_timer="Seconds a betting window stays open (1-600) - multiplied per-match for a "
+                  "concurrent tournament round",
+    wager_channel="Name of the text channel to direct all wager/betting postings to - created if it doesn't exist",
+    member="Whose elo to set - give together with elo",
+    elo="The exact elo value to set member to - give together with member",
+    default_elo="Elo a brand new player starts at here (default 1000) - doesn't change existing players",
 )
 @app_commands.checks.has_permissions(manage_guild=True)
-async def setBettingTimer(ctx, seconds: int):
-    await helperObj.setBettingTimerHelper(ctx, seconds)
+async def setAdmin(
+    ctx, team1: str = None, team2: str = None, size: int = None, betting_timer: int = None,
+    wager_channel: str = None, member: discord.Member = None, elo: int = None,
+    default_elo: int = None,
+):
+    await helperObj.adminSetHelper(
+        ctx, team1, team2, size, betting_timer, wager_channel, member, elo, default_elo
+    )
 
 
-@setBettingTimer.error
-async def setBettingTimer_error(ctx, error):
+@setAdmin.error
+async def setAdmin_error(ctx, error):
     if isinstance(error, app_commands.MissingPermissions):
         await ctx.response.send_message(
-            "You need the Manage Server permission to change the betting timer."
+            "You need the Manage Server permission to change server settings."
         )
     else:
         raise error
-
-
-@tree.command(
-    name="set-elo",
-    description="Admin: set a player's elo directly, to an exact value"
-)
-@app_commands.describe(member="Whose elo to set", elo="The exact elo value to set it to")
-@app_commands.checks.has_permissions(manage_guild=True)
-async def setElo(ctx, member: discord.Member, elo: int):
-    await helperObj.setEloHelper(ctx, member, elo)
-
-
-@setElo.error
-async def setElo_error(ctx, error):
-    if isinstance(error, app_commands.MissingPermissions):
-        await ctx.response.send_message(
-            "You need the Manage Server permission to set a player's elo."
-        )
-    else:
-        raise error
-
-
-@tree.command(
-    name="card-clear-unlocks",
-    description="Admin: wipe a player's unlocked trading-card titles/color schemes/fonts"
-)
-@app_commands.describe(member="Whose unlocks to clear")
-@app_commands.checks.has_permissions(manage_guild=True)
-async def cardClearUnlocks(ctx, member: discord.Member):
-    await helperObj.clearCardUnlocksHelper(ctx, member)
-
-
-@cardClearUnlocks.error
-async def cardClearUnlocks_error(ctx, error):
-    if isinstance(error, app_commands.MissingPermissions):
-        await ctx.response.send_message(
-            "You need the Manage Server permission to clear a player's trading-card unlocks."
-        )
-    else:
-        raise error
-
-
-@tree.command(
-    name="start",
-    description="Move players to their respective channels and open betting on the game"
-)
-async def start(ctx):
-    # BUG FIX: movefunc() does one move_to() API call per member and used
-    # to never respond to the interaction at all, which Discord shows to
-    # the user as "The application did not respond" once it also risked
-    # the same 3-second timeout as /return. Defer immediately, then
-    # confirm via followup once the moves are done.
-    await ctx.response.defer()
-    await helperObj.movefunc(ctx)
-    await ctx.followup.send("Moved!")
-    await helperObj.sendCurrentMatchupImage(ctx)
-    await helperObj.startBettingHelper(ctx)
 
 
 @tree.command(
     name="wager",
-    description="Wager gold on the current game — or, with a match id, on one tournament match"
+    description="Wager gold on the current game - or, with a match id, on one tournament match"
 )
 @app_commands.describe(
     amount="Amount of gold to wager", team="Which team you think will win",
-    match_id="A specific tournament match's id — omit to bet on the current casual/ranked game instead"
+    match_id="A specific tournament match's id - omit to bet on the current casual/ranked game instead"
 )
 @app_commands.choices(team=[
     app_commands.Choice(name="Team 1", value=1),
@@ -591,7 +564,7 @@ async def daily(ctx):
     name="stats",
     description="View your (or another player's) game record, elo, and economy stats"
 )
-@app_commands.describe(member="Whose stats to look up — defaults to you")
+@app_commands.describe(member="Whose stats to look up - defaults to you")
 async def stats(ctx, member: discord.Member = None):
     await helperObj.statsHelper(ctx, member)
 
@@ -606,16 +579,6 @@ async def cardTitleAutocomplete(ctx, current: str):
     return [app_commands.Choice(name=t, value=t) for t in matches[:25]]
 
 
-@tree.command(
-    name="card-set-title",
-    description="Equip one of your unlocked trading-card titles"
-)
-@app_commands.describe(title="Which title to equip — pick from your unlocked ones")
-@app_commands.autocomplete(title=cardTitleAutocomplete)
-async def cardSetTitle(ctx, title: str):
-    await helperObj.cardSetTitleHelper(ctx, title)
-
-
 # Same shape as cardTitleAutocomplete above — the caller's own available
 # schemes only (CARD_DEFAULT_SCHEME_NAME plus whatever they've unlocked).
 async def cardColorSchemeAutocomplete(ctx, current: str):
@@ -623,16 +586,6 @@ async def cardColorSchemeAutocomplete(ctx, current: str):
     schemes = helperObj.getAvailableCardColorSchemes(ctx.guild.id, ctx.user.id)
     matches = [s["name"] for s in schemes if current in s["name"].lower()]
     return [app_commands.Choice(name=n, value=n) for n in matches[:25]]
-
-
-@tree.command(
-    name="card-set-color-scheme",
-    description="Equip one of your unlocked trading-card color schemes"
-)
-@app_commands.describe(scheme="Which color scheme to equip — pick from your unlocked ones")
-@app_commands.autocomplete(scheme=cardColorSchemeAutocomplete)
-async def cardSetColorScheme(ctx, scheme: str):
-    await helperObj.cardSetColorSchemeHelper(ctx, scheme)
 
 
 # Same shape as cardTitleAutocomplete/cardColorSchemeAutocomplete above —
@@ -645,21 +598,34 @@ async def cardFontAutocomplete(ctx, current: str):
 
 
 @tree.command(
-    name="card-set-font",
-    description="Equip one of your purchased trading-card fonts"
+    name="card-set",
+    description="Equip an unlocked trading-card title, color scheme, and/or font"
 )
-@app_commands.describe(font_style="Which font to equip — pick from your unlocked ones")
-@app_commands.autocomplete(font_style=cardFontAutocomplete)
-async def cardSetFont(ctx, font_style: str):
-    await helperObj.cardSetFontHelper(ctx, font_style)
+@app_commands.describe(
+    title="Which title to equip - pick from your unlocked ones",
+    color_scheme="Which color scheme to equip - pick from your unlocked ones",
+    font_style="Which font to equip - pick from your unlocked ones",
+)
+@app_commands.autocomplete(
+    title=cardTitleAutocomplete, color_scheme=cardColorSchemeAutocomplete, font_style=cardFontAutocomplete
+)
+async def cardSet(ctx, title: str = None, color_scheme: str = None, font_style: str = None):
+    await helperObj.cardSetHelper(ctx, title, color_scheme, font_style)
 
 
 @tree.command(
-    name="card-test",
-    description="Preview your trading card in every color scheme"
+    name="preview",
+    description="See every option for a customization type at once, in one image"
 )
-async def cardTest(ctx):
-    await helperObj.cardTestHelper(ctx)
+@app_commands.describe(type="What to preview")
+@app_commands.choices(type=[
+    app_commands.Choice(name="Logos", value="Logos"),
+    app_commands.Choice(name="Card Titles", value="Card Titles"),
+    app_commands.Choice(name="Color Schemes", value="Color Schemes"),
+    app_commands.Choice(name="Fonts", value="Fonts"),
+])
+async def preview(ctx, type: app_commands.Choice[str]):
+    await helperObj.previewHelper(ctx, type.value)
 
 
 @tree.command(
@@ -694,7 +660,7 @@ async def shopBuyAutocomplete(ctx, current: str):
     name="shop-buy",
     description="Purchase a trading-card cosmetic with gold"
 )
-@app_commands.describe(item="Which item to purchase — pick from what you don't already own")
+@app_commands.describe(item="Which item to purchase - pick from what you don't already own")
 @app_commands.autocomplete(item=shopBuyAutocomplete)
 async def shopBuy(ctx, item: str):
     await helperObj.shopBuyHelper(ctx, item)
@@ -702,11 +668,11 @@ async def shopBuy(ctx, item: str):
 
 @tree.command(
     name="leaderboard",
-    description="Rank the server by a stat — react to page through it"
+    description="Rank the server by a stat - react to page through it"
 )
 @app_commands.describe(
-    filter="Which stat to rank by — omit for an overview of elo, balance, and record",
-    order="Highest-first or lowest-first — defaults to highest-first"
+    filter="Which stat to rank by - omit for an overview of elo, balance, and record",
+    order="Highest-first or lowest-first - defaults to highest-first"
 )
 @app_commands.choices(filter=[
     app_commands.Choice(name="Elo", value="elo"),
@@ -745,47 +711,41 @@ SITE_COMMANDS_URL = "https://shockwave.netlify.app/commands.html"
 # that has to stay short enough to fit there — this can afford a real
 # sentence or two, closer to what commands.html says.
 COMMAND_HELP = {
-    "team-set-channels": "Names the two voice channels teams get moved into. Creates them if they don't already exist.",
-    "team-set-size": "Sets how many players make up one side.",
-    "clear": "Wipes the current teams/draft so you can start a fresh session. clear_tournament deletes this server's tournament entirely. clear_elo and clear_economy reset data for every player; clear_achievements does too unless a user is given, which narrows it to just them. Requires the Manage Server permission.",
-    "make-teams": "Randomly splits everyone in your voice channel into two even teams and posts the roster. Doesn't move anyone — run /start for that. ranked:true forms roughly elo-balanced teams instead, and tracks elo once a winner is reported.",
-    "captains": "Starts a live captain draft. Name two captains, or use_random to pick two automatically; everyone else lands in a pool picked from with /choose. ranked:true tracks elo for the resulting game.",
+    "set": "Admin one-stop for server settings: team1+team2 names the two voice channels teams get moved into (creates them if missing), size sets how many players make up one side, betting_timer sets how long a betting window stays open (1-600 seconds, multiplied by the number of matches for a concurrent tournament round), wager_channel redirects every betting posting to one specific text channel, member+elo sets a player's elo directly to an exact value (still credits any Diamond+ tier reward the new elo qualifies for), and default_elo sets what a brand new player in this server starts at (1000 by default; doesn't touch anyone's existing elo - use /clear's clear_elo to reset current players to it). Give any combination in one call - team1/team2 and member/elo must each be given as a pair. Requires the Manage Server permission.",
+    "clear": "Wipes the current teams/draft so you can start a fresh session. clear_tournament deletes this server's tournament entirely. clear_elo and clear_economy reset data for every player; clear_achievements and clear_card_unlocks do too unless a user is given, which narrows either to just them. Requires the Manage Server permission.",
+    "make-teams": "Randomly splits everyone in your voice channel into two even teams and posts the roster, with a ▶️ reaction on it to move everyone and open betting when you're ready (⚡ to open betting without moving anyone; 🔄 to reroll roles too, if use_roles was set). ranked:true forms roughly elo-balanced teams instead, and tracks elo once a winner is reported.",
+    "captains": "Starts a live captain draft. Name two captains, or use_random to pick two automatically; everyone else lands in a pool picked from with /choose. Once both teams are set, react ▶️ on the roster to move everyone and open betting, or ⚡ to open betting without moving anyone. ranked:true tracks elo for the resulting game.",
     "choose": "Captains only. Picks one player from the draft pool onto your team, then passes the turn to the other captain.",
-    "randomize-roles": "Shuffles lane roles across the current teams.",
-    "start": "Moves the current rosters into their team channels and opens a one-minute betting window.",
-    "return": "Pulls both team channels back into the original voice channel. Refunds any open bets if a winner hasn't been reported yet.",
-    "notify": "DMs a one-time invite link to your voice channel — to one member, or to everyone holding a given role.",
-    "wager-set-channel": "Redirects every betting posting to one specific text channel, instead of wherever /start happens to run.",
-    "set-betting-timer": "Sets how long a betting window stays open (1-600 seconds). Multiplied by the number of matches for a concurrent tournament round. Requires the Manage Server permission.",
-    "set-elo": "Sets a player's elo directly to an exact value, correcting a broken rating without fighting the match-result math to get there. Still credits any Diamond+ tier reward the new elo qualifies for. Requires the Manage Server permission.",
-    "card-clear-unlocks": "Wipes a player's unlocked trading-card titles, color schemes, and fonts, and resets their equipped card back to Shockwave's own defaults. A targeted undo for a bad grant or an exploited unlock — not a whole-server reset. Requires the Manage Server permission.",
-    "wager": "Bets gold on one team winning the current game — or, with a match id, on a specific tournament match. Only while betting is open, one bet per player per game/match.",
-    "wager-against": "Challenges another player to a heads-up gold wager — separate from team-game betting, no /start required.",
+    "notify": "DMs a one-time invite link to your voice channel - to one member, or to everyone holding a given role. message optionally replaces the default invite text; either way it's signed \"Sent by\" you. You must be sitting in a voice channel yourself to run this.",
+    "wager": "Bets gold on one team winning the current game - or, with a match id, on a specific tournament match. Only while betting is open, one bet per player per game/match.",
+    "wager-against": "Challenges another player to a heads-up gold wager - separate from team-game betting, no active game required.",
     "daily": "Claims 1000 free gold. Once per calendar day, per player.",
-    "stats": "Shows a player's elo, ranked/casual/game record, betting record, balance, and net gold — defaults to you. React with \U0001f5bc️ to toggle the avatar between their real one and a generic placeholder, or \U0001f3b4 to replace the whole embed with a customizable trading card; \U0001faaa swaps back.",
-    "card-set-title": "Equips one of your unlocked trading-card titles (see /stats' \U0001f3b4 reaction). Reaching Diamond, Master, Grandmaster, or Challenger permanently unlocks that tier's own title, even if you derank afterward.",
-    "card-set-color-scheme": "Equips one of your unlocked trading-card color schemes (see /stats' \U0001f3b4 reaction). Reaching Diamond, Master, Grandmaster, or Challenger permanently unlocks that tier's own scheme (colors matching its emoji), even if you derank afterward. \"Default\" (Shockwave's own palette) is always available.",
-    "card-set-font": "Equips one of your purchased trading-card fonts (see /shop). \"Default\" (Shockwave's own Chakra Petch/IBM Plex Sans pairing) is always available.",
-    "card-test": "Renders your trading card once per color scheme (Default plus the whole /shop catalog, regardless of what you own) so you can see what each one looks like before buying.",
+    "stats": "Shows a player's elo, ranked/casual/game record, betting record, balance, and net gold - defaults to you. React with \U0001f5bc️ to toggle the avatar between this server's own profile picture and their regular account-wide one, or \U0001F0CF to replace the whole embed with a customizable trading card; \U0001faaa swaps back.",
+    "card-set": "Equips your unlocked trading-card title, color scheme, and/or font in one go (see /stats' \U0001F0CF reaction) - set any combination of the three at once. Reaching Diamond, Master, Grandmaster, or Challenger permanently unlocks that tier's own title and scheme, even if you derank afterward; \"Default\" is always available for both. Fonts are purchased from /shop.",
+    "preview": "Shows every option for one customization type - Logos, Card Titles, Color Schemes, or Fonts - in a single gallery image (a few images only if there are too many to fit), regardless of what you've personally unlocked yet.",
     "shop": "Browse every trading-card title, color scheme, and font purchasable with gold, and what you already own.",
-    "achievements": "Browse every gameplay achievement, what it takes to earn it, and whether you already have. Earning one unlocks its title for /card-set-title and posts a one-time announcement in the channel.",
-    "shop-buy": "Purchases a trading-card cosmetic with gold, permanently unlocking it for /card-set-title, /card-set-color-scheme, or /card-set-font. Refuses if you already own it or can't afford it.",
+    "achievements": "Browse every gameplay achievement, what it takes to earn it, and whether you already have. Earning one unlocks its title for /card-set and posts a one-time announcement in the channel.",
+    "shop-buy": "Purchases a trading-card cosmetic with gold, permanently unlocking it for /card-set. Refuses if you already own it or can't afford it.",
     "leaderboard": "Ranks the server by a stat, including ranked-only and casual-only wins/losses/win rate. Omit filter for an elo-sorted overview. Reactions page through the results.",
-    "report-correct-winner": "Fixes a misreported winner — undoes and reapplies the payouts, records, and elo. Requires Manage Server.",
-    "team-create": "Creates a persistent team with you as its captain.",
-    "team-set-voice-channel": "Sets a persistent team's voice channel. Captain-only.",
-    "team-invite": "Invites one or more members (up to 5 per call) to a team you captain. Captain-only — each invitee must accept before joining.",
-    "team-set-logo": "Sets a persistent team's logo to one of the built-in Clash logos. Captain-only.",
+    "report-correct-winner": "Fixes a misreported winner - undoes and reapplies the payouts, records, and elo. invalidate undoes the last game entirely instead (bets refunded, nothing reapplied), as if it never happened. Requires Manage Server.",
+    "team-create": "Creates a persistent team with you as its captain, or captain as its captain if given.",
+    "team-set": "Sets a persistent team's voice channel and/or logo, any combination in one call. new_voice_channel creates a fresh one named after the team. The team's captain, or anyone with Manage Server, can do this.",
+    "team-rename": "Renames a persistent team. The new name can't already belong to another team in this server. The team's captain, or anyone with Manage Server, can do this.",
+    "team-delete": "Deletes a persistent team - its roster, record, and any pending invites go with it. The team's captain, or anyone with Manage Server, can do this; confirmation required. Doesn't affect a tournament it's already registered in.",
+    "team-invite": "Invites one or more members (up to 5 per call) to a team. Each invitee must accept before joining. The team's captain, or anyone with Manage Server, can do this. force (Manage Server only) skips the invitee's confirmation and adds them straight to the roster.",
+    "team-leave": "Removes you from a persistent team's roster. Anyone rostered can do this to themselves, no permission needed - except the team's captain, who has to use /team-delete instead since there's no one to hand the captaincy to.",
     "my-teams": "Lists the teams you're a rostered player on in this server, with paging to flip through each one's full stats card.",
-    "team-stats": "Shows a persistent team's captain, roster, voice channel, and win/loss record. React with \U0001f6e1️ to swap it for a team card — its logo as the focal point, colors sampled from that logo, captain/roster/record/win rate. ↩️ swaps back.",
-    "team-list": "Browse every team in the server with filtering (name search, recruiting-only) and sorting (name, wins, losses, win rate, roster size — sort:\"Win Rate\" order:\"Descending\" for the old /team-leaderboard ranking). React to page through it.",
-    "team-use": "Loads two persistent teams straight into a casual or ranked game, skipping the random-split-or-draft step.",
-    "tournament-create": "Creates an empty tournament shell for this server — name, team size, and bracket size. One tournament per server.",
-    "tournament-register": "Registers one of your teams for the server's tournament. Captain-only.",
+    "team-stats": "Shows a persistent team's captain, roster, voice channel, and win/loss record. React with \U0001f6e1️ to swap it for a team card - its logo as the focal point, colors sampled from that logo, captain/roster/record/win rate. ↩️ swaps back.",
+    "team-list": "Browse every team in the server with filtering (name search, recruiting-only) and sorting (name, wins, losses, win rate, roster size - sort:\"Win Rate\" order:\"Descending\" for the old /team-leaderboard ranking). React to page through it.",
+    "team-use": "Loads two persistent teams straight into a casual or ranked game, skipping the random-split-or-draft step. Posts a roster with the same ▶️/⚡ reactions as /make-teams to start it.",
+    "reuse": "Re-posts the exact same two teams from whichever of /make-teams, /captains, or /team-use ran last, instead of drawing a fresh random split or captains draft. Stays ranked if the last game was ranked, casual if it was casual. Cancels an actively in-progress game from those same teams first (refund + move back) if there is one.",
+    "tournament-create": "Creates an empty tournament shell for this server - name, team size, and bracket size. One tournament per server.",
+    "tournament-register": "Registers one of your teams for the server's tournament. The team's captain, or anyone with Manage Server, can do this.",
     "tournament-create-bracket": "Builds the tournament bracket from whichever teams are currently registered, seeded randomly. Rerunning it rerolls the bracket. For double elimination, losers_bracket_timing picks whether the losers bracket waits for the whole winners bracket to finish, or interleaves as each round unlocks.",
     "tournament-print-bracket": "Prints the current bracket.",
     "tournament-start": "Starts playing the current round of the bracket. mode is Sequential (one match at a time) or Simultaneous (all at once, no betting).",
     "roll": "Rolls a random number between 1 and num.",
+    "dev-give-gold": "Temporary developer-only tool for testing the economy - grants yourself 1000 gold. Only usable by the hardcoded DEV_USER_ID.",
     "help": "Shows this message, or details on one command.",
 }
 
@@ -794,7 +754,7 @@ COMMAND_HELP = {
     name="help",
     description="Get a list of commands, or details on a specific one"
 )
-@app_commands.describe(command="Command name to look up — omit for the full list on the site")
+@app_commands.describe(command="Command name to look up - omit for the full list on the site")
 async def help(ctx, command: str = None):
     if command is None:
         await ctx.response.send_message(f"Full command list: {SITE_COMMANDS_URL}")
@@ -820,13 +780,19 @@ async def help(ctx, command: str = None):
 
 @tree.command(
     name="make-teams",
-    description="Create teams — randomly, or roughly elo-balanced for a ranked game"
+    description="Create teams - randomly, or roughly elo-balanced for a ranked game"
 )
 @app_commands.describe(
-    use_roles="Assign Top/Jungle/Mid/Bottom/Support roles (5-player teams only) — ignored if ranked",
+    use_roles="Assign Top/Jungle/Mid/Bottom/Support roles (5-player teams only) - ignored if ranked",
     ranked="Form roughly elo-balanced teams from your voice channel and track elo for this game",
 )
 async def makeTeams(ctx, use_roles: bool = False, ranked: bool = False):
+    if ctx.user.voice is None or ctx.user.voice.channel is None:
+        await ctx.response.send_message(
+            "You need to be in a voice channel to form teams from it - join one and try again."
+        )
+        return
+
     if ranked:
         # rankedTeamHelper handles its own response + team embeds (elo
         # averages need per-player lookups it already has to do anyway) —
@@ -844,13 +810,11 @@ async def makeTeams(ctx, use_roles: bool = False, ranked: bool = False):
     #
     # This command only announces the teams — it used to optionally move
     # everyone immediately (a `movevar` flag), but moving players and
-    # opening betting is now exclusively /start's job, so a roster can be
+    # opening betting only happens once the posted roster's own ▶️
+    # reaction is clicked (see _finalizeRoster), so a roster can be
     # announced and reviewed before anyone actually gets pulled into a
     # voice channel.
-    if use_roles:
-        await helperObj.both(ctx)
-    else:
-        await helperObj.randomizeTeamHelper(ctx)
+    await helperObj.randomizeTeamHelper(ctx)
 
     team1 = helperObj.get(ctx.guild.id, "team1")
     team2 = helperObj.get(ctx.guild.id, "team2")
@@ -864,8 +828,9 @@ async def makeTeams(ctx, use_roles: bool = False, ranked: bool = False):
 
     # Roles (Top/Jungle/Mid/Bottom/Support) only make sense for a 5-player
     # team — makeEmbedString() silently falls back to a plain roster for
-    # any other size. Explain that instead of leaving people wondering
-    # where the roles went.
+    # any other size, and _finalizeRoster silently skips the 🔄 reroll
+    # reaction for the same reason. Explain that instead of leaving people
+    # wondering where the roles went.
     if use_roles:
         unroled = [
             f"{team.get_name()} ({len(team.get_players())} players)"
@@ -878,7 +843,8 @@ async def makeTeams(ctx, use_roles: bool = False, ranked: bool = False):
                 f"assigned for: {', '.join(unroled)}. Showing the roster as normal instead."
             )
 
-    await helperObj.printEmbed(ctx, team1Obj, team2Obj, useRoles=use_roles)
+    team1_message, team2_message = await helperObj.printEmbed(ctx, team1Obj, team2Obj, useRoles=use_roles)
+    await helperObj._finalizeRoster(ctx.guild.id, team1_message, team2_message, team1Obj, team2Obj, use_roles)
 
     # BUG FIX: this used to be folded into the very first response message,
     # which gets posted *before* the team embeds and is easy to scroll past
@@ -886,41 +852,31 @@ async def makeTeams(ctx, use_roles: bool = False, ranked: bool = False):
     # it last — after the rosters, bolded — puts it where people are
     # actually looking once they're done reading the teams.
     await ctx.channel.send(
-        '📣 **Ready?** Use "/start" to move everyone into their channels and open betting.'
+        f"📣 **Ready?** React {helper.TEAM_START_EMOJI} on the roster above to move everyone into their "
+        f"channels and open betting, or {helper.TEAM_START_NO_MOVE_EMOJI} to open betting without "
+        "moving anyone."
     )
 
 
 @tree.command(
-    name="return",
-    description="Return all members (including spectators) to the original channel"
-)
-async def returnAll(ctx):
-    # BUG FIX: `original_channel == ""` never caught the "not set" case,
-    # since discord.utils.get() returns None (not "") when nothing matches.
-    # BUG FIX: Discord requires the initial interaction response within 3
-    # seconds, and this moves one member per API call — with enough people
-    # that can blow past 3 seconds before a response is sent, expiring the
-    # interaction token. Both fixes (and the refund-active-bets behavior)
-    # now live in helperObj.returnHelper, which /return and the automatic
-    # refund-before-payout path share.
-    await helperObj.returnHelper(ctx)
-
-
-@tree.command(
     name="report-correct-winner",
-    description="Admin: fix a misreported winner for the last game and adjust stats/payouts"
+    description="Admin: fix a misreported winner, or invalidate the last game entirely"
 )
 @app_commands.describe(
-    team="The team that actually won",
-    match_id="Optional: correct a specific tournament match instead of the last game"
+    team="The team that actually won - omit if invalidating instead",
+    match_id="Optional: correct a specific tournament match instead of the last game",
+    invalidate="Undo the last game entirely instead of picking a winner - refunds bets, undoes elo/records/gold",
 )
 @app_commands.choices(team=[
     app_commands.Choice(name="Team 1", value=1),
     app_commands.Choice(name="Team 2", value=2),
 ])
 @app_commands.checks.has_permissions(manage_guild=True)
-async def reportCorrectWinner(ctx, team: app_commands.Choice[int], match_id: int = None):
-    await helperObj.reportCorrectWinnerHelper(ctx, team.value, match_id)
+async def reportCorrectWinner(
+    ctx, team: app_commands.Choice[int] = None, match_id: int = None, invalidate: bool = False
+):
+    team_value = team.value if team is not None else None
+    await helperObj.reportCorrectWinnerHelper(ctx, team_value, match_id, invalidate)
 
 
 @reportCorrectWinner.error
@@ -938,10 +894,10 @@ async def reportCorrectWinner_error(ctx, error):
     description="Start captain draft"
 )
 @app_commands.describe(
-    captain_1="First captain — required unless use_random is set",
-    captain_2="Second captain — required unless use_random is set",
+    captain_1="First captain - required unless use_random is set",
+    captain_2="Second captain - required unless use_random is set",
     use_random="Pick two captains at random from the voice channel instead",
-    ranked="Track elo for this game — defaults to casual",
+    ranked="Track elo for this game - defaults to casual",
 )
 async def captains(
     ctx, captain_1: discord.Member = None, captain_2: discord.Member = None,
@@ -959,7 +915,13 @@ async def startCaptainsDraft(ctx, captain_1, captain_2, use_random, ranked):
     # `random` module imported at the top of this file (harmless here since
     # the module isn't used inside this function, but a landmine for future
     # edits).
-    if ctx.user.voice is None or len(ctx.user.voice.channel.members) < 2:
+    if ctx.user.voice is None or ctx.user.voice.channel is None:
+        await ctx.response.send_message(
+            "You need to be in a voice channel to start a captains draft - join one and try again."
+        )
+        return
+
+    if len(ctx.user.voice.channel.members) < 2:
         await ctx.response.send_message("Not enough players in the voice channel!")
         return
 
@@ -1005,7 +967,7 @@ async def startCaptainsDraft(ctx, captain_1, captain_2, use_random, ranked):
     description="Choose a player for your team (captains only)"
 )
 @app_commands.describe(
-    member="The player to pick — required unless use_random is set",
+    member="The player to pick - required unless use_random is set",
     use_random="Pick a random remaining player instead of naming one",
 )
 async def choose(ctx, member: discord.Member = None, use_random: bool = False):
@@ -1021,11 +983,12 @@ async def choose(ctx, member: discord.Member = None, use_random: bool = False):
 )
 @app_commands.describe(
     clear_channels="Also forget the saved team channel names",
-    clear_tournament="Delete this server's tournament entirely — bracket, registrations, match history. Can't be undone",
-    clear_elo="Reset every player's elo back to 1000 for this server (confirmation required)",
+    clear_tournament="Delete this server's tournament entirely - bracket, registrations, match history. Can't be undone",
+    clear_elo="Reset every player's elo back to this server's default elo (confirmation required)",
     clear_economy="Wipe every player's balance/elo/record/gold entirely for this server (confirmation required)",
-    clear_achievements="Reset earned achievements for this server, or just one player if `user` is set (confirmation required)",
-    user="With clear_achievements: only reset this player's achievements instead of everyone's",
+    clear_achievements="Reset earned achievements, or just one player if `user` is set (confirmation required)",
+    clear_card_unlocks="Wipe trading-card unlocks, or just one player if `user` is set (confirmation required)",
+    user="With clear_achievements/clear_card_unlocks: only reset this player instead of everyone",
 )
 @app_commands.checks.has_permissions(manage_guild=True)
 async def clearAll(
@@ -1035,10 +998,13 @@ async def clearAll(
     clear_elo: bool = False,
     clear_economy: bool = False,
     clear_achievements: bool = False,
+    clear_card_unlocks: bool = False,
     user: discord.Member = None,
 ):
-    if user is not None and not clear_achievements:
-        await ctx.response.send_message("`user` only applies to `clear_achievements` — set that flag too.")
+    if user is not None and not (clear_achievements or clear_card_unlocks):
+        await ctx.response.send_message(
+            "`user` only applies to `clear_achievements`/`clear_card_unlocks` - set one of those too."
+        )
         return
 
     await helperObj.clearTeamsHelper(ctx)
@@ -1052,13 +1018,15 @@ async def clearAll(
 
     await ctx.response.send_message("Cleared!")
 
-    # clear_elo, clear_economy, and clear_achievements all act on every
-    # player in the server (clear_achievements only, if narrowed to a
-    # single `user`), so none of them run immediately — a confirm/cancel
-    # view goes out as a followup and the actual reset waits for that
-    # click.
-    if clear_economy or clear_elo or clear_achievements:
-        await helperObj.confirmDestructiveClearHelper(ctx, clear_economy, clear_elo, clear_achievements, user)
+    # clear_elo, clear_economy, clear_achievements, and clear_card_unlocks
+    # all act on every player in the server (clear_achievements/
+    # clear_card_unlocks only, if narrowed to a single `user`), so none of
+    # them run immediately — a confirm/cancel view goes out as a followup
+    # and the actual reset waits for that click.
+    if clear_economy or clear_elo or clear_achievements or clear_card_unlocks:
+        await helperObj.confirmDestructiveClearHelper(
+            ctx, clear_economy, clear_elo, clear_achievements, clear_card_unlocks, user
+        )
 
 
 @clearAll.error
@@ -1071,6 +1039,40 @@ async def clearAll_error(ctx, error):
         raise error
 
 
+# The caller's own captained teams only — for team-name params on commands
+# that require being that team's captain. Same "only suggest what's
+# actually usable" idea cardTitleAutocomplete uses for card unlocks, just
+# scoped to captaincy (getTeamsCaptainedBy) instead. Doesn't stop someone
+# from typing a different name by hand — Discord's autocomplete is a
+# suggestion list, not a restriction to it — the backing helpers still do
+# their own captain check either way. A member with Manage Server can act
+# on any team (see the helpers' own "or manage_guild" override), so they
+# get every team suggested here too, not just ones they happen to captain.
+async def myCaptainedTeamAutocomplete(ctx, current: str):
+    current = current.lower()
+    if ctx.user.guild_permissions.manage_guild:
+        teams = helperObj.getTeamsForGuild(ctx.guild.id)
+    else:
+        teams = helperObj.getTeamsCaptainedBy(ctx.guild.id, ctx.user.id)
+    names = [team.get_name() for _team_id, team in teams if current in team.get_name().lower()]
+    return [app_commands.Choice(name=n, value=n) for n in names[:25]]
+
+
+# Same shape as myCaptainedTeamAutocomplete, but for team-name params that
+# only read a team rather than requiring captaincy of it (/team-stats,
+# /team-use) — every team the caller is rostered on at all (getTeamsForPlayer),
+# captain or not. Same Manage Server carve-out as myCaptainedTeamAutocomplete:
+# an admin sees every team in the guild here too, not just ones they're on.
+async def myTeamAutocomplete(ctx, current: str):
+    current = current.lower()
+    if ctx.user.guild_permissions.manage_guild:
+        teams = helperObj.getTeamsForGuild(ctx.guild.id)
+    else:
+        teams = helperObj.getTeamsForPlayer(ctx.guild.id, ctx.user.id)
+    names = [team.get_name() for _team_id, team in teams if current in team.get_name().lower()]
+    return [app_commands.Choice(name=n, value=n) for n in names[:25]]
+
+
 @tree.command(
     name="tournament-create",
     description="Create a tournament for this server"
@@ -1079,7 +1081,7 @@ async def clearAll_error(ctx, error):
     name="Tournament name",
     teamsize="Number of players per team",
     numteams="Number of teams the bracket holds",
-    double_elim="Double elimination instead of single — defaults to single"
+    double_elim="Double elimination instead of single - defaults to single"
 )
 async def createTournament(ctx, name: str, teamsize: int, numteams: int, double_elim: bool = False):
     await helperObj.createTournamentHelper(ctx, name, teamsize, numteams, double_elim)
@@ -1090,6 +1092,7 @@ async def createTournament(ctx, name: str, teamsize: int, numteams: int, double_
     description="Register a team for this server's tournament"
 )
 @app_commands.describe(team="Name of the team to register")
+@app_commands.autocomplete(team=myCaptainedTeamAutocomplete)
 async def registerTeam(ctx, team: str):
     await helperObj.registerTeamHelper(ctx, team)
 
@@ -1100,8 +1103,8 @@ async def registerTeam(ctx, team: str):
 )
 @app_commands.describe(
     elimination_type="Single or double elimination for this tournament",
-    losers_bracket_timing="Double elimination only: when the losers bracket plays — defaults to "
-                           "after the winners bracket finishes"
+    losers_bracket_timing="Double elimination only: when the losers bracket plays - defaults to "
+                           "after winners finishes"
 )
 @app_commands.choices(elimination_type=[
     app_commands.Choice(name="Single elimination", value="single"),
@@ -1109,7 +1112,7 @@ async def registerTeam(ctx, team: str):
 ])
 @app_commands.choices(losers_bracket_timing=[
     app_commands.Choice(name="After the winners bracket finishes entirely", value="after_winners"),
-    app_commands.Choice(name="Interleaved — as soon as each round unlocks it", value="interleaved"),
+    app_commands.Choice(name="Interleaved - as soon as each round unlocks it", value="interleaved"),
 ])
 async def createBracket(
     ctx, elimination_type: app_commands.Choice[str], losers_bracket_timing: app_commands.Choice[str] = None
@@ -1145,21 +1148,12 @@ async def startTournament(ctx, mode: app_commands.Choice[str]):
     name="team-create",
     description="Create a persistent team you're the captain of"
 )
-@app_commands.describe(name="Team name", team_size="How many players the team is looking for")
-async def createTeam(ctx, name: str, team_size: int):
-    await helperObj.createTeamHelper(ctx, name, team_size)
-
-
-@tree.command(
-    name="team-set-voice-channel",
-    description="Set (or create) a voice channel for a team you captain"
-)
 @app_commands.describe(
-    team="Name of the team",
-    channel="Voice channel to use — omit to create a new one named after the team"
+    name="Team name", team_size="How many players the team is looking for",
+    captain="Optional: make this member the captain instead of you",
 )
-async def setTeamVoiceChannel(ctx, team: str, channel: discord.VoiceChannel = None):
-    await helperObj.setTeamVoiceChannelHelper(ctx, team, channel)
+async def createTeam(ctx, name: str, team_size: int, captain: discord.Member = None):
+    await helperObj.createTeamHelper(ctx, name, team_size, captain)
 
 
 @tree.command(
@@ -1173,14 +1167,27 @@ async def setTeamVoiceChannel(ctx, team: str, channel: discord.VoiceChannel = No
     member_3="Another member to invite (optional)",
     member_4="Another member to invite (optional)",
     member_5="Another member to invite (optional)",
+    force="Manage Server only: add them straight to the roster, skipping their own confirmation",
 )
+@app_commands.autocomplete(team=myCaptainedTeamAutocomplete)
 async def teamInvite(
     ctx, team: str, member_1: discord.Member,
     member_2: discord.Member = None, member_3: discord.Member = None,
     member_4: discord.Member = None, member_5: discord.Member = None,
+    force: bool = False,
 ):
     members = [m for m in (member_1, member_2, member_3, member_4, member_5) if m is not None]
-    await helperObj.teamInviteHelper(ctx, team, members)
+    await helperObj.teamInviteHelper(ctx, team, members, force)
+
+
+@tree.command(
+    name="team-leave",
+    description="Leave a persistent team you're rostered on"
+)
+@app_commands.describe(team="Name of the team to leave")
+@app_commands.autocomplete(team=myTeamAutocomplete)
+async def teamLeave(ctx, team: str):
+    await helperObj.teamLeaveHelper(ctx, team)
 
 
 # Discord caps a slash command option at 25 static choices, and the built-in
@@ -1193,13 +1200,41 @@ async def logoAutocomplete(ctx, current: str):
 
 
 @tree.command(
-    name="team-set-logo",
-    description="Set a team's logo to one of the built-in Clash logos"
+    name="team-set",
+    description="Set a team's voice channel and/or logo (captain only)"
 )
-@app_commands.describe(team="Name of the team", logo="Which built-in logo to use")
-@app_commands.autocomplete(logo=logoAutocomplete)
-async def setTeamLogo(ctx, team: str, logo: str):
-    await helperObj.setTeamLogoHelper(ctx, team, logo)
+@app_commands.describe(
+    team="Name of the team",
+    voice_channel="Existing voice channel to use for the team",
+    new_voice_channel="Create a brand new voice channel named after the team",
+    logo="Which built-in logo to use",
+)
+@app_commands.autocomplete(logo=logoAutocomplete, team=myCaptainedTeamAutocomplete)
+async def setTeam(
+    ctx, team: str, voice_channel: discord.VoiceChannel = None,
+    new_voice_channel: bool = False, logo: str = None,
+):
+    await helperObj.teamSetHelper(ctx, team, voice_channel, new_voice_channel, logo)
+
+
+@tree.command(
+    name="team-rename",
+    description="Rename a persistent team you captain"
+)
+@app_commands.describe(team="Current name of the team", new_name="New name for the team")
+@app_commands.autocomplete(team=myCaptainedTeamAutocomplete)
+async def renameTeam(ctx, team: str, new_name: str):
+    await helperObj.teamRenameHelper(ctx, team, new_name)
+
+
+@tree.command(
+    name="team-delete",
+    description="Delete a persistent team you captain (confirmation required)"
+)
+@app_commands.describe(team="Name of the team to delete")
+@app_commands.autocomplete(team=myCaptainedTeamAutocomplete)
+async def deleteTeam(ctx, team: str):
+    await helperObj.teamDeleteHelper(ctx, team)
 
 
 @tree.command(
@@ -1207,6 +1242,7 @@ async def setTeamLogo(ctx, team: str, logo: str):
     description="View a team's roster and record"
 )
 @app_commands.describe(team="Name of the team")
+@app_commands.autocomplete(team=myTeamAutocomplete)
 async def teamStats(ctx, team: str):
     await helperObj.teamStatsHelper(ctx, team)
 
@@ -1221,13 +1257,13 @@ async def myTeams(ctx):
 
 @tree.command(
     name="team-list",
-    description="Browse every team in this server, with filtering and sorting — react to page through it"
+    description="Browse every team in this server, with filtering and sorting - react to page through it"
 )
 @app_commands.describe(
     search="Only show teams whose name contains this",
     recruiting_only="Only show teams still short of their target roster size",
-    sort="What to sort by — defaults to name",
-    order="Ascending or descending — defaults to ascending",
+    sort="What to sort by - defaults to name",
+    order="Ascending or descending - defaults to ascending",
 )
 @app_commands.choices(sort=[
     app_commands.Choice(name="Name", value="name"),
@@ -1256,26 +1292,41 @@ async def teamList(
 @app_commands.describe(
     team1="Name of the first persistent team",
     team2="Name of the second persistent team",
-    ranked="Track elo for this game — defaults to casual"
+    ranked="Track elo for this game - defaults to casual"
 )
+@app_commands.autocomplete(team1=myTeamAutocomplete, team2=myTeamAutocomplete)
 async def useTeams(ctx, team1: str, team2: str, ranked: bool = False):
     await helperObj.useTeamsHelper(ctx, team1, team2, ranked)
 
 
 @tree.command(
+    name="reuse",
+    description="Re-post the last game's two teams instead of making a fresh split/draft"
+)
+async def reuseTeams(ctx):
+    await helperObj.reuseTeamsHelper(ctx)
+
+
+@tree.command(
     name="notify",
-    description="Send a member — or everyone in a role — an invite to the channel"
+    description="Send a member - or everyone in a role - an invite to the channel"
 )
 @app_commands.describe(
     member="A specific member to invite",
-    role="Invite every member of this role instead — give one or the other, not both",
+    role="Invite every member of this role instead - give one or the other, not both",
+    message="Custom text to send instead of the default invite message",
 )
-async def notify(ctx, member: discord.Member = None, role: discord.Role = None):
+async def notify(ctx, member: discord.Member = None, role: discord.Role = None, message: str = None):
     if member is None and role is None:
         await ctx.response.send_message("Mention a member or a role to invite.")
         return
     if member is not None and role is not None:
         await ctx.response.send_message("Give a member or a role, not both.")
+        return
+    if ctx.user.voice is None or ctx.user.voice.channel is None:
+        await ctx.response.send_message(
+            "You need to be in a voice channel to invite someone to it - join one and try again."
+        )
         return
 
     # notifyHelper DMs the target directly rather than responding to the
@@ -1283,17 +1334,24 @@ async def notify(ctx, member: discord.Member = None, role: discord.Role = None):
     # ctx.response.send_message below still only ever fires once either way.
     targets = role.members if role is not None else [member]
     for target in targets:
-        await helperObj.notifyHelper(ctx, target)
+        await helperObj.notifyHelper(ctx, target, message)
 
-    team_size = helperObj.get(ctx.guild.id, "team_size")
-    await ctx.response.send_message("Sent an invite for the " + str(team_size * 2) + " man!")
+    # BUG FIX: this used to always reference `member.name`, which crashed
+    # with AttributeError whenever /notify was called with `role` instead
+    # (member is None in that case).
+    if member is not None:
+        summary = member.name
+    else:
+        count = len(targets)
+        summary = f"{count} member{'s' if count != 1 else ''} in {role.name}"
+    await ctx.response.send_message(f"Sent an invite to {summary}!")
 
 
 @tree.command(
     name="roll",
     description="Roll a number between 1 and the number you provide"
 )
-@app_commands.describe(num="Top of the range — must be greater than 1")
+@app_commands.describe(num="Top of the range - must be greater than 1")
 async def roll(ctx, *, num: int):
     if num > 1:
         rand = random.randint(1, num)
@@ -1302,32 +1360,22 @@ async def roll(ctx, *, num: int):
         await ctx.response.send_message("Please use a number greater than 1.")
 
 
-@tree.command(
-    name="randomize-roles",
-    description="Randomize roles"
-)
-async def randomizeRoles(ctx):
-    await helperObj.randomRoleHelper(ctx)
-    result1 = helperObj.get(ctx.guild.id, "result1")
-    result2 = helperObj.get(ctx.guild.id, "result2")
-    await ctx.response.send_message(f"**Team 1**\n{result1}\n**Team 2**\n{result2}")
+# TEMPORARY dev tool for testing the economy without grinding /daily or
+# real games — hardcoded to one Discord user id rather than a permission
+# check, since this isn't a real admin feature anyone else should be able
+# to run. Remove this command (and DEV_USER_ID) once it's no longer needed.
+DEV_USER_ID = 217743368959164416
 
 
-# TEMP: throwaway command that forces every achievement threshold for the
-# caller and then runs the REAL achievement check/unlock/announce pipeline
-# — see runSimulatedAchievementsHelper (helper.py) for how. This DOES touch
-# real data: it overwrites the caller's own economy row and card_unlocks,
-# and persists a couple of `teams` rows (named "TEST Team N"). Neither is
-# cleaned up afterward — this is a debug tool for a test server, not
-# something to run against a server with real achievement progress you
-# care about. Delete this once the achievement system is confirmed to work
-# end to end.
 @tree.command(
-    name="test-achievements",
-    description="TEMP: force every achievement for yourself through the real check/unlock/announce pipeline"
+    name="dev-give-gold",
+    description="Temporary developer tool: grants yourself 1000 gold for testing"
 )
-async def testAchievements(ctx):
-    await helperObj.runSimulatedAchievementsHelper(ctx)
+async def devGiveGold(ctx):
+    if ctx.user.id != DEV_USER_ID:
+        await ctx.response.send_message("This command is not available.")
+        return
+    await helperObj.devGiveGoldHelper(ctx)
 
 
 # Guarded so tests.py can import this module (to exercise command callbacks
