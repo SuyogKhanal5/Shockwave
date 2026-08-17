@@ -88,6 +88,15 @@ IBM_PLEX_SANS = os.path.join(FONTS_DIR, "IBMPlexSans.ttf")  # variable weight �
 RUSSO_ONE = os.path.join(FONTS_DIR, "RussoOne-Regular.ttf")
 CINZEL = os.path.join(FONTS_DIR, "Cinzel-Variable.ttf")
 ORBITRON = os.path.join(FONTS_DIR, "Orbitron-Variable.ttf")
+# Second wave of shop fonts — same "genuinely distinct typeface, not just a
+# weight" bar the three above set, all single-static-weight Google/SIL-OFL
+# fonts (no `_variation` to pass, same as Russo One). Chosen to each read
+# as a completely different mood at a glance: Press Start 2P is an actual
+# pixel-grid bitmap-style face (8-bit/arcade), Creepster is a dripping
+# horror-poster face, Black Ops One is a blocky military stencil face.
+PRESS_START_2P = os.path.join(FONTS_DIR, "PressStart2P-Regular.ttf")
+CREEPSTER = os.path.join(FONTS_DIR, "Creepster-Regular.ttf")
+BLACK_OPS_ONE = os.path.join(FONTS_DIR, "BlackOpsOne-Regular.ttf")
 
 # Colors lifted straight from shockwave-site/assets/styles.css's :root
 # palette, so the bracket image reads as part of the same brand instead of
@@ -242,6 +251,13 @@ CARD_WIDTH = 420 * BRACKET_SUPERSAMPLE
 CARD_AVATAR_SIZE = 176 * BRACKET_SUPERSAMPLE
 CARD_AVATAR_BORDER = 3 * BRACKET_SUPERSAMPLE
 CARD_NAME_FONT_SIZE = 20 * BRACKET_SUPERSAMPLE
+# Floor _fitNameFont shrinks toward — see that method's own comment for
+# why a floor is needed at all now (PRESS_START_2P's unusually wide,
+# near-monospace glyphs). Low enough that even Discord's absolute worst
+# case — a full 32-character username in PRESS_START_2P — still actually
+# clears the card's width once shrunk this far (768px at 24pt, still over
+# CARD_WIDTH's ~760px usable width; comfortably under it by 20pt).
+CARD_NAME_MIN_FONT_SIZE = 10 * BRACKET_SUPERSAMPLE
 CARD_TITLE_FONT_SIZE = 14 * BRACKET_SUPERSAMPLE
 CARD_STAT_LABEL_FONT_SIZE = 12 * BRACKET_SUPERSAMPLE
 CARD_STAT_VALUE_FONT_SIZE = 15 * BRACKET_SUPERSAMPLE
@@ -488,11 +504,16 @@ CARD_SHOP_COLOR_SCHEMES = {
 }
 # Genuinely different typefaces for the card's name/title (see
 # _cardFontPaths) — RUSSO_ONE/CINZEL/ORBITRON, not just different weights
-# of the same Chakra Petch font as before (see that BUG FIX note).
+# of the same Chakra Petch font as before (see that BUG FIX note). Retail/
+# Villain/Military are priced the same as the original three (matching,
+# not escalating, cosmetic tiers) despite arriving later.
 CARD_SHOP_FONT_STYLES = {
     "Bold": 3000,
     "Elegant": 3000,
     "Cyber": 3000,
+    "Retro": 3000,
+    "Villain": 3000,
+    "Military": 3000,
 }
 # Every card_unlocks itemKey that resolves to a real title — tier-earned,
 # specially-granted, or purchased alike — the one place getUnlockedCardTitles
@@ -5044,7 +5065,16 @@ class helpers():
     # team are filtered out rather than failing the whole command — with
     # exactly one member given, the old single-invite error messages are
     # preserved verbatim rather than folded into the multi-invite phrasing.
-    async def teamInviteHelper(self, ctx, team_name, members):
+    # `force` (Manage Server only, checked separately from — and on top of
+    # — the ordinary captain-or-admin gate above, so a captain who isn't
+    # also an admin still can't skip anyone's consent) adds every valid
+    # member straight to the roster instead: no posted invite, no ✅
+    # reaction, no team_invites row for anyone to accept later — same
+    # add_player + updateTeamData pair handleTeamInviteReaction itself
+    # commits once a real invite is actually accepted, just run
+    # immediately instead of waiting on a reaction that force is
+    # specifically here to skip.
+    async def teamInviteHelper(self, ctx, team_name, members, force=False):
         guild_id = ctx.guild.id
 
         result = self.getTeamRow(guild_id, team_name)
@@ -5057,6 +5087,13 @@ class helpers():
             await ctx.response.send_message(
                 f"Only **{team_name}**'s captain or a member with the Manage Server permission can "
                 "invite players."
+            )
+            return
+
+        if force and not ctx.user.guild_permissions.manage_guild:
+            await ctx.response.send_message(
+                "Only a member with the Manage Server permission can force-add players - "
+                "everyone else still needs the invitee's own confirmation."
             )
             return
 
@@ -5090,6 +5127,19 @@ class helpers():
             await ctx.response.send_message(f"Nobody to invite - {reasons}.")
             return
 
+        if force:
+            for member in valid:
+                team.add_player(Player(member.id, member.name))
+            self.updateTeamData(team_id, team)
+
+            mentions = ", ".join(member.mention for member in valid)
+            message = f"{mentions} added to **{team_name}** by {ctx.user.mention} - no confirmation needed."
+            if skipped:
+                reasons = "; ".join(f"{member.display_name} ({reason})" for member, reason in skipped)
+                message += f"\n(Not added: {reasons}.)"
+            await ctx.response.send_message(message)
+            return
+
         mentions = ", ".join(member.mention for member in valid)
         message = (
             f"{mentions}, {ctx.user.mention} invited you to join **{team_name}**! "
@@ -5111,6 +5161,45 @@ class helpers():
                 (guild_id, ctx.channel.id, msg.id, team_id, team_name, ctx.user.id, member.id, member.name)
             )
         self.db.commit()
+
+    # /team-leave: the self-service counterpart to /team-invite — no
+    # captain/admin gate at all, since removing *yourself* needs nobody
+    # else's permission. The captain can't use this one, though: unlike
+    # every other team command, there's no "who's in charge now" answer to
+    # fall back to (no transfer-captaincy command exists yet), so leaving a
+    # non-empty team captain-less would break isTeamCaptain everywhere else
+    # it's checked (rename/set/invite/delete) down to just "whoever has
+    # Manage Server." /team-delete is the captain's own way out instead —
+    # it already has to answer "what happens to this team" regardless of
+    # roster size.
+    async def teamLeaveHelper(self, ctx, team_name):
+        guild_id = ctx.guild.id
+
+        result = self.getTeamRow(guild_id, team_name)
+        if result is None:
+            await ctx.response.send_message(f"No team named **{team_name}** in this server.")
+            return
+        team_id, team = result
+
+        if self.isTeamCaptain(team, ctx.user.id):
+            await ctx.response.send_message(
+                f"You're **{team_name}**'s captain - use /team-delete instead if you want to leave it, "
+                "since there's nobody else to hand the captaincy to yet."
+            )
+            return
+
+        # remove_player() relies on __eq__/identity match — same "find the
+        # actual roster object by id first" pattern chooseFunc's own
+        # players.remove_player call already has to use.
+        player = next((p for p in team.get_players() if p.get_id() == ctx.user.id), None)
+        if player is None:
+            await ctx.response.send_message(f"You're not on **{team_name}**.")
+            return
+
+        team.remove_player(player)
+        self.updateTeamData(team_id, team)
+
+        await ctx.response.send_message(f"You've left **{team_name}**.")
 
     # Renames a persistent team both in the `name` column (what getTeamRow
     # looks it up by) and inside its own serialized `data` blob — those two
@@ -7075,7 +7164,8 @@ class helpers():
     # a glance, and every body element always used the same three
     # hardcoded weights regardless of font_style at all. CARD_SHOP_FONT_
     # STYLES now backs each style with a genuinely different bundled
-    # typeface (RUSSO_ONE/CINZEL/ORBITRON, all Google Fonts, SIL Open Font
+    # typeface (RUSSO_ONE/CINZEL/ORBITRON, then PRESS_START_2P/CREEPSTER/
+    # BLACK_OPS_ONE in a second wave, all Google Fonts, SIL Open Font
     # License) for name/title, and shifts every body element's weight
     # together too — there's still only the one bundled body typeface
     # (IBM_PLEX_SANS, a variable font — see _loadFont), so "a different
@@ -7106,6 +7196,27 @@ class helpers():
                 "title_font": ORBITRON, "title_variation": "SemiBold",
                 "body_font": IBM_PLEX_SANS,
                 "label_weight": "SemiBold", "value_weight": "Medium", "team_weight": "Regular",
+            }
+        if font_style == "Retro":
+            return {
+                "name_font": PRESS_START_2P, "name_variation": None,
+                "title_font": PRESS_START_2P, "title_variation": None,
+                "body_font": IBM_PLEX_SANS,
+                "label_weight": "SemiBold", "value_weight": "Medium", "team_weight": "Medium",
+            }
+        if font_style == "Villain":
+            return {
+                "name_font": CREEPSTER, "name_variation": None,
+                "title_font": CREEPSTER, "title_variation": None,
+                "body_font": IBM_PLEX_SANS,
+                "label_weight": "Bold", "value_weight": "Regular", "team_weight": "Regular",
+            }
+        if font_style == "Military":
+            return {
+                "name_font": BLACK_OPS_ONE, "name_variation": None,
+                "title_font": BLACK_OPS_ONE, "title_variation": None,
+                "body_font": IBM_PLEX_SANS,
+                "label_weight": "Bold", "value_weight": "SemiBold", "team_weight": "SemiBold",
             }
         return {
             "name_font": CHAKRA_PETCH_BOLD, "name_variation": None,
@@ -8110,6 +8221,29 @@ class helpers():
         paste_y = int(y - badge.height / 2)
         image.paste(badge, (paste_x, paste_y), badge)
 
+    # Every other bundled font stays comfortably under the card's width even
+    # for a full 32-character Discord username at CARD_NAME_FONT_SIZE —
+    # PRESS_START_2P ("Retro") is the one exception, its near-monospace,
+    # unusually-wide-per-glyph metrics can push a long real username well
+    # past the card's edge (a 22-character name measured at exactly
+    # CARD_WIDTH itself in testing, with nowhere left to safely draw a
+    # border). Rather than special-case that one font, this shrinks
+    # whichever font/variation was actually chosen down toward
+    # CARD_NAME_MIN_FONT_SIZE until it fits — a no-op in practice for every
+    # other style, since they're never close to the limit to begin with.
+    # Only the drawn font size changes; name_y/title_y and the rest of the
+    # layout stay anchored to the fixed CARD_NAME_FONT_SIZE slot regardless,
+    # so a shrunk name just leaves a little extra breathing room under it
+    # rather than needing the whole card re-laid-out.
+    def _fitNameFont(self, font_path, variation, text, max_width):
+        size = CARD_NAME_FONT_SIZE
+        font = self._loadFont(font_path, size, variation)
+        measurer = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+        while size > CARD_NAME_MIN_FONT_SIZE and measurer.textlength(text, font=font) > max_width:
+            size -= 2 * BRACKET_SUPERSAMPLE
+            font = self._loadFont(font_path, size, variation)
+        return font
+
     # Pure rendering: a portrait trading card built entirely from already-
     # fetched data (no DB/network access here — see _swapStatsForTradingCard
     # for the async half that gathers all of this). `avatar_image` is an
@@ -8132,7 +8266,9 @@ class helpers():
         background_color = self._hexToRgb(settings["background_color"], BRACKET_BACKGROUND)
         fonts = self._cardFontPaths(settings["font_style"])
 
-        name_font = self._loadFont(fonts["name_font"], CARD_NAME_FONT_SIZE, fonts["name_variation"])
+        name_font = self._fitNameFont(
+            fonts["name_font"], fonts["name_variation"], display_name, CARD_WIDTH - BRACKET_MARGIN * 2
+        )
         title_font = self._loadFont(fonts["title_font"], CARD_TITLE_FONT_SIZE, fonts["title_variation"])
         label_font = self._loadFont(fonts["body_font"], CARD_STAT_LABEL_FONT_SIZE, fonts["label_weight"])
         value_font = self._loadFont(fonts["body_font"], CARD_STAT_VALUE_FONT_SIZE, fonts["value_weight"])

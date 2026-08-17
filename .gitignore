@@ -5,3 +5,7 @@ __pycache__/
 .claude/
 data/guildData/serverInfo/main.db
 shockwave-site/
+# /preview's rendered cache (see PREVIEW_DIR/_cachedPreviewFiles in
+# helper.py) - regenerated on demand from the logo/color-scheme/font/title
+# catalogs already in source, so it's a build artifact, not source content.
+assets/previews/

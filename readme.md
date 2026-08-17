@@ -465,7 +465,29 @@ react-to-accept pattern as everything else that needs a specific person's
 consent (`TEAM_INVITE_ACCEPT_EMOJI`, its own `team_invites` table keyed by
 message id) — the captain check on both invites and voice-channel changes
 relies on `Team.get_captain()` actually returning a real `Player` object,
-which turned out to need its own fix (see below). `/team-use` is the
+which turned out to need its own fix (see below). `force` (Manage Server
+only — checked separately from, and on top of, the ordinary captain-or-
+admin gate every `/team-invite` call still has to pass first, so a captain
+who isn't also an admin can't use it) skips the whole react-to-accept
+dance: every valid member goes straight onto the roster via the same
+`add_player`/`updateTeamData` pair `handleTeamInviteReaction` itself
+commits once a real invite is accepted, just run immediately instead of
+waiting on a reaction — no posted invite, no ✅, no `team_invites` row for
+anyone to accept later.
+
+`/team-leave` is the self-service opposite of `/team-invite` — removing
+*yourself* needs nobody else's permission, so it's the one team command
+with no captain/admin gate at all. The team's own captain is the one
+exception: unlike every other command here, there's no "who's in charge
+now" to fall back to (no transfer-captaincy command exists), so letting a
+captain leave a non-empty team would strand it exactly the same way a
+`None` `get_captain()` used to before that was fixed — `isTeamCaptain`
+would fail for everyone, silently downgrading every other team command on
+it to "Manage Server members only" until someone thought to check why.
+`teamLeaveHelper` refuses outright instead, pointing the captain at
+`/team-delete` — which already has to answer "what happens to this team"
+regardless of roster size, so it's the one place that decision belongs.
+`/team-use` is the
 shortcut: it loads two persistent teams straight into `team1`/`team2` so
 a casual or ranked game can start immediately, without cloning any state
 back into the `teams` table — the in-memory copy gets `set_id(1)`/`set_id(2)`
@@ -986,17 +1008,36 @@ the title/epithet under it), `body_font` plus a `label_weight`/
 values, team/roster rows — the header's username shares `team_weight`,
 both being small secondary text).
 
-`CARD_SHOP_FONT_STYLES`' three styles each back `name_font`/`title_font`
+`CARD_SHOP_FONT_STYLES`' six styles each back `name_font`/`title_font`
 with a genuinely different bundled typeface — `"Bold"` is `RUSSO_ONE`,
-`"Elegant"` is `CINZEL`, `"Cyber"` is `ORBITRON`, all pulled from Google
-Fonts (SIL Open Font License) into `assets/fonts/`, alongside the
-already-bundled Chakra Petch/IBM Plex Sans pairing `"default"` still
-uses. `body_font` stays `IBM_PLEX_SANS` for every style — there's still
-only the one bundled body typeface — so a style's effect on the smaller
-text is a different named `_loadFont` weight/instance of that same file,
-same mechanism as `name_variation`/`title_variation` for Cinzel/Orbitron
-(both variable fonts, like `IBM_PLEX_SANS` itself); Russo One is a single
-static weight by design, so its own `_variation` fields are `None`.
+`"Elegant"` is `CINZEL`, `"Cyber"` is `ORBITRON`, `"Retro"` is
+`PRESS_START_2P`, `"Villain"` is `CREEPSTER`, `"Military"` is
+`BLACK_OPS_ONE`, all pulled from Google Fonts (SIL Open Font License) into
+`assets/fonts/`, alongside the already-bundled Chakra Petch/IBM Plex Sans
+pairing `"default"` still uses. `body_font` stays `IBM_PLEX_SANS` for
+every style — there's still only the one bundled body typeface — so a
+style's effect on the smaller text is a different named `_loadFont`
+weight/instance of that same file, same mechanism as `name_variation`/
+`title_variation` for Cinzel/Orbitron (both variable fonts, like
+`IBM_PLEX_SANS` itself); the other four (Russo One, Press Start 2P,
+Creepster, Black Ops One) are each a single static weight by design, so
+their own `_variation` fields are `None`.
+
+`PRESS_START_2P`'s near-monospace, unusually-wide-per-glyph metrics turned
+up a real bug the first five styles never touched: a long real Discord
+username (up to 32 characters) rendered in it at the standard
+`CARD_NAME_FONT_SIZE` could measure at or past `CARD_WIDTH` itself, with
+nowhere left to draw the card's own border — every other bundled font
+stays comfortably clear of the edge even at the same size. `_fitNameFont`
+fixes this generally rather than special-casing the one font: it shrinks
+whichever font/variation `_renderTradingCardImage` actually picked, in
+`_loadFont`-sized steps, down toward `CARD_NAME_MIN_FONT_SIZE` until the
+name's measured width clears `CARD_WIDTH - BRACKET_MARGIN * 2` — a no-op
+for the other five styles, since none of them come close to the limit to
+begin with. Only the drawn font size changes; `name_y`/`title_y` and the
+rest of the card's layout stay anchored to the fixed `CARD_NAME_FONT_SIZE`
+slot regardless, so a shrunk name just leaves a little extra breathing
+room under it rather than needing the whole card re-laid-out.
 
 Two rounds of BUG FIXes got the font-style feature to this point. First:
 `_cardFontPaths` originally only varied `name_font`/`title_font`, and

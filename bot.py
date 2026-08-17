@@ -732,7 +732,8 @@ COMMAND_HELP = {
     "team-set": "Sets a persistent team's voice channel and/or logo, any combination in one call. new_voice_channel creates a fresh one named after the team. The team's captain, or anyone with Manage Server, can do this.",
     "team-rename": "Renames a persistent team. The new name can't already belong to another team in this server. The team's captain, or anyone with Manage Server, can do this.",
     "team-delete": "Deletes a persistent team - its roster, record, and any pending invites go with it. The team's captain, or anyone with Manage Server, can do this; confirmation required. Doesn't affect a tournament it's already registered in.",
-    "team-invite": "Invites one or more members (up to 5 per call) to a team. Each invitee must accept before joining. The team's captain, or anyone with Manage Server, can do this.",
+    "team-invite": "Invites one or more members (up to 5 per call) to a team. Each invitee must accept before joining. The team's captain, or anyone with Manage Server, can do this. force (Manage Server only) skips the invitee's confirmation and adds them straight to the roster.",
+    "team-leave": "Removes you from a persistent team's roster. Anyone rostered can do this to themselves, no permission needed - except the team's captain, who has to use /team-delete instead since there's no one to hand the captaincy to.",
     "my-teams": "Lists the teams you're a rostered player on in this server, with paging to flip through each one's full stats card.",
     "team-stats": "Shows a persistent team's captain, roster, voice channel, and win/loss record. React with \U0001f6e1️ to swap it for a team card - its logo as the focal point, colors sampled from that logo, captain/roster/record/win rate. ↩️ swaps back.",
     "team-list": "Browse every team in the server with filtering (name search, recruiting-only) and sorting (name, wins, losses, win rate, roster size - sort:\"Win Rate\" order:\"Descending\" for the old /team-leaderboard ranking). React to page through it.",
@@ -1166,15 +1167,27 @@ async def createTeam(ctx, name: str, team_size: int, captain: discord.Member = N
     member_3="Another member to invite (optional)",
     member_4="Another member to invite (optional)",
     member_5="Another member to invite (optional)",
+    force="Manage Server only: add them straight to the roster, skipping their own confirmation",
 )
 @app_commands.autocomplete(team=myCaptainedTeamAutocomplete)
 async def teamInvite(
     ctx, team: str, member_1: discord.Member,
     member_2: discord.Member = None, member_3: discord.Member = None,
     member_4: discord.Member = None, member_5: discord.Member = None,
+    force: bool = False,
 ):
     members = [m for m in (member_1, member_2, member_3, member_4, member_5) if m is not None]
-    await helperObj.teamInviteHelper(ctx, team, members)
+    await helperObj.teamInviteHelper(ctx, team, members, force)
+
+
+@tree.command(
+    name="team-leave",
+    description="Leave a persistent team you're rostered on"
+)
+@app_commands.describe(team="Name of the team to leave")
+@app_commands.autocomplete(team=myTeamAutocomplete)
+async def teamLeave(ctx, team: str):
+    await helperObj.teamLeaveHelper(ctx, team)
 
 
 # Discord caps a slash command option at 25 static choices, and the built-in

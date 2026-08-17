@@ -35,7 +35,7 @@ from unittest.mock import AsyncMock, MagicMock, PropertyMock, mock_open, patch
 
 import discord
 from discord import app_commands
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 
 from TourneyClasses import (
     Player, Team, Tournament, BracketNode, serialize_bracket, deserialize_bracket,
@@ -2254,6 +2254,71 @@ class TeamInviteHelperTests(HelperTestCase):
         self.cursor.execute("SELECT COUNT(*) FROM team_invites")
         self.assertEqual(self.cursor.fetchone()[0], 0)
 
+    async def test_force_rejects_a_captain_who_is_not_also_an_admin(self):
+        # force is Manage Server only - even the team's own captain can't
+        # use it without also being an admin, unlike an ordinary invite.
+        await self._make_team()
+        ctx = self._ctx(manage_guild=False)  # Alice, the captain, but no Manage Server
+        target = FakeMember("Bob", id=902)
+        await self.helperObj.teamInviteHelper(ctx, "Red", [target], force=True)
+        ctx.response.send_message.assert_awaited_once_with(
+            "Only a member with the Manage Server permission can force-add players - "
+            "everyone else still needs the invitee's own confirmation."
+        )
+        _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        self.assertEqual([p.get_id() for p in team.get_players()], [901])
+
+    async def test_force_adds_directly_to_the_roster_with_no_reaction_or_pending_row(self):
+        await self._make_team()
+        ctx = self._ctx(user_id=903, name="Cleo", manage_guild=True)  # admin, not the captain
+        target = FakeMember("Bob", id=902)
+        posted_message = FakeMessage(id=790)
+        ctx.original_response.return_value = posted_message
+
+        await self.helperObj.teamInviteHelper(ctx, "Red", [target], force=True)
+
+        ctx.response.send_message.assert_awaited_once()
+        text = ctx.response.send_message.call_args.args[0]
+        self.assertIn(target.mention, text)
+        self.assertIn(ctx.user.mention, text)
+        self.assertIn("no confirmation needed", text)
+        posted_message.add_reaction.assert_not_awaited()
+
+        _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        self.assertEqual(sorted(p.get_id() for p in team.get_players()), [901, 902])
+
+        self.cursor.execute("SELECT COUNT(*) FROM team_invites")
+        self.assertEqual(self.cursor.fetchone()[0], 0)
+
+    async def test_force_still_skips_bots_and_already_rostered_members(self):
+        await self._make_team()
+        ctx = self._ctx(manage_guild=True)
+        bob = FakeMember("Bob", id=902)
+        botty = FakeMember("Botty", id=904, bot=True)
+
+        await self.helperObj.teamInviteHelper(ctx, "Red", [bob, ctx.user, botty], force=True)
+
+        text = ctx.response.send_message.call_args.args[0]
+        self.assertIn(bob.mention, text)
+        self.assertIn("Not added", text)
+        self.assertIn("Alice", text)
+        self.assertIn("Botty", text)
+        _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        self.assertEqual(sorted(p.get_id() for p in team.get_players()), [901, 902])
+
+    async def test_force_with_nobody_valid_still_reports_reasons_and_adds_nobody(self):
+        await self._make_team()
+        ctx = self._ctx(manage_guild=True)
+        botty = FakeMember("Botty", id=904, bot=True)
+
+        await self.helperObj.teamInviteHelper(ctx, "Red", [ctx.user, botty], force=True)
+
+        text = ctx.response.send_message.call_args.args[0]
+        self.assertIn("Alice", text)
+        self.assertIn("Botty", text)
+        _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        self.assertEqual([p.get_id() for p in team.get_players()], [901])
+
 
 class HandleTeamInviteReactionTests(HelperTestCase):
     def setUp(self):
@@ -2342,6 +2407,64 @@ class HandleTeamInviteReactionTests(HelperTestCase):
 
         _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
         self.assertEqual({p.get_id() for p in team.get_players()}, {901, 902, 903})
+
+
+class TeamLeaveHelperTests(HelperTestCase):
+    def _ctx(self, user_id=901, name="Alice"):
+        return FakeInteraction(self.guild, FakeMember(name, id=user_id))
+
+    async def _make_team(self, name="Red", captain_id=901, captain_name="Alice"):
+        ctx = self._ctx(user_id=captain_id, name=captain_name)
+        await self.helperObj.createTeamHelper(ctx, name, 5)
+
+    async def test_rejects_unknown_team(self):
+        ctx = self._ctx()
+        await self.helperObj.teamLeaveHelper(ctx, "Nonexistent")
+        ctx.response.send_message.assert_awaited_once_with("No team named **Nonexistent** in this server.")
+
+    async def test_rejects_the_captain(self):
+        await self._make_team()
+        ctx = self._ctx()  # Alice, the captain
+        await self.helperObj.teamLeaveHelper(ctx, "Red")
+        ctx.response.send_message.assert_awaited_once_with(
+            "You're **Red**'s captain - use /team-delete instead if you want to leave it, "
+            "since there's nobody else to hand the captaincy to yet."
+        )
+        _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        self.assertEqual([p.get_id() for p in team.get_players()], [901])
+
+    async def test_rejects_someone_not_on_the_team(self):
+        await self._make_team()
+        ctx = self._ctx(user_id=902, name="Bob")
+        await self.helperObj.teamLeaveHelper(ctx, "Red")
+        ctx.response.send_message.assert_awaited_once_with("You're not on **Red**.")
+
+    async def test_removes_a_non_captain_player_from_the_roster(self):
+        await self._make_team()
+        _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        team.add_player(Player(902, "Bob"))
+        self.helperObj.updateTeamData(team.get_id(), team)
+
+        ctx = self._ctx(user_id=902, name="Bob")
+        await self.helperObj.teamLeaveHelper(ctx, "Red")
+
+        ctx.response.send_message.assert_awaited_once_with("You've left **Red**.")
+        _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        self.assertEqual([p.get_id() for p in team.get_players()], [901])
+
+    async def test_leaving_does_not_affect_other_rostered_players(self):
+        await self._make_team()
+        _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        team_id = team.get_id()
+        team.add_player(Player(902, "Bob"))
+        team.add_player(Player(903, "Cleo"))
+        self.helperObj.updateTeamData(team_id, team)
+
+        ctx = self._ctx(user_id=902, name="Bob")
+        await self.helperObj.teamLeaveHelper(ctx, "Red")
+
+        _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        self.assertEqual(sorted(p.get_id() for p in team.get_players()), [901, 903])
 
 
 class TeamStatsHelperTests(_FakeLogoDirTestCase):
@@ -8063,6 +8186,9 @@ class ShopTests(HelperTestCase):
         self.assertIn("Legend", values["__Titles__"])
         self.assertIn("Crimson", values["__Color Schemes__"])
         self.assertIn("Bold", values["__Fonts__"])
+        self.assertIn("Retro", values["__Fonts__"])
+        self.assertIn("Villain", values["__Fonts__"])
+        self.assertIn("Military", values["__Fonts__"])
         self.assertIn(f"{helper_module.CARD_SHOP_TITLES['Legend']} gold", values["__Titles__"])
 
     async def test_shop_marks_already_owned_items(self):
@@ -8260,6 +8386,35 @@ class RenderTradingCardImageTests(HelperTestCase):
         )
         self.assertEqual(image.width, helper_module.CARD_WIDTH)
 
+    def test_name_font_shrinks_to_fit_a_long_username_in_every_shop_font(self):
+        # Regression test: PRESS_START_2P ("Retro")'s near-monospace glyphs
+        # are unusually wide - a real (up to 32-char) Discord username at
+        # the standard CARD_NAME_FONT_SIZE could measure at or past
+        # CARD_WIDTH itself, well past the card's own border, where every
+        # other bundled font stays comfortably clear of the edge.
+        # _fitNameFont shrinks the actual font size (never the layout) to
+        # cover this for any font, not just this one.
+        max_width = helper_module.CARD_WIDTH - helper_module.BRACKET_MARGIN * 2
+        name = "abcdefghijklmnopqrstuvwxyzABCDEF"  # Discord's own 32-char cap
+        measurer = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+        for font_style in (helper_module.CARD_DEFAULT_FONT_STYLE, *helper_module.CARD_SHOP_FONT_STYLES):
+            fonts = self.helperObj._cardFontPaths(font_style)
+            font = self.helperObj._fitNameFont(fonts["name_font"], fonts["name_variation"], name, max_width)
+            self.assertLessEqual(measurer.textlength(name, font=font), max_width)
+
+    def test_name_font_never_shrinks_below_the_floor(self):
+        # An absurdly long name still can't be made to fit at ANY size a
+        # human could read - _fitNameFont has to stop somewhere rather than
+        # shrinking toward 0.
+        fonts = self.helperObj._cardFontPaths("Retro")
+        font = self.helperObj._fitNameFont(fonts["name_font"], fonts["name_variation"], "x" * 200, max_width=1)
+        self.assertEqual(font.size, helper_module.CARD_NAME_MIN_FONT_SIZE)
+
+    def test_name_font_does_not_shrink_when_it_already_fits(self):
+        fonts = self.helperObj._cardFontPaths(helper_module.CARD_DEFAULT_FONT_STYLE)
+        font = self.helperObj._fitNameFont(fonts["name_font"], fonts["name_variation"], "Alice", 100000)
+        self.assertEqual(font.size, helper_module.CARD_NAME_FONT_SIZE)
+
     def test_grows_taller_to_fit_teams(self):
         settings = {
             "title": "X", "accent_color": "#EDC643", "background_color": "#150B22",
@@ -8386,6 +8541,28 @@ class RenderTradingCardImageTests(HelperTestCase):
         default_name_font = self.helperObj._cardFontPaths(helper_module.CARD_DEFAULT_FONT_STYLE)["name_font"]
         for font_style in helper_module.CARD_SHOP_FONT_STYLES:
             self.assertNotEqual(self.helperObj._cardFontPaths(font_style)["name_font"], default_name_font)
+
+    def test_every_font_style_uses_its_own_distinct_font_file(self):
+        # Not just distinct from "default" — distinct from every OTHER shop
+        # style too, so two styles can't accidentally end up pointing at
+        # the same bundled file.
+        paths = {
+            font_style: self.helperObj._cardFontPaths(font_style)["name_font"]
+            for font_style in (helper_module.CARD_DEFAULT_FONT_STYLE, *helper_module.CARD_SHOP_FONT_STYLES)
+        }
+        self.assertEqual(len(set(paths.values())), len(paths))
+
+    def test_every_shop_font_file_actually_loads(self):
+        # _loadFont silently degrades to PIL's built-in font on a bad path
+        # (OSError/ValueError caught and swallowed) — real for a genuinely
+        # missing/renamed style, but it means a corrupted or truncated font
+        # FILE wouldn't be caught by any test that only goes through
+        # _loadFont. Load each bundled shop-font file directly instead, so
+        # a bad download/corrupted TTF fails loudly here.
+        for font_style in helper_module.CARD_SHOP_FONT_STYLES:
+            paths = self.helperObj._cardFontPaths(font_style)
+            font = ImageFont.truetype(paths["name_font"], 40)
+            self.assertGreater(len(font.getname()[0]), 0)
 
     def test_unrecognized_font_style_falls_back_to_default(self):
         self.assertEqual(
@@ -9925,7 +10102,7 @@ class CommandRegistrationTests(BotModuleTestCase):
             "team-rename", "team-delete",
             "team-invite", "team-stats", "team-list", "my-teams",
             "tournament-register", "tournament-create-bracket",
-            "tournament-print-bracket", "tournament-start", "team-use", "reuse", "preview",
+            "tournament-print-bracket", "tournament-start", "team-use", "reuse", "preview", "team-leave",
         }
         self.assertEqual(names, expected)
 
@@ -10499,7 +10676,7 @@ class CommandDelegationTests(BotModuleTestCase):
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "teamInviteHelper", mock):
             await self._command("team-invite").callback(ctx, "Red", target)
-        mock.assert_awaited_once_with(ctx, "Red", [target])
+        mock.assert_awaited_once_with(ctx, "Red", [target], False)
 
     async def test_team_invite_delegates_multiple_members_and_drops_unset_slots(self):
         ctx = self._ctx()
@@ -10510,7 +10687,22 @@ class CommandDelegationTests(BotModuleTestCase):
             await self._command("team-invite").callback(
                 ctx, "Red", member_1=bob, member_2=cleo, member_3=None, member_4=None, member_5=None
             )
-        mock.assert_awaited_once_with(ctx, "Red", [bob, cleo])
+        mock.assert_awaited_once_with(ctx, "Red", [bob, cleo], False)
+
+    async def test_team_invite_delegates_force_flag(self):
+        ctx = self._ctx()
+        target = FakeMember("Bob", id=902)
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "teamInviteHelper", mock):
+            await self._command("team-invite").callback(ctx, "Red", target, force=True)
+        mock.assert_awaited_once_with(ctx, "Red", [target], True)
+
+    async def test_team_leave_delegates(self):
+        ctx = self._ctx()
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "teamLeaveHelper", mock):
+            await self._command("team-leave").callback(ctx, "Red")
+        mock.assert_awaited_once_with(ctx, "Red")
 
     async def test_team_stats_delegates(self):
         ctx = self._ctx()
