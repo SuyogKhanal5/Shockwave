@@ -20,11 +20,10 @@ with open("token.txt") as f:
 dataFolder = "data/guildData/serverInfo/"
 dbpath = dataFolder + "main.db"
 
-# BUG FIX: sqlite3.connect() creates the database FILE on disk as a side
-# effect of connecting, even if it's empty. The original code checked
-# `path.isfile(dbpath)` *after* calling connect(), so the file always
-# already existed by the time the check ran — meaning CREATE TABLE never
-# executed, even on a brand new install. Check existence first.
+# sqlite3.connect() creates the database FILE on disk as a side effect of
+# connecting, even if it's empty — this check has to run before connect()
+# or the file will always already exist by the time it's checked, and
+# CREATE TABLE below will never execute, even on a brand new install.
 db_already_existed = path.isfile(dbpath)
 
 mainDB = sqlite3.connect(dbpath)
@@ -33,8 +32,8 @@ cursor = mainDB.cursor()
 
 def ensure_column(table, column, coltype="", default=None):
     # Adds a column to an existing table if it isn't already there, so
-    # installs that predate the economy/betting feature don't need a fresh
-    # database — only used for tables that existed before this feature.
+    # databases that predate the economy/betting feature don't need a one
+    # only used for tables that existed before this feature.
     cursor.execute(f"PRAGMA table_info({table})")
     existing_cols = [row[1] for row in cursor.fetchall()]
     if column not in existing_cols:
@@ -55,22 +54,16 @@ if not db_already_existed:
         "roster_team1_message_id, roster_team2_message_id, roster_channel_id, roster_use_roles, "
         "default_elo)"
     )
-    # BUG FIX: the original CREATE TABLE call was never committed.
     mainDB.commit()
 else:
-    # LEGACY: the now-removed /randomize-roles command (randomRoleHelper)
-    # used to write to "result1"/"result2", but these were never columns on
-    # `servers` — on any pre-existing database, that command crashed with
-    # "sqlite3.OperationalError: no such column: result1" the moment it ran.
-    # Left in place (nothing reads/writes them anymore) rather than
-    # attempting a column drop, matching this file's additive-only
-    # migration approach elsewhere.
+    # result1/result2 are unused - nothing reads or writes them - kept only
+    # for schema compatibility with databases that predate this migration.
     ensure_column("servers", "result1", "TEXT")
     ensure_column("servers", "result2", "TEXT")
-    # BUG FIX: same story for "captain1"/"captain2" — captainsHelper and
-    # chooseFunc/chooseHelper read and write these, but they were never
-    # columns either, so the entire /captains draft flow has always
-    # crashed with "no such column: captain1" on the very first call.
+    # captain1/captain2 are read and written by captainsHelper and
+    # chooseFunc/chooseHelper (the /captains draft flow) but aren't part of
+    # the original CREATE TABLE above, so a pre-existing database needs
+    # them added via migration rather than already having them.
     ensure_column("servers", "captain1", "TEXT")
     ensure_column("servers", "captain2", "TEXT")
     ensure_column("servers", "betting_state", "TEXT", "'NONE'")
@@ -94,12 +87,12 @@ else:
     # however many matches are open at once (see
     # _openConcurrentTournamentBetting).
     ensure_column("servers", "betting_timer_seconds", "INTEGER", str(helper.BETTING_DURATION_SECONDS))
-    # The live "reroll roles / start the game" reaction control on a just-
-    # posted, actually-final roster — see _finalizeRoster/handleRosterReaction
+    # The live "reroll roles / start the game" button controls on a just-
+    # posted, actually-final roster — see _finalizeRoster/RosterActionView
     # (replaces the old standalone /randomize-roles and /start commands).
-    # roster_team2_message_id is what a reaction is actually checked
-    # against; overwriting it on every new roster is what makes an older
-    # roster's reactions inert once a newer one has been posted.
+    # roster_team2_message_id is what a click is actually checked against;
+    # overwriting it on every new roster is what makes an older roster's
+    # buttons inert once a newer one has been posted.
     ensure_column("servers", "roster_team1_message_id", "INTEGER")
     ensure_column("servers", "roster_team2_message_id", "INTEGER")
     ensure_column("servers", "roster_channel_id", "INTEGER")
@@ -158,7 +151,7 @@ cursor.execute(
     "challengerId, challengerName, targetId, targetName, amount, state)"
 )
 # One row per posted /leaderboard message, tracking which page it's
-# currently showing so the paging reactions know what to re-render.
+# currently showing so the paging buttons know what to re-render.
 cursor.execute(
     "CREATE TABLE IF NOT EXISTS leaderboards("
     "messageId INTEGER PRIMARY KEY, guildId, channelId, filter, sort_order, page)"
@@ -171,31 +164,29 @@ cursor.execute(
     "CREATE TABLE IF NOT EXISTS my_team_views("
     "messageId INTEGER PRIMARY KEY, guildId, channelId, userId, page)"
 )
-# One row per posted /stats message — recognizes that a reaction landed on
-# a real /stats embed (see handleStatsReaction).
+# One row per posted /stats message — recognizes that a click landed on
+# a real /stats embed (see StatsView).
 cursor.execute(
     "CREATE TABLE IF NOT EXISTS stats_views(messageId INTEGER PRIMARY KEY, guildId)"
 )
-# BUG FIX: targetUserId and cardShown were added to stats_views after it
-# already shipped — "CREATE TABLE IF NOT EXISTS" above is a no-op on a
-# database that already has the table from before these columns existed
-# (same story as economy/tournament_matches below), so a live server's
-# stats_views was silently missing both until ensure_column started
-# actually adding them. targetUserId is who to re-fetch the real avatar
-# for when toggling back off the placeholder; cardShown flips to 1 once
-# the trading-card reaction fires — the avatar toggle refuses to touch the
-# message after that (see handleStatsReaction), since a trading card isn't
-# shaped like a normal /stats embed anymore and toggling its thumbnail
-# would just make a mess of it.
+# "CREATE TABLE IF NOT EXISTS" above is a no-op on a database that already
+# has the table, so targetUserId/cardShown (added after stats_views
+# shipped, same story as economy/tournament_matches below) need
+# ensure_column to actually reach an existing server's table. targetUserId
+# is who to re-fetch the real avatar for when toggling back off the
+# placeholder; cardShown flips to 1 once the Card button is pressed — the
+# avatar toggle refuses to touch the message after that (see StatsView),
+# since a trading card isn't shaped like a normal /stats embed anymore and
+# toggling its thumbnail would just make a mess of it.
 ensure_column("stats_views", "targetUserId")
 ensure_column("stats_views", "cardShown", "INTEGER", "0")
 # Which avatar the trading card is currently rendered with — 0 (default)
 # for this server's own profile picture, 1 for the regular account-wide
 # one. Only meaningful once cardShown=1; reset to 0 every time the card is
 # (re-)entered so it always starts on the server avatar, matching the
-# plain /stats embed's own default (see handleStatsReaction).
+# plain /stats embed's own default (see StatsView).
 ensure_column("stats_views", "cardAvatarGlobal", "INTEGER", "0")
-# A player's trading-card look (see /stats' \U0001F0CF reaction and
+# A player's trading-card look (see /stats' Card button and
 # _renderTradingCardImage) — one row per (guild, player), created with
 # Shockwave's own defaults the first time it's needed. Colors are stored as
 # "#RRGGBB" hex, font_style is a named preset _cardFontPaths knows how to
@@ -231,17 +222,16 @@ cursor.execute(
     "CREATE TABLE IF NOT EXISTS card_unlocks("
     "guildId, userId, itemType, itemKey, PRIMARY KEY(guildId, userId, itemType, itemKey))"
 )
-# One row per posted /team-stats message — recognizes that a reaction
-# landed on a real /team-stats embed (see handleTeamStatsReaction), same
-# idea as stats_views above but scoped to a team (teamId) rather than a
-# player.
+# One row per posted /team-stats message — recognizes that a click
+# landed on a real /team-stats embed (see TeamStatsView), same idea as
+# stats_views above but scoped to a team (teamId) rather than a player.
 cursor.execute(
     "CREATE TABLE IF NOT EXISTS team_stats_views("
     "messageId INTEGER PRIMARY KEY, guildId, teamId, cardShown INTEGER DEFAULT 0)"
 )
 # One row per posted /team-list message — same paging idea as leaderboards
 # above, plus the filter/sort options it was posted with, so a page flip
-# (handleTeamListReaction) re-applies the exact same view instead of
+# (_handleTeamListPageClick) re-applies the exact same view instead of
 # resetting to the unfiltered/default-sorted list.
 cursor.execute(
     "CREATE TABLE IF NOT EXISTS team_list_views("
@@ -297,7 +287,7 @@ cursor.execute(
 ensure_column("tournament_matches", "bracketType", "TEXT", "'winners'")
 # Set once this match's own betting window (see
 # _openConcurrentTournamentBetting) has closed — separate from `state`,
-# since a match can still be unresolved (waiting on a reaction) after
+# since a match can still be unresolved (waiting on a report) after
 # betting on it has already closed.
 ensure_column("tournament_matches", "bettingClosed", "INTEGER", "0")
 # JSON snapshot of exactly which wagers _settleMatchWagers paid out for this
@@ -315,6 +305,33 @@ cursor.execute(
     "CREATE TABLE IF NOT EXISTS tournament_wagers("
     "matchId, guildId, userId, username, team, amount, "
     "PRIMARY KEY(matchId, userId))"
+)
+# /setup: each role a player has explicitly said they like or dislike
+# playing — `role` is one of SETUP_ROLE_NAMES, `preference` is 'like' or
+# 'dislike'. The PRIMARY KEY includes `role` (not `preference`), so a role
+# can only ever have ONE stored preference per player at a time. A role
+# picked in both the liked and disliked steps of the same /setup run never
+# reaches this table at all (see helper.py's _confirmSetupRoleStep - it's
+# left out of both sides instead, i.e. neutral), so nothing here has to
+# resolve that contradiction itself. Meant to feed a future role-aware elo
+# balance; for now it's read only to gate /make-teams' use_roles on
+# everyone in the voice channel having run /setup at least once.
+cursor.execute(
+    "CREATE TABLE IF NOT EXISTS player_role_preferences("
+    "guildId, userId, role, preference, PRIMARY KEY(guildId, userId, role))"
+)
+# /setup's own in-progress role-picker: one row per posted message while
+# the caller is still toggling/confirming, deleted once they finish (or
+# the view times out). `step` is 'liked' or 'disliked' (which round is
+# currently live); `selectedRoles` is a comma-separated snapshot of
+# whichever roles are CURRENTLY toggled on for that round, kept in sync by
+# _handleSetupRoleToggleClick as the caller presses each role's button;
+# `likedRoles` only gets filled in once the liked round is confirmed,
+# carrying that finished set forward so the disliked round's own confirm
+# can check both against each other.
+cursor.execute(
+    "CREATE TABLE IF NOT EXISTS setup_role_sessions("
+    "messageId INTEGER PRIMARY KEY, guildId, userId, step, selectedRoles, likedRoles)"
 )
 mainDB.commit()
 
@@ -376,20 +393,15 @@ async def syncCommandsToGuild(guild):
     await tree.sync(guild=guild)
 
 
-# BUG FIX: the four roster_* columns (added later via ensure_column, see
-# above) meant the plain positional INSERT below started supplying fewer
-# values than the table actually has — sqlite3.OperationalError on every
-# single on_guild_join, silently swallowed by discord.py's own event-error
-# logging, so the guild's servers row was simply never created. Every
-# command that reads a column via helperObj.get() (a bare
-# cursor.fetchone()[0]) then crashed with "'NoneType' object is not
-# subscriptable" the moment anyone tried to use the bot in that guild.
-# ensure_guild_row is now the one place that inserts a row — check first,
-# insert only if missing, so it's safe to call from on_ready too (self-
-# healing any guild whose row never got created, or was lost to a wiped/
-# restored database) without ever creating a duplicate row for a guild
-# that already has one (servers.guildId has no UNIQUE constraint to lean
-# on INSERT OR IGNORE for).
+# The one place that inserts a `servers` row — check first, insert only if
+# missing, so it's safe to call from on_ready too (self-healing any guild
+# whose row never got created, or was lost to a wiped/restored database)
+# without ever creating a duplicate row for a guild that already has one
+# (servers.guildId has no UNIQUE constraint to lean on INSERT OR IGNORE
+# for). The positional INSERT below has to supply a value for every column
+# on `servers`, including the roster_* ones added later via ensure_column
+# above — falling out of sync with the table's actual column count throws
+# sqlite3.OperationalError.
 def ensure_guild_row(guild_id, guild_name):
     cursor.execute("SELECT 1 FROM servers WHERE guildId=?", (guild_id,))
     if cursor.fetchone() is not None:
@@ -410,7 +422,36 @@ async def on_ready():
         ensure_guild_row(guild.id, guild.name)
     if not rotateStatus.is_running():
         rotateStatus.start()
+    registerPersistentViews()
     print('Command: Shockwave')
+
+
+# Persistent views (every button has a fixed custom_id, timeout=None) need
+# registering exactly once per process so Discord keeps routing their
+# clicks to this bot even across a restart/redeploy - on_ready can fire
+# more than once (e.g. on reconnect), so this is guarded the same way
+# rotateStatus.is_running() above guards the status-rotation task from
+# being started twice.
+_persistent_views_registered = False
+
+
+def registerPersistentViews():
+    global _persistent_views_registered
+    if _persistent_views_registered:
+        return
+    client.add_view(helper.WinnerReportView(helperObj))
+    client.add_view(helper.DuelAcceptView(helperObj))
+    client.add_view(helper.DuelResultView(helperObj))
+    client.add_view(helper.TournamentReadyView(helperObj))
+    client.add_view(helper.TournamentMatchReportView(helperObj))
+    client.add_view(helper.RosterActionView(helperObj))
+    client.add_view(helper.TeamInviteAcceptView(helperObj))
+    client.add_view(helper.StatsView(helperObj))
+    client.add_view(helper.TeamStatsView(helperObj))
+    client.add_view(helper.LeaderboardPagingView(helperObj))
+    client.add_view(helper.MyTeamsPagingView(helperObj))
+    client.add_view(helper.TeamListPagingView(helperObj))
+    _persistent_views_registered = True
 
 
 @client.event
@@ -424,38 +465,6 @@ async def on_guild_remove(ctx):
     cursor.execute("""DELETE FROM servers WHERE guildId=?""", (ctx.id,))
     mainDB.commit()
 
-
-# Every reaction-driven feature's handler — each one looks at `payload` and
-# no-ops immediately if it's not for one of ITS OWN messages (a leaderboard
-# page, a tournament ready-check, ...), so running all of them per reaction
-# is cheap. They're called individually rather than in a loop over a plain
-# list of callables so each one's name still shows up in a traceback.
-REACTION_HANDLERS = (
-    "handleGameReportReaction", "handleDuelReaction", "handleLeaderboardReaction",
-    "handleMyTeamsReaction", "handleTeamListReaction", "handleTeamInviteReaction",
-    "handleTournamentReaction", "handleStatsReaction", "handleTeamStatsReaction",
-    "handleRosterReaction",
-)
-
-
-@client.event
-async def on_raw_reaction_add(payload):
-    # Ignore the bot's own TEAM_EMOJIS/CANCEL_GAME_EMOJI reactions on the
-    # winner-report message, and DM reactions (no guild).
-    if payload.member is None or payload.member.bot or payload.guild_id is None:
-        return
-
-    # BUG FIX: these used to run as one unguarded sequence of awaits — an
-    # exception raised by any one of them (say, handleGameReportReaction on a
-    # malformed payload) skipped every handler after it for that same
-    # reaction, with nothing telling the user their click didn't do
-    # anything. Each now gets its own try/except so a bug in one handler
-    # can't silently swallow the rest.
-    for handler_name in REACTION_HANDLERS:
-        try:
-            await getattr(helperObj, handler_name)(payload)
-        except Exception:
-            traceback.print_exc()
 
 
 # Catch-all for every slash command's errors. discord.py calls this after
@@ -668,7 +677,7 @@ async def shopBuy(ctx, item: str):
 
 @tree.command(
     name="leaderboard",
-    description="Rank the server by a stat - react to page through it"
+    description="Rank the server by a stat - buttons to page through it"
 )
 @app_commands.describe(
     filter="Which stat to rank by - omit for an overview of elo, balance, and record",
@@ -713,20 +722,20 @@ SITE_COMMANDS_URL = "https://shockwave.netlify.app/commands.html"
 COMMAND_HELP = {
     "set": "Admin one-stop for server settings: team1+team2 names the two voice channels teams get moved into (creates them if missing), size sets how many players make up one side, betting_timer sets how long a betting window stays open (1-600 seconds, multiplied by the number of matches for a concurrent tournament round), wager_channel redirects every betting posting to one specific text channel, member+elo sets a player's elo directly to an exact value (still credits any Diamond+ tier reward the new elo qualifies for), and default_elo sets what a brand new player in this server starts at (1000 by default; doesn't touch anyone's existing elo - use /clear's clear_elo to reset current players to it). Give any combination in one call - team1/team2 and member/elo must each be given as a pair. Requires the Manage Server permission.",
     "clear": "Wipes the current teams/draft so you can start a fresh session. clear_tournament deletes this server's tournament entirely. clear_elo and clear_economy reset data for every player; clear_achievements and clear_card_unlocks do too unless a user is given, which narrows either to just them. Requires the Manage Server permission.",
-    "make-teams": "Randomly splits everyone in your voice channel into two even teams and posts the roster, with a ▶️ reaction on it to move everyone and open betting when you're ready (⚡ to open betting without moving anyone; 🔄 to reroll roles too, if use_roles was set). ranked:true forms roughly elo-balanced teams instead, and tracks elo once a winner is reported.",
-    "captains": "Starts a live captain draft. Name two captains, or use_random to pick two automatically; everyone else lands in a pool picked from with /choose. Once both teams are set, react ▶️ on the roster to move everyone and open betting, or ⚡ to open betting without moving anyone. ranked:true tracks elo for the resulting game.",
+    "make-teams": "Randomly splits everyone in your voice channel into two even teams and posts the roster, with a Start button on it to move everyone and open betting when you're ready (Start (no move) to open betting without moving anyone; Reroll to reroll roles too, if use_roles was set). ranked:true forms roughly elo-balanced teams instead, and tracks elo once a winner is reported. Combine ranked:true with use_roles:true (10 players only) to also assign Top/Jungle/Mid/Bottom/Support, preferring each player's liked roles from /setup and nudging the split toward whichever side is more balanced once roles are considered.",
+    "captains": "Starts a live captain draft. Name two captains, or use_random to pick two automatically; everyone else lands in a pool picked from with /choose. Once both teams are set, press Start on the roster to move everyone and open betting, or Start (no move) to open betting without moving anyone. ranked:true tracks elo for the resulting game.",
     "choose": "Captains only. Picks one player from the draft pool onto your team, then passes the turn to the other captain.",
     "notify": "DMs a one-time invite link to your voice channel - to one member, or to everyone holding a given role. message optionally replaces the default invite text; either way it's signed \"Sent by\" you. You must be sitting in a voice channel yourself to run this.",
     "wager": "Bets gold on one team winning the current game - or, with a match id, on a specific tournament match. Only while betting is open, one bet per player per game/match.",
     "wager-against": "Challenges another player to a heads-up gold wager - separate from team-game betting, no active game required.",
     "daily": "Claims 1000 free gold. Once per calendar day, per player.",
-    "stats": "Shows a player's elo, ranked/casual/game record, betting record, balance, and net gold - defaults to you. React with \U0001f5bc️ to toggle the avatar between this server's own profile picture and their regular account-wide one, or \U0001F0CF to replace the whole embed with a customizable trading card; \U0001faaa swaps back.",
-    "card-set": "Equips your unlocked trading-card title, color scheme, and/or font in one go (see /stats' \U0001F0CF reaction) - set any combination of the three at once. Reaching Diamond, Master, Grandmaster, or Challenger permanently unlocks that tier's own title and scheme, even if you derank afterward; \"Default\" is always available for both. Fonts are purchased from /shop.",
+    "stats": "Shows a player's elo, ranked/casual/game record, betting record, balance, and net gold - defaults to you. Press Avatar to toggle the shown avatar between this server's own profile picture and their regular account-wide one, or Card to replace the whole embed with a customizable trading card; Back swaps back.",
+    "card-set": "Equips your unlocked trading-card title, color scheme, and/or font in one go (see /stats' Card button) - set any combination of the three at once. Reaching Diamond, Master, Grandmaster, or Challenger permanently unlocks that tier's own title and scheme, even if you derank afterward; \"Default\" is always available for both. Fonts are purchased from /shop.",
     "preview": "Shows every option for one customization type - Logos, Card Titles, Color Schemes, or Fonts - in a single gallery image (a few images only if there are too many to fit), regardless of what you've personally unlocked yet.",
-    "shop": "Browse every trading-card title, color scheme, and font purchasable with gold, and what you already own.",
+    "shop": "Browse every trading-card title, color scheme, and font purchasable with gold, with a ✅ next to anything you already own. Sort: Price / Sort: Owned buttons under the listing re-sort each category (Ascending/Descending toggle which way) without needing to re-run the command.",
     "achievements": "Browse every gameplay achievement, what it takes to earn it, and whether you already have. Earning one unlocks its title for /card-set and posts a one-time announcement in the channel.",
     "shop-buy": "Purchases a trading-card cosmetic with gold, permanently unlocking it for /card-set. Refuses if you already own it or can't afford it.",
-    "leaderboard": "Ranks the server by a stat, including ranked-only and casual-only wins/losses/win rate. Omit filter for an elo-sorted overview. Reactions page through the results.",
+    "leaderboard": "Ranks the server by a stat, including ranked-only and casual-only wins/losses/win rate. Omit filter for an elo-sorted overview. Buttons page through the results.",
     "report-correct-winner": "Fixes a misreported winner - undoes and reapplies the payouts, records, and elo. invalidate undoes the last game entirely instead (bets refunded, nothing reapplied), as if it never happened. Requires Manage Server.",
     "team-create": "Creates a persistent team with you as its captain, or captain as its captain if given.",
     "team-set": "Sets a persistent team's voice channel and/or logo, any combination in one call. new_voice_channel creates a fresh one named after the team. The team's captain, or anyone with Manage Server, can do this.",
@@ -735,9 +744,9 @@ COMMAND_HELP = {
     "team-invite": "Invites one or more members (up to 5 per call) to a team. Each invitee must accept before joining. The team's captain, or anyone with Manage Server, can do this. force (Manage Server only) skips the invitee's confirmation and adds them straight to the roster.",
     "team-leave": "Removes you from a persistent team's roster. Anyone rostered can do this to themselves, no permission needed - except the team's captain, who has to use /team-delete instead since there's no one to hand the captaincy to.",
     "my-teams": "Lists the teams you're a rostered player on in this server, with paging to flip through each one's full stats card.",
-    "team-stats": "Shows a persistent team's captain, roster, voice channel, and win/loss record. React with \U0001f6e1️ to swap it for a team card - its logo as the focal point, colors sampled from that logo, captain/roster/record/win rate. ↩️ swaps back.",
-    "team-list": "Browse every team in the server with filtering (name search, recruiting-only) and sorting (name, wins, losses, win rate, roster size - sort:\"Win Rate\" order:\"Descending\" for the old /team-leaderboard ranking). React to page through it.",
-    "team-use": "Loads two persistent teams straight into a casual or ranked game, skipping the random-split-or-draft step. Posts a roster with the same ▶️/⚡ reactions as /make-teams to start it.",
+    "team-stats": "Shows a persistent team's captain, roster, voice channel, and win/loss record. Press Card to swap it for a team card - its logo as the focal point, colors sampled from that logo, captain/roster/record/win rate. Back swaps back.",
+    "team-list": "Browse every team in the server with filtering (name search, recruiting-only) and sorting (name, wins, losses, win rate, roster size - sort:\"Win Rate\" order:\"Descending\" for the old /team-leaderboard ranking). Buttons page through it.",
+    "team-use": "Loads two persistent teams straight into a casual or ranked game, skipping the random-split-or-draft step. Posts a roster with the same Start/Start (no move) buttons as /make-teams to start it.",
     "reuse": "Re-posts the exact same two teams from whichever of /make-teams, /captains, or /team-use ran last, instead of drawing a fresh random split or captains draft. Stays ranked if the last game was ranked, casual if it was casual. Cancels an actively in-progress game from those same teams first (refund + move back) if there is one.",
     "tournament-create": "Creates an empty tournament shell for this server - name, team size, and bracket size. One tournament per server.",
     "tournament-register": "Registers one of your teams for the server's tournament. The team's captain, or anyone with Manage Server, can do this.",
@@ -746,8 +755,21 @@ COMMAND_HELP = {
     "tournament-start": "Starts playing the current round of the bracket. mode is Sequential (one match at a time) or Simultaneous (all at once, no betting).",
     "roll": "Rolls a random number between 1 and num.",
     "dev-give-gold": "Temporary developer-only tool for testing the economy - grants yourself 1000 gold. Only usable by the hardcoded DEV_USER_ID.",
+    "dev-test-role-balance": "Temporary developer-only tool for testing role-aware ranked balancing - previews the Top/Jungle/Mid/Bottom/Support split (with each pick's tier and effective elo) that /make-teams ranked:true use_roles:true would produce for your voice channel, padding out fewer than 10 people with other guild members if needed. Anyone without real /setup preferences gets a random liked/disliked role made up just for the preview, cleared again right after. Doesn't create a game, move anyone, or touch team1/team2/is_ranked. Only usable by the hardcoded DEV_USER_ID.",
+    "setup": "Introduces Shockwave, creates your personal solo team, and walks you through picking which roles you like/dislike playing (press a role to toggle it, then press Confirm) for future role-aware team balancing. solo_team_name is only required the first time. Run it any time afterward to update either. Unlocks the Onboarded achievement the first time.",
     "help": "Shows this message, or details on one command.",
 }
+
+
+@tree.command(
+    name="setup",
+    description="Get started with Shockwave: your solo team and role preferences"
+)
+@app_commands.describe(
+    solo_team_name="Name for your personal solo team - required the first time, optional after",
+)
+async def setup(ctx, solo_team_name: str = None):
+    await helperObj.setupHelper(ctx, solo_team_name)
 
 
 @tree.command(
@@ -783,7 +805,7 @@ async def help(ctx, command: str = None):
     description="Create teams - randomly, or roughly elo-balanced for a ranked game"
 )
 @app_commands.describe(
-    use_roles="Assign Top/Jungle/Mid/Bottom/Support roles (5-player teams only) - ignored if ranked",
+    use_roles="Assign Top/Jungle/Mid/Bottom/Support roles (5-player teams only) - also works with ranked",
     ranked="Form roughly elo-balanced teams from your voice channel and track elo for this game",
 )
 async def makeTeams(ctx, use_roles: bool = False, ranked: bool = False):
@@ -793,25 +815,42 @@ async def makeTeams(ctx, use_roles: bool = False, ranked: bool = False):
         )
         return
 
+    # Role-aware team formation needs every rostered player to have run
+    # /setup at least once (it's what /setup's liked/disliked roles feed
+    # into, both here and for rankedTeamHelper's own role balancing below)
+    # — checked here, before anything about the current roster is touched,
+    # so an incomplete voice channel gets a clear "who's missing" message
+    # instead of forming plain (role-less) teams anyway or failing partway
+    # through. Bots can't run /setup, so they're excluded rather than
+    # permanently blocking the check.
+    if use_roles:
+        not_setup = [
+            member for member in ctx.user.voice.channel.members
+            if not member.bot and not helperObj.hasCompletedSetup(ctx.guild.id, member.id)
+        ]
+        if not_setup:
+            mentions = ", ".join(member.mention for member in not_setup)
+            await ctx.response.send_message(
+                f"Everyone needs to run /setup before role-based teams can be formed. Still missing: {mentions}."
+            )
+            return
+
     if ranked:
         # rankedTeamHelper handles its own response + team embeds (elo
         # averages need per-player lookups it already has to do anyway) —
         # a completely separate flow from the random split below, which
-        # bot.py builds the response for itself. use_roles doesn't apply
-        # here (elo-balanced teams get their own embed format).
-        await helperObj.rankedTeamHelper(ctx)
+        # bot.py builds the response for itself.
+        await helperObj.rankedTeamHelper(ctx, use_roles)
         return
 
-    # BUG FIX: `use_roles` (renamed from `roles`, which was shadowing the
-    # module-level `roles` dict above) is already a bool from the slash
-    # command's type annotation. The original code compared it to the
-    # *string* 'True' (`if roles == 'True':`), which is always False no
-    # matter what the user picks, so the roles branch was unreachable.
+    # `use_roles` (not `roles`, which would shadow the module-level `roles`
+    # dict above) is already a bool from the slash command's type
+    # annotation — comparing it to the string 'True' would always be False.
     #
     # This command only announces the teams — it used to optionally move
     # everyone immediately (a `movevar` flag), but moving players and
-    # opening betting only happens once the posted roster's own ▶️
-    # reaction is clicked (see _finalizeRoster), so a roster can be
+    # opening betting only happens once the posted roster's own Start
+    # button is clicked (see _finalizeRoster), so a roster can be
     # announced and reviewed before anyone actually gets pulled into a
     # voice channel.
     await helperObj.randomizeTeamHelper(ctx)
@@ -828,8 +867,8 @@ async def makeTeams(ctx, use_roles: bool = False, ranked: bool = False):
 
     # Roles (Top/Jungle/Mid/Bottom/Support) only make sense for a 5-player
     # team — makeEmbedString() silently falls back to a plain roster for
-    # any other size, and _finalizeRoster silently skips the 🔄 reroll
-    # reaction for the same reason. Explain that instead of leaving people
+    # any other size, and _finalizeRoster silently skips the Reroll
+    # button for the same reason. Explain that instead of leaving people
     # wondering where the roles went.
     if use_roles:
         unroled = [
@@ -846,15 +885,13 @@ async def makeTeams(ctx, use_roles: bool = False, ranked: bool = False):
     team1_message, team2_message = await helperObj.printEmbed(ctx, team1Obj, team2Obj, useRoles=use_roles)
     await helperObj._finalizeRoster(ctx.guild.id, team1_message, team2_message, team1Obj, team2Obj, use_roles)
 
-    # BUG FIX: this used to be folded into the very first response message,
-    # which gets posted *before* the team embeds and is easy to scroll past
-    # once the (visually much bigger) rosters land right after it. Posting
-    # it last — after the rosters, bolded — puts it where people are
-    # actually looking once they're done reading the teams.
+    # Posted last (after the rosters, bolded) rather than folded into the
+    # very first response message, which is easy to scroll past once the
+    # (visually much bigger) rosters land right after it — this puts it
+    # where people are actually looking once they're done reading the teams.
     await ctx.channel.send(
-        f"📣 **Ready?** React {helper.TEAM_START_EMOJI} on the roster above to move everyone into their "
-        f"channels and open betting, or {helper.TEAM_START_NO_MOVE_EMOJI} to open betting without "
-        "moving anyone."
+        "📣 **Ready?** Press Start on the roster above to move everyone into their channels and open "
+        "betting, or Start (no move) to open betting without moving anyone."
     )
 
 
@@ -911,10 +948,8 @@ async def captains(
 # (captainsHelper sets is_ranked accordingly, which gates whether recordResult later
 # touches anyone's elo).
 async def startCaptainsDraft(ctx, captain_1, captain_2, use_random, ranked):
-    # BUG FIX: renamed `random` param to `use_random` — it was shadowing the
-    # `random` module imported at the top of this file (harmless here since
-    # the module isn't used inside this function, but a landmine for future
-    # edits).
+    # Named `use_random`, not `random` — that would shadow the `random`
+    # module imported at the top of this file.
     if ctx.user.voice is None or ctx.user.voice.channel is None:
         await ctx.response.send_message(
             "You need to be in a voice channel to start a captains draft - join one and try again."
@@ -926,24 +961,18 @@ async def startCaptainsDraft(ctx, captain_1, captain_2, use_random, ranked):
         return
 
     if use_random:
-        # BUG FIX: this used to build a plain Python list of names and pass
-        # it straight to helperObj.update(), which binds it as a sqlite3
-        # query parameter — sqlite3 can't bind a list at all (raises
-        # InterfaceError), so this path crashed on every call before ever
-        # reaching getRandomMember(). getRandomMember() also needs each
-        # player's id (to look the Member back up), not just their name.
-        # Serialize into a Team, the same convention every other "players"
-        # column write in this file uses.
+        # sqlite3 can't bind a plain Python list as a query parameter, and
+        # getRandomMember() needs each player's id (to look the Member back
+        # up), not just their name — serialize into a Team, the same
+        # convention every other "players" column write in this file uses.
         players = Team()
         for player in ctx.user.voice.channel.members:
             players.add_player(Player(player.id, player.name))
         helperObj.update(ctx.guild.id, "players", players.serializeTeam())
 
-        # BUG FIX: `while captain1 is None:` on its own is fine, but the
-        # captain2 loop `while captain2 is None and captain2 == captain1:`
-        # can never be True (a value can't be both None and equal to a
-        # non-None captain1), so it never actually re-rolled on a
-        # collision. Loop on "still None" OR "same as captain1" instead.
+        # Loop on "still None OR same as captain1" - "AND" can never be
+        # True (a value can't be both None and equal to a non-None
+        # captain1), so it would never actually re-roll on a collision.
         captain1 = await helperObj.getRandomMember(ctx)
         while captain1 is None:
             captain1 = await helperObj.getRandomMember(ctx)
@@ -1257,7 +1286,7 @@ async def myTeams(ctx):
 
 @tree.command(
     name="team-list",
-    description="Browse every team in this server, with filtering and sorting - react to page through it"
+    description="Browse every team in this server, with filtering and sorting - buttons to page through it"
 )
 @app_commands.describe(
     search="Only show teams whose name contains this",
@@ -1336,9 +1365,6 @@ async def notify(ctx, member: discord.Member = None, role: discord.Role = None, 
     for target in targets:
         await helperObj.notifyHelper(ctx, target, message)
 
-    # BUG FIX: this used to always reference `member.name`, which crashed
-    # with AttributeError whenever /notify was called with `role` instead
-    # (member is None in that case).
     if member is not None:
         summary = member.name
     else:
@@ -1376,6 +1402,22 @@ async def devGiveGold(ctx):
         await ctx.response.send_message("This command is not available.")
         return
     await helperObj.devGiveGoldHelper(ctx)
+
+
+@tree.command(
+    name="dev-test-role-balance",
+    description="Temporary developer tool: previews a role-aware ranked split without creating a game"
+)
+async def devTestRoleBalance(ctx):
+    if ctx.user.id != DEV_USER_ID:
+        await ctx.response.send_message("This command is not available.")
+        return
+    if ctx.user.voice is None or ctx.user.voice.channel is None:
+        await ctx.response.send_message(
+            "You need to be in a voice channel to preview a role balance from it - join one and try again."
+        )
+        return
+    await helperObj.devTestRoleBalanceHelper(ctx)
 
 
 # Guarded so tests.py can import this module (to exercise command callbacks

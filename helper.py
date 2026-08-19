@@ -97,6 +97,14 @@ ORBITRON = os.path.join(FONTS_DIR, "Orbitron-Variable.ttf")
 PRESS_START_2P = os.path.join(FONTS_DIR, "PressStart2P-Regular.ttf")
 CREEPSTER = os.path.join(FONTS_DIR, "Creepster-Regular.ttf")
 BLACK_OPS_ONE = os.path.join(FONTS_DIR, "BlackOpsOne-Regular.ttf")
+# Third wave — same single-static-weight Google/SIL-OFL bar as the second
+# wave. Bungee is a chunky neon-sign/urban display face, Rye is a
+# wanted-poster western face, Permanent Marker is a casual handwritten
+# marker face (the one "quiet" font of this wave, priced with Bold/Elegant
+# rather than the loud ones — see CARD_SHOP_FONT_STYLES).
+BUNGEE = os.path.join(FONTS_DIR, "Bungee-Regular.ttf")
+RYE = os.path.join(FONTS_DIR, "Rye-Regular.ttf")
+PERMANENT_MARKER = os.path.join(FONTS_DIR, "PermanentMarker-Regular.ttf")
 
 # Colors lifted straight from shockwave-site/assets/styles.css's :root
 # palette, so the bracket image reads as part of the same brand instead of
@@ -190,12 +198,13 @@ GAME_LOSS_GOLD = 150
 # deducted from losers' balances at bet time, so simply not crediting it
 # to the winners removes it from the economy outright.
 MAX_IMBALANCE_RAKE = 0.5
-TEAM_EMOJIS = {1: "🔵", 2: "🔴"}   # blue for team 1, red for team 2 — matches TEAM1_ACCENT_COLOR/TEAM2_ACCENT_COLOR
-WINNER_EMOJIS = {emoji: team for team, emoji in TEAM_EMOJIS.items()}
-# Cancels the current game (refunds any bets, moves everyone back to the
-# original channel) — the reaction replacement for the old /return
-# command, living on the exact same message TEAM_EMOJIS' own winner-report
-# reactions do (see _openBetting/handleGameReportReaction).
+# blue for team 1, red for team 2 — matches TEAM1_ACCENT_COLOR/
+# TEAM2_ACCENT_COLOR, and decorates WinnerReportView/TournamentMatchReportView's
+# own Team 1/Team 2 button labels.
+TEAM_EMOJIS = {1: "🔵", 2: "🔴"}
+# Decorates the "Game cancelled" message WinnerReportView's own Cancel
+# Game button posts (see cancelGameHelper) — the button replacement for
+# the old /return command.
 CANCEL_GAME_EMOJI = "\U0001F6D1"  # 🛑
 DEFAULT_ELO = 1000
 ELO_K_FACTOR = 32
@@ -203,6 +212,38 @@ ELO_K_FACTOR = 32
 # teams — keeps matchups from being the exact same optimal split every
 # time, at the cost of the balance being only "roughly" fair.
 ELO_BALANCE_JITTER = 100
+# Role-aware ranked balancing (/make-teams ranked:true use_roles:true, 5v5
+# only — see _assignRolesForBalance). Neither penalty touches a player's
+# real elo at all; both only shape which role/team split the balancer
+# picks, exactly the way ELO_BALANCE_JITTER's own nudge does.
+#
+# A player sitting in a role they didn't mark as liked (and didn't mark
+# disliked either — no preference on record either way) is assumed to
+# perform somewhat below their raw elo there.
+ROLE_BALANCE_OFF_ROLE_PENALTY = 100
+# A player forced into a role they specifically marked as disliked is
+# assumed to underperform a lot more than just "unfamiliar" - someone who
+# said they don't jungle, jungling, is a bigger gap than someone with no
+# stated opinion on it either way.
+ROLE_BALANCE_DISLIKED_ROLE_PENALTY = 200
+# Fill order _assignRolesForBalance walks SETUP_ROLE_NAMES' five roles in
+# - Jungle first and the rest afterward, so a player who'd fit multiple
+# roles well doesn't get claimed by an easier-to-fill role before the
+# scarcer one (junglers are typically the harder role to find genuine
+# takers for) ever gets a look at them. Final rosters still get reordered
+# back to SETUP_ROLE_NAMES' own Top/Jungle/Mid/Bottom/Support order before
+# being handed to a Team, since that's the position makeEmbedString reads
+# each row's label from.
+ROLE_BALANCE_FILL_ORDER = ["Jungle", "Top", "Mid", "Bottom", "Support"]
+# _refineRoleBalance's cap on hill-climb passes over every pairwise role
+# swap - it already stops as soon as a full pass finds no improving swap,
+# this only guards against a pathological input oscillating forever.
+ROLE_BALANCE_MAX_REFINE_PASSES = 5
+# /dev-test-role-balance only - how many of the made-up-preference players
+# in that dry run get a disliked role along with their liked one, so the
+# preview reliably demonstrates the disliked-role penalty instead of
+# leaving it up to chance.
+ROLE_BALANCE_TEST_DISLIKE_COUNT = 3
 # How long the /clear confirmation buttons stay clickable before the
 # reset is abandoned on its own.
 CLEAR_CONFIRM_TIMEOUT_SECONDS = 30
@@ -210,37 +251,39 @@ CLEAR_CONFIRM_TIMEOUT_SECONDS = 30
 TOURNAMENT_CONFIRM_TIMEOUT_SECONDS = 30
 # ...and for /team-set's already-in-use voice channel confirmation.
 TEAM_CONFIRM_TIMEOUT_SECONDS = 30
-# /team-invite: react to accept, same idea as duel/team-game acceptance.
-TEAM_INVITE_ACCEPT_EMOJI = "✅"
+# ...and for confirming a reported game winner (see ConfirmWinnerReportView)
+# before it's actually recorded.
+WINNER_REPORT_CONFIRM_TIMEOUT_SECONDS = 30
+# How long /shop's own sort buttons (see ShopSortView) stay clickable
+# before they freeze in place - longer than the confirm/cancel views above
+# since this isn't gating anything destructive, just a display preference
+# someone might sit on while comparing prices.
+SHOP_SORT_TIMEOUT_SECONDS = 180
+# ...and for confirming a reported duel result (see ConfirmDuelResultView)
+# before gold actually changes hands.
+DUEL_CONFIRM_TIMEOUT_SECONDS = 30
 
-# /tournament-start (sequential mode): react to mark a queued match ready
-# to begin. Simultaneous-mode match results reuse TEAM_EMOJIS/WINNER_EMOJIS
-# above — same reporting reactions as a normal game, just scoped to a specific
-# tournament_matches row instead of the guild's single betting_message_id.
-TOURNAMENT_READY_EMOJI = "✅"
-
-# /stats: react to toggle the shown avatar between this server's own
+# /stats: press to toggle the shown avatar between this server's own
 # per-server profile picture (if the player has set one — same as the
 # card/embed shows by default) and their regular, account-wide avatar (see
-# handleStatsReaction/_resolveGlobalAvatarUrl) — same reaction either
-# direction, flipping based on whichever's currently showing. Both are
-# resolved live (not snapshotted at /stats time) so a player who changes
-# either avatar later and toggles sees their current one, same as a fresh
-# /stats would.
-STATS_AVATAR_TOGGLE_EMOJI = "\U0001f5bc️"  # 🖼️
-# /stats: react to blow the whole embed away and replace it with the
+# StatsView/_resolveGlobalAvatarUrl) — same button either direction,
+# flipping based on whichever's currently showing. Both are resolved live
+# (not snapshotted at /stats time) so a player who changes either avatar
+# later and toggles sees their current one, same as a fresh /stats would.
+STATS_AVATAR_TOGGLE_EMOJI = "\U0001f5bc️"  # 🖼️ decorates StatsView's Avatar button
+# /stats: press to blow the whole embed away and replace it with the
 # player's trading card (see _renderTradingCardImage). Both this and the
 # avatar toggle above only make sense on the plain /stats embed, so
-# handleStatsReaction removes both reactions the moment the card goes up
-# and replaces them with STATS_RETURN_EMOJI below — a card isn't shaped
-# like a normal /stats embed, so neither toggle applies to it anymore.
-STATS_CARD_EMOJI = "\U0001F0CF"  # 🃏
+# StatsView swaps Card out for STATS_RETURN_EMOJI below the moment the
+# card goes up — a card isn't shaped like a normal /stats embed, so
+# neither toggle applies to it anymore.
+STATS_CARD_EMOJI = "\U0001F0CF"  # 🃏 decorates StatsView's Card button
 # Shown only once the trading card is up in place of STATS_AVATAR_TOGGLE_EMOJI
 # / STATS_CARD_EMOJI — the one action that makes sense from the card view,
-# swapping back to the plain /stats embed (which then gets its own two
-# reactions restored, so the whole thing is a real back-and-forth toggle
+# swapping back to the plain /stats embed (which then gets its own Card
+# button restored, so the whole thing is a real back-and-forth toggle
 # rather than a one-way trip).
-STATS_RETURN_EMOJI = "\U0001faaa"  # 🪪
+STATS_RETURN_EMOJI = "\U0001faaa"  # 🪪 decorates StatsView's Back button
 
 # Trading-card layout (see _renderTradingCardImage) — a portrait card
 # roughly the shape of a real trading card, reusing the same canvas/header
@@ -297,21 +340,22 @@ CARD_DEFAULT_FONT_STYLE = "default"        # Chakra Petch + IBM Plex Sans — se
 # is, since it needs no unlocking either.
 CARD_DEFAULT_SCHEME_NAME = "Default"
 
-# /team-stats: react to swap the embed for a team card (see
+# /team-stats: press to swap the embed for a team card (see
 # _renderTeamCardImage), the team's own counterpart to /stats' trading
 # card — same one-card-view-with-a-way-back shape as STATS_CARD_EMOJI/
 # STATS_RETURN_EMOJI, tracked in its own team_stats_views table rather than
 # reusing stats_views (a team, not a player, is what's shown on the card).
-TEAM_CARD_EMOJI = "\U0001f6e1️"    # 🛡️
-TEAM_CARD_RETURN_EMOJI = "↩️"  # ↩️
+TEAM_CARD_EMOJI = "\U0001f6e1️"    # 🛡️ decorates TeamStatsView's Card button
+TEAM_CARD_RETURN_EMOJI = "↩️"  # ↩️ decorates TeamStatsView's Back button
 
-# Roster action reactions — replace the old standalone /start and
-# /randomize-roles commands. Posted on the SECOND team embed only (see
-# printEmbed/_finalizeRoster) once a roster is actually final (not mid-
-# draft), tracked via roster_team1_message_id/roster_team2_message_id on
-# `servers` so a stale reaction from an earlier roster can't act on
-# whatever team1/team2 happen to be loaded now. TEAM_ROLES_REROLL_EMOJI
-# only gets added when the roster is role-eligible (see _finalizeRoster).
+# RosterActionView's own button decorations — replace the old standalone
+# /start and /randomize-roles commands. Posted on the SECOND team embed
+# only (see printEmbed/_finalizeRoster) once a roster is actually final
+# (not mid-draft), tracked via roster_team1_message_id/
+# roster_team2_message_id on `servers` so a stale click on an earlier
+# roster can't act on whatever team1/team2 happen to be loaded now. The
+# Reroll button only gets included when the roster is role-eligible (see
+# _finalizeRoster).
 TEAM_ROLES_REROLL_EMOJI = "\U0001f504"  # 🔄
 TEAM_START_EMOJI = "▶️"  # ▶️
 # Same as TEAM_START_EMOJI (posts the matchup image, opens betting) but
@@ -359,16 +403,16 @@ TEAM_CARD_FALLBACK_ACCENT_COLOR = (237, 198, 67)
 # aren't vetted against the darkened-background card they'd be driving
 # once equipped as a full color scheme.
 #
-# BUG FIX: this used to be 90, which (against these cards' fairly bright
-# vignette centers, ~80-120 brightness already) forced almost any color to
-# get lightened into the 70-80% HSL-lightness range to clear the gap —
-# fully saturated reds/pinks especially, since a pure red's own average-
-# channel brightness tops out around 85 even at 100% saturation. The
-# result read as washed-out pastel regardless of how saturated
-# CARD_SHOP_COLOR_SCHEMES' own raw accents were, silently undoing any
-# saturation tuning there. 45 still rescues a genuinely too-dark color
-# (see RenderTeamCardImageTests' own dark-navy regression test) without
-# forcing an already-vivid one toward white.
+# Calibrated deliberately low: against these cards' fairly bright vignette
+# centers (~80-120 brightness already), a higher value would force almost
+# any color to lighten into the 70-80% HSL-lightness range to clear the
+# gap — fully saturated reds/pinks especially, since a pure red's own
+# average-channel brightness tops out around 85 even at 100% saturation —
+# reading as washed-out pastel regardless of how saturated
+# CARD_SHOP_COLOR_SCHEMES' own raw accents were, undoing any saturation
+# tuning there. 45 still rescues a genuinely too-dark color (see
+# RenderTeamCardImageTests' own dark-navy regression test) without forcing
+# an already-vivid one toward white.
 CARD_MIN_ACCENT_CONTRAST = 45
 
 # League-style rank tiers for /stats. Each tier spans 250 elo, with
@@ -388,9 +432,8 @@ ELO_TIERS = [
     (250, "Bronze", "\U0001f949", (205, 127, 50)),
     (500, "Silver", "\U0001f948", (192, 192, 192)),
     (750, "Gold", "\U0001f947", (255, 204, 51)),
-    # BUG FIX: this used to be a cyan/teal (79, 209, 232) that read as
-    # "Diamond" at a glance — closer to the actual color of the large blue
-    # diamond emoji \U0001f537 itself, which is a clear blue, not cyan.
+    # A clear blue (matching \U0001f537 itself), not cyan/teal - cyan reads
+    # as "Diamond" at a glance.
     (1000, "Platinum", "\U0001f537", (41, 121, 255)),
     (1250, "Diamond", "\U0001f48e", (137, 207, 240)),
     (1500, "Master", "\U0001f7e3", (155, 60, 200)),
@@ -452,6 +495,13 @@ CARD_SHOP_TITLES = {
     "Legend": 5000,
     "Ace": 3000,
     "Champion": 7500,
+    "Contender": 1000,
+    "Rival": 2000,
+    "Vanguard": 3500,
+    "Warlord": 4500,
+    "Phantom": 5500,
+    "Executioner": 6500,
+    "Overlord": 8500,
 }
 # Hand-picked accent/background pairs rather than derived from anything
 # else — unlike a tier reward's scheme, there's no ELO_TIERS badge color
@@ -481,39 +531,36 @@ CARD_SHOP_COLOR_SCHEMES = {
     "Shurima": {"price": 4000, "accent_color": "#F7A62E", "background_color": "#3D2A14"},
     "Shadow Isles": {"price": 4000, "accent_color": "#29FF8A", "background_color": "#0A1F16"},
     "Bilgewater": {"price": 4000, "accent_color": "#09ECD7", "background_color": "#2E1A0D"},
-    # BUG FIX: this used to be a yellow accent on a purple-ish background
-    # (#FFCD29 / #3D2E4D) — close enough to CARD_DEFAULT_ACCENT_COLOR's
-    # own gold-on-indigo look that the two read as nearly the same card at
-    # a glance. Swapped which hue plays which role instead of just picking
-    # new colors outright: the accent is now a lavender derived from the
-    # old background's own purple hue (re-saturated/lightened to work as
-    # an accent), and the background is the old accent's yellow hue
-    # darkened down (same 28%-of-a-full-saturation-base approach every
-    # other entry's background uses) — still recognizably "Bandle City"
-    # colored, just with the two roles reversed. Accent brightened further
-    # (same reasoning as Targon's own BUG FIX below) after the first swap
-    # still only cleared CARD_MIN_ACCENT_CONTRAST by ~7 units — legible in
-    # principle, but not comfortably so.
+    # Accent (lavender, from the region's own purple hue) and background
+    # (darkened yellow, the same 28%-of-a-full-saturation-base approach
+    # every other entry's background uses) deliberately swapped from a
+    # plain yellow-on-purple pick, which read too close to
+    # CARD_DEFAULT_ACCENT_COLOR's own gold-on-indigo look at a glance.
     "Bandle City": {"price": 4000, "accent_color": "#B677F8", "background_color": "#473700"},
-    # BUG FIX: #8529FF only cleared CARD_MIN_ACCENT_CONTRAST by ~3.5
-    # units — technically passing but barely, and it read as genuinely
-    # hard to make out. Brightened (same hue, higher HSL lightness) twice
-    # now for a comfortable margin instead of just scraping past the
-    # floor.
+    # Brightened for a comfortable margin above CARD_MIN_ACCENT_CONTRAST,
+    # not just scraping past the floor.
     "Targon": {"price": 4000, "accent_color": "#AE77F8", "background_color": "#150A2E"},
 }
 # Genuinely different typefaces for the card's name/title (see
 # _cardFontPaths) — RUSSO_ONE/CINZEL/ORBITRON, not just different weights
-# of the same Chakra Petch font as before (see that BUG FIX note). Retail/
-# Villain/Military are priced the same as the original three (matching,
-# not escalating, cosmetic tiers) despite arriving later.
+# of the same Chakra Petch font as before. Price
+# only tracks how loud/stylized a face reads, not arrival order: Bold and
+# Elegant are the two "quiet" faces (a plain display face, a plain serif)
+# and stay at the original baseline price; every other style commits hard
+# to one specific loud aesthetic (futuristic, pixel-arcade, horror,
+# military stencil, neon sign, wanted-poster western) and costs more for
+# it. Handwritten (Permanent Marker) is the one later addition that reads
+# closer to "quiet" than "loud", so it's priced at the baseline too.
 CARD_SHOP_FONT_STYLES = {
-    "Bold": 3000,
-    "Elegant": 3000,
-    "Cyber": 3000,
-    "Retro": 3000,
-    "Villain": 3000,
-    "Military": 3000,
+    "Bold": 2500,
+    "Elegant": 2500,
+    "Handwritten": 2500,
+    "Cyber": 3500,
+    "Retro": 3500,
+    "Villain": 3500,
+    "Military": 3500,
+    "Neon": 3500,
+    "Western": 3500,
 }
 # Every card_unlocks itemKey that resolves to a real title — tier-earned,
 # specially-granted, or purchased alike — the one place getUnlockedCardTitles
@@ -600,6 +647,7 @@ CARD_ACHIEVEMENT_TITLES = {
     "gambler": "Frequent Bettor",
     "iron_will": "Iron Will",
     "tournament_champion": "Tournament Champion",
+    "onboarded": "Onboarded",
 }
 # /achievements' own descriptions — kept next to the thresholds above they
 # each read from, so the two can't drift out of sync with each other.
@@ -621,6 +669,7 @@ CARD_ACHIEVEMENT_DESCRIPTIONS = {
     "gambler": f"Place {CARD_ACHIEVEMENT_GAMBLER_BETS}+ total bets.",
     "iron_will": f"Rack up {CARD_ACHIEVEMENT_IRON_WILL_LOSSES}+ game losses without giving up.",
     "tournament_champion": "Win a tournament.",
+    "onboarded": "Run /setup for the first time.",
 }
 CARD_TITLE_CATALOG = {**CARD_TITLE_CATALOG, **CARD_ACHIEVEMENT_TITLES}
 
@@ -639,27 +688,24 @@ CARD_BACKGROUND_DARKEN_RATIO = 0.28
 
 # /wager-against: a heads-up gold wager between two specific players,
 # independent of the team-game betting above. The challenged player
-# accepts with a checkmark; once accepted, anyone can react blue/red to
-# report who actually won, same as the team-game winner report.
-DUEL_ACCEPT_EMOJI = "✅"       # ✅
-DUEL_CHALLENGER_EMOJI = "\U0001f535"  # 🔵 — challenger ("player 1") won
-DUEL_TARGET_EMOJI = "\U0001f534"      # 🔴 — target ("player 2") won
+# accepts with a button (DuelAcceptView); once accepted, anyone can press
+# a button to report who actually won (DuelResultView), then confirm it
+# (ConfirmDuelResultView) before gold actually changes hands - same shape
+# as the team-game winner report.
 
-# /leaderboard: paged via reactions rather than re-running the command —
-# clicking one of these edits the existing message instead of posting a
-# new one (see handleLeaderboardReaction).
+# /leaderboard: paged via LeaderboardPagingView's buttons rather than
+# re-running the command — clicking one edits the existing message
+# instead of posting a new one. Also decorate MyTeamsPagingView/
+# TeamListPagingView's own button labels, the same First/Prev/Next/Last
+# shape reused for /my-teams and /team-list.
 LEADERBOARD_PAGE_SIZE = 10
 LEADERBOARD_FIRST_EMOJI = "⏮️"  # ⏮️ jump to the first page
 LEADERBOARD_PREV_EMOJI = "◀️"   # ◀️ previous page
 LEADERBOARD_NEXT_EMOJI = "▶️"   # ▶️ next page
 LEADERBOARD_LAST_EMOJI = "⏭️"   # ⏭️ jump to the last page
-LEADERBOARD_NAV_EMOJIS = (
-    LEADERBOARD_FIRST_EMOJI, LEADERBOARD_PREV_EMOJI, LEADERBOARD_NEXT_EMOJI, LEADERBOARD_LAST_EMOJI
-)
 
 # /team-list: what it can sort by, and its display label — same paging
-# (LEADERBOARD_NAV_EMOJIS) and page size as /leaderboard, just over teams
-# instead of players.
+# shape and page size as /leaderboard, just over teams instead of players.
 TEAM_LIST_SORT_LABELS = {
     "name": "Name",
     "wins": "Wins",
@@ -689,11 +735,6 @@ LEADERBOARD_STAT_LABELS = {
     "gold_wagered": "Gold Wagered",
 }
 
-# BUG FIX: this dict used to only live in main.py. helper.py's
-# randomRoleHelper did `global roles` and expected to find it — but each
-# Python module has its own separate global namespace, so that `global`
-# statement pointed at helper.py's (empty) globals and raised a NameError
-# the first time the function ran. Defining it here fixes that.
 roles = {
     0: "Top - ",
     1: "Jungle - ",
@@ -701,6 +742,11 @@ roles = {
     3: "Bottom - ",
     4: "Support - "
 }
+# /setup's own role vocabulary — the same five roles as `roles` above,
+# just as bare names rather than "<Name> - " embed-line prefixes. What
+# gets stored in player_role_preferences.
+SETUP_ROLE_NAMES = ["Top", "Jungle", "Mid", "Bottom", "Support"]
+SETUP_ROLE_TIMEOUT_SECONDS = 120
 
 
 # Confirm/cancel buttons for /clear's clear_elo, clear_economy,
@@ -950,6 +996,724 @@ class ConfirmTeamDeleteView(discord.ui.View):
             await self.message.edit(view=self)
 
 
+# One SETUP_ROLE_NAMES entry's own toggle button - primary (highlighted)
+# when currently selected, secondary otherwise, so the live selection is
+# visible at a glance without any separate summary text. There's no
+# separate "un-click" the way a reaction's remove event was — clicking an
+# already-selected role's button toggles it off the exact same way
+# clicking an unselected one toggles it on, so this one button fully
+# replaces the old add-reaction/remove-reaction pair for that role.
+class SetupRoleToggleButton(discord.ui.Button):
+    def __init__(self, role, selected):
+        super().__init__(
+            label=role, style=discord.ButtonStyle.primary if selected else discord.ButtonStyle.secondary, row=0,
+        )
+        self.role_name = role
+
+    async def callback(self, interaction):
+        await self.view.helperObj._handleSetupRoleToggleClick(interaction, self.role_name)
+
+
+# /setup's role-picking step: press a role to toggle it, then press
+# Confirm. The same view SHAPE serves both the liked-roles step and the
+# disliked-roles step that follows it — confirm's callback
+# (helpers._confirmSetupRoleStep) reads which step is current from
+# setup_role_sessions itself, and a fresh instance (selected_roles=()) is
+# built for the disliked round rather than reusing the liked round's own
+# stale button states.  Every toggle click also rebuilds a fresh instance
+# (see helpers._handleSetupRoleToggleClick) reflecting the DB's current
+# selectedRoles, since there's no per-instance state to mutate in place —
+# a button's own selected/unselected style is derived fresh every render,
+# never tracked on self.
+class SetupRoleSelectionView(discord.ui.View):
+    def __init__(self, helperObj, guild_id, user_id, selected_roles=()):
+        super().__init__(timeout=SETUP_ROLE_TIMEOUT_SECONDS)
+        self.helperObj = helperObj
+        self.guild_id = guild_id
+        self.user_id = user_id
+        self.message = None
+        for role in SETUP_ROLE_NAMES:
+            self.add_item(SetupRoleToggleButton(role, role in selected_roles))
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "Only the person who ran /setup can use this.", ephemeral=True
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success, row=1)
+    async def confirm(self, interaction, button):
+        await self.helperObj._confirmSetupRoleStep(interaction, self)
+
+    async def on_timeout(self):
+        if self.message is None:
+            return
+        self.helperObj._expireSetupRoleSession(self.guild_id, self.message.id)
+        for item in self.children:
+            item.disabled = True
+        try:
+            await self.message.edit(
+                content="Role selection timed out - run /setup again if you'd like to set your roles.",
+                view=self,
+            )
+        except discord.HTTPException:
+            pass
+
+
+# Discord caps a button's label at 80 characters; a team name is free
+# text (/team-create, /team-rename) with no length limit of its own, so
+# this truncates rather than risking an edit/send outright failing on an
+# unusually long name.
+def _teamButtonLabel(team_name, team_number):
+    return f"{team_name} {TEAM_EMOJIS[team_number]}"[:80]
+
+
+# Team 1/Team 2/Cancel Game are built per-message (dynamic add_item)
+# rather than via decorator so each report can show the game's actual
+# team names instead of a fixed "Team 1"/"Team 2" label — custom_id stays
+# fixed either way for persistent routing after a restart, same shape as
+# SetupRoleToggleButton. team_number is None for Cancel Game.
+class _WinnerReportButton(discord.ui.Button):
+    def __init__(self, label, style, custom_id, team_number=None):
+        super().__init__(label=label, style=style, custom_id=custom_id)
+        self.team_number = team_number
+
+    async def callback(self, interaction):
+        if self.team_number is None:
+            await self.view.helperObj._handleWinnerReportCancelClick(interaction)
+        else:
+            await self.view.helperObj._handleWinnerReportPick(interaction, self.team_number)
+
+
+# The winner-report message's own buttons — persistent (custom_id on every
+# item, timeout=None, registered once via client.add_view in bot.py's
+# on_ready) rather than a normal per-message View, so an open betting
+# window (up to WAGER_TIMER_SECONDS_MAX, or far longer for a big
+# tournament's own betting_timer setting) keeps accepting clicks across a
+# bot restart/redeploy the same way the reactions it replaces always did.
+# A persistent view is a single shared instance covering every guild's
+# open betting window at once, so unlike a normal ConfirmXView there's no
+# per-game state on self at all — every callback below re-derives guild_id/
+# the report message id from the interaction itself and looks up game
+# state fresh, exactly the "look everything up by id, trust nothing
+# stored on an object" shape handleGameReportReaction (the reaction
+# handler this replaces) already used. team1_name/team2_name default to
+# "Team 1"/"Team 2" for the generic instance client.add_view registers at
+# startup (routing only, never actually shown); every real send passes
+# the game's actual names in.
+class WinnerReportView(discord.ui.View):
+    def __init__(self, helperObj, team1_name="Team 1", team2_name="Team 2"):
+        super().__init__(timeout=None)
+        self.helperObj = helperObj
+        self.team1 = _WinnerReportButton(
+            _teamButtonLabel(team1_name, 1), discord.ButtonStyle.primary,
+            "shockwave:winner_report:team1", team_number=1,
+        )
+        self.team2 = _WinnerReportButton(
+            _teamButtonLabel(team2_name, 2), discord.ButtonStyle.danger,
+            "shockwave:winner_report:team2", team_number=2,
+        )
+        self.cancelGame = _WinnerReportButton(
+            "Cancel Game", discord.ButtonStyle.secondary, "shockwave:winner_report:cancel",
+        )
+        self.add_item(self.team1)
+        self.add_item(self.team2)
+        self.add_item(self.cancelGame)
+
+
+# A Team 1/Team 2 click on the winner-report message posts this instead of
+# recording the result immediately — a real game/economy change (elo,
+# payouts, game record) shouldn't hinge on a single accidental click the
+# way the roster start/reroll buttons reasonably can, since a fresh
+# roster or /clear cleanly undoes those, while a recorded result only has
+# the heavier /report-correct-winner as its way back. Open to anyone to
+# click, same as the winner-report buttons themselves — there's no single
+# "invoker" to restrict this to the way a slash-command-triggered
+# ConfirmXView has ctx.user, since reporting a winner has always been
+# something anyone at the table can do. On Confirm, the original
+# report_message (if handed one) has its buttons stripped too, so a stale
+# Team 1/Team 2/Cancel Game row doesn't linger on a message that's already
+# been resolved.
+class ConfirmWinnerReportView(discord.ui.View):
+    def __init__(self, helperObj, guild_id, winning_team, report_message_id, report_message=None):
+        super().__init__(timeout=WINNER_REPORT_CONFIRM_TIMEOUT_SECONDS)
+        self.helperObj = helperObj
+        self.guild_id = guild_id
+        self.winning_team = winning_team
+        self.report_message_id = report_message_id
+        self.report_message = report_message
+        self.message = None
+
+    def _disable_buttons(self):
+        for item in self.children:
+            item.disabled = True
+
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success)
+    async def confirm(self, interaction, button):
+        self._disable_buttons()
+        self.stop()
+        await interaction.response.edit_message(
+            content="Winner confirmed - recording the result...", view=self
+        )
+        await self.helperObj.recordResult(
+            self.guild_id, self.winning_team, interaction.channel, interaction.guild
+        )
+        await self.helperObj._clearMessageButtons(self.report_message)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction, button):
+        self._disable_buttons()
+        self.stop()
+        self.helperObj._restoreWinnerReportMessage(self.guild_id, self.report_message_id)
+        await interaction.response.edit_message(
+            content="Report cancelled - use the buttons on the original message to report the correct winner.",
+            view=self,
+        )
+
+    async def on_timeout(self):
+        self._disable_buttons()
+        self.helperObj._restoreWinnerReportMessage(self.guild_id, self.report_message_id)
+        if self.message is not None:
+            try:
+                await self.message.edit(
+                    content=(
+                        "Confirmation timed out - use the buttons on the original message to report "
+                        "the winner."
+                    ),
+                    view=self,
+                )
+            except discord.HTTPException:
+                pass
+
+
+# Cancel Game click posts this instead of cancelling immediately — same
+# reasoning as ConfirmWinnerReportView (a real refund-and-move-everyone-
+# back action shouldn't hinge on one accidental click), so both of the
+# winner-report message's consequential buttons now share the same
+# two-step shape; only roster start/reroll stay single-click, since those
+# are still cleanly reversible afterward. On Confirm, the original
+# report_message (if handed one) has its buttons stripped too, matching
+# ConfirmWinnerReportView.
+class ConfirmCancelGameView(discord.ui.View):
+    def __init__(self, helperObj, guild_id, report_message_id, report_message=None):
+        super().__init__(timeout=WINNER_REPORT_CONFIRM_TIMEOUT_SECONDS)
+        self.helperObj = helperObj
+        self.guild_id = guild_id
+        self.report_message_id = report_message_id
+        self.report_message = report_message
+        self.message = None
+
+    def _disable_buttons(self):
+        for item in self.children:
+            item.disabled = True
+
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction, button):
+        self._disable_buttons()
+        self.stop()
+        await interaction.response.edit_message(
+            content="Cancellation confirmed - cancelling the game...", view=self
+        )
+        await self.helperObj._finishGameCancel(
+            self.guild_id, interaction.channel, interaction.guild, self.report_message
+        )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction, button):
+        self._disable_buttons()
+        self.stop()
+        self.helperObj._restoreWinnerReportMessage(self.guild_id, self.report_message_id)
+        await interaction.response.edit_message(
+            content="Game kept - use the buttons on the original message to report the winner or cancel again.",
+            view=self,
+        )
+
+    async def on_timeout(self):
+        self._disable_buttons()
+        self.helperObj._restoreWinnerReportMessage(self.guild_id, self.report_message_id)
+        if self.message is not None:
+            try:
+                await self.message.edit(
+                    content=(
+                        "Cancellation confirmation timed out - use the buttons on the original message."
+                    ),
+                    view=self,
+                )
+            except discord.HTTPException:
+                pass
+
+
+# Same idea as ConfirmWinnerReportView, for a simultaneous-mode tournament
+# match's own 🔵/🔴 report instead of the guild-wide singleton one — a
+# separate view since a simultaneous round can have several matches (and
+# so several pending confirmations) live at once, each needing its own
+# match_id/channel_id rather than the one guild_id a normal game's report
+# has. Confirm calls _resolveTournamentMatch directly (the same function
+# recordResult's own tournament hook calls for sequential mode); Cancel/
+# timeout put the match back to AWAITING_RESULT via
+# _restoreTournamentMatchAwaitingResult so it can be reacted on again.
+class ConfirmTournamentMatchReportView(discord.ui.View):
+    def __init__(self, helperObj, guild_id, match_id, winning_team, channel_id):
+        super().__init__(timeout=WINNER_REPORT_CONFIRM_TIMEOUT_SECONDS)
+        self.helperObj = helperObj
+        self.guild_id = guild_id
+        self.match_id = match_id
+        self.winning_team = winning_team
+        self.channel_id = channel_id
+        self.message = None
+
+    def _disable_buttons(self):
+        for item in self.children:
+            item.disabled = True
+
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success)
+    async def confirm(self, interaction, button):
+        self._disable_buttons()
+        self.stop()
+        await interaction.response.edit_message(
+            content="Winner confirmed - recording the result...", view=self
+        )
+        await self.helperObj._resolveTournamentMatch(
+            self.guild_id, self.match_id, self.winning_team, self.channel_id
+        )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction, button):
+        self._disable_buttons()
+        self.stop()
+        self.helperObj._restoreTournamentMatchAwaitingResult(self.match_id)
+        await interaction.response.edit_message(
+            content=(
+                "Report cancelled - use the buttons on the original match message to report the "
+                "correct winner."
+            ),
+            view=self,
+        )
+
+    async def on_timeout(self):
+        self._disable_buttons()
+        self.helperObj._restoreTournamentMatchAwaitingResult(self.match_id)
+        if self.message is not None:
+            try:
+                await self.message.edit(
+                    content=(
+                        "Confirmation timed out - use the buttons on the original match message to "
+                        "report the winner."
+                    ),
+                    view=self,
+                )
+            except discord.HTTPException:
+                pass
+
+
+# The sequential-mode ready-check message's own button - persistent
+# (custom_id, timeout=None, registered once via client.add_view) since a
+# match can sit waiting on a captain indefinitely, same reasoning as
+# WinnerReportView/DuelAcceptView. The callback re-derives which match
+# (and whether the clicker is actually one of its captains) from
+# interaction.guild_id/interaction.message.id.
+class TournamentReadyView(discord.ui.View):
+    def __init__(self, helperObj):
+        super().__init__(timeout=None)
+        self.helperObj = helperObj
+
+    @discord.ui.button(label="Ready", style=discord.ButtonStyle.success, custom_id="shockwave:tournament:ready")
+    async def ready(self, interaction, button):
+        await self.helperObj._handleReadyClick(interaction)
+
+
+# The simultaneous-mode match report message's own buttons - same
+# persistent shape as TournamentReadyView, for the same "can sit
+# AWAITING_RESULT indefinitely" reason. A press posts a
+# ConfirmTournamentMatchReportView instead of resolving immediately,
+# matching WinnerReportView/ConfirmWinnerReportView's two-step shape.
+class TournamentMatchReportView(discord.ui.View):
+    def __init__(self, helperObj):
+        super().__init__(timeout=None)
+        self.helperObj = helperObj
+
+    @discord.ui.button(
+        label=f"Team 1 {TEAM_EMOJIS[1]}", style=discord.ButtonStyle.primary, custom_id="shockwave:tournament:team1"
+    )
+    async def team1(self, interaction, button):
+        await self.helperObj._handleTournamentMatchReportClick(interaction, 1)
+
+    @discord.ui.button(
+        label=f"Team 2 {TEAM_EMOJIS[2]}", style=discord.ButtonStyle.danger, custom_id="shockwave:tournament:team2"
+    )
+    async def team2(self, interaction, button):
+        await self.helperObj._handleTournamentMatchReportClick(interaction, 2)
+
+
+# The posted roster's own buttons (team2_message only, see
+# _finalizeRoster) - persistent (custom_id, timeout=None, registered once
+# via client.add_view) since a roster can sit un-started indefinitely,
+# same reasoning as WinnerReportView. Reroll always shows (a single shared
+# instance can't conditionally omit a button per-message the way adding a
+# reaction conditionally once could); its own callback checks
+# roster_use_roles and politely no-ops if this particular roster was
+# never role-eligible, the same guard the old reaction handler already
+# had for "a prankster reacts 🔄 on a message that never earned it".
+class RosterActionView(discord.ui.View):
+    # include_reroll=False (a roster that isn't role-eligible) omits the
+    # button from THIS message entirely, matching the reaction it replaces
+    # (which was only ever added when _finalizeRoster's own roles_eligible
+    # check passed) — the generic instance registered once at startup
+    # still has all three, since persistent-view registration is only
+    # about routing a custom_id's clicks, not about which buttons any one
+    # message actually shows.
+    def __init__(self, helperObj, include_reroll=True):
+        super().__init__(timeout=None)
+        self.helperObj = helperObj
+        if not include_reroll:
+            self.remove_item(self.reroll)
+
+    @discord.ui.button(
+        label=f"Reroll {TEAM_ROLES_REROLL_EMOJI}", style=discord.ButtonStyle.secondary,
+        custom_id="shockwave:roster:reroll",
+    )
+    async def reroll(self, interaction, button):
+        await self.helperObj._handleRosterRerollClick(interaction)
+
+    @discord.ui.button(
+        label=f"Start {TEAM_START_EMOJI}", style=discord.ButtonStyle.success,
+        custom_id="shockwave:roster:start",
+    )
+    async def start(self, interaction, button):
+        await self.helperObj._handleRosterStartClick(interaction, move=True)
+
+    @discord.ui.button(
+        label=f"Start (no move) {TEAM_START_NO_MOVE_EMOJI}", style=discord.ButtonStyle.primary,
+        custom_id="shockwave:roster:start_no_move",
+    )
+    async def startNoMove(self, interaction, button):
+        await self.helperObj._handleRosterStartClick(interaction, move=False)
+
+
+# /team-invite's own posted message - persistent (custom_id, timeout=None,
+# registered once via client.add_view) since an invite can sit unanswered
+# indefinitely, same reasoning as WinnerReportView. One shared Accept
+# button covers every invitee on the message (see
+# _handleTeamInviteAcceptClick) - the DB lookup itself, scoped to
+# targetId=interaction.user.id, is what tells several different invited
+# members' clicks apart, not anything about the button or view.
+class TeamInviteAcceptView(discord.ui.View):
+    def __init__(self, helperObj):
+        super().__init__(timeout=None)
+        self.helperObj = helperObj
+
+    @discord.ui.button(label="Accept", style=discord.ButtonStyle.success, custom_id="shockwave:team_invite:accept")
+    async def accept(self, interaction, button):
+        await self.helperObj._handleTeamInviteAcceptClick(interaction)
+
+
+# /stats' own posted message - persistent (custom_id, timeout=None,
+# registered once via client.add_view) since nothing ever expires a stats
+# view on its own, the same open-ended reasoning as WinnerReportView.
+# card_shown picks which of Card/Back is actually attached to THIS
+# message (see RosterActionView's own include_reroll for why a persistent
+# view's registered template and any one message's real button set don't
+# have to match) - Avatar always shows either way, since both the embed
+# and the trading card have their own avatar to toggle.
+class StatsView(discord.ui.View):
+    def __init__(self, helperObj, card_shown=False):
+        super().__init__(timeout=None)
+        self.helperObj = helperObj
+        if card_shown:
+            self.remove_item(self.showCard)
+        else:
+            self.remove_item(self.returnToStats)
+
+    @discord.ui.button(
+        label=f"Avatar {STATS_AVATAR_TOGGLE_EMOJI}", style=discord.ButtonStyle.secondary,
+        custom_id="shockwave:stats:avatar_toggle",
+    )
+    async def avatarToggle(self, interaction, button):
+        await self.helperObj._handleStatsAvatarToggleClick(interaction)
+
+    @discord.ui.button(
+        label=f"Card {STATS_CARD_EMOJI}", style=discord.ButtonStyle.primary, custom_id="shockwave:stats:show_card",
+    )
+    async def showCard(self, interaction, button):
+        await self.helperObj._handleStatsShowCardClick(interaction)
+
+    @discord.ui.button(
+        label=f"Back {STATS_RETURN_EMOJI}", style=discord.ButtonStyle.primary, custom_id="shockwave:stats:return",
+    )
+    async def returnToStats(self, interaction, button):
+        await self.helperObj._handleStatsReturnClick(interaction)
+
+
+# /team-stats' own posted message - same persistent, state-dependent-
+# button-set shape as StatsView, just for a team (no avatar toggle, since
+# a team card has no per-player avatar to flip).
+class TeamStatsView(discord.ui.View):
+    def __init__(self, helperObj, card_shown=False):
+        super().__init__(timeout=None)
+        self.helperObj = helperObj
+        if card_shown:
+            self.remove_item(self.showCard)
+        else:
+            self.remove_item(self.returnToStats)
+
+    @discord.ui.button(
+        label=f"Card {TEAM_CARD_EMOJI}", style=discord.ButtonStyle.primary, custom_id="shockwave:team_stats:show_card",
+    )
+    async def showCard(self, interaction, button):
+        await self.helperObj._handleTeamStatsShowCardClick(interaction)
+
+    @discord.ui.button(
+        label=f"Back {TEAM_CARD_RETURN_EMOJI}", style=discord.ButtonStyle.primary,
+        custom_id="shockwave:team_stats:return",
+    )
+    async def returnToStats(self, interaction, button):
+        await self.helperObj._handleTeamStatsReturnClick(interaction)
+
+
+# /leaderboard, /my-teams, and /team-list all page the exact same way -
+# First/Prev/Next/Last, one shared view per guild/caller/search rather
+# than re-running the command - so all three views below are the same
+# four-button shape, just wired to a different helper.py handler and
+# table. Persistent (custom_id, timeout=None, registered once via
+# client.add_view) since nothing ever expires one of these pages on its
+# own, the same open-ended reasoning as WinnerReportView.
+class LeaderboardPagingView(discord.ui.View):
+    def __init__(self, helperObj):
+        super().__init__(timeout=None)
+        self.helperObj = helperObj
+
+    @discord.ui.button(label=LEADERBOARD_FIRST_EMOJI, style=discord.ButtonStyle.secondary, custom_id="shockwave:leaderboard:first")
+    async def first(self, interaction, button):
+        await self.helperObj._handleLeaderboardPageClick(interaction, "first")
+
+    @discord.ui.button(label=LEADERBOARD_PREV_EMOJI, style=discord.ButtonStyle.secondary, custom_id="shockwave:leaderboard:prev")
+    async def prev(self, interaction, button):
+        await self.helperObj._handleLeaderboardPageClick(interaction, "prev")
+
+    @discord.ui.button(label=LEADERBOARD_NEXT_EMOJI, style=discord.ButtonStyle.secondary, custom_id="shockwave:leaderboard:next")
+    async def next(self, interaction, button):
+        await self.helperObj._handleLeaderboardPageClick(interaction, "next")
+
+    @discord.ui.button(label=LEADERBOARD_LAST_EMOJI, style=discord.ButtonStyle.secondary, custom_id="shockwave:leaderboard:last")
+    async def last(self, interaction, button):
+        await self.helperObj._handleLeaderboardPageClick(interaction, "last")
+
+
+# See LeaderboardPagingView - same shape, /my-teams' own table/handler.
+class MyTeamsPagingView(discord.ui.View):
+    def __init__(self, helperObj):
+        super().__init__(timeout=None)
+        self.helperObj = helperObj
+
+    @discord.ui.button(label=LEADERBOARD_FIRST_EMOJI, style=discord.ButtonStyle.secondary, custom_id="shockwave:my_teams:first")
+    async def first(self, interaction, button):
+        await self.helperObj._handleMyTeamsPageClick(interaction, "first")
+
+    @discord.ui.button(label=LEADERBOARD_PREV_EMOJI, style=discord.ButtonStyle.secondary, custom_id="shockwave:my_teams:prev")
+    async def prev(self, interaction, button):
+        await self.helperObj._handleMyTeamsPageClick(interaction, "prev")
+
+    @discord.ui.button(label=LEADERBOARD_NEXT_EMOJI, style=discord.ButtonStyle.secondary, custom_id="shockwave:my_teams:next")
+    async def next(self, interaction, button):
+        await self.helperObj._handleMyTeamsPageClick(interaction, "next")
+
+    @discord.ui.button(label=LEADERBOARD_LAST_EMOJI, style=discord.ButtonStyle.secondary, custom_id="shockwave:my_teams:last")
+    async def last(self, interaction, button):
+        await self.helperObj._handleMyTeamsPageClick(interaction, "last")
+
+
+# See LeaderboardPagingView - same shape, /team-list's own table/handler.
+class TeamListPagingView(discord.ui.View):
+    def __init__(self, helperObj):
+        super().__init__(timeout=None)
+        self.helperObj = helperObj
+
+    @discord.ui.button(label=LEADERBOARD_FIRST_EMOJI, style=discord.ButtonStyle.secondary, custom_id="shockwave:team_list:first")
+    async def first(self, interaction, button):
+        await self.helperObj._handleTeamListPageClick(interaction, "first")
+
+    @discord.ui.button(label=LEADERBOARD_PREV_EMOJI, style=discord.ButtonStyle.secondary, custom_id="shockwave:team_list:prev")
+    async def prev(self, interaction, button):
+        await self.helperObj._handleTeamListPageClick(interaction, "prev")
+
+    @discord.ui.button(label=LEADERBOARD_NEXT_EMOJI, style=discord.ButtonStyle.secondary, custom_id="shockwave:team_list:next")
+    async def next(self, interaction, button):
+        await self.helperObj._handleTeamListPageClick(interaction, "next")
+
+    @discord.ui.button(label=LEADERBOARD_LAST_EMOJI, style=discord.ButtonStyle.secondary, custom_id="shockwave:team_list:last")
+    async def last(self, interaction, button):
+        await self.helperObj._handleTeamListPageClick(interaction, "last")
+
+
+# Lets whoever ran /shop re-sort the listing by price or by owned status,
+# either direction, without re-running the command - four independent
+# toggle buttons (not a single cycling one) so the current sort is always
+# visible at a glance from which two are "pressed". Purely a display
+# preference: clicking any of these only re-renders the same embed with a
+# different sort_key/descending combination (see helpers._buildShopEmbed)
+# and never touches gold, ownership, or the catalog itself, so unlike
+# every other View in this file there's nothing to restore on cancel or
+# timeout - just stop taking input once it expires.
+class ShopSortView(discord.ui.View):
+    def __init__(self, helperObj, guild_id, user_id):
+        super().__init__(timeout=SHOP_SORT_TIMEOUT_SECONDS)
+        self.helperObj = helperObj
+        self.guild_id = guild_id
+        self.user_id = user_id
+        self.sort_key = None
+        # Named `sort_descending`, not `descending` - that would collide
+        # with the `descending` button method below, which discord.py's
+        # button decorator turns into a class-level ui.Item descriptor that
+        # an instance attribute of the same name would shadow.
+        self.sort_descending = False
+        self.message = None
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "Only the person who ran /shop can sort this.", ephemeral=True
+            )
+            return False
+        return True
+
+    def _disable_buttons(self):
+        for item in self.children:
+            item.disabled = True
+
+    async def _reRender(self, interaction):
+        embed = self.helperObj._buildShopEmbed(
+            self.guild_id, self.user_id, self.sort_key, self.sort_descending
+        )
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Sort: Price", style=discord.ButtonStyle.secondary)
+    async def sortByPrice(self, interaction, button):
+        self.sort_key = "price"
+        await self._reRender(interaction)
+
+    @discord.ui.button(label="Sort: Owned", style=discord.ButtonStyle.secondary)
+    async def sortByOwned(self, interaction, button):
+        self.sort_key = "owned"
+        await self._reRender(interaction)
+
+    @discord.ui.button(label="Ascending", style=discord.ButtonStyle.secondary)
+    async def ascending(self, interaction, button):
+        self.sort_descending = False
+        await self._reRender(interaction)
+
+    @discord.ui.button(label="Descending", style=discord.ButtonStyle.secondary)
+    async def descending(self, interaction, button):
+        self.sort_descending = True
+        await self._reRender(interaction)
+
+    async def on_timeout(self):
+        self._disable_buttons()
+        if self.message is not None:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+
+# /wager-against's challenge message's own button - persistent (custom_id,
+# timeout=None, registered once via client.add_view) since a challenge can
+# sit unanswered indefinitely, same reasoning as WinnerReportView. A single
+# shared instance covers every pending challenge in every guild, so the
+# callback re-derives which duel (and whether this clicker is actually the
+# challenged player) from interaction.guild_id/interaction.message.id
+# rather than anything stored on self.
+class DuelAcceptView(discord.ui.View):
+    def __init__(self, helperObj):
+        super().__init__(timeout=None)
+        self.helperObj = helperObj
+
+    @discord.ui.button(label="Accept", style=discord.ButtonStyle.success, custom_id="shockwave:duel:accept")
+    async def accept(self, interaction, button):
+        await self.helperObj._handleDuelAcceptClick(interaction)
+
+
+# The accepted duel's own result-report message's buttons - same
+# persistent shape as DuelAcceptView, for the same "a duel can sit
+# AWAITING_RESULT indefinitely" reason. A press posts a
+# ConfirmDuelResultView instead of paying out immediately, matching
+# WinnerReportView/ConfirmWinnerReportView's two-step shape - a real gold
+# transfer shouldn't hinge on a single accidental click.
+class DuelResultView(discord.ui.View):
+    def __init__(self, helperObj):
+        super().__init__(timeout=None)
+        self.helperObj = helperObj
+
+    @discord.ui.button(
+        label="Challenger Won 🔵", style=discord.ButtonStyle.primary,
+        custom_id="shockwave:duel:challenger_won",
+    )
+    async def challengerWon(self, interaction, button):
+        await self.helperObj._handleDuelResultClick(interaction, winner_is_challenger=True)
+
+    @discord.ui.button(
+        label="Target Won 🔴", style=discord.ButtonStyle.danger,
+        custom_id="shockwave:duel:target_won",
+    )
+    async def targetWon(self, interaction, button):
+        await self.helperObj._handleDuelResultClick(interaction, winner_is_challenger=False)
+
+
+# A Challenger Won/Target Won click posts this instead of paying out the
+# pot immediately - Confirm actually pays out (via _finishDuelResolution,
+# which re-fetches the duel's own row by id rather than trusting anything
+# stored here besides the id itself); Cancel/timeout restores the duel to
+# AWAITING_RESULT via _restoreDuelAwaitingResult so its buttons work again.
+# Not persistent - a short, one-off confirmation window, same as
+# ConfirmWinnerReportView/ConfirmTournamentMatchReportView.
+class ConfirmDuelResultView(discord.ui.View):
+    def __init__(self, helperObj, duel_id, winner_is_challenger):
+        super().__init__(timeout=DUEL_CONFIRM_TIMEOUT_SECONDS)
+        self.helperObj = helperObj
+        self.duel_id = duel_id
+        self.winner_is_challenger = winner_is_challenger
+        self.message = None
+
+    def _disable_buttons(self):
+        for item in self.children:
+            item.disabled = True
+
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success)
+    async def confirm(self, interaction, button):
+        self._disable_buttons()
+        self.stop()
+        await interaction.response.edit_message(
+            content="Result confirmed - paying out the wager...", view=self
+        )
+        await self.helperObj._finishDuelResolution(self.duel_id, self.winner_is_challenger)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction, button):
+        self._disable_buttons()
+        self.stop()
+        self.helperObj._restoreDuelAwaitingResult(self.duel_id)
+        await interaction.response.edit_message(
+            content="Report cancelled - use the buttons on the original message to report the correct result.",
+            view=self,
+        )
+
+    async def on_timeout(self):
+        self._disable_buttons()
+        self.helperObj._restoreDuelAwaitingResult(self.duel_id)
+        if self.message is not None:
+            try:
+                await self.message.edit(
+                    content=(
+                        "Confirmation timed out - use the buttons on the original message to report "
+                        "the result."
+                    ),
+                    view=self,
+                )
+            except discord.HTTPException:
+                pass
+
+
 class helpers():
     def __init__(self, cursor, db) -> None:
         self.cursor = cursor
@@ -1045,6 +1809,148 @@ class helpers():
 
         return team1, team2
 
+    # One of the three tiers ROLE_BALANCE_OFF_ROLE_PENALTY/
+    # ROLE_BALANCE_DISLIKED_ROLE_PENALTY are keyed off of, given the
+    # (liked, disliked) lists getRolePreferences returns for a player.
+    def _roleTier(self, liked, disliked, role):
+        if role in liked:
+            return "liked"
+        if role in disliked:
+            return "disliked"
+        return "neutral"
+
+    def _roleBalancePenalty(self, tier):
+        return {
+            "liked": 0,
+            "neutral": ROLE_BALANCE_OFF_ROLE_PENALTY,
+            "disliked": ROLE_BALANCE_DISLIKED_ROLE_PENALTY,
+        }[tier]
+
+    # Builds one (member, elo, role, tier, effective_elo) entry — effective_elo
+    # is elo minus whichever penalty `tier` earns, 0 for "liked". Shared by
+    # _assignRolesForBalance's initial fill and _refineRoleBalance's swaps
+    # so both ways a player ends up on a role score it the same way.
+    def _reassignRole(self, guild_id, member, elo, role):
+        liked, disliked = self.getRolePreferences(guild_id, member.id)
+        tier = self._roleTier(liked, disliked, role)
+        return (member, elo, role, tier, elo - self._roleBalancePenalty(tier))
+
+    # Greedily assigns each of `members_with_elo` (must be exactly 10 —
+    # 5v5, the only shape roles apply to — see formRoleBalancedTeams) one
+    # of SETUP_ROLE_NAMES' five roles, two players per role (one per
+    # eventual team — _splitRoleBalancedTeams decides which). Walks
+    # ROLE_BALANCE_FILL_ORDER (jungle first) and, for each role in turn,
+    # fills its two slots from whichever unassigned players actually like
+    # it first, then unassigned players with no stated preference either
+    # way, and only reaches for someone who marked the role disliked if
+    # nothing else is left for it.
+    #
+    # Returns a list of 10 (member, elo, role, tier, effective_elo) tuples
+    # in ROLE_BALANCE_FILL_ORDER order, not SETUP_ROLE_NAMES' on-screen
+    # order — callers that need Top/Jungle/Mid/Bottom/Support order (i.e.
+    # _splitRoleBalancedTeams) reorder for themselves.
+    def _assignRolesForBalance(self, guild_id, members_with_elo):
+        elo_by_id = {member.id: elo for member, elo in members_with_elo}
+        preferences = {
+            member.id: self.getRolePreferences(guild_id, member.id) for member, _elo in members_with_elo
+        }
+        remaining = sorted((member for member, _elo in members_with_elo), key=lambda m: m.id)
+
+        assigned = []
+        for role in ROLE_BALANCE_FILL_ORDER:
+            liking, neutral, disliking = [], [], []
+            for member in remaining:
+                liked, disliked = preferences[member.id]
+                tier = self._roleTier(liked, disliked, role)
+                (liking if tier == "liked" else disliking if tier == "disliked" else neutral).append(member)
+
+            for member in (liking + neutral + disliking)[:2]:
+                remaining.remove(member)
+                assigned.append(self._reassignRole(guild_id, member, elo_by_id[member.id], role))
+
+        return assigned
+
+    # Brute-forces which of each role's two players lands on which side —
+    # 2**5 = 32 combinations, cheap enough to just try all of them — and
+    # keeps whichever split minimizes the gap between the two sides' total
+    # effective_elo. `assigned` is 10 (member, elo, role, tier,
+    # effective_elo) tuples, two per SETUP_ROLE_NAMES role (the shape
+    # _assignRolesForBalance/_refineRoleBalance both produce). Returns
+    # (side_a, side_b), each a list of 5 such tuples sorted into
+    # SETUP_ROLE_NAMES' own Top/Jungle/Mid/Bottom/Support order, matching
+    # the position makeEmbedString reads each roster row's role label from.
+    def _splitRoleBalancedTeams(self, assigned):
+        by_role = {}
+        for entry in assigned:
+            by_role.setdefault(entry[2], []).append(entry)
+        role_pairs = [by_role[role] for role in SETUP_ROLE_NAMES]
+
+        best_diff, best_combo = None, None
+        for combo in itertools.product((0, 1), repeat=len(role_pairs)):
+            side_a = [pair[flip] for pair, flip in zip(role_pairs, combo)]
+            side_b = [pair[1 - flip] for pair, flip in zip(role_pairs, combo)]
+            diff = abs(sum(e[4] for e in side_a) - sum(e[4] for e in side_b))
+            if best_diff is None or diff < best_diff:
+                best_diff, best_combo = diff, (side_a, side_b)
+
+        return best_combo
+
+    def _roleSplitDiff(self, assigned):
+        side_a, side_b = self._splitRoleBalancedTeams(assigned)
+        return abs(sum(e[4] for e in side_a) - sum(e[4] for e in side_b))
+
+    # Hill-climbs on top of _assignRolesForBalance's initial preference-
+    # first fill: repeatedly tries swapping which role each of two players
+    # is assigned to (any two players holding different roles, not just
+    # ones _splitRoleBalancedTeams currently has on opposite sides — it
+    # re-decides sides fresh every time anyway), keeping a swap only if it
+    # lets _splitRoleBalancedTeams find a tighter effective-elo split than
+    # the best one seen so far. A swap that only makes preference fit
+    # worse without ever improving balance is never kept — this only
+    # refines the balance on top of whatever _assignRolesForBalance already
+    # prioritized for preference, it never fights it for its own sake.
+    # Stops once a full pass finds no improving swap, or after
+    # ROLE_BALANCE_MAX_REFINE_PASSES passes either way.
+    def _refineRoleBalance(self, guild_id, assigned):
+        best_assigned = list(assigned)
+        best_diff = self._roleSplitDiff(best_assigned)
+
+        for _pass in range(ROLE_BALANCE_MAX_REFINE_PASSES):
+            improved = False
+            for i, j in itertools.combinations(range(len(best_assigned)), 2):
+                member_i, elo_i, role_i, _tier_i, _eff_i = best_assigned[i]
+                member_j, elo_j, role_j, _tier_j, _eff_j = best_assigned[j]
+                if role_i == role_j:
+                    continue
+
+                candidate = list(best_assigned)
+                candidate[i] = self._reassignRole(guild_id, member_i, elo_i, role_j)
+                candidate[j] = self._reassignRole(guild_id, member_j, elo_j, role_i)
+
+                diff = self._roleSplitDiff(candidate)
+                if diff < best_diff:
+                    best_assigned, best_diff, improved = candidate, diff, True
+                    break
+            if not improved:
+                break
+
+        return best_assigned
+
+    # Entry point for /make-teams ranked:true use_roles:true — returns
+    # None for anything other than exactly 10 players (rankedTeamHelper
+    # falls back to the roleless formBalancedTeams split in that case,
+    # same as the casual /make-teams path does for non-5v5 rosters).
+    # Otherwise runs _assignRolesForBalance's preference-first fill,
+    # _refineRoleBalance's balance-improving swap pass on top of it, and
+    # returns the final (side_a, side_b) split, each already ordered
+    # Top/Jungle/Mid/Bottom/Support for makeEmbedString.
+    def formRoleBalancedTeams(self, guild_id, members_with_elo):
+        if len(members_with_elo) != 10:
+            return None
+        assigned = self._assignRolesForBalance(guild_id, members_with_elo)
+        refined = self._refineRoleBalance(guild_id, assigned)
+        return self._splitRoleBalancedTeams(refined)
+
     # What a brand new player's elo starts at in this guild — DEFAULT_ELO
     # (1000) unless an admin has overridden it with /set's default_elo
     # param (see adminSetHelper), in which case that value wins instead.
@@ -1125,7 +2031,13 @@ class helpers():
     # eventually reported (see computeGameDeltas/recordResult). Everything
     # else — moving players, opening betting — is still the posted roster's
     # ▶️ reaction's job, same as /make-teams.
-    async def rankedTeamHelper(self, ctx):
+    #
+    # use_roles=True additionally tries to assign Top/Jungle/Mid/Bottom/
+    # Support (see formRoleBalancedTeams) — only possible with exactly 10
+    # players, since roles only make sense for two full 5-player sides.
+    # Anything else falls back to the same roleless formBalancedTeams split
+    # everyone else gets, with a note explaining why roles weren't applied.
+    async def rankedTeamHelper(self, ctx, use_roles=False):
         await self.clearTeamsHelper(ctx)
 
         guild_id = ctx.guild.id
@@ -1138,18 +2050,30 @@ class helpers():
             elo = self.getEconomy(guild_id, member.id, "elo")
             members_with_elo.append((member, elo if elo is not None else default_elo))
 
-        team1_members, team2_members = self.formBalancedTeams(members_with_elo)
         elo_by_id = {member.id: elo for member, elo in members_with_elo}
-
         name1, name2 = self._rosterTeamNames(guild_id)
+
+        role_split = self.formRoleBalancedTeams(guild_id, members_with_elo) if use_roles else None
+
         team1 = Team()
         team1.name = name1
-        for member in team1_members:
-            team1.add_player(Player(member.id, member.name))
         team2 = Team()
         team2.name = name2
-        for member in team2_members:
-            team2.add_player(Player(member.id, member.name))
+
+        if role_split is not None:
+            side_a, side_b = role_split
+            for member, _elo, _role, _tier, _eff in side_a:
+                team1.add_player(Player(member.id, member.name))
+            for member, _elo, _role, _tier, _eff in side_b:
+                team2.add_player(Player(member.id, member.name))
+            team1_members = [entry[0] for entry in side_a]
+            team2_members = [entry[0] for entry in side_b]
+        else:
+            team1_members, team2_members = self.formBalancedTeams(members_with_elo)
+            for member in team1_members:
+                team1.add_player(Player(member.id, member.name))
+            for member in team2_members:
+                team2.add_player(Player(member.id, member.name))
 
         self.update(guild_id, "team1", team1.serializeTeam())
         self.update(guild_id, "team2", team2.serializeTeam())
@@ -1159,13 +2083,23 @@ class helpers():
         team1_avg = self.averageElo(team1_members, elo_by_id, default_elo)
         team2_avg = self.averageElo(team2_members, elo_by_id, default_elo)
 
-        await ctx.response.send_message(
+        message = (
             f"Ranked teams created! Team 1 avg elo **{team1_avg}**, Team 2 avg elo **{team2_avg}**. "
-            f"React {TEAM_START_EMOJI} on the roster below when you're ready to move everyone and open "
-            f"betting, or {TEAM_START_NO_MOVE_EMOJI} to open betting without moving anyone."
         )
-        team1_message, team2_message = await self.printEmbed(ctx, team1, team2)
-        await self._finalizeRoster(ctx.guild.id, team1_message, team2_message, team1, team2, use_roles=False)
+        if use_roles and role_split is None:
+            message += (
+                "Roles need exactly 10 players (5 a side) to assign, so no roles were assigned this "
+                "time - showing the roster as normal instead. "
+            )
+        message += (
+            "Press Start on the roster below when you're ready to move everyone and open betting, or "
+            "Start (no move) to open betting without moving anyone."
+        )
+        await ctx.response.send_message(message)
+        team1_message, team2_message = await self.printEmbed(ctx, team1, team2, useRoles=role_split is not None)
+        await self._finalizeRoster(
+            ctx.guild.id, team1_message, team2_message, team1, team2, use_roles=role_split is not None
+        )
 
     def makeEmbedString(self, team: Team, useRoles=False):
         teamString = ""
@@ -1187,10 +2121,6 @@ class helpers():
     # control. Callers that don't care (a draft's own in-progress reposts)
     # just discard the return value.
     async def printEmbed(self, ctx, team1: Team, team2: Team, playersTeam=None, useRoles=False):
-        # BUG FIX: this always called makeEmbedString() with its default
-        # useRoles=False, so /make-teams use_roles:True computed and stored
-        # role-shuffled results (see the old randomRoleHelper) that the
-        # embed it actually posts never displayed. Forward the flag through.
         team1_embedString = self.makeEmbedString(team1, useRoles)
         team2_embedString = self.makeEmbedString(team2, useRoles)
 
@@ -1201,11 +2131,10 @@ class helpers():
             title=team2.get_name(), description=team2_embedString, color=discord.Color.red()
         )
 
-        # BUG FIX: ctx.response.send_message can only be called once per
-        # interaction. printEmbed is now sometimes called from a place
-        # (chooseHelper) where the interaction was already responded to
-        # earlier in the flow, so calling send_message again would raise.
-        # Use channel.send for both embeds here and let the caller decide
+        # ctx.response.send_message can only be called once per interaction,
+        # and printEmbed is sometimes called from a place (chooseHelper)
+        # where the interaction was already responded to earlier in the
+        # flow — channel.send for both embeds here lets the caller decide
         # if/when to do the initial interaction response.
         team1_message = await ctx.channel.send(embed=team1_embed)
         team2_message = await ctx.channel.send(embed=team2_embed)
@@ -1343,17 +2272,18 @@ class helpers():
         await ctx.response.send_message(message)
 
     # Turns a just-posted, actually-final roster (not a captains draft still
-    # mid-pick) into a live control: 🔄 to reroll roles (only if the roster
-    # actually qualifies — see below), ▶️ to move everyone and open
-    # betting, and ⚡ to open betting without moving anyone — ▶️ and 🔄
-    # replace the old standalone /randomize-roles and /start commands
-    # respectively. All reactions live on `team2_message` only (team1's own
-    # message stays a plain, unreactive embed) — see handleRosterReaction
-    # for why one message is enough to drive both teams' state.
-    # `roster_team1_message_id`/`roster_team2_message_id` on `servers` is
-    # what makes a reaction on an OLD roster message inert once a newer one
-    # has been posted: each new call here overwrites them, so a stale
-    # message's reactions simply fail the id check and no-op.
+    # mid-pick) into a live control: Reroll to reroll roles (only if the
+    # roster actually qualifies — see below), Start to move everyone and
+    # open betting, and Start (no move) to open betting without moving
+    # anyone — Start and Reroll replace the old standalone
+    # /randomize-roles and /start commands respectively. The RosterActionView
+    # lives on `team2_message` only (team1's own message stays a plain
+    # embed) — see RosterActionView's own callbacks for why one message is
+    # enough to drive both teams' state. `roster_team1_message_id`/
+    # `roster_team2_message_id` on `servers` is what makes a click on an OLD
+    # roster message inert once a newer one has been posted: each new call
+    # here overwrites them, so a stale message's buttons simply fail the id
+    # check and no-op.
     async def _finalizeRoster(self, guild_id, team1_message, team2_message, team1, team2, use_roles):
         roles_eligible = use_roles and len(team1.get_players()) == 5 and len(team2.get_players()) == 5
 
@@ -1362,10 +2292,7 @@ class helpers():
         self.update(guild_id, "roster_channel_id", team2_message.channel.id)
         self.update(guild_id, "roster_use_roles", 1 if roles_eligible else 0)
 
-        if roles_eligible:
-            await team2_message.add_reaction(TEAM_ROLES_REROLL_EMOJI)
-        await team2_message.add_reaction(TEAM_START_EMOJI)
-        await team2_message.add_reaction(TEAM_START_NO_MOVE_EMOJI)
+        await team2_message.edit(view=RosterActionView(self, include_reroll=roles_eligible))
 
     # The voice channel to send everyone back to once the game ends (see
     # moveMembersToOriginalChannel) — the old /start command took this from
@@ -1448,10 +2375,49 @@ class helpers():
     # nobody has to be in a voice channel at all to click it, and there's
     # no "original channel" to send anyone back to once the game ends
     # (moveMembersToOriginalChannel simply no-ops for a game started this way).
-    async def _startRosterViaReaction(self, guild_id, channel, payload, move=True):
-        guild = self.client.get_guild(guild_id)
-        if guild is None:
+    # RosterActionView's Reroll button callback.
+    async def _handleRosterRerollClick(self, interaction):
+        guild_id = interaction.guild_id
+        if guild_id is None:
             return
+
+        stored_message_id = self.get(guild_id, "roster_team2_message_id")
+        if stored_message_id is None or int(stored_message_id) != interaction.message.id:
+            await interaction.response.send_message("This roster is no longer live.", ephemeral=True)
+            return
+
+        # include_reroll=False already keeps this button off a non-
+        # eligible roster's own message (see _finalizeRoster) - this is
+        # just defense in depth against a mismatched/stale message.
+        if not self.get(guild_id, "roster_use_roles"):
+            await interaction.response.send_message(
+                "This roster doesn't have roles assigned, so there's nothing to reroll.", ephemeral=True
+            )
+            return
+
+        await interaction.response.defer()
+        await self._rerollRoster(guild_id, interaction.channel)
+
+    # RosterActionView's Start/Start (no move) button callback - ▶️/⚡'s old
+    # reaction-based whole implementation (everything the old /start
+    # command did: movefunc + sendCurrentMatchupImage + startBettingHelper),
+    # adapted for a persistent shared view: re-derives which roster (and
+    # whether it's still live) from the interaction itself. move=False is
+    # the "start without moving anyone" version - same matchup image and
+    # betting open, just skipping the whole "find where to move everyone"
+    # dance, since nobody has to be in a voice channel at all to click it.
+    async def _handleRosterStartClick(self, interaction, move):
+        guild_id = interaction.guild_id
+        if guild_id is None:
+            return
+
+        stored_message_id = self.get(guild_id, "roster_team2_message_id")
+        if stored_message_id is None or int(stored_message_id) != interaction.message.id:
+            await interaction.response.send_message("This roster is no longer live.", ephemeral=True)
+            return
+
+        guild = interaction.guild
+        channel = interaction.channel
 
         team1 = Team()
         team1.deserializeTeam(self.get(guild_id, "team1"))
@@ -1462,10 +2428,10 @@ class helpers():
         if move:
             original_channel = self._findRosterVoiceChannel(guild, team1, team2)
             if original_channel is None:
-                await channel.send(
+                await interaction.response.send_message(
                     "Nobody from the roster is currently in a voice channel, so there's nowhere to move "
-                    f"them. Join a voice channel with the group and click {TEAM_START_EMOJI} again, or "
-                    f"{TEAM_START_NO_MOVE_EMOJI} to start without moving anyone."
+                    "them. Join a voice channel with the group and press Start again, or Start (no "
+                    "move) to start without moving anyone."
                 )
                 return
 
@@ -1483,10 +2449,12 @@ class helpers():
 
         # BUG-PRONE PATTERN AVOIDED: flip this synchronously, with no
         # `await` between it and the checks above, so a second
-        # near-simultaneous ▶️/⚡ click can't also pass those checks and
-        # start the game twice — same reasoning handleGameReportReaction's
-        # own betting_message_id clear documents.
+        # near-simultaneous Start/Start (no move) click can't also pass
+        # those checks and start the game twice — same reasoning
+        # _handleWinnerReportPick's own betting_message_id clear documents.
         self.update(guild_id, "roster_team2_message_id", None)
+
+        await interaction.response.defer()
 
         if move:
             self.update(guild_id, "original_channel", str(original_channel))
@@ -1505,9 +2473,9 @@ class helpers():
             # Overwrite whatever original_channel might already be on
             # record (captainsHelper captures the drafting caller's voice
             # channel the moment a draft starts, in case everyone's since
-            # left voice by the time a reaction is finally clicked; a
-            # leftover value from an earlier game is possible too) — ⚡
-            # deliberately moved nobody, so moveMembersToOriginalChannel
+            # left voice by the time a click finally comes in; a leftover
+            # value from an earlier game is possible too) — the no-move
+            # start deliberately moved nobody, so moveMembersToOriginalChannel
             # must no-op for this game once it resolves, the same way it
             # already does for a guild that's never started a game at all.
             self.update(guild_id, "original_channel", "")
@@ -1517,56 +2485,18 @@ class helpers():
         await self._openBetting(guild_id, channel)
 
         try:
-            team2_message = await channel.fetch_message(payload.message_id)
-            await team2_message.clear_reaction(TEAM_ROLES_REROLL_EMOJI)
-            await team2_message.clear_reaction(TEAM_START_EMOJI)
-            await team2_message.clear_reaction(TEAM_START_NO_MOVE_EMOJI)
+            await interaction.message.edit(view=None)
         except discord.HTTPException:
             pass
 
-    async def handleRosterReaction(self, payload):
-        guild_id = payload.guild_id
-        if guild_id is None:
-            return
-
-        emoji = str(payload.emoji)
-        if emoji not in (TEAM_ROLES_REROLL_EMOJI, TEAM_START_EMOJI, TEAM_START_NO_MOVE_EMOJI):
-            return
-
-        stored_message_id = self.get(guild_id, "roster_team2_message_id")
-        if stored_message_id is None or int(stored_message_id) != payload.message_id:
-            return
-
-        channel = self.client.get_channel(payload.channel_id)
-        if channel is None:
-            channel = await self.client.fetch_channel(payload.channel_id)
-
-        if emoji == TEAM_ROLES_REROLL_EMOJI:
-            # A prankster can react with 🔄 on any message, including ones
-            # the bot itself never put it on — only actually reroll if this
-            # roster was eligible for it in the first place (see
-            # _finalizeRoster).
-            if not self.get(guild_id, "roster_use_roles"):
-                return
-            await self._rerollRoster(guild_id, channel)
-            try:
-                message = await channel.fetch_message(payload.message_id)
-                await self._clearPagingReaction(message, payload)
-            except discord.HTTPException:
-                pass
-            return
-
-        await self._startRosterViaReaction(guild_id, channel, payload, move=emoji == TEAM_START_EMOJI)
-
     async def captainsHelper(self, ctx, captain_1, captain_2, ranked=False):
-        # BUG FIX: this validation used to run *after* clearTeamsHelper and
-        # after already building `Player(captain_1.id, ...)` from both
-        # captains — so a None captain crashed with AttributeError on
-        # `captain_1.id` before this check ever ran, instead of showing the
-        # message below. bot.py's /captains command happens to reject None
-        # captains before calling in here today, which is the only reason
-        # this was never hit in practice; checking first makes the guard
-        # actually do something if that ever changes.
+        # Checked before clearTeamsHelper and before building
+        # Player(captain_1.id, ...) from either captain, since either would
+        # crash with AttributeError on a None captain instead of showing
+        # the message below. bot.py's /captains command happens to reject
+        # None captains before calling in here today, which is the only
+        # reason this guard isn't hit in practice; checking first here
+        # keeps it meaningful if that ever changes.
         if captain_1 is None or captain_2 is None:
             await ctx.response.send_message("Mention two team captains!")
             return
@@ -1619,11 +2549,9 @@ class helpers():
 
     # function for captain to choose a specific team member
     async def chooseFunc(self, ctx, member):
-        # BUG FIX: /choose can be called with no `member` and `use_random`
-        # left False (its default), which passed member=None all the way
-        # down into chooseHelper -> Player(member.id, ...) and crashed with
-        # AttributeError: 'NoneType' object has no attribute 'id'. Catch it
-        # here with a clear message instead of letting it blow up.
+        # /choose can be called with no `member` and `use_random` left False
+        # (its default) - catch that here with a clear message rather than
+        # passing member=None down into chooseHelper -> Player(member.id, ...).
         if member is None:
             await ctx.response.send_message(
                 'Please mention a player to choose, e.g. "/choose member:@Name", '
@@ -1645,10 +2573,6 @@ class helpers():
 
         turn = int(self.get(ctx.guild.id, "turn"))
 
-        # BUG FIX: this mixed ctx.user.id (correct, for slash-command
-        # Interactions) with ctx.message.author.id (wrong — Interaction
-        # objects don't have .message.author and this would raise
-        # AttributeError). Standardized on ctx.user throughout.
         if players.get_players() != []:
             if turn == 1 and ctx.user.id == captain1.id:
                 await self.chooseHelper(ctx, member, 1)
@@ -1678,11 +2602,8 @@ class helpers():
     async def getRandomMember(self, ctx):
         playersSer = self.get(ctx.guild.id, "players")
 
-        # BUG FIX: `Team().deserializeTeam(playersSer)` was assigned to
-        # `players` — but deserializeTeam() mutates the object in place and
-        # returns None, so `players` was always None and the very next line
-        # (`players.get_players()`) raised AttributeError. Instantiate first,
-        # then call deserializeTeam on the instance.
+        # deserializeTeam() mutates the object in place and returns None -
+        # instantiate first, then call deserializeTeam on the instance.
         players = Team()
         players.deserializeTeam(playersSer)
 
@@ -1753,9 +2674,8 @@ class helpers():
                 "Player has already been selected or does not exist in the player list."
             )
 
-        # BUG FIX: `players` is a Team object, never equal to the list
-        # literal `[]` — this comparison was always False, so the "draft
-        # complete" message never fired. Check the underlying player list.
+        # `players` is a Team object, never equal to the list literal `[]` -
+        # check the underlying player list instead.
         #
         # Also prompt once both teams reach team_size, even if the pool
         # still has people left in it — a voice channel with more people
@@ -1771,8 +2691,8 @@ class helpers():
             if team2_message is not None:
                 await self._finalizeRoster(ctx.guild.id, team1_message, team2_message, team1, team2, use_roles=False)
             await ctx.channel.send(
-                f"Both teams are set! React {TEAM_START_EMOJI} on the roster above to move everyone "
-                f"to the channels, or {TEAM_START_NO_MOVE_EMOJI} to open betting without moving anyone!"
+                "Both teams are set! Press Start on the roster above to move everyone to the "
+                "channels, or Start (no move) to open betting without moving anyone!"
             )
             return
 
@@ -1803,20 +2723,14 @@ class helpers():
 
     # clears all current teams
     #
-    # BUG FIX: this used to wipe team1/team2/original_channel unconditionally,
-    # even while a game built from them was still actively being bet on or
-    # played out (betting_state OPEN/CLOSED) — every team-formation command
-    # (/make-teams, /captains, /team-use) and /clear itself all funnel
-    # through here, so simply starting a new roster, or running /clear for
-    # something as unrelated as clear_elo, silently orphaned the game in
-    # progress: getRosterPlayers would find nothing once the winner was
-    # finally reported (no elo/game-record/win-loss-gold applied, no "Elo:"
-    # line in the result message), and moveMembersToOriginalChannel would
-    # find original_channel already blanked out (no "Moved everyone back"
-    # either) — both silently, with no error or explanation anywhere. Now
-    # an in-progress game is cancelled cleanly first (same refund + move-
-    # back cancelGameHelper's own 🛑 reaction does, with the same "Game
-    # cancelled" notice) so nothing is silently lost.
+    # Every team-formation command (/make-teams, /captains, /team-use) and
+    # /clear itself all funnel through here — an in-progress game
+    # (betting_state OPEN/CLOSED) is cancelled cleanly first (the same
+    # refund + move-back + "Game cancelled" notice Cancel Game triggers),
+    # so wiping team1/team2/original_channel below can't silently orphan a
+    # game still being bet on or played out (getRosterPlayers finding
+    # nothing once a winner is later reported, moveMembersToOriginalChannel
+    # finding original_channel already blank).
     async def clearTeamsHelper(self, ctx):
         guild_id = ctx.guild.id
 
@@ -2227,17 +3141,15 @@ class helpers():
         size = self._nextPowerOfTwo(len(shuffled))
         num_byes = size - len(shuffled)
 
-        # BUG FIX: placing every real team first and every bye at the tail
-        # (team[i] if i < len(team) else None), then pairing consecutively
-        # by index, could seat two byes in the same first-round pair
-        # whenever num_byes was even — a "BYE vs BYE" match that never has
-        # a winner to report, silently orphaning that slot for the rest of
-        # the bracket (whoever the surviving side eventually reaches it
-        # gets an unearned second auto-advance instead of a real match).
-        # num_byes is always < size // 2 (size is the smallest power of two
-        # >= len(teams)), so there are always at least as many pairs as
-        # byes — spread one bye per pair instead, guaranteeing every bye
-        # is paired against a real team.
+        # Spreads one bye per pair rather than placing every real team
+        # first and every bye at the tail (team[i] if i < len(team) else
+        # None) - that naive layout could seat two byes in the same
+        # first-round pair whenever num_byes was even, a "BYE vs BYE" match
+        # that never has a winner to report, silently orphaning that slot
+        # for the rest of the bracket. num_byes is always < size // 2 (size
+        # is the smallest power of two >= len(teams)), so there are always
+        # at least as many pairs as byes, guaranteeing every bye is paired
+        # against a real team.
         team_iter = iter(shuffled)
         slots = []
         for pair_index in range(size // 2):
@@ -2613,14 +3525,11 @@ class helpers():
 
     # Whether `node`'s own label is still live (still in it, or the match it
     # fed hasn't been decided yet) or eliminated — dimmed in the second
-    # case, so a glance at the tree shows who's still alive at a glance.
-    # BUG FIX: this used to dim the OPPOSITE case — a node whose team WON
-    # and advanced (node.next.team matching this node's own team) got
-    # dimmed as a "stale waypoint", while the team that actually LOST here
-    # was left in full brightness, backwards from what anyone reading the
-    # bracket expects (the winner should stand out, not fade). A node is
+    # case, so a glance at the tree shows who's still alive. A node is
     # eliminated exactly when the match it feeds into (node.next) has
-    # resolved to someone ELSE'S name.
+    # resolved to someone ELSE'S name - a node whose own team won and
+    # advanced should stand out in full brightness, not fade as a "stale
+    # waypoint".
     def _bracketNodeTextColor(self, node):
         if node.team is None:
             return BRACKET_TEXT_COLOR
@@ -3264,12 +4173,10 @@ class helpers():
         subtitle = f"for {guild_name}" if guild_name else None
 
         game1_label = game1_winner_name if game1_winner_name is not None else "TBD"
-        # BUG FIX: neither stage used to dim its loser at all once a stage
-        # resolved — both "top"/"bottom" labels always drew in the same
-        # plain color, unlike the main bracket images where a decided
-        # match dims the side that lost (see _bracketNodeTextColor). Stays
-        # False (no dimming) for whichever side hasn't lost yet — either
-        # the stage isn't decided, or that side is the one who won.
+        # Dims whichever side lost once a stage resolves, matching the main
+        # bracket images (see _bracketNodeTextColor). Stays False (no
+        # dimming) for whichever side hasn't lost yet - either the stage
+        # isn't decided, or that side is the one who won.
         stages = [{
             "top": f"{wb_champion.get_name()} (winners bracket)",
             "bottom": f"{lb_champion.get_name()} (losers bracket)",
@@ -3713,11 +4620,11 @@ class helpers():
             f"match_{match_id}_vs.png"
         )
         msg = await channel.send(
-            f"**Match #{match_id}:** {team1.get_name()} vs {team2.get_name()} - react with "
-            f"{TOURNAMENT_READY_EMOJI} when ready to play (either captain)!",
-            file=matchup_file
+            f"**Match #{match_id}:** {team1.get_name()} vs {team2.get_name()} - press Ready below "
+            "when ready to play (either captain)!",
+            file=matchup_file,
+            view=TournamentReadyView(self),
         )
-        await msg.add_reaction(TOURNAMENT_READY_EMOJI)
 
         self.cursor.execute(
             "UPDATE tournament_matches SET state='PENDING_READY', messageId=? WHERE id=?", (msg.id, match_id)
@@ -3725,10 +4632,10 @@ class helpers():
         self.db.commit()
 
     # Posts the "who won" prompt for a simultaneous-mode match — no ready
-    # check, just a direct TEAM_EMOJIS report same as a normal game. Betting on
-    # it (alongside every other match in the same round) is opened
-    # separately — see _openConcurrentTournamentBetting, called once after
-    # every match in the round has its own report prompt posted.
+    # check, just a direct report same as a normal game. Betting on it
+    # (alongside every other match in the same round) is opened separately
+    # — see _openConcurrentTournamentBetting, called once after every match
+    # in the round has its own report prompt posted.
     async def _postMatchReport(self, guild_id, match_id, channel):
         self.cursor.execute(
             "SELECT team1, team2, roundIndex, bracketType FROM tournament_matches WHERE id=?", (match_id,)
@@ -3746,12 +4653,11 @@ class helpers():
             f"match_{match_id}_vs.png"
         )
         msg = await channel.send(
-            f"**Match #{match_id}:** {team1.get_name()} vs {team2.get_name()} - react with "
-            f"{TEAM_EMOJIS[1]} if {team1.get_name()} won, or {TEAM_EMOJIS[2]} if {team2.get_name()} won.",
-            file=matchup_file
+            f"**Match #{match_id}:** {team1.get_name()} vs {team2.get_name()} - press Team 1 if "
+            f"{team1.get_name()} won, or Team 2 if {team2.get_name()} won.",
+            file=matchup_file,
+            view=TournamentMatchReportView(self),
         )
-        await msg.add_reaction(TEAM_EMOJIS[1])
-        await msg.add_reaction(TEAM_EMOJIS[2])
 
         self.cursor.execute(
             "UPDATE tournament_matches SET state='AWAITING_RESULT', messageId=? WHERE id=?", (msg.id, match_id)
@@ -4269,35 +5175,46 @@ class helpers():
         )
         await self._startRound(guild_id, tournament, 0, mode, ctx.channel)
 
-    async def _handleReadyReaction(self, payload):
-        guild_id = payload.guild_id
+    # TournamentReadyView's Ready button callback - re-derives which match
+    # (and whether the clicker is actually one of its captains) from the
+    # interaction itself, since the view is a single shared persistent
+    # instance with nothing match-specific stored on it.
+    async def _handleReadyClick(self, interaction):
+        guild_id = interaction.guild_id
+        if guild_id is None:
+            return
+
         self.cursor.execute(
             "SELECT id, team1, team2 FROM tournament_matches "
             "WHERE guildId=? AND messageId=? AND state='PENDING_READY'",
-            (guild_id, payload.message_id)
+            (guild_id, interaction.message.id)
         )
         row = self.cursor.fetchone()
         if row is None:
+            await interaction.response.send_message(
+                "This match isn't waiting on a ready check.", ephemeral=True
+            )
             return
         match_id, team1_ser, team2_ser = row
         team1, team2 = Team(), Team()
         team1.deserializeTeam(team1_ser)
         team2.deserializeTeam(team2_ser)
 
-        if not (self.isTeamCaptain(team1, payload.user_id) or self.isTeamCaptain(team2, payload.user_id)):
+        if not (self.isTeamCaptain(team1, interaction.user.id) or self.isTeamCaptain(team2, interaction.user.id)):
+            await interaction.response.send_message(
+                "Only one of this match's captains can mark it ready.", ephemeral=True
+            )
             return
 
         # BUG-PRONE PATTERN AVOIDED: flip state before anything async below,
-        # so a double-react can't begin the same match twice.
+        # so a double-click can't begin the same match twice.
         self.cursor.execute("UPDATE tournament_matches SET state='AWAITING_RESULT' WHERE id=?", (match_id,))
         self.db.commit()
 
-        channel = self.client.get_channel(payload.channel_id)
-        if channel is None:
-            channel = await self.client.fetch_channel(payload.channel_id)
+        channel = interaction.channel
 
-        # Route through the exact same team-game cycle a casual/ranked
-        # game uses: team1/team2 + betting + the TEAM_EMOJIS report message.
+        # Route through the exact same team-game cycle a casual/ranked game
+        # uses: team1/team2 + betting + the winner-report message.
         # active_tournament_match_id is what tells recordResult (once that
         # cycle resolves) to come back here and advance the bracket.
         team1.set_id(1)
@@ -4308,40 +5225,72 @@ class helpers():
         self.update(guild_id, "is_ranked", 0)
         self.update(guild_id, "active_tournament_match_id", match_id)
 
+        await interaction.response.defer()
         await channel.send(f"**Match #{match_id}:** {team1.get_name()} vs {team2.get_name()} is starting!")
         await self._openBetting(guild_id, channel)
 
-    async def _handleSimultaneousResultReaction(self, payload, winning_team):
-        guild_id = payload.guild_id
+    # Only flips a match's state back to AWAITING_RESULT if it's still
+    # CONFIRMING (i.e. nothing else already resolved it a different way in
+    # the meantime) — a conditional UPDATE rather than a
+    # select-then-update, so this is atomic and just no-ops instead of
+    # stomping a state that's moved on.
+    def _restoreTournamentMatchAwaitingResult(self, match_id):
         self.cursor.execute(
-            "SELECT id FROM tournament_matches WHERE guildId=? AND messageId=? "
-            "AND state='AWAITING_RESULT' AND mode='simultaneous'",
-            (guild_id, payload.message_id)
+            "UPDATE tournament_matches SET state='AWAITING_RESULT' WHERE id=? AND state='CONFIRMING'",
+            (match_id,)
         )
-        row = self.cursor.fetchone()
-        if row is None:
-            return
-        await self._resolveTournamentMatch(guild_id, row[0], winning_team, payload.channel_id)
+        self.db.commit()
 
-    # Called from bot.py's on_raw_reaction_add. Dispatches ready-checks
-    # (sequential mode) and direct result reports (simultaneous mode only
-    # — sequential results resolve through handleWinnerReaction/recordResult
-    # instead, same as any other game).
-    async def handleTournamentReaction(self, payload):
-        guild_id = payload.guild_id
+    # TournamentMatchReportView's Team 1/Team 2 button callback. A pick no
+    # longer resolves the match immediately - it posts a
+    # ConfirmTournamentMatchReportView instead (Confirm actually calls
+    # _resolveTournamentMatch; Cancel/timeout restores the match via
+    # _restoreTournamentMatchAwaitingResult so its buttons work again),
+    # matching WinnerReportView/ConfirmWinnerReportView's two-step shape.
+    async def _handleTournamentMatchReportClick(self, interaction, winning_team):
+        guild_id = interaction.guild_id
         if guild_id is None:
             return
 
-        emoji = str(payload.emoji)
-
-        if emoji == TOURNAMENT_READY_EMOJI:
-            await self._handleReadyReaction(payload)
+        self.cursor.execute(
+            "SELECT id, team1, team2 FROM tournament_matches WHERE guildId=? AND messageId=? "
+            "AND state='AWAITING_RESULT' AND mode='simultaneous'",
+            (guild_id, interaction.message.id)
+        )
+        row = self.cursor.fetchone()
+        if row is None:
+            await interaction.response.send_message(
+                "This match has already been reported or is no longer pending.", ephemeral=True
+            )
             return
+        match_id, team1_ser, team2_ser = row
 
-        winning_team = WINNER_EMOJIS.get(emoji)
-        if winning_team is None:
-            return
-        await self._handleSimultaneousResultReaction(payload, winning_team)
+        # BUG-PRONE PATTERN AVOIDED: flip out of AWAITING_RESULT before
+        # anything async below, so a second near-simultaneous click on this
+        # same match message can't also pass the check above and post a
+        # second confirmation for it. Also closes betting on this match
+        # right away (same reasoning _handleWinnerReportPick's own
+        # betting_state close has) — otherwise /wager match_id: stays open
+        # for the whole confirmation window, letting someone bet on
+        # whichever side just got reported before it's even confirmed.
+        # Left closed even if the report is later cancelled.
+        self.cursor.execute(
+            "UPDATE tournament_matches SET state='CONFIRMING', bettingClosed=1 WHERE id=?", (match_id,)
+        )
+        self.db.commit()
+
+        team1, team2 = Team(), Team()
+        team1.deserializeTeam(team1_ser)
+        team2.deserializeTeam(team2_ser)
+        name = team1.get_name() if winning_team == 1 else team2.get_name()
+
+        view = ConfirmTournamentMatchReportView(self, guild_id, match_id, winning_team, interaction.channel_id)
+        await interaction.response.send_message(
+            f"**{name}** reported as the winner of Match #{match_id} - Confirm to finalize it, or "
+            "Cancel to report again.",
+            view=view,
+        )
+        view.message = await interaction.original_response()
 
     # Records the winner, advances the bracket (propagating the winning
     # team into the shared "next" node), prints the updated bracket, and
@@ -4657,8 +5606,8 @@ class helpers():
 
     # Every team in the guild `user_id` is a rostered player on (captain or
     # not) — what /my-teams pages through. Sorted by team_id so paging
-    # stays stable across reactions even though this is recomputed fresh
-    # from the DB on every page flip (see handleMyTeamsReaction), the same
+    # stays stable across clicks even though this is recomputed fresh
+    # from the DB on every page flip (see _handleMyTeamsPageClick), the same
     # way getLeaderboardEntries is recomputed fresh rather than snapshotted.
     def getTeamsForPlayer(self, guild_id, user_id):
         teams = self.getTeamsForGuild(guild_id)
@@ -4759,9 +5708,9 @@ class helpers():
         )
         return embed
 
-    # Posts the first page and pre-reacts with the paging emoji, same
-    # pattern as leaderboardHelper/myTeamsHelper — clicking them
-    # (handleTeamListReaction) edits this same message.
+    # Posts the first page with its own TeamListPagingView, same pattern
+    # as leaderboardHelper/myTeamsHelper — clicking a button
+    # (_handleTeamListPageClick) edits this same message.
     async def teamListHelper(self, ctx, search, recruiting_only, sort, order):
         guild_id = ctx.guild.id
 
@@ -4775,10 +5724,8 @@ class helpers():
         embed = self._renderTeamListEmbed(
             ctx.guild.name, teams_sorted, search, recruiting_only, sort, order, page=0
         )
-        await ctx.response.send_message(embed=embed)
+        await ctx.response.send_message(embed=embed, view=TeamListPagingView(self))
         msg = await ctx.original_response()
-        for emoji in LEADERBOARD_NAV_EMOJIS:
-            await msg.add_reaction(emoji)
 
         self.cursor.execute(
             "INSERT OR REPLACE INTO team_list_views"
@@ -4788,57 +5735,41 @@ class helpers():
         )
         self.db.commit()
 
-    # Called from bot.py's on_raw_reaction_add — no-ops unless the emoji/
-    # message match an active /team-list page view.
-    async def handleTeamListReaction(self, payload):
-        guild_id = payload.guild_id
+    # TeamListPagingView's button callback - no-ops (with a plain
+    # ephemeral note) unless the interaction's message still matches an
+    # active /team-list page view.
+    async def _handleTeamListPageClick(self, interaction, direction):
+        guild_id = interaction.guild_id
         if guild_id is None:
             return
 
-        emoji = str(payload.emoji)
-        if emoji not in LEADERBOARD_NAV_EMOJIS:
-            return
-
         self.cursor.execute(
-            "SELECT channelId, search, recruitingOnly, sort, sort_order, page FROM team_list_views "
+            "SELECT search, recruitingOnly, sort, sort_order, page FROM team_list_views "
             "WHERE guildId=? AND messageId=?",
-            (guild_id, payload.message_id)
+            (guild_id, interaction.message.id)
         )
         row = self.cursor.fetchone()
         if row is None:
+            await interaction.response.send_message("This list is no longer live.", ephemeral=True)
             return
-        channel_id, search, recruiting_only, sort, order, page = row
+        search, recruiting_only, sort, order, page = row
         recruiting_only = bool(recruiting_only)
 
         teams_sorted = self._filterAndSortTeams(guild_id, search, recruiting_only, sort, order)
         total_pages = self._teamListPageCount(teams_sorted)
-
-        if emoji == LEADERBOARD_FIRST_EMOJI:
-            new_page = 0
-        elif emoji == LEADERBOARD_PREV_EMOJI:
-            new_page = max(0, page - 1)
-        elif emoji == LEADERBOARD_NEXT_EMOJI:
-            new_page = min(total_pages - 1, page + 1)
-        else:
-            new_page = total_pages - 1
+        new_page = self._computeNewPage(direction, page, total_pages)
 
         if new_page == page:
+            await interaction.response.defer()
             return
 
-        channel = self.client.get_channel(channel_id)
-        if channel is None:
-            channel = await self.client.fetch_channel(channel_id)
-        message = await channel.fetch_message(payload.message_id)
-
-        guild = self.client.get_guild(guild_id)
-        guild_name = guild.name if guild is not None else ""
+        guild_name = interaction.guild.name if interaction.guild is not None else ""
         embed = self._renderTeamListEmbed(guild_name, teams_sorted, search, recruiting_only, sort, order, new_page)
-        await message.edit(embed=embed)
-        await self._clearPagingReaction(message, payload)
+        await interaction.response.edit_message(embed=embed)
 
         self.cursor.execute(
             "UPDATE team_list_views SET page=? WHERE guildId=? AND messageId=?",
-            (new_page, guild_id, payload.message_id)
+            (new_page, guild_id, interaction.message.id)
         )
         self.db.commit()
 
@@ -5057,22 +5988,23 @@ class helpers():
         await ctx.response.send_message(content=f"**{team_name}**: set {summary}.", file=logo_file)
 
     # Invites `members` (one or more) to a team the caller captains — posts
-    # a single message mentioning everyone valid and reacts once with
-    # TEAM_INVITE_ACCEPT_EMOJI; each invited member only actually joins
-    # once THEY react themselves (handleTeamInviteReaction), independently
-    # of whether anyone else invited alongside them has. Bots, duplicates
-    # (the same member passed more than once), and players already on the
-    # team are filtered out rather than failing the whole command — with
+    # a single message mentioning everyone valid with one shared Accept
+    # button (TeamInviteAcceptView); each invited member only actually
+    # joins once THEY press it themselves (_handleTeamInviteAcceptClick),
+    # independently of whether anyone else invited alongside them has.
+    # Bots, duplicates (the same member passed more than once), and
+    # players already on the team are filtered out rather than failing
+    # the whole command — with
     # exactly one member given, the old single-invite error messages are
     # preserved verbatim rather than folded into the multi-invite phrasing.
     # `force` (Manage Server only, checked separately from — and on top of
     # — the ordinary captain-or-admin gate above, so a captain who isn't
     # also an admin still can't skip anyone's consent) adds every valid
-    # member straight to the roster instead: no posted invite, no ✅
-    # reaction, no team_invites row for anyone to accept later — same
-    # add_player + updateTeamData pair handleTeamInviteReaction itself
+    # member straight to the roster instead: no posted invite, no Accept
+    # button, no team_invites row for anyone to accept later — same
+    # add_player + updateTeamData pair _handleTeamInviteAcceptClick itself
     # commits once a real invite is actually accepted, just run
-    # immediately instead of waiting on a reaction that force is
+    # immediately instead of waiting on a click that force is
     # specifically here to skip.
     async def teamInviteHelper(self, ctx, team_name, members, force=False):
         guild_id = ctx.guild.id
@@ -5143,15 +6075,14 @@ class helpers():
         mentions = ", ".join(member.mention for member in valid)
         message = (
             f"{mentions}, {ctx.user.mention} invited you to join **{team_name}**! "
-            f"React with {TEAM_INVITE_ACCEPT_EMOJI} to accept."
+            "Press Accept below to join."
         )
         if skipped:
             reasons = "; ".join(f"{member.display_name} ({reason})" for member, reason in skipped)
             message += f"\n(Not invited: {reasons}.)"
 
-        await ctx.response.send_message(message)
+        await ctx.response.send_message(message, view=TeamInviteAcceptView(self))
         msg = await ctx.original_response()
-        await msg.add_reaction(TEAM_INVITE_ACCEPT_EMOJI)
 
         for member in valid:
             self.cursor.execute(
@@ -5200,6 +6131,266 @@ class helpers():
         self.updateTeamData(team_id, team)
 
         await ctx.response.send_message(f"You've left **{team_name}**.")
+
+    # Every role `user_id` has an explicit preference on, split into
+    # (liked, disliked) lists of SETUP_ROLE_NAMES entries.
+    def getRolePreferences(self, guild_id, user_id):
+        self.cursor.execute(
+            "SELECT role, preference FROM player_role_preferences WHERE guildId=? AND userId=?",
+            (guild_id, user_id)
+        )
+        liked, disliked = [], []
+        for role, preference in self.cursor.fetchall():
+            (liked if preference == "like" else disliked).append(role)
+        return liked, disliked
+
+    # Whether `user_id` has ever run /setup in this guild — gates
+    # /make-teams' use_roles (see bot.py's makeTeams) against everyone
+    # currently in the caller's voice channel. Reuses the "onboarded"
+    # achievement's own card_unlocks row as the signal rather than a
+    # separate completion table, since unlocking it already only ever
+    # happens once, the first time /setup runs.
+    def hasCompletedSetup(self, guild_id, user_id):
+        self.cursor.execute(
+            "SELECT 1 FROM card_unlocks WHERE guildId=? AND userId=? AND itemType='title' AND itemKey='onboarded'",
+            (guild_id, user_id)
+        )
+        return self.cursor.fetchone() is not None
+
+    # /setup: a one-stop first command for a new player — a short
+    # explanation of what Shockwave actually does (pointing at /help for
+    # the rest), a personal "solo team" (a persistent, team_size=1 team
+    # with just them on it), and their liked/disliked roles for role-aware
+    # matchmaking, picked by reacting on a posted message and confirming
+    # with a button rather than typing role names. Safe to re-run any time
+    # afterward to update either.
+    #
+    # solo_team_name is only required the first time - if the caller
+    # already captains a size-1 team (found structurally, same lookup
+    # /team-invite's solo-team logic never needed until now: captained by
+    # this player, team_size exactly 1, no separate soloTeamId column to
+    # keep in sync), omitting it just keeps that team as-is, and giving a
+    # new name renames it through the same case-insensitive collision
+    # check /team-rename uses.
+    async def setupHelper(self, ctx, solo_team_name=None):
+        guild_id = ctx.guild.id
+        user_id = ctx.user.id
+
+        solo_team = next(
+            (team for _team_id, team in self.getTeamsCaptainedBy(guild_id, user_id) if team.get_team_size() == 1),
+            None
+        )
+
+        if solo_team is None:
+            if solo_team_name is None:
+                await ctx.response.send_message(
+                    "Give solo_team_name to create your personal solo team - you don't have one in "
+                    "this server yet."
+                )
+                return
+            if self.getTeamRow(guild_id, solo_team_name) is not None:
+                await ctx.response.send_message(
+                    f"A team named **{solo_team_name}** already exists in this server - pick another "
+                    "name for your solo team."
+                )
+                return
+            solo_team = Team()
+            solo_team.set_name(solo_team_name)
+            solo_team.set_team_size(1)
+            captain = Player(ctx.user.id, ctx.user.name)
+            solo_team.add_player(captain)
+            solo_team.set_captain(captain)
+            self._saveNewTeam(guild_id, solo_team)
+            team_note = f"Created your solo team **{solo_team_name}**."
+        elif solo_team_name is None:
+            team_note = f"Your solo team is still **{solo_team.get_name()}**."
+        elif solo_team_name.lower() != solo_team.get_name().lower():
+            if self.getTeamRow(guild_id, solo_team_name) is not None:
+                await ctx.response.send_message(
+                    f"A team named **{solo_team_name}** already exists in this server - pick another "
+                    "name for your solo team."
+                )
+                return
+            old_name = solo_team.get_name()
+            solo_team.set_name(solo_team_name)
+            self._renameTeam(solo_team.get_id(), solo_team)
+            team_note = f"Renamed your solo team from **{old_name}** to **{solo_team_name}**."
+        elif solo_team_name != solo_team.get_name():
+            old_name = solo_team.get_name()
+            solo_team.set_name(solo_team_name)
+            self._renameTeam(solo_team.get_id(), solo_team)
+            team_note = f"Renamed your solo team from **{old_name}** to **{solo_team_name}**."
+        else:
+            team_note = f"Your solo team is still **{solo_team_name}**."
+
+        blurb = (
+            "**Shockwave** splits your voice channel into two teams (randomly, by live captain "
+            "draft, or roughly elo-balanced for ranked play) and moves everyone into the right "
+            "channel automatically. It also runs a gold economy (betting, a daily allowance, a "
+            "leaderboard) and tournaments (persistent teams, a real bracket, sequential or "
+            "simultaneous matches). Run **/help** any time for the full command list."
+        )
+        view = SetupRoleSelectionView(self, guild_id, user_id)
+        await ctx.response.send_message(
+            f"{blurb}\n\n{team_note}\n\n"
+            f"Press the roles you **like** playing ({', '.join(SETUP_ROLE_NAMES)}) to toggle them on, "
+            "then press Confirm.",
+            view=view,
+        )
+        message = await ctx.original_response()
+        view.message = message
+
+        self.cursor.execute(
+            "INSERT INTO setup_role_sessions(messageId, guildId, userId, step, selectedRoles, likedRoles) "
+            "VALUES(?, ?, ?, 'liked', '', '')",
+            (message.id, guild_id, user_id)
+        )
+        self.db.commit()
+
+    # Overwrites `player_role_preferences` for `user_id` with exactly
+    # `liked`/`disliked` - the reaction-based flow always walks both steps
+    # in full each run (no way to leave a side untouched the way the old
+    # string-param version allowed), so a plain replace is correct: a role
+    # that's in neither list just ends up with no row, i.e. neutral.
+    def _applySetupRolePreferences(self, guild_id, user_id, liked, disliked):
+        self.cursor.execute(
+            "DELETE FROM player_role_preferences WHERE guildId=? AND userId=?", (guild_id, user_id)
+        )
+        for role in liked:
+            self.cursor.execute(
+                "INSERT INTO player_role_preferences(guildId, userId, role, preference) VALUES(?, ?, ?, 'like')",
+                (guild_id, user_id, role)
+            )
+        for role in disliked:
+            self.cursor.execute(
+                "INSERT INTO player_role_preferences(guildId, userId, role, preference) "
+                "VALUES(?, ?, ?, 'dislike')",
+                (guild_id, user_id, role)
+            )
+        self.db.commit()
+
+    def _expireSetupRoleSession(self, guild_id, message_id):
+        self.cursor.execute(
+            "DELETE FROM setup_role_sessions WHERE guildId=? AND messageId=?", (guild_id, message_id)
+        )
+        self.db.commit()
+
+    # SetupRoleSelectionView's Confirm button, for both the liked-roles
+    # step and the disliked-roles step that follows it - which one is
+    # live is read fresh from setup_role_sessions rather than the view
+    # tracking it itself, so the exact same view instance can be reused
+    # for both (see that class's own comment).
+    #
+    # First confirm: snapshots the currently-toggled roles as the liked
+    # set, flips the session to the disliked step, and re-poses the same
+    # message/reactions for the second round. Second confirm: any role
+    # toggled in BOTH rounds is a contradiction - "can't like and dislike
+    # the same role" is enforced by simply leaving that role out of both
+    # final sets (neutral - no player_role_preferences row at all) rather
+    # than rejecting the whole thing, with the summary telling the caller
+    # which role(s) that happened to and pointing them at /setup again to
+    # fix it.
+    async def _confirmSetupRoleStep(self, interaction, view):
+        guild_id, user_id = view.guild_id, view.user_id
+        message = interaction.message
+
+        self.cursor.execute(
+            "SELECT step, selectedRoles, likedRoles FROM setup_role_sessions WHERE guildId=? AND messageId=?",
+            (guild_id, message.id)
+        )
+        row = self.cursor.fetchone()
+        if row is None:
+            await interaction.response.send_message(
+                "This role selection has expired - run /setup again.", ephemeral=True
+            )
+            return
+        step, selected_csv, liked_csv = row
+        selected = sorted(r for r in selected_csv.split(",") if r)
+
+        if step == "liked":
+            self.cursor.execute(
+                "UPDATE setup_role_sessions SET step='disliked', likedRoles=?, selectedRoles='' "
+                "WHERE guildId=? AND messageId=?",
+                (",".join(selected), guild_id, message.id)
+            )
+            self.db.commit()
+            fresh_view = SetupRoleSelectionView(self, guild_id, user_id)
+            fresh_view.message = message
+            await interaction.response.edit_message(
+                content=(
+                    f"Liked roles set: {', '.join(selected) if selected else 'none'}.\n\n"
+                    f"Now press the roles you **dislike** playing "
+                    f"({', '.join(SETUP_ROLE_NAMES)}) to toggle them on, then press Confirm."
+                ),
+                view=fresh_view,
+            )
+            return
+
+        liked = [r for r in liked_csv.split(",") if r]
+        disliked = selected
+        overlap = sorted(set(liked) & set(disliked))
+        final_liked = [r for r in liked if r not in overlap]
+        final_disliked = [r for r in disliked if r not in overlap]
+
+        self._applySetupRolePreferences(guild_id, user_id, final_liked, final_disliked)
+        self._expireSetupRoleSession(guild_id, message.id)
+
+        newly_unlocked = []
+        if self._unlockAchievement(guild_id, user_id, "onboarded"):
+            newly_unlocked.append((user_id, "onboarded"))
+
+        liked_now, disliked_now = self.getRolePreferences(guild_id, user_id)
+        summary = (
+            f"Liked roles: {', '.join(liked_now) if liked_now else 'none set'}.\n"
+            f"Disliked roles: {', '.join(disliked_now) if disliked_now else 'none set'}."
+        )
+        if overlap:
+            was = "was" if len(overlap) == 1 else "were"
+            it = "it was" if len(overlap) == 1 else "they were"
+            summary += (
+                f"\n\n{', '.join(overlap)} {was} marked as both liked and disliked, so {it} left "
+                "neutral instead. Run /setup again if you'd like to fix that."
+            )
+
+        for item in view.children:
+            item.disabled = True
+        await interaction.response.edit_message(content=summary, view=view)
+
+        if newly_unlocked:
+            await self._announceAchievements(interaction.channel, newly_unlocked)
+
+    # SetupRoleToggleButton's callback - toggles one role on/off in the
+    # current setup_role_sessions step, then rebuilds and re-renders a
+    # fresh SetupRoleSelectionView so the clicked button's own style
+    # reflects its new state. No-ops (with a plain ephemeral note) for a
+    # stale/expired session - interaction_check already keeps this to the
+    # player who ran /setup, so there's nothing else to guard here.
+    async def _handleSetupRoleToggleClick(self, interaction, role_name):
+        guild_id = interaction.guild_id
+        message = interaction.message
+
+        self.cursor.execute(
+            "SELECT selectedRoles FROM setup_role_sessions WHERE guildId=? AND messageId=?",
+            (guild_id, message.id)
+        )
+        row = self.cursor.fetchone()
+        if row is None:
+            await interaction.response.send_message(
+                "This role selection has expired - run /setup again.", ephemeral=True
+            )
+            return
+
+        selected = {r for r in row[0].split(",") if r}
+        selected.symmetric_difference_update({role_name})
+        self.cursor.execute(
+            "UPDATE setup_role_sessions SET selectedRoles=? WHERE guildId=? AND messageId=?",
+            (",".join(sorted(selected)), guild_id, message.id)
+        )
+        self.db.commit()
+
+        new_view = SetupRoleSelectionView(self, guild_id, interaction.user.id, selected_roles=selected)
+        new_view.message = message
+        await interaction.response.edit_message(view=new_view)
 
     # Renames a persistent team both in the `name` column (what getTeamRow
     # looks it up by) and inside its own serialized `data` blob — those two
@@ -5261,8 +6452,8 @@ class helpers():
 
     # Deletes a team's row and any pending /team-invite for it (a stale
     # invite would otherwise just silently no-op the moment someone
-    # accepted it — see handleTeamInviteReaction's own team-lookup guard —
-    # rather than telling them it's gone). Doesn't touch a tournament this
+    # accepted it — see _handleTeamInviteAcceptClick's own team-lookup
+    # guard — rather than telling them it's gone). Doesn't touch a tournament this
     # team's already registered in; see ConfirmTeamDeleteView for why that's
     # safe to leave alone.
     def _deleteTeam(self, guild_id, team_id):
@@ -5302,30 +6493,29 @@ class helpers():
         )
         view.message = await ctx.original_response()
 
-    # Called from bot.py's on_raw_reaction_add — no-ops unless the emoji/
-    # message match a pending invite for the reactor specifically. Several
-    # invitees can now share one messageId (one /team-invite call, several
-    # people invited at once), so this is looked up by (messageId, the
-    # reactor's own id) together rather than fetching whatever row happens
-    # to come back first for the message and comparing targetId after —
-    # each invitee accepting only ever resolves their OWN row.
-    async def handleTeamInviteReaction(self, payload):
-        guild_id = payload.guild_id
+    # TeamInviteAcceptView's Accept button callback. Several different
+    # invited members can share the exact same message (one team_invites
+    # row per invitee), so unlike every other button in this file the
+    # dispatch here doesn't need a special multi-user interaction_check -
+    # scoping the lookup to `targetId=interaction.user.id` already answers
+    # "is this invite actually for whoever clicked" on its own.
+    async def _handleTeamInviteAcceptClick(self, interaction):
+        guild_id = interaction.guild_id
         if guild_id is None:
             return
 
-        if str(payload.emoji) != TEAM_INVITE_ACCEPT_EMOJI:
-            return
-
         self.cursor.execute(
-            "SELECT id, channelId, teamId, teamName, targetId, targetName "
+            "SELECT id, teamId, teamName, targetId, targetName "
             "FROM team_invites WHERE guildId=? AND messageId=? AND targetId=?",
-            (guild_id, payload.message_id, payload.user_id)
+            (guild_id, interaction.message.id, interaction.user.id)
         )
         row = self.cursor.fetchone()
         if row is None:
+            await interaction.response.send_message(
+                "This isn't an invite for you, or it's already been used.", ephemeral=True
+            )
             return
-        invite_id, channel_id, team_id, team_name, target_id, target_name = row
+        invite_id, team_id, team_name, target_id, target_name = row
 
         # BUG-PRONE PATTERN AVOIDED: delete the invite before anything
         # async below, so a double-click can't add the player twice.
@@ -5339,10 +6529,7 @@ class helpers():
         team.add_player(Player(target_id, target_name))
         self.updateTeamData(team_id, team)
 
-        channel = self.client.get_channel(channel_id)
-        if channel is None:
-            channel = await self.client.fetch_channel(channel_id)
-        await channel.send(f"**{target_name}** has joined **{team_name}**!")
+        await interaction.response.send_message(f"**{target_name}** has joined **{team_name}**!")
 
     # Builds a team's stats embed — shared by /team-stats and /my-teams's
     # paging, so both stay in sync automatically. Returns (embed, file):
@@ -5384,13 +6571,13 @@ class helpers():
         team_id, team = result
 
         embed, file = self._renderTeamStatsEmbed(team)
+        view = TeamStatsView(self, card_shown=False)
         if file is not None:
-            await ctx.response.send_message(embed=embed, file=file)
+            await ctx.response.send_message(embed=embed, file=file, view=view)
         else:
-            await ctx.response.send_message(embed=embed)
+            await ctx.response.send_message(embed=embed, view=view)
 
         msg = await ctx.original_response()
-        await msg.add_reaction(TEAM_CARD_EMOJI)
 
         self.cursor.execute(
             "INSERT OR REPLACE INTO team_stats_views(messageId, guildId, teamId, cardShown) "
@@ -5571,11 +6758,16 @@ class helpers():
 
         return image
 
-    # The card half of TEAM_CARD_EMOJI (see handleTeamStatsReaction) —
+    # The card half of TeamStatsView's toggle (see _handleTeamStatsShowCardClick) —
     # re-fetches the team fresh (getTeamById) rather than trusting whatever
     # was true when /team-stats first posted, same "always current"
     # approach _swapStatsForTradingCard takes for a player's live stats.
-    async def _swapTeamStatsForCard(self, message, guild_id, guild_name, team_id):
+    # `view`, when given, is included in the same edit call that swaps the
+    # image in - passing view=None here (the default) omits the kwarg
+    # entirely rather than passing it through, since discord.py's
+    # Message.edit treats an explicit view=None as "remove every
+    # component," not "leave the current one alone."
+    async def _swapTeamStatsForCard(self, message, guild_id, guild_name, team_id, view=None):
         team = self.getTeamById(guild_id, team_id)
         if team is None:
             return
@@ -5584,83 +6776,74 @@ class helpers():
 
         embed = discord.Embed(color=discord.Color.gold())
         embed.set_image(url=f"attachment://{file.filename}")
-        await message.edit(embed=embed, attachments=[file])
+        edit_kwargs = {"embed": embed, "attachments": [file]}
+        if view is not None:
+            edit_kwargs["view"] = view
+        await message.edit(**edit_kwargs)
 
     # The reverse: rebuilds the plain /team-stats embed
     # (_renderTeamStatsEmbed, the same one teamStatsHelper itself posts) in
-    # place of the card image.
-    async def _swapTeamCardForStats(self, message, guild_id, team_id):
+    # place of the card image. See _swapTeamStatsForCard on `view`.
+    async def _swapTeamCardForStats(self, message, guild_id, team_id, view=None):
         team = self.getTeamById(guild_id, team_id)
         if team is None:
             return
         embed, file = self._renderTeamStatsEmbed(team)
-        if file is not None:
-            await message.edit(embed=embed, attachments=[file])
-        else:
-            await message.edit(embed=embed, attachments=[])
+        edit_kwargs = {"embed": embed, "attachments": [file] if file is not None else []}
+        if view is not None:
+            edit_kwargs["view"] = view
+        await message.edit(**edit_kwargs)
 
-    # Called from bot.py's on_raw_reaction_add for every reaction — mirrors
-    # handleStatsReaction's own emoji-swap shape, just for a team instead
-    # of a player: TEAM_CARD_EMOJI removes itself and hands off to
-    # _swapTeamStatsForCard, replacing itself with TEAM_CARD_RETURN_EMOJI;
-    # that swaps back via _swapTeamCardForStats and restores TEAM_CARD_EMOJI
-    # in turn, the same real back-and-forth toggle handleStatsReaction has.
-    async def handleTeamStatsReaction(self, payload):
-        guild_id = payload.guild_id
-        if guild_id is None:
-            return
-
-        emoji = str(payload.emoji)
-        if emoji not in (TEAM_CARD_EMOJI, TEAM_CARD_RETURN_EMOJI):
-            return
+    # TeamStatsView's Card button callback - swaps the plain embed for the
+    # team's trading-card image and re-renders with a Back button in place
+    # of Card (see TeamStatsView).
+    async def _handleTeamStatsShowCardClick(self, interaction):
+        guild_id = interaction.guild_id
+        message = interaction.message
 
         self.cursor.execute(
-            "SELECT teamId, cardShown FROM team_stats_views WHERE guildId=? AND messageId=?",
-            (guild_id, payload.message_id)
+            "SELECT teamId FROM team_stats_views WHERE guildId=? AND messageId=? AND cardShown=0",
+            (guild_id, message.id)
         )
         row = self.cursor.fetchone()
         if row is None:
+            await interaction.response.send_message("This team stats view is no longer live.", ephemeral=True)
             return
-        team_id, card_shown = row
+        team_id = row[0]
 
-        if card_shown and emoji == TEAM_CARD_EMOJI:
-            return
-        if not card_shown and emoji == TEAM_CARD_RETURN_EMOJI:
-            return
-
-        channel = self.client.get_channel(payload.channel_id)
-        if channel is None:
-            channel = await self.client.fetch_channel(payload.channel_id)
-        message = await channel.fetch_message(payload.message_id)
-        if not message.embeds:
-            return
-
-        if emoji == TEAM_CARD_EMOJI:
-            guild_name = channel.guild.name if channel.guild is not None else ""
-            await self._swapTeamStatsForCard(message, guild_id, guild_name, team_id)
-            self.cursor.execute(
-                "UPDATE team_stats_views SET cardShown=1 WHERE guildId=? AND messageId=?",
-                (guild_id, payload.message_id)
-            )
-            self.db.commit()
-            try:
-                await message.clear_reaction(TEAM_CARD_EMOJI)
-            except discord.HTTPException:
-                pass
-            await message.add_reaction(TEAM_CARD_RETURN_EMOJI)
-            return
-
-        await self._swapTeamCardForStats(message, guild_id, team_id)
+        await interaction.response.defer()
+        guild_name = interaction.guild.name if interaction.guild is not None else ""
+        await self._swapTeamStatsForCard(
+            message, guild_id, guild_name, team_id, view=TeamStatsView(self, card_shown=True)
+        )
         self.cursor.execute(
-            "UPDATE team_stats_views SET cardShown=0 WHERE guildId=? AND messageId=?",
-            (guild_id, payload.message_id)
+            "UPDATE team_stats_views SET cardShown=1 WHERE guildId=? AND messageId=?",
+            (guild_id, message.id)
         )
         self.db.commit()
-        try:
-            await message.clear_reaction(TEAM_CARD_RETURN_EMOJI)
-        except discord.HTTPException:
-            pass
-        await message.add_reaction(TEAM_CARD_EMOJI)
+
+    # TeamStatsView's Back button callback - the reverse swap.
+    async def _handleTeamStatsReturnClick(self, interaction):
+        guild_id = interaction.guild_id
+        message = interaction.message
+
+        self.cursor.execute(
+            "SELECT teamId FROM team_stats_views WHERE guildId=? AND messageId=? AND cardShown=1",
+            (guild_id, message.id)
+        )
+        row = self.cursor.fetchone()
+        if row is None:
+            await interaction.response.send_message("This team stats view is no longer live.", ephemeral=True)
+            return
+        team_id = row[0]
+
+        await interaction.response.defer()
+        await self._swapTeamCardForStats(message, guild_id, team_id, view=TeamStatsView(self, card_shown=False))
+        self.cursor.execute(
+            "UPDATE team_stats_views SET cardShown=0 WHERE guildId=? AND messageId=?",
+            (guild_id, message.id)
+        )
+        self.db.commit()
 
     # ---------------- /my-teams ----------------
 
@@ -5679,22 +6862,18 @@ class helpers():
         embed.set_footer(text=f"Team {page + 1}/{len(teams)}")
         return embed, file
 
-    # Posts the caller's first team and pre-reacts with the same paging
-    # emoji /leaderboard uses — clicking them (handleMyTeamsReaction) edits
-    # this same message. Tracked by messageId+userId rather than just
-    # messageId/guildId the way leaderboards is, since which teams a page
-    # flip should show depends on who's paging, not just which server.
-    # Clears the reactor's own click after a paginated view (/my-teams,
-    # /leaderboard) advances, so they can press the same nav emoji again
-    # immediately instead of having to un-react manually first. Tolerates
-    # failure — removing someone ELSE's reaction needs Manage Messages,
-    # and a server that hasn't granted the bot that permission shouldn't
-    # make paging itself break; the click is just left uncleared.
-    async def _clearPagingReaction(self, message, payload):
-        try:
-            await message.remove_reaction(payload.emoji, payload.member)
-        except discord.HTTPException:
-            pass
+    # Shared by every LeaderboardPagingView/MyTeamsPagingView/
+    # TeamListPagingView button callback - First/Prev/Next/Last all reduce
+    # to the same arithmetic regardless of which of the three tables/
+    # render functions the caller actually pages through.
+    def _computeNewPage(self, direction, page, total_pages):
+        if direction == "first":
+            return 0
+        if direction == "prev":
+            return max(0, page - 1)
+        if direction == "next":
+            return min(total_pages - 1, page + 1)
+        return total_pages - 1
 
     async def myTeamsHelper(self, ctx):
         guild_id = ctx.guild.id
@@ -5706,13 +6885,12 @@ class helpers():
             return
 
         embed, file = self._renderMyTeamsEmbed(teams, page=0)
+        view = MyTeamsPagingView(self)
         if file is not None:
-            await ctx.response.send_message(embed=embed, file=file)
+            await ctx.response.send_message(embed=embed, file=file, view=view)
         else:
-            await ctx.response.send_message(embed=embed)
+            await ctx.response.send_message(embed=embed, view=view)
         msg = await ctx.original_response()
-        for emoji in LEADERBOARD_NAV_EMOJIS:
-            await msg.add_reaction(emoji)
 
         self.cursor.execute(
             "INSERT OR REPLACE INTO my_team_views(messageId, guildId, channelId, userId, page) "
@@ -5721,63 +6899,52 @@ class helpers():
         )
         self.db.commit()
 
-    # Called from bot.py's on_raw_reaction_add for every reaction — no-ops
-    # unless the emoji/message match an active /my-teams page view. Only
-    # the caller who posted it can page it — checked implicitly, since
-    # this looks the view up by messageId and re-derives the team list from
-    # the stored userId regardless of who actually clicked the reaction;
-    # anyone else's click still moves the same shared view. That matches
-    # how /leaderboard's paging already behaves (any reactor can page a
-    # guild-wide view) — a personal view being paged by someone else just
-    # steps through the OWNER's teams, not the clicker's.
-    async def handleMyTeamsReaction(self, payload):
-        guild_id = payload.guild_id
+    # MyTeamsPagingView's button callback - no-ops (with a plain ephemeral
+    # note) unless the interaction's message still matches an active
+    # /my-teams page view. Only the caller who posted it "owns" the paged
+    # team list, but the button itself is clickable by anyone - checked
+    # implicitly, since this looks the view up by messageId and re-derives
+    # the team list from the stored userId regardless of who actually
+    # clicked, so anyone else's click still moves the same shared view.
+    # That matches how /leaderboard's own paging already behaves (any
+    # clicker can page a guild-wide view) — a personal view being paged by
+    # someone else just steps through the OWNER's teams, not the clicker's.
+    async def _handleMyTeamsPageClick(self, interaction, direction):
+        guild_id = interaction.guild_id
         if guild_id is None:
             return
 
-        emoji = str(payload.emoji)
-        if emoji not in LEADERBOARD_NAV_EMOJIS:
-            return
-
         self.cursor.execute(
-            "SELECT channelId, userId, page FROM my_team_views WHERE guildId=? AND messageId=?",
-            (guild_id, payload.message_id)
+            "SELECT userId, page FROM my_team_views WHERE guildId=? AND messageId=?",
+            (guild_id, interaction.message.id)
         )
         row = self.cursor.fetchone()
         if row is None:
+            await interaction.response.send_message("This view is no longer live.", ephemeral=True)
             return
-        channel_id, user_id, page = row
+        user_id, page = row
 
         teams = self.getTeamsForPlayer(guild_id, user_id)
         if not teams:
+            await interaction.response.defer()
             return
         total_pages = self._myTeamsPageCount(teams)
         page = min(page, total_pages - 1)
-
-        if emoji == LEADERBOARD_FIRST_EMOJI:
-            new_page = 0
-        elif emoji == LEADERBOARD_PREV_EMOJI:
-            new_page = max(0, page - 1)
-        elif emoji == LEADERBOARD_NEXT_EMOJI:
-            new_page = min(total_pages - 1, page + 1)
-        else:
-            new_page = total_pages - 1
+        new_page = self._computeNewPage(direction, page, total_pages)
 
         if new_page == page:
+            await interaction.response.defer()
             return
 
-        channel = self.client.get_channel(channel_id)
-        if channel is None:
-            channel = await self.client.fetch_channel(channel_id)
-        message = await channel.fetch_message(payload.message_id)
-
         embed, file = self._renderMyTeamsEmbed(teams, new_page)
-        await message.edit(embed=embed, attachments=[file] if file is not None else [])
-        await self._clearPagingReaction(message, payload)
+        if file is not None:
+            await interaction.response.edit_message(embed=embed, attachments=[file])
+        else:
+            await interaction.response.edit_message(embed=embed, attachments=[])
 
         self.cursor.execute(
             "UPDATE my_team_views SET page=? WHERE guildId=? AND messageId=?",
-            (new_page, guild_id, payload.message_id)
+            (new_page, guild_id, interaction.message.id)
         )
         self.db.commit()
 
@@ -5911,8 +7078,8 @@ class helpers():
         await ctx.response.send_message(
             f"**{discord.utils.escape_markdown(team1.get_name())}** vs "
             f"**{discord.utils.escape_markdown(team2.get_name())}** loaded{ranked_note}. "
-            f"React {TEAM_START_EMOJI} on the roster below when you're ready to move everyone and open "
-            f"betting, or {TEAM_START_NO_MOVE_EMOJI} to open betting without moving anyone."
+            "Press Start on the roster below when you're ready to move everyone and open betting, or "
+            "Start (no move) to open betting without moving anyone."
         )
         team1_message, team2_message = await self.printEmbed(ctx, team1, team2)
         await self._finalizeRoster(guild_id, team1_message, team2_message, team1, team2, use_roles=False)
@@ -5962,8 +7129,8 @@ class helpers():
         await ctx.response.send_message(
             f"Reusing **{discord.utils.escape_markdown(team1.get_name())}** vs "
             f"**{discord.utils.escape_markdown(team2.get_name())}**{ranked_note}. "
-            f"React {TEAM_START_EMOJI} on the roster below when you're ready to move everyone and open "
-            f"betting, or {TEAM_START_NO_MOVE_EMOJI} to open betting without moving anyone."
+            "Press Start on the roster below when you're ready to move everyone and open betting, or "
+            "Start (no move) to open betting without moving anyone."
         )
         team1_message, team2_message = await self.printEmbed(ctx, team1, team2, useRoles=use_roles)
         await self._finalizeRoster(
@@ -6023,6 +7190,94 @@ class helpers():
             f"Gave yourself {DEV_GIVE_GOLD_AMOUNT} gold! Your balance is now {new_balance}."
         )
 
+    # TEMPORARY: backs /dev-test-role-balance (see bot.py's DEV_USER_ID
+    # guard) — a dry run of formRoleBalancedTeams against real elo, without
+    # creating a game, moving anyone, or touching team1/team2/mode/
+    # is_ranked, so the balancing logic can be sanity-checked without
+    # needing 10 people in voice at once. Pads a short voice channel out
+    # with other non-bot guild members (need not be online), clearly
+    # labelled as fill-ins in the reply. Remove this command (and
+    # devTestRoleBalanceHelper) once no longer needed for testing.
+    async def devTestRoleBalanceHelper(self, ctx):
+        guild_id = ctx.guild.id
+        voice_members = [m for m in ctx.user.voice.channel.members if not m.bot]
+
+        fill_ins = []
+        for member in ctx.guild.members:
+            if len(voice_members) + len(fill_ins) >= 10:
+                break
+            if member.bot or member in voice_members:
+                continue
+            fill_ins.append(member)
+
+        members = (voice_members + fill_ins)[:10]
+        if len(members) < 10:
+            await ctx.response.send_message(
+                f"Need 10 distinct non-bot guild members to test with, only found {len(members)}."
+            )
+            return
+
+        default_elo = self._defaultEloForGuild(guild_id)
+        members_with_elo = []
+        for member in members:
+            self.ensureEconomyRow(guild_id, member.id, member.name)
+            elo = self.getEconomy(guild_id, member.id, "elo")
+            members_with_elo.append((member, elo if elo is not None else default_elo))
+
+        # Most test/fill-in members have never run /setup, so without this
+        # they'd all come back "neutral" and the preview would never
+        # actually exercise the liked/disliked tiers. Anyone with no real
+        # preference on file gets a made-up liked role for the length of
+        # this call only — restored back to "no preference" in the finally
+        # block right after, since it's fake data invented purely for this
+        # dry run and shouldn't leak into that player's real /setup
+        # standing. ROLE_BALANCE_TEST_DISLIKE_COUNT of them also get a
+        # made-up disliked role, so the preview reliably shows the bigger
+        # disliked-role penalty at work instead of leaving it to chance
+        # whether any random run happens to roll one.
+        needs_preference = [
+            member for member, _elo in members_with_elo
+            if not any(self.getRolePreferences(guild_id, member.id))
+        ]
+        dislike_count = min(ROLE_BALANCE_TEST_DISLIKE_COUNT, len(needs_preference))
+        dislikers = {m.id for m in random.sample(needs_preference, dislike_count)}
+
+        randomized_ids = set()
+        for member in needs_preference:
+            fake_liked = random.choice(SETUP_ROLE_NAMES)
+            other_roles = [role for role in SETUP_ROLE_NAMES if role != fake_liked]
+            fake_disliked = [random.choice(other_roles)] if member.id in dislikers else []
+            self._applySetupRolePreferences(guild_id, member.id, [fake_liked], fake_disliked)
+            randomized_ids.add(member.id)
+
+        try:
+            side_a, side_b = self.formRoleBalancedTeams(guild_id, members_with_elo)
+        finally:
+            for user_id in randomized_ids:
+                self._applySetupRolePreferences(guild_id, user_id, [], [])
+
+        lines = ["**Role balance preview** (dry run - nothing was created or moved)"]
+        if fill_ins:
+            names = ", ".join(member.name for member in fill_ins)
+            lines.append(f"Filled in {len(fill_ins)} non-voice member(s) to reach 10: {names}")
+        if randomized_ids:
+            lines.append(
+                f"{len(randomized_ids)} player(s) had no real /setup preferences, so a random liked/disliked "
+                "role was made up for them just for this preview (marked with *)."
+            )
+
+        for label, side in (("Side A", side_a), ("Side B", side_b)):
+            total = sum(entry[4] for entry in side)
+            lines.append(f"\n**{label}** (total effective elo: {total})")
+            for member, elo, role, tier, effective_elo in side:
+                marker = "*" if member.id in randomized_ids else ""
+                lines.append(f"{role}: {member.name}{marker} - {tier} ({elo} -> {effective_elo})")
+
+        diff = abs(sum(entry[4] for entry in side_a) - sum(entry[4] for entry in side_b))
+        lines.append(f"\nEffective elo gap between sides: {diff}")
+
+        await ctx.response.send_message("\n".join(lines))
+
     # ---------------- Betting ----------------
 
     # Returns [(user_id, name), ...] for a team column ("team1"/"team2"), or
@@ -6042,13 +7297,18 @@ class helpers():
     # elo-change summary says the same name the roster embed and matchup
     # image already showed (see _rosterTeamNames). `fallback` for a column
     # that's unset or (defensively) came back with an empty name.
-    def getRosterName(self, guild_id, column, fallback):
+    def getRosterName(self, guild_id, column, fallback, escape=True):
         serialized = self.get(guild_id, column)
         if not serialized:
             return fallback
         team = Team()
         team.deserializeTeam(serialized)
         name = team.get_name() or fallback
+        if not escape:
+            # Button labels render as plain text (Discord doesn't apply
+            # markdown to them), so escaping here would show a stray
+            # backslash instead of protecting anything.
+            return name
         # Team names are free text (/team-create, /team-rename). Escaped
         # here rather than at creation so the stored name stays exact -
         # an unescaped underscore/asterisk from one team's name can pair
@@ -6096,8 +7356,8 @@ class helpers():
         state = self.get(guild_id, "betting_state")
         if state != "OPEN":
             await ctx.response.send_message(
-                f"Betting is not currently open. React {TEAM_START_EMOJI} on the roster message to "
-                "start a game and open betting."
+                "Betting is not currently open. Press Start on the roster message to start a game "
+                "and open betting."
             )
             return
 
@@ -6210,12 +7470,12 @@ class helpers():
     # The winner-report message goes out immediately, right alongside the
     # "betting is open" one, rather than waiting for the timer to close
     # betting first — a real game doesn't wait for a 60-second countdown to
-    # finish before anyone knows who won, so TEAM_EMOJIS' reactions (and
-    # CANCEL_GAME_EMOJI, the reaction replacement for the old /return
-    # command) are live on this same message from the moment the game
-    # starts. handleGameReportReaction accepts either while betting_state
-    # is OPEN or CLOSED, so a fast game can be reported before the window
-    # even closes.
+    # finish before anyone knows who won, so WinnerReportView's buttons
+    # (Team 1/Team 2, and Cancel Game, the button replacement for the old
+    # /return command) are live on this same message from the moment the
+    # game starts. _handleWinnerReportPick accepts either while
+    # betting_state is OPEN or CLOSED, so a fast game can be reported
+    # before the window even closes.
     async def _openBetting(self, guild_id, channel):
         # /set's wager_channel param redirects the whole cycle (open/closed/
         # report) there instead of wherever the roster's ▶️ reaction (or a
@@ -6236,16 +7496,17 @@ class helpers():
         self.update(guild_id, "betting_state", "OPEN")
         self.update(guild_id, "betting_channel_id", channel.id)
 
+        team1_name = self.getRosterName(guild_id, "team1", "Team 1", escape=False)
+        team2_name = self.getRosterName(guild_id, "team2", "Team 2", escape=False)
+
         duration = self._getBettingTimerSeconds(guild_id)
         msg = await channel.send(
             f"🎲 Betting is open! Use `/wager <amount> <team>` to bet on this game (closes in "
-            f"{duration} seconds). React {TEAM_EMOJIS[1]} for Team 1 or {TEAM_EMOJIS[2]} for Team 2 "
-            f"once the game ends to record the result and pay out bets, or {CANCEL_GAME_EMOJI} to "
-            "cancel the game."
+            f"{duration} seconds). Once the game ends, press the winning team's button below to "
+            f"report it (you'll be asked to confirm before it's recorded and bets are paid out), or "
+            f"Cancel Game to cancel the game.",
+            view=WinnerReportView(self, team1_name, team2_name),
         )
-        await msg.add_reaction(TEAM_EMOJIS[1])
-        await msg.add_reaction(TEAM_EMOJIS[2])
-        await msg.add_reaction(CANCEL_GAME_EMOJI)
 
         self.update(guild_id, "betting_message_id", msg.id)
 
@@ -6280,7 +7541,7 @@ class helpers():
 
     # Stops the running betting timer (if any) without touching wagers or
     # betting_state — the one piece cancelBettingHelper and
-    # handleGameReportReaction both need before they go on to actually
+    # _handleWinnerReportPick both need before they go on to actually
     # resolve or cancel the round, since a winner can now be reported (or
     # the game cancelled) while the timer's still counting down.
     def _cancelBettingTimerTask(self, guild_id):
@@ -6288,61 +7549,148 @@ class helpers():
         if task is not None and not task.done():
             task.cancel()
 
-    # Called from bot.py's on_raw_reaction_add. Handles both reactions that
-    # can land on the winner-report message: a TEAM_EMOJIS pick records the
-    # result and pays out bets, CANCEL_GAME_EMOJI cancels the game outright
-    # (refunding any bets and moving everyone back — the reaction
-    # replacement for the old /return command). Valid while betting_state
-    # is OPEN or CLOSED, not just after the timer's own window has closed.
-    async def handleGameReportReaction(self, payload):
-        guild_id = payload.guild_id
-        if guild_id is None:
-            return
+    # Undoes _handleWinnerReportPick's own synchronous betting_message_id
+    # clear once a pending winner confirmation is cancelled or times out,
+    # so clicking a button on the original report message works again
+    # instead of leaving the game stuck with no way to report a winner at
+    # all. Only restores it if nothing else has since resolved the game a different
+    # way (a fresh betting_message_id already set, or betting_state no
+    # longer OPEN/CLOSED — e.g. 🛑 or a new team-forming command's own
+    # clearTeamsHelper cancelled it out from under the pending
+    # confirmation) — otherwise this would stomp whatever that newer state
+    # actually is.
+    def _restoreWinnerReportMessage(self, guild_id, report_message_id):
+        if (
+            self.get(guild_id, "betting_state") in ("OPEN", "CLOSED")
+            and self.get(guild_id, "betting_message_id") is None
+        ):
+            self.update(guild_id, "betting_message_id", report_message_id)
 
-        emoji = str(payload.emoji)
-        is_cancel = emoji == CANCEL_GAME_EMOJI
-        winning_team = None if is_cancel else WINNER_EMOJIS.get(emoji)
-        if not is_cancel and winning_team is None:
+    # Strips a message's buttons once its flow has actually concluded (a
+    # winner recorded, or the game cancelled), so a resolved winner-report
+    # message doesn't keep showing Team 1/Team 2/Cancel Game as if it were
+    # still live. `message` is optional only so callers/tests that don't
+    # have a real message object (or don't care) can skip it; a message
+    # that's already been deleted (or a stale/mocked one in a test) just
+    # no-ops rather than raising.
+    async def _clearMessageButtons(self, message):
+        if message is None:
+            return
+        try:
+            await message.edit(view=None)
+        except discord.HTTPException:
+            pass
+
+    # WinnerReportView's Team 1/Team 2 button callback. A pick no longer
+    # records the result immediately — it posts a ConfirmWinnerReportView
+    # instead (Confirm actually calls recordResult, then strips this
+    # message's own buttons via _clearMessageButtons; Cancel/timeout
+    # restores the report message via _restoreWinnerReportMessage so its
+    # buttons work again) — a real elo/payout/game-record change shouldn't
+    # hinge on a single accidental click. Valid while betting_state is OPEN
+    # or CLOSED, not just after the timer's own window has closed.
+    async def _handleWinnerReportPick(self, interaction, winning_team):
+        guild_id = interaction.guild_id
+        if guild_id is None:
             return
 
         state = self.get(guild_id, "betting_state")
         if state not in ("OPEN", "CLOSED"):
+            await interaction.response.send_message(
+                "There's no open betting round to report a winner for.", ephemeral=True
+            )
             return
 
         stored_message_id = self.get(guild_id, "betting_message_id")
-        if stored_message_id is None or int(stored_message_id) != payload.message_id:
+        if stored_message_id is None or int(stored_message_id) != interaction.message.id:
+            await interaction.response.send_message(
+                "This game has already been reported or cancelled.", ephemeral=True
+            )
             return
 
         # BUG-PRONE PATTERN AVOIDED: clear the stored message id before
-        # doing anything async below, so a second reaction on this same
-        # message (another TEAM_EMOJIS pick, or the cancel emoji) can't
-        # also pass the check above and double-process the same game.
-        # Cleared here rather than flipping betting_state itself, since the
-        # cancel path below still needs to read betting_state as it
+        # doing anything async below, so a second click on this same
+        # message (the other team, or Cancel Game) can't also pass the
+        # check above and double-process the same game. Cleared here
+        # rather than flipping betting_state itself, since the cancel
+        # button's own handler still needs to read betting_state as it
         # actually is to decide whether there's anything to refund.
         self.update(guild_id, "betting_message_id", None)
 
-        channel = self.client.get_channel(payload.channel_id)
-        if channel is None:
-            channel = await self.client.fetch_channel(payload.channel_id)
-
-        guild = self.client.get_guild(guild_id)
-
         self._cancelBettingTimerTask(guild_id)
 
-        if is_cancel:
-            await self.cancelGameHelper(guild_id, channel, guild)
+        # Close betting the moment a report click lands, win-confirmed or
+        # not — otherwise /wager stays open for the entire confirmation
+        # window (state is still OPEN/CLOSED either way, and nothing else
+        # here touches it), letting someone place a brand new bet on
+        # whichever side just got reported as the winner before it's even
+        # confirmed. Left CLOSED even if the report is later cancelled,
+        # matching how a report has always cleared every wager for good the
+        # instant it landed, confirmed or not.
+        if state == "OPEN":
+            self.update(guild_id, "betting_state", "CLOSED")
+
+        name = self.getRosterName(guild_id, "team1" if winning_team == 1 else "team2", f"Team {winning_team}")
+        view = ConfirmWinnerReportView(
+            self, guild_id, winning_team, interaction.message.id, report_message=interaction.message
+        )
+        await interaction.response.send_message(
+            f"**{name}** reported as the winner - Confirm to finalize it (records elo and pays out "
+            "bets), or Cancel to report again.",
+            view=view,
+        )
+        view.message = await interaction.original_response()
+
+    # WinnerReportView's Cancel Game button callback. A click no longer
+    # cancels immediately — it posts a ConfirmCancelGameView instead
+    # (Confirm actually calls _finishGameCancel; Cancel/timeout restores
+    # the report message via _restoreWinnerReportMessage so its buttons
+    # work again), the same two-step shape _handleWinnerReportPick uses,
+    # since this button sits on the exact same message and message id.
+    async def _handleWinnerReportCancelClick(self, interaction):
+        guild_id = interaction.guild_id
+        if guild_id is None:
             return
 
-        await self.recordResult(guild_id, winning_team, channel, guild)
+        state = self.get(guild_id, "betting_state")
+        if state not in ("OPEN", "CLOSED"):
+            await interaction.response.send_message(
+                "There's no open betting round to cancel.", ephemeral=True
+            )
+            return
 
-    # The CANCEL_GAME_EMOJI half of handleGameReportReaction — refunds any
-    # open bets and moves everyone back to the original channel, the same
-    # two things the old /return command did. `cancelBettingHelper` handles
-    # the refund/state-reset/tournament-hook-clear; this just adds the
-    # voice-channel move on top, since cancelBettingHelper alone is also
-    # used by _openBetting to silently clear a stale round before opening a
-    # fresh one, where moving anyone would be wrong.
+        stored_message_id = self.get(guild_id, "betting_message_id")
+        if stored_message_id is None or int(stored_message_id) != interaction.message.id:
+            await interaction.response.send_message(
+                "This game has already been reported or cancelled.", ephemeral=True
+            )
+            return
+
+        self.update(guild_id, "betting_message_id", None)
+        self._cancelBettingTimerTask(guild_id)
+
+        view = ConfirmCancelGameView(self, guild_id, interaction.message.id, report_message=interaction.message)
+        await interaction.response.send_message(
+            "Cancel this game? Any open bets get refunded and everyone moves back to the original "
+            "channel - Confirm to cancel, or Cancel to keep playing.",
+            view=view,
+        )
+        view.message = await interaction.original_response()
+
+    # ConfirmCancelGameView's Confirm button callback — refunds any open
+    # bets and moves everyone back to the original channel (the same two
+    # things the old /return command did), then strips the original
+    # report message's own buttons via _clearMessageButtons.
+    async def _finishGameCancel(self, guild_id, channel, guild, report_message=None):
+        await self.cancelGameHelper(guild_id, channel, guild)
+        await self._clearMessageButtons(report_message)
+
+    # cancelGameHelper: refunds any open bets and moves everyone back to
+    # the original channel. `cancelBettingHelper` handles the refund/
+    # state-reset/tournament-hook-clear; this just adds the voice-channel
+    # move on top, since cancelBettingHelper alone is also used by
+    # _openBetting to silently clear a stale round before opening a fresh
+    # one, where moving anyone would be wrong.
     async def cancelGameHelper(self, guild_id, channel, guild):
         await channel.send(f"{CANCEL_GAME_EMOJI} Game cancelled.")
         await self.cancelBettingHelper(guild_id, channel)
@@ -6406,9 +7754,9 @@ class helpers():
     # ---------------- Duels (/wager-against) ----------------
 
     # Challenges `member` to a heads-up wager for `amount` gold, independent
-    # of any team game — posts a message mentioning them and reacts with
-    # DUEL_ACCEPT_EMOJI; the duel only actually escrows gold once they react
-    # to accept (see handleDuelReaction), so nothing is held here.
+    # of any team game — posts a message mentioning them with a DuelAcceptView
+    # button; the duel only actually escrows gold once they press it (see
+    # _handleDuelAcceptClick), so nothing is held here.
     async def challengeDuelHelper(self, ctx, member, amount):
         guild_id = ctx.guild.id
         challenger = ctx.user
@@ -6443,55 +7791,121 @@ class helpers():
 
         await ctx.response.send_message(
             f"{member.mention}, {challenger.mention} has challenged you to a **{amount} gold** wager! "
-            f"React with {DUEL_ACCEPT_EMOJI} to accept."
+            "Press Accept below to take the bet.",
+            view=DuelAcceptView(self),
         )
         msg = await ctx.original_response()
-        await msg.add_reaction(DUEL_ACCEPT_EMOJI)
 
         self.cursor.execute("UPDATE duels SET messageId=? WHERE id=?", (msg.id, duel_id))
         self.db.commit()
 
-    # Called from bot.py's on_raw_reaction_add for every reaction — no-ops
-    # immediately unless the emoji/message match a duel currently waiting on
-    # exactly that reaction.
-    async def handleDuelReaction(self, payload):
-        guild_id = payload.guild_id
+    # DuelAcceptView's Accept button callback - re-derives which duel (and
+    # whether this clicker is actually the challenged player) from the
+    # interaction itself, since the view is a single shared persistent
+    # instance with nothing duel-specific stored on it.
+    async def _handleDuelAcceptClick(self, interaction):
+        guild_id = interaction.guild_id
         if guild_id is None:
             return
 
-        emoji = str(payload.emoji)
-        if emoji not in (DUEL_ACCEPT_EMOJI, DUEL_CHALLENGER_EMOJI, DUEL_TARGET_EMOJI):
+        self.cursor.execute(
+            "SELECT id, channelId, challengerId, challengerName, targetId, targetName, amount "
+            "FROM duels WHERE guildId=? AND messageId=? AND state='PENDING_ACCEPT'",
+            (guild_id, interaction.message.id)
+        )
+        row = self.cursor.fetchone()
+        if row is None:
+            await interaction.response.send_message(
+                "This challenge is no longer pending.", ephemeral=True
+            )
+            return
+        duel_id, channel_id, challenger_id, challenger_name, target_id, target_name, amount = row
+
+        # Only the challenged player can accept their own challenge.
+        if interaction.user.id != target_id:
+            await interaction.response.send_message(
+                "Only the challenged player can accept this.", ephemeral=True
+            )
+            return
+
+        await interaction.response.defer()
+        await self._acceptDuel(
+            guild_id, duel_id, channel_id, challenger_id, challenger_name, target_id, target_name, amount
+        )
+
+    # DuelResultView's Challenger Won/Target Won button callback. A result
+    # no longer pays out immediately - it posts a ConfirmDuelResultView
+    # instead (Confirm actually pays out via _finishDuelResolution; Cancel/
+    # timeout restores the duel via _restoreDuelAwaitingResult so its
+    # buttons work again), matching WinnerReportView/ConfirmWinnerReportView's
+    # two-step shape for the exact same reason: a real gold transfer
+    # shouldn't hinge on a single accidental click.
+    async def _handleDuelResultClick(self, interaction, winner_is_challenger):
+        guild_id = interaction.guild_id
+        if guild_id is None:
             return
 
         self.cursor.execute(
-            "SELECT id, channelId, challengerId, challengerName, targetId, targetName, amount, state "
-            "FROM duels WHERE guildId=? AND messageId=?",
-            (guild_id, payload.message_id)
+            "SELECT id, challengerName, targetName FROM duels "
+            "WHERE guildId=? AND messageId=? AND state='AWAITING_RESULT'",
+            (guild_id, interaction.message.id)
+        )
+        row = self.cursor.fetchone()
+        if row is None:
+            await interaction.response.send_message(
+                "This duel has already been reported or is no longer pending.", ephemeral=True
+            )
+            return
+        duel_id, challenger_name, target_name = row
+
+        # BUG-PRONE PATTERN AVOIDED: flip the state before doing anything
+        # async below, so a second near-simultaneous click (the other
+        # result button) can't also pass the check above and double-
+        # process the same duel.
+        self.cursor.execute("UPDATE duels SET state='CONFIRMING' WHERE id=?", (duel_id,))
+        self.db.commit()
+
+        winner_name = challenger_name if winner_is_challenger else target_name
+        view = ConfirmDuelResultView(self, duel_id, winner_is_challenger)
+        await interaction.response.send_message(
+            f"**{winner_name}** reported as the winner - Confirm to pay out the wager, or Cancel to "
+            "report again.",
+            view=view,
+        )
+        view.message = await interaction.original_response()
+
+    # Undoes _handleDuelResultClick's own CONFIRMING flip once a pending
+    # result confirmation is cancelled or times out, so the duel's report
+    # buttons work again - an atomic conditional UPDATE (not select-then-
+    # update) so it naturally no-ops if the duel already resolved a
+    # different way in the meantime.
+    def _restoreDuelAwaitingResult(self, duel_id):
+        self.cursor.execute(
+            "UPDATE duels SET state='AWAITING_RESULT' WHERE id=? AND state='CONFIRMING'", (duel_id,)
+        )
+        self.db.commit()
+
+    # ConfirmDuelResultView's Confirm button callback - re-fetches the
+    # duel's own row by id (rather than trusting anything stored on the
+    # view besides the id/winner_is_challenger themselves) before handing
+    # off to _resolveDuel for the actual payout.
+    async def _finishDuelResolution(self, duel_id, winner_is_challenger):
+        self.cursor.execute(
+            "SELECT guildId, channelId, challengerId, challengerName, targetId, targetName, amount "
+            "FROM duels WHERE id=?",
+            (duel_id,)
         )
         row = self.cursor.fetchone()
         if row is None:
             return
-        duel_id, channel_id, challenger_id, challenger_name, target_id, target_name, amount, state = row
-
-        if emoji == DUEL_ACCEPT_EMOJI:
-            # Only the challenged player can accept their own challenge.
-            if state != "PENDING_ACCEPT" or payload.user_id != target_id:
-                return
-            await self._acceptDuel(
-                guild_id, duel_id, channel_id, challenger_id, challenger_name, target_id, target_name, amount
-            )
-            return
-
-        if state != "AWAITING_RESULT":
-            return
-        winner_is_challenger = emoji == DUEL_CHALLENGER_EMOJI
+        guild_id, channel_id, challenger_id, challenger_name, target_id, target_name, amount = row
         await self._resolveDuel(
             guild_id, duel_id, channel_id, challenger_id, challenger_name,
             target_id, target_name, amount, winner_is_challenger
         )
 
     # Escrows `amount` from both players and posts the win/loss report
-    # message, pre-reacted with the blue/red circle choices.
+    # message with a DuelResultView.
     async def _acceptDuel(
         self, guild_id, duel_id, channel_id, challenger_id, challenger_name, target_id, target_name, amount
     ):
@@ -6529,11 +7943,9 @@ class helpers():
         pot = amount * 2
         msg = await channel.send(
             f"\U0001f4b0 **{challenger_name}** vs **{target_name}** - {pot} gold on the line! "
-            f"React with {DUEL_CHALLENGER_EMOJI} if {challenger_name} won, "
-            f"or {DUEL_TARGET_EMOJI} if {target_name} won."
+            f"Press the button below for whoever actually won.",
+            view=DuelResultView(self),
         )
-        await msg.add_reaction(DUEL_CHALLENGER_EMOJI)
-        await msg.add_reaction(DUEL_TARGET_EMOJI)
 
         self.cursor.execute(
             "UPDATE duels SET state='AWAITING_RESULT', messageId=? WHERE id=?", (msg.id, duel_id)
@@ -6547,8 +7959,8 @@ class helpers():
         target_id, target_name, amount, winner_is_challenger
     ):
         # BUG-PRONE PATTERN AVOIDED: delete the duel row before anything
-        # async below, so a second near-simultaneous reaction can't also
-        # pass the AWAITING_RESULT check and pay out twice.
+        # async below, so a double-click on Confirm (or any other caller)
+        # can't find this row and pay out twice.
         self.cursor.execute("DELETE FROM duels WHERE id=?", (duel_id,))
         self.db.commit()
 
@@ -6967,8 +8379,8 @@ class helpers():
 
     # Builds the plain /stats embed for `target` (a discord.Member or
     # discord.User — anything with .id/.name/.display_name/.display_avatar)
-    # in `guild_id`. Factored out of statsHelper so handleStatsReaction can
-    # rebuild the exact same embed when STATS_RETURN_EMOJI swaps a trading
+    # in `guild_id`. Factored out of statsHelper so _handleStatsReturnClick can
+    # rebuild the exact same embed when the Back button swaps a trading
     # card back to it, without duplicating the field layout.
     def _buildStatsEmbed(self, guild_id, target):
         user_id = target.id
@@ -7027,12 +8439,10 @@ class helpers():
         # display_avatar (not the possibly-None .avatar) always resolves to
         # something — the member's own custom avatar if they have one, or
         # Discord's default avatar for their account otherwise.
-        # BUG FIX: an animated (GIF) avatar's .url pointed at the .gif
-        # asset, which Discord's embed thumbnail slot doesn't reliably
-        # unfurl — the thumbnail just silently failed to attach at all.
-        # with_format("png") forces a static snapshot for animated avatars
-        # too (a no-op for already-static ones), trading the animation for
-        # actually showing up every time.
+        # with_format("png") forces a static snapshot even for an animated
+        # (GIF) avatar (a no-op for already-static ones) - Discord's embed
+        # thumbnail slot doesn't reliably unfurl a .gif URL, so without this
+        # an animated avatar's thumbnail can silently fail to attach at all.
         embed.set_thumbnail(url=target.display_avatar.with_format("png").url)
         # Exactly 3 inline fields per row (Discord wraps at 3), grouped
         # ranked / casual+bet / gold top to bottom, with nothing left over
@@ -7068,10 +8478,8 @@ class helpers():
 
         embed = self._buildStatsEmbed(guild_id, target)
 
-        await ctx.response.send_message(embed=embed)
+        await ctx.response.send_message(embed=embed, view=StatsView(self, card_shown=False))
         msg = await ctx.original_response()
-        await msg.add_reaction(STATS_AVATAR_TOGGLE_EMOJI)
-        await msg.add_reaction(STATS_CARD_EMOJI)
 
         self.cursor.execute(
             "INSERT OR REPLACE INTO stats_views(messageId, guildId, targetUserId, cardShown) "
@@ -7097,7 +8505,7 @@ class helpers():
         except Exception:
             return None
 
-    # The per-server half of handleStatsReaction's avatar toggle —
+    # The per-server half of StatsView's avatar toggle —
     # display_avatar resolves this server's own profile picture if the
     # player has set one, falling back to their regular account-wide
     # avatar otherwise (the same avatar /stats itself shows by default).
@@ -7157,16 +8565,10 @@ class helpers():
     # labels, stat values, team/roster rows — username shares team_weight,
     # both being small secondary text).
     #
-    # BUG FIX: earlier versions only varied name_font/title_font, and even
-    # then only via different WEIGHTS of the same Chakra Petch font — the
-    # difference between "default" and "Bold" was one modest weight step
-    # on two smallish pieces of text, easy to read as "nothing changed" at
-    # a glance, and every body element always used the same three
-    # hardcoded weights regardless of font_style at all. CARD_SHOP_FONT_
-    # STYLES now backs each style with a genuinely different bundled
-    # typeface (RUSSO_ONE/CINZEL/ORBITRON, then PRESS_START_2P/CREEPSTER/
-    # BLACK_OPS_ONE in a second wave, all Google Fonts, SIL Open Font
-    # License) for name/title, and shifts every body element's weight
+    # CARD_SHOP_FONT_STYLES backs each style with a genuinely different
+    # bundled typeface (RUSSO_ONE/CINZEL/ORBITRON, then PRESS_START_2P/
+    # CREEPSTER/BLACK_OPS_ONE in a second wave, all Google Fonts, SIL Open
+    # Font License) for name/title, and shifts every body element's weight
     # together too — there's still only the one bundled body typeface
     # (IBM_PLEX_SANS, a variable font — see _loadFont), so "a different
     # font" for the smaller text still means a different weight of it
@@ -7218,6 +8620,27 @@ class helpers():
                 "body_font": IBM_PLEX_SANS,
                 "label_weight": "Bold", "value_weight": "SemiBold", "team_weight": "SemiBold",
             }
+        if font_style == "Neon":
+            return {
+                "name_font": BUNGEE, "name_variation": None,
+                "title_font": BUNGEE, "title_variation": None,
+                "body_font": IBM_PLEX_SANS,
+                "label_weight": "Bold", "value_weight": "SemiBold", "team_weight": "Medium",
+            }
+        if font_style == "Western":
+            return {
+                "name_font": RYE, "name_variation": None,
+                "title_font": RYE, "title_variation": None,
+                "body_font": IBM_PLEX_SANS,
+                "label_weight": "SemiBold", "value_weight": "Medium", "team_weight": "Regular",
+            }
+        if font_style == "Handwritten":
+            return {
+                "name_font": PERMANENT_MARKER, "name_variation": None,
+                "title_font": PERMANENT_MARKER, "title_variation": None,
+                "body_font": IBM_PLEX_SANS,
+                "label_weight": "Medium", "value_weight": "Regular", "team_weight": "Light",
+            }
         return {
             "name_font": CHAKRA_PETCH_BOLD, "name_variation": None,
             "title_font": CHAKRA_PETCH_SEMIBOLD, "title_variation": None,
@@ -7233,17 +8656,15 @@ class helpers():
     # should set customized=1 when it does) without ever needing a one-off
     # migration for players who predate that.
     #
-    # BUG FIX: INSERT OR IGNORE alone left existing rows frozen at whatever
-    # CARD_DEFAULT_* happened to be the day they were first created — every
-    # later tweak to the default palette (and there were several) needed a
-    # manual DB fix to actually show up for a player who'd already viewed
-    # their card once. Since there's no customization command yet, every
-    # existing row is really just a stale snapshot of the defaults, not a
-    # deliberate choice — so an uncustomized row (customized=0) is now
-    # re-synced to the current CARD_DEFAULT_* values on every call here,
-    # keeping it "following the defaults" instead of pinned to the past.
-    # Once real customization exists, setting customized=1 opts a row out
-    # of this and this UPDATE becomes a no-op for it.
+    # INSERT OR IGNORE alone would leave an existing row frozen at whatever
+    # CARD_DEFAULT_* was the day it was first created. Since there's no
+    # customization command yet, every existing row is really just a stale
+    # snapshot of the defaults, not a deliberate choice — so an
+    # uncustomized row (customized=0) is re-synced to the current
+    # CARD_DEFAULT_* values on every call here, keeping it "following the
+    # defaults" instead of pinned to the past. Once real customization
+    # exists, setting customized=1 opts a row out of this and this UPDATE
+    # becomes a no-op for it.
     def ensureCardSettings(self, guild_id, user_id):
         self.cursor.execute(
             "INSERT OR IGNORE INTO trading_cards"
@@ -8055,13 +9476,17 @@ class helpers():
             return "font_style", CARD_SHOP_FONT_STYLES[item]
         return None, None
 
-    # /shop: every purchasable cosmetic, grouped by category, with its
-    # price or an "owned" marker and the caller's current balance so they
-    # can see at a glance what they can actually afford.
-    async def shopHelper(self, ctx):
-        guild_id = ctx.guild.id
-        user_id = ctx.user.id
-        self.ensureEconomyRow(guild_id, user_id, ctx.user.name)
+    # The embed both shopHelper's initial post and every later ShopSortView
+    # button click render — kept as one method so a re-sort can never drift
+    # from what /shop itself would show. Each category's items keep their
+    # own catalog order when sort_key is None (the original behavior,
+    # still what a fresh /shop call gets); "price" sorts cheapest-first and
+    # "owned" sorts unowned-first, each reversed by `descending`. Sorting
+    # only ever reorders each category's own lines — Titles/Color Schemes/
+    # Fonts never mix together, so the three-field layout below stays the
+    # same shape either way. Python's sort is stable, so items tied on the
+    # sort key keep their catalog order relative to each other.
+    def _buildShopEmbed(self, guild_id, user_id, sort_key=None, descending=False):
         balance = self.getEconomy(guild_id, user_id, "balance")
         catalog = self.getShopCatalog(guild_id, user_id)
 
@@ -8072,18 +9497,45 @@ class helpers():
         for label, item_type in (
             ("Titles", "title"), ("Color Schemes", "color_scheme"), ("Fonts", "font_style")
         ):
+            items = [item for item in catalog if item["type"] == item_type]
+            if sort_key == "price":
+                items.sort(key=lambda item: item["price"], reverse=descending)
+            elif sort_key == "owned":
+                items.sort(key=lambda item: item["owned"], reverse=descending)
+
             lines = []
-            for item in catalog:
-                if item["type"] != item_type:
-                    continue
-                status = "✅ Owned" if item["owned"] else f"{item['price']} gold"
+            for item in items:
+                status = f"{item['price']} gold" + (" ✅" if item["owned"] else "")
                 lines.append(f"**{item['name']}** - {status}")
             # __underline__ (Discord markdown) rather than just bold, so
             # each category heading reads distinctly from the item lines'
             # own bolded names underneath it.
             embed.add_field(name=f"__{label}__", value="\n".join(lines), inline=False)
-        embed.set_footer(text="/shop-buy to purchase - equip with /card-set")
-        await ctx.response.send_message(embed=embed)
+
+        footer = "/shop-buy to purchase - equip with /card-set"
+        if sort_key is not None:
+            sort_label = "price" if sort_key == "price" else "owned status"
+            direction = "descending" if descending else "ascending"
+            footer += f" - sorted by {sort_label} ({direction})"
+        embed.set_footer(text=footer)
+        return embed
+
+    # /shop: every purchasable cosmetic, grouped by category, with its
+    # price and the caller's current balance so they can see at a glance
+    # what they can actually afford. An owned item still shows its price
+    # (rather than hiding it behind an "Owned" marker) with a ✅ appended,
+    # so comparing costs across a whole category never loses an
+    # already-bought item's price from view. ShopSortView's buttons let
+    # the caller re-sort by price or owned status, either direction,
+    # without re-running the command.
+    async def shopHelper(self, ctx):
+        guild_id = ctx.guild.id
+        user_id = ctx.user.id
+        self.ensureEconomyRow(guild_id, user_id, ctx.user.name)
+        embed = self._buildShopEmbed(guild_id, user_id)
+        view = ShopSortView(self, guild_id, user_id)
+        await ctx.response.send_message(embed=embed, view=view)
+        view.message = await ctx.original_response()
 
     # Every CARD_ACHIEVEMENT_TITLES entry as {key, name, description,
     # earned} — what /achievements displays. Earned state reads straight
@@ -8418,10 +9870,16 @@ class helpers():
     # posts the result in place of the /stats embed. A missing/unfetchable
     # avatar falls back to a plain tile rather than failing the whole card
     # over one image request. `use_global_avatar` is the trading-card half
-    # of the same STATS_AVATAR_TOGGLE_EMOJI reaction the plain embed uses —
-    # see handleStatsReaction, which re-calls this in place to redraw the
-    # card with the other avatar rather than posting a new message.
-    async def _swapStatsForTradingCard(self, message, guild_id, guild_name, target_user_id, use_global_avatar=False):
+    # of the same STATS_AVATAR_TOGGLE_EMOJI button the plain embed uses —
+    # see _handleStatsAvatarToggleClick, which re-calls this in place to
+    # redraw the card with the other avatar rather than posting a new message.
+    # `view`, when given, is included in the same edit call that swaps the
+    # image in - see TeamStatsView helpers' own `view` param for why
+    # view=None (the default) omits the kwarg rather than passing it
+    # through.
+    async def _swapStatsForTradingCard(
+        self, message, guild_id, guild_name, target_user_id, use_global_avatar=False, view=None
+    ):
         member = await self._resolveGuildMember(guild_id, target_user_id)
         display_name = member.display_name if member is not None else f"Player {target_user_id}"
 
@@ -8453,119 +9911,118 @@ class helpers():
 
         embed = discord.Embed(color=discord.Color.gold())
         embed.set_image(url=f"attachment://{file.filename}")
-        await message.edit(embed=embed, attachments=[file])
+        edit_kwargs = {"embed": embed, "attachments": [file]}
+        if view is not None:
+            edit_kwargs["view"] = view
+        await message.edit(**edit_kwargs)
 
     # The reverse of _swapStatsForTradingCard: rebuilds the plain /stats
     # embed (via _buildStatsEmbed, the same one statsHelper itself posts)
     # and puts it back in place of the trading card image. attachments=[]
     # is required here, not just omitted — the message currently has the
     # card's PNG attached, and message.edit() otherwise leaves existing
-    # attachments alone.
-    async def _swapTradingCardForStats(self, message, guild_id, target_user_id):
+    # attachments alone. See _swapStatsForTradingCard on `view`.
+    async def _swapTradingCardForStats(self, message, guild_id, target_user_id, view=None):
         member = await self._resolveGuildMember(guild_id, target_user_id)
         if member is None:
             return
         embed = self._buildStatsEmbed(guild_id, member)
-        await message.edit(embed=embed, attachments=[])
+        edit_kwargs = {"embed": embed, "attachments": []}
+        if view is not None:
+            edit_kwargs["view"] = view
+        await message.edit(**edit_kwargs)
 
-    # Called from bot.py's on_raw_reaction_add for every reaction — no-ops
-    # unless the emoji/message match a /stats embed still tracked in
-    # stats_views. STATS_CARD_EMOJI hands off to _swapStatsForTradingCard
-    # and marks cardShown, swapping STATS_CARD_EMOJI out for STATS_RETURN_EMOJI
-    # ("show card again" doesn't apply once it's already up — STATS_AVATAR_
-    # TOGGLE_EMOJI stays either way, since both the embed and the card have
-    # their own avatar to toggle). STATS_RETURN_EMOJI does the reverse via
-    # _swapTradingCardForStats, restoring STATS_CARD_EMOJI. STATS_AVATAR_
-    # TOGGLE_EMOJI itself branches on cardShown: off the card, it flips the
-    # embed's thumbnail between the per-server and regular avatar
-    # (comparing the embed's own thumbnail URL against a freshly-resolved
-    # server URL); on the card, it flips cardAvatarGlobal and re-renders the
-    # whole card image in place, since the avatar there is baked into a PNG
-    # rather than a swappable embed thumbnail URL.
-    async def handleStatsReaction(self, payload):
-        guild_id = payload.guild_id
-        if guild_id is None:
-            return
+    # StatsView's Card button callback - swaps the plain embed for the
+    # trading-card image and re-renders with a Back button in place of
+    # Card (see StatsView).
+    async def _handleStatsShowCardClick(self, interaction):
+        guild_id = interaction.guild_id
+        message = interaction.message
 
-        emoji = str(payload.emoji)
-        if emoji not in (STATS_AVATAR_TOGGLE_EMOJI, STATS_CARD_EMOJI, STATS_RETURN_EMOJI):
+        self.cursor.execute(
+            "SELECT targetUserId FROM stats_views WHERE guildId=? AND messageId=? AND cardShown=0",
+            (guild_id, message.id)
+        )
+        row = self.cursor.fetchone()
+        if row is None:
+            await interaction.response.send_message("This stats view is no longer live.", ephemeral=True)
             return
+        target_user_id = row[0]
+
+        await interaction.response.defer()
+        guild_name = interaction.guild.name if interaction.guild is not None else ""
+        await self._swapStatsForTradingCard(
+            message, guild_id, guild_name, target_user_id, view=StatsView(self, card_shown=True)
+        )
+        self.cursor.execute(
+            "UPDATE stats_views SET cardShown=1, cardAvatarGlobal=0 WHERE guildId=? AND messageId=?",
+            (guild_id, message.id)
+        )
+        self.db.commit()
+
+    # StatsView's Back button callback - the reverse swap.
+    async def _handleStatsReturnClick(self, interaction):
+        guild_id = interaction.guild_id
+        message = interaction.message
+
+        self.cursor.execute(
+            "SELECT targetUserId FROM stats_views WHERE guildId=? AND messageId=? AND cardShown=1",
+            (guild_id, message.id)
+        )
+        row = self.cursor.fetchone()
+        if row is None:
+            await interaction.response.send_message("This stats view is no longer live.", ephemeral=True)
+            return
+        target_user_id = row[0]
+
+        await interaction.response.defer()
+        await self._swapTradingCardForStats(message, guild_id, target_user_id, view=StatsView(self, card_shown=False))
+        self.cursor.execute(
+            "UPDATE stats_views SET cardShown=0, cardAvatarGlobal=0 WHERE guildId=? AND messageId=?",
+            (guild_id, message.id)
+        )
+        self.db.commit()
+
+    # StatsView's Avatar button callback - branches on cardShown: off the
+    # card, it flips the embed's thumbnail between the per-server and
+    # regular avatar (comparing the embed's own thumbnail URL against a
+    # freshly-resolved server URL); on the card, it flips cardAvatarGlobal
+    # and re-renders the whole card image in place, since the avatar there
+    # is baked into a PNG rather than a swappable embed thumbnail URL.
+    # Available on both sides, unlike Card/Back, since both the embed and
+    # the card have their own avatar to toggle.
+    async def _handleStatsAvatarToggleClick(self, interaction):
+        guild_id = interaction.guild_id
+        message = interaction.message
 
         self.cursor.execute(
             "SELECT targetUserId, cardShown, cardAvatarGlobal FROM stats_views "
             "WHERE guildId=? AND messageId=?",
-            (guild_id, payload.message_id)
+            (guild_id, message.id)
         )
         row = self.cursor.fetchone()
         if row is None:
+            await interaction.response.send_message("This stats view is no longer live.", ephemeral=True)
             return
         target_user_id, card_shown, card_avatar_global = row
 
-        # STATS_CARD_EMOJI/STATS_RETURN_EMOJI each only apply on one side of
-        # the embed/card divide — the reactions themselves are swapped out
-        # below to enforce this in the UI, but a reaction click already in
-        # flight when that swap happens could still slip through, so check
-        # again here too. STATS_AVATAR_TOGGLE_EMOJI applies on both sides,
-        # so it has no such guard.
-        if card_shown and emoji == STATS_CARD_EMOJI:
-            return
-        if not card_shown and emoji == STATS_RETURN_EMOJI:
-            return
-
-        channel = self.client.get_channel(payload.channel_id)
-        if channel is None:
-            channel = await self.client.fetch_channel(payload.channel_id)
-        message = await channel.fetch_message(payload.message_id)
-        if not message.embeds:
-            return
-
-        if emoji == STATS_CARD_EMOJI:
-            guild_name = channel.guild.name if channel.guild is not None else ""
-            await self._swapStatsForTradingCard(message, guild_id, guild_name, target_user_id)
-            self.cursor.execute(
-                "UPDATE stats_views SET cardShown=1, cardAvatarGlobal=0 WHERE guildId=? AND messageId=?",
-                (guild_id, payload.message_id)
-            )
-            self.db.commit()
-            # STATS_CARD_EMOJI ("show the card") is the one reaction that
-            # doesn't apply anymore once the card is already up — remove
-            # just that one rather than leaving it sitting there silently
-            # no-opping, and offer the one new action that does apply.
-            try:
-                await message.clear_reaction(STATS_CARD_EMOJI)
-            except discord.HTTPException:
-                pass
-            await message.add_reaction(STATS_RETURN_EMOJI)
-            return
-
-        if emoji == STATS_RETURN_EMOJI:
-            await self._swapTradingCardForStats(message, guild_id, target_user_id)
-            self.cursor.execute(
-                "UPDATE stats_views SET cardShown=0, cardAvatarGlobal=0 WHERE guildId=? AND messageId=?",
-                (guild_id, payload.message_id)
-            )
-            self.db.commit()
-            try:
-                await message.clear_reaction(STATS_RETURN_EMOJI)
-            except discord.HTTPException:
-                pass
-            await message.add_reaction(STATS_CARD_EMOJI)
-            return
+        await interaction.response.defer()
 
         if card_shown:
-            guild_name = channel.guild.name if channel.guild is not None else ""
+            guild_name = interaction.guild.name if interaction.guild is not None else ""
             new_global = not card_avatar_global
             await self._swapStatsForTradingCard(
                 message, guild_id, guild_name, target_user_id, use_global_avatar=new_global
             )
             self.cursor.execute(
                 "UPDATE stats_views SET cardAvatarGlobal=? WHERE guildId=? AND messageId=?",
-                (1 if new_global else 0, guild_id, payload.message_id)
+                (1 if new_global else 0, guild_id, message.id)
             )
             self.db.commit()
-            await self._clearPagingReaction(message, payload)
             return
 
+        if not message.embeds:
+            return
         embed = message.embeds[0]
         server_url = await self._resolveMemberAvatarUrl(guild_id, target_user_id)
         if server_url is None:
@@ -8581,7 +10038,6 @@ class helpers():
 
         embed.set_thumbnail(url=new_url)
         await message.edit(embed=embed)
-        await self._clearPagingReaction(message, payload)
 
     # ---------------- Leaderboard ----------------
 
@@ -8695,8 +10151,8 @@ class helpers():
         embed.set_footer(text=f"Page {page + 1}/{total_pages} · {order_label}")
         return embed
 
-    # Posts the first page and pre-reacts with the paging emoji — clicking
-    # them (handleLeaderboardReaction) edits this same message rather than
+    # Posts the first page with its own LeaderboardPagingView — clicking a
+    # button (_handleLeaderboardPageClick) edits this same message rather than
     # posting a new one, so the current view is tracked by messageId here.
     async def leaderboardHelper(self, ctx, stat, order):
         guild_id = ctx.guild.id
@@ -8709,10 +10165,8 @@ class helpers():
         entries_sorted = self._sortLeaderboardEntries(entries, stat if stat is not None else "elo", order)
         embed = self._renderLeaderboardEmbed(ctx.guild.name, entries_sorted, stat, order, page=0)
 
-        await ctx.response.send_message(embed=embed)
+        await ctx.response.send_message(embed=embed, view=LeaderboardPagingView(self))
         msg = await ctx.original_response()
-        for emoji in LEADERBOARD_NAV_EMOJIS:
-            await msg.add_reaction(emoji)
 
         self.cursor.execute(
             "INSERT OR REPLACE INTO leaderboards(messageId, guildId, channelId, filter, sort_order, page) "
@@ -8721,56 +10175,40 @@ class helpers():
         )
         self.db.commit()
 
-    # Called from bot.py's on_raw_reaction_add for every reaction — no-ops
-    # unless the emoji/message match an active leaderboard page view.
-    async def handleLeaderboardReaction(self, payload):
-        guild_id = payload.guild_id
+    # LeaderboardPagingView's button callback - no-ops (with a plain
+    # ephemeral note) unless the interaction's message still matches an
+    # active leaderboard page view.
+    async def _handleLeaderboardPageClick(self, interaction, direction):
+        guild_id = interaction.guild_id
         if guild_id is None:
             return
 
-        emoji = str(payload.emoji)
-        if emoji not in LEADERBOARD_NAV_EMOJIS:
-            return
-
         self.cursor.execute(
-            "SELECT channelId, filter, sort_order, page FROM leaderboards WHERE guildId=? AND messageId=?",
-            (guild_id, payload.message_id)
+            "SELECT filter, sort_order, page FROM leaderboards WHERE guildId=? AND messageId=?",
+            (guild_id, interaction.message.id)
         )
         row = self.cursor.fetchone()
         if row is None:
+            await interaction.response.send_message("This leaderboard is no longer live.", ephemeral=True)
             return
-        channel_id, stat, order, page = row
+        stat, order, page = row
 
         entries = self.getLeaderboardEntries(guild_id)
         entries_sorted = self._sortLeaderboardEntries(entries, stat if stat is not None else "elo", order)
         total_pages = self._leaderboardPageCount(entries_sorted)
-
-        if emoji == LEADERBOARD_FIRST_EMOJI:
-            new_page = 0
-        elif emoji == LEADERBOARD_PREV_EMOJI:
-            new_page = max(0, page - 1)
-        elif emoji == LEADERBOARD_NEXT_EMOJI:
-            new_page = min(total_pages - 1, page + 1)
-        else:
-            new_page = total_pages - 1
+        new_page = self._computeNewPage(direction, page, total_pages)
 
         if new_page == page:
+            await interaction.response.defer()
             return
 
-        channel = self.client.get_channel(channel_id)
-        if channel is None:
-            channel = await self.client.fetch_channel(channel_id)
-        message = await channel.fetch_message(payload.message_id)
-
-        guild = self.client.get_guild(guild_id)
-        guild_name = guild.name if guild is not None else ""
+        guild_name = interaction.guild.name if interaction.guild is not None else ""
         embed = self._renderLeaderboardEmbed(guild_name, entries_sorted, stat, order, new_page)
-        await message.edit(embed=embed)
-        await self._clearPagingReaction(message, payload)
+        await interaction.response.edit_message(embed=embed)
 
         self.cursor.execute(
             "UPDATE leaderboards SET page=? WHERE guildId=? AND messageId=?",
-            (new_page, guild_id, payload.message_id)
+            (new_page, guild_id, interaction.message.id)
         )
         self.db.commit()
 
