@@ -5,6 +5,12 @@ __pycache__/
 .claude/
 data/guildData/serverInfo/main.db
 shockwave-site/
+# RotatingFileHandler output (see bot.py) - shockwave.log plus its rotated
+# shockwave.log.1/.2/.3 backups.
+shockwave.log*
+# Daily main.db snapshots (see backupDatabaseTask in bot.py) - data, not
+# source, same reasoning as main.db itself above.
+data/guildData/backups/
 # /preview's rendered cache (see PREVIEW_DIR/_cachedPreviewFiles in
 # helper.py) - regenerated on demand from the logo/color-scheme/font/title
 # catalogs already in source, so it's a build artifact, not source content.

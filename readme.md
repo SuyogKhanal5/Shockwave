@@ -58,6 +58,30 @@ commands. For that, see shockwave.netlify.app.
   per-guild keeps registration effectively instant while still needing zero
   server-specific configuration.
 
+### Logging and database backups
+
+`bot.py` configures the root logger at import time: a `RotatingFileHandler`
+(`shockwave.log`, capped at 5MB × 3 backups so it can't grow unbounded) plus a
+plain console handler, both sharing one timestamped formatter. Configuring the
+root logger rather than just a `shockwave`-named one means discord.py's own
+internal logging (gateway, HTTP) lands in the same file, not just this
+project's own `logger.info`/`logger.error` calls. `shockwave.log*` is
+gitignored, same reasoning as `main.db` itself.
+
+`backupDatabaseTask` (a `discord.ext.tasks.loop(hours=24)`, started from
+`on_ready` the same way `rotateStatus` is, and guarded against double-starting
+on a reconnect the same way) snapshots `main.db` into
+`data/guildData/backups/` once a day, then deletes any backup older than
+`BACKUP_RETENTION_DAYS` (7). It uses `mainDB.backup(backup_conn)` — sqlite3's
+own point-in-time backup API — rather than a plain file copy, since `main.db`
+is a live connection other code can be reading/writing between event loop
+ticks and copying the raw file risks capturing it mid-write. It runs directly
+on the event loop rather than via `asyncio.to_thread`: `mainDB` was opened
+with the default `check_same_thread=True`, so handing it to a different
+thread would raise outright, and backing up a database this size finishes
+well within the time a trading-card render already blocks the loop for.
+`data/guildData/backups/` is gitignored, same reasoning as `main.db`.
+
 ### Team formation
 
 `/make-teams` and `/captains` both build two `Team` objects seeded from whoever
@@ -418,13 +442,16 @@ message id.
 Nothing is escrowed at challenge time, only a balance sanity-check, so a
 challenge that's never accepted doesn't leave anyone's gold stuck. Both
 players' gold is only locked once the target presses Accept
-(`DuelAcceptView`), at which point a second message goes out with a
-`DuelResultView` (Challenger Won/Target Won buttons). Picking a result posts a
-`ConfirmDuelResultView` rather than paying out immediately - the same
-two-step confirm shape the team-game winner report uses, for the same reason
-(a real gold transfer shouldn't hinge on one accidental click). Both
-`DuelAcceptView` and `DuelResultView` are persistent, same reasoning as
-`WinnerReportView`; `ConfirmDuelResultView` is a short-lived confirm view like
+(`DuelAcceptView`), which also strips that Accept button via
+`_clearMessageButtons` right after `_acceptDuel` runs, at which point a second
+message goes out with a `DuelResultView` (Challenger Won/Target Won buttons).
+Picking a result posts a `ConfirmDuelResultView` rather than paying out
+immediately - the same two-step confirm shape the team-game winner report
+uses, for the same reason (a real gold transfer shouldn't hinge on one
+accidental click). Confirming there also strips the result message's own
+buttons, matching `ConfirmWinnerReportView`. Both `DuelAcceptView` and
+`DuelResultView` are persistent, same reasoning as `WinnerReportView`;
+`ConfirmDuelResultView` is a short-lived confirm view like
 `ConfirmWinnerReportView`.
 
 ### Leaderboard paging
@@ -776,26 +803,29 @@ image's own canvas/header drawing code (`_createBracketCanvas`,
 
 Sequential mode reuses the ordinary game cycle rather than reimplementing it.
 Pressing a match's ready-check button (`TournamentReadyView`, either captain)
-sets `servers.team1`/`team2` to that match's two teams and calls
+sets `servers.team1`/`team2` to that match's two teams, strips the ready-check
+message's own Ready button via `_clearMessageButtons`, and calls
 `_openBetting`, the exact function `RosterActionView`'s own Start handler
-calls, so betting, the Team 1/Team 2 winner report, and payouts all work
-unmodified. The only addition is `active_tournament_match_id`, a column on
-`servers` that's `None` for every ordinary game and only gets set while a
-tournament match is borrowing the cycle. `recordResult` checks it once its
-normal work is done and, if set, hands off to `_resolveTournamentMatch` to
-advance the bracket. `TournamentReadyView`, like every other view backing a
-flow that can sit open indefinitely, is persistent.
+calls, so betting, the winner report, and payouts all work unmodified. The
+only addition is `active_tournament_match_id`, a column on `servers` that's
+`None` for every ordinary game and only gets set while a tournament match is
+borrowing the cycle. `recordResult` checks it once its normal work is done
+and, if set, hands off to `_resolveTournamentMatch` to advance the bracket.
+`TournamentReadyView`, like every other view backing a flow that can sit open
+indefinitely, is persistent.
 
 Simultaneous mode can't reuse that cycle, since `team1`/`team2` and
 `betting_state` are guild-wide singletons and simultaneous mode needs several
 matches live at once. It skips movement entirely and posts every match's own
-`TournamentMatchReportView` (Team 1/Team 2 buttons) at once, scoped by each
-match's own row instead of guild state. Betting still happens, just through a
-second, match-scoped path (`_openConcurrentTournamentBetting`/
+`TournamentMatchReportView` at once, scoped by each match's own row instead of
+guild state. Its two buttons are built per-message from the match's actual
+team names (`_teamButtonLabel`, the same helper/pattern `WinnerReportView`
+uses), not a fixed "Team 1"/"Team 2" label. Betting still happens, just
+through a second, match-scoped path (`_openConcurrentTournamentBetting`/
 `tournament_wagers`) instead of the singleton `wagers` table a normal game
 uses.
 
-A Team 1/Team 2 click on a simultaneous match doesn't resolve it right away
+A team-button click on a simultaneous match doesn't resolve it right away
 either, the same reasoning `ConfirmWinnerReportView` has for a normal game. It
 posts a `ConfirmTournamentMatchReportView` instead
 (`_handleTournamentMatchReportClick`), first flipping the match's `state` from
@@ -807,7 +837,9 @@ second near-simultaneous click on the same match can't also pass the
 `bettingClosed=1` closes `/wager match_id:` on that match immediately, since
 otherwise it would stay open for the whole confirmation window and let someone
 bet on whichever side just got reported before it's even confirmed. Confirm
-calls `_resolveTournamentMatch` directly. Cancel or a timeout calls
+calls `_resolveTournamentMatch` directly, then strips the original match
+message's own buttons via `_clearMessageButtons`, matching
+`ConfirmWinnerReportView`. Cancel or a timeout calls
 `_restoreTournamentMatchAwaitingResult`, a conditional `UPDATE ... WHERE id=?
 AND state='CONFIRMING'` that puts the match back to `AWAITING_RESULT` so its
 buttons work again, but only if nothing else has resolved it a different way

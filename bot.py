@@ -1,14 +1,35 @@
 # Import Statements
 import random
 import itertools
-import traceback
+import os
 import os.path as path
 import sqlite3
+import logging
+import time
+from datetime import datetime
+from logging.handlers import RotatingFileHandler
 import discord
 from discord import app_commands
 from discord.ext import tasks
 from TourneyClasses import Team, Player
 import helper
+
+# Logs to both the console and a rotating file (shockwave.log, capped at
+# 5MB x 3 backups so it can't grow unbounded) — the file is what survives
+# a restart or a run with no attached terminal (e.g. as a background
+# service), which stdout alone doesn't. Configured on the root logger so
+# discord.py's own internal logging (gateway, HTTP) is captured the same
+# way, not just this file's own logger calls.
+LOG_FILE = "shockwave.log"
+_log_formatter = logging.Formatter(
+    "[{asctime}] [{levelname:<8}] {name}: {message}", "%Y-%m-%d %H:%M:%S", style="{"
+)
+_file_handler = RotatingFileHandler(LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8")
+_file_handler.setFormatter(_log_formatter)
+_console_handler = logging.StreamHandler()
+_console_handler.setFormatter(_log_formatter)
+logging.basicConfig(level=logging.INFO, handlers=[_file_handler, _console_handler])
+logger = logging.getLogger("shockwave")
 
 # Get token from text file
 token = ""
@@ -24,10 +45,48 @@ dbpath = dataFolder + "main.db"
 # connecting, even if it's empty — this check has to run before connect()
 # or the file will always already exist by the time it's checked, and
 # CREATE TABLE below will never execute, even on a brand new install.
+# makedirs is needed first too - a fresh clone has no data/ tree at all
+# (it's gitignored), and sqlite3.connect() doesn't create missing parent
+# directories, only the file itself.
+os.makedirs(dataFolder, exist_ok=True)
 db_already_existed = path.isfile(dbpath)
 
 mainDB = sqlite3.connect(dbpath)
 cursor = mainDB.cursor()
+
+# A single row change (a long serialized team roster in particular) can run
+# to thousands of characters once its bound parameters are expanded inline
+# below - capped so one oversized statement can't dominate the log file.
+LOG_LINE_MAX_LENGTH = 500
+_MUTATING_SQL_PREFIXES = ("INSERT", "UPDATE", "DELETE")
+
+
+# discord.py's own internal logging (View.on_error for a button callback,
+# Loop._error for a background task) and on_app_command_error below already
+# funnel unhandled exceptions into this same root-configured logger - this
+# covers the other half: every database write. sqlite3's trace callback
+# receives each executed statement with its bound parameters already
+# expanded inline (not the raw `?` placeholders), so this reads as a real
+# audit trail rather than opaque parameterized SQL. Everything that isn't
+# an INSERT/UPDATE/DELETE (SELECTs, the trace callback's own "BEGIN " for
+# an implicit transaction) is filtered out - only mutations are "important
+# actions" worth a permanent record.
+def _logDatabaseStatement(sql):
+    statement = sql.strip()
+    if not statement.upper().startswith(_MUTATING_SQL_PREFIXES):
+        return
+    if len(statement) > LOG_LINE_MAX_LENGTH:
+        statement = statement[:LOG_LINE_MAX_LENGTH] + "... (truncated)"
+    logger.info("DB: %s", statement)
+
+
+mainDB.set_trace_callback(_logDatabaseStatement)
+
+# Where daily database snapshots land (see backupDatabaseTask below) -
+# separate from serverInfo/ so a backup can never collide with or get
+# mistaken for the live database file.
+BACKUP_DIR = "data/guildData/backups"
+BACKUP_RETENTION_DAYS = 7
 
 
 def ensure_column(table, column, coltype="", default=None):
@@ -379,7 +438,45 @@ async def rotateStatus():
     try:
         await client.change_presence(activity=discord.Game(name=next(_orianna_quote_cycle)))
     except Exception:
-        pass
+        logger.debug("Presence update skipped - connection not settled yet.", exc_info=True)
+
+
+# Snapshots main.db into BACKUP_DIR and prunes anything older than
+# BACKUP_RETENTION_DAYS. Uses sqlite3's own backup() API rather than a
+# plain file copy - main.db is a live connection other code can be
+# reading/writing between event loop ticks, and copying the raw file
+# risks capturing it mid-write; backup() takes a proper point-in-time
+# snapshot instead. Runs on the event loop rather than a thread: mainDB
+# was opened with the default check_same_thread=True, so handing it to a
+# different thread (e.g. via asyncio.to_thread) would raise outright, and
+# a 100KB-scale database backs up in well under the time a trading-card
+# render already blocks the loop for.
+def _backupDatabase():
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup_path = os.path.join(BACKUP_DIR, f"main-{timestamp}.db")
+    backup_conn = sqlite3.connect(backup_path)
+    try:
+        mainDB.backup(backup_conn)
+    finally:
+        backup_conn.close()
+
+    cutoff = time.time() - BACKUP_RETENTION_DAYS * 86400
+    for name in os.listdir(BACKUP_DIR):
+        entry_path = os.path.join(BACKUP_DIR, name)
+        if os.path.isfile(entry_path) and os.path.getmtime(entry_path) < cutoff:
+            os.remove(entry_path)
+
+
+# Runs immediately on .start() (an on_ready right after boot always gets a
+# fresh snapshot) and then every 24 hours after.
+@tasks.loop(hours=24)
+async def backupDatabaseTask():
+    try:
+        _backupDatabase()
+        logger.info("Database backup completed.")
+    except Exception:
+        logger.exception("Database backup failed.")
 
 
 # Commands are registered on `tree` with no guild= at all (see every
@@ -422,8 +519,10 @@ async def on_ready():
         ensure_guild_row(guild.id, guild.name)
     if not rotateStatus.is_running():
         rotateStatus.start()
+    if not backupDatabaseTask.is_running():
+        backupDatabaseTask.start()
     registerPersistentViews()
-    print('Command: Shockwave')
+    logger.info("Shockwave is ready - logged in as %s.", client.user)
 
 
 # Persistent views (every button has a fixed custom_id, timeout=None) need
@@ -482,7 +581,7 @@ async def on_app_command_error(interaction, error):
         message = "You don't have permission to use this command."
     else:
         message = "Something went wrong running that command. Try again, and let an admin know if it keeps happening."
-        traceback.print_exception(type(error), error, error.__traceback__)
+        logger.error("Unhandled application command error", exc_info=(type(error), error, error.__traceback__))
 
     # A local .error handler that already responded to this interaction
     # (e.g. the MissingPermissions branch above, handled first by
@@ -754,8 +853,6 @@ COMMAND_HELP = {
     "tournament-print-bracket": "Prints the current bracket.",
     "tournament-start": "Starts playing the current round of the bracket. mode is Sequential (one match at a time) or Simultaneous (all at once, no betting).",
     "roll": "Rolls a random number between 1 and num.",
-    "dev-give-gold": "Temporary developer-only tool for testing the economy - grants yourself 1000 gold. Only usable by the hardcoded DEV_USER_ID.",
-    "dev-test-role-balance": "Temporary developer-only tool for testing role-aware ranked balancing - previews the Top/Jungle/Mid/Bottom/Support split (with each pick's tier and effective elo) that /make-teams ranked:true use_roles:true would produce for your voice channel, padding out fewer than 10 people with other guild members if needed. Anyone without real /setup preferences gets a random liked/disliked role made up just for the preview, cleared again right after. Doesn't create a game, move anyone, or touch team1/team2/is_ranked. Only usable by the hardcoded DEV_USER_ID.",
     "setup": "Introduces Shockwave, creates your personal solo team, and walks you through picking which roles you like/dislike playing (press a role to toggle it, then press Confirm) for future role-aware team balancing. solo_team_name is only required the first time. Run it any time afterward to update either. Unlocks the Onboarded achievement the first time.",
     "help": "Shows this message, or details on one command.",
 }
@@ -1384,40 +1481,6 @@ async def roll(ctx, *, num: int):
         await ctx.response.send_message("You rolled " + str(rand))
     else:
         await ctx.response.send_message("Please use a number greater than 1.")
-
-
-# TEMPORARY dev tool for testing the economy without grinding /daily or
-# real games — hardcoded to one Discord user id rather than a permission
-# check, since this isn't a real admin feature anyone else should be able
-# to run. Remove this command (and DEV_USER_ID) once it's no longer needed.
-DEV_USER_ID = 217743368959164416
-
-
-@tree.command(
-    name="dev-give-gold",
-    description="Temporary developer tool: grants yourself 1000 gold for testing"
-)
-async def devGiveGold(ctx):
-    if ctx.user.id != DEV_USER_ID:
-        await ctx.response.send_message("This command is not available.")
-        return
-    await helperObj.devGiveGoldHelper(ctx)
-
-
-@tree.command(
-    name="dev-test-role-balance",
-    description="Temporary developer tool: previews a role-aware ranked split without creating a game"
-)
-async def devTestRoleBalance(ctx):
-    if ctx.user.id != DEV_USER_ID:
-        await ctx.response.send_message("This command is not available.")
-        return
-    if ctx.user.voice is None or ctx.user.voice.channel is None:
-        await ctx.response.send_message(
-            "You need to be in a voice channel to preview a role balance from it - join one and try again."
-        )
-        return
-    await helperObj.devTestRoleBalanceHelper(ctx)
 
 
 # Guarded so tests.py can import this module (to exercise command callbacks

@@ -176,9 +176,6 @@ BETTING_DURATION_SECONDS = 60
 # leave betting open for an unreasonable stretch.
 MAX_CONCURRENT_BETTING_SECONDS = 1800
 DAILY_GOLD_AMOUNT = 1000
-# TEMPORARY: how much /dev-give-gold hands out — see bot.py's DEV_USER_ID
-# guard. Remove alongside that command once it's no longer needed.
-DEV_GIVE_GOLD_AMOUNT = 1000
 # Reward every rostered player gets in computeGameDeltas for simply
 # finishing a game — casual or ranked, regardless of anything they bet
 # themselves — split by whether their side won or lost. Not a
@@ -239,11 +236,6 @@ ROLE_BALANCE_FILL_ORDER = ["Jungle", "Top", "Mid", "Bottom", "Support"]
 # swap - it already stops as soon as a full pass finds no improving swap,
 # this only guards against a pathological input oscillating forever.
 ROLE_BALANCE_MAX_REFINE_PASSES = 5
-# /dev-test-role-balance only - how many of the made-up-preference players
-# in that dry run get a disliked role along with their liked one, so the
-# preview reliably demonstrates the disliked-role penalty instead of
-# leaving it up to chance.
-ROLE_BALANCE_TEST_DISLIKE_COUNT = 3
 # How long the /clear confirmation buttons stay clickable before the
 # reset is abandoned on its own.
 CLEAR_CONFIRM_TIMEOUT_SECONDS = 30
@@ -1246,22 +1238,25 @@ class ConfirmCancelGameView(discord.ui.View):
 
 
 # Same idea as ConfirmWinnerReportView, for a simultaneous-mode tournament
-# match's own 🔵/🔴 report instead of the guild-wide singleton one — a
-# separate view since a simultaneous round can have several matches (and
-# so several pending confirmations) live at once, each needing its own
-# match_id/channel_id rather than the one guild_id a normal game's report
-# has. Confirm calls _resolveTournamentMatch directly (the same function
-# recordResult's own tournament hook calls for sequential mode); Cancel/
-# timeout put the match back to AWAITING_RESULT via
+# match's own Team 1/Team 2 report instead of the guild-wide singleton one
+# — a separate view since a simultaneous round can have several matches
+# (and so several pending confirmations) live at once, each needing its
+# own match_id/channel_id rather than the one guild_id a normal game's
+# report has. Confirm calls _resolveTournamentMatch directly (the same
+# function recordResult's own tournament hook calls for sequential mode)
+# and then strips the original match message's own buttons via
+# _clearMessageButtons, matching ConfirmWinnerReportView; Cancel/timeout
+# put the match back to AWAITING_RESULT via
 # _restoreTournamentMatchAwaitingResult so it can be reacted on again.
 class ConfirmTournamentMatchReportView(discord.ui.View):
-    def __init__(self, helperObj, guild_id, match_id, winning_team, channel_id):
+    def __init__(self, helperObj, guild_id, match_id, winning_team, channel_id, report_message=None):
         super().__init__(timeout=WINNER_REPORT_CONFIRM_TIMEOUT_SECONDS)
         self.helperObj = helperObj
         self.guild_id = guild_id
         self.match_id = match_id
         self.winning_team = winning_team
         self.channel_id = channel_id
+        self.report_message = report_message
         self.message = None
 
     def _disable_buttons(self):
@@ -1278,6 +1273,7 @@ class ConfirmTournamentMatchReportView(discord.ui.View):
         await self.helperObj._resolveTournamentMatch(
             self.guild_id, self.match_id, self.winning_team, self.channel_id
         )
+        await self.helperObj._clearMessageButtons(self.report_message)
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction, button):
@@ -1324,27 +1320,40 @@ class TournamentReadyView(discord.ui.View):
         await self.helperObj._handleReadyClick(interaction)
 
 
+# Team 1/Team 2 are built per-message (dynamic add_item) rather than via
+# decorator so each match report can show the match's actual team names,
+# the same reasoning/shape _WinnerReportButton/WinnerReportView use.
+class _TournamentReportButton(discord.ui.Button):
+    def __init__(self, label, style, custom_id, team_number):
+        super().__init__(label=label, style=style, custom_id=custom_id)
+        self.team_number = team_number
+
+    async def callback(self, interaction):
+        await self.view.helperObj._handleTournamentMatchReportClick(interaction, self.team_number)
+
+
 # The simultaneous-mode match report message's own buttons - same
 # persistent shape as TournamentReadyView, for the same "can sit
 # AWAITING_RESULT indefinitely" reason. A press posts a
 # ConfirmTournamentMatchReportView instead of resolving immediately,
 # matching WinnerReportView/ConfirmWinnerReportView's two-step shape.
+# team1_name/team2_name default to "Team 1"/"Team 2" for the generic
+# instance client.add_view registers at startup (routing only); every
+# real send passes the match's actual names in.
 class TournamentMatchReportView(discord.ui.View):
-    def __init__(self, helperObj):
+    def __init__(self, helperObj, team1_name="Team 1", team2_name="Team 2"):
         super().__init__(timeout=None)
         self.helperObj = helperObj
-
-    @discord.ui.button(
-        label=f"Team 1 {TEAM_EMOJIS[1]}", style=discord.ButtonStyle.primary, custom_id="shockwave:tournament:team1"
-    )
-    async def team1(self, interaction, button):
-        await self.helperObj._handleTournamentMatchReportClick(interaction, 1)
-
-    @discord.ui.button(
-        label=f"Team 2 {TEAM_EMOJIS[2]}", style=discord.ButtonStyle.danger, custom_id="shockwave:tournament:team2"
-    )
-    async def team2(self, interaction, button):
-        await self.helperObj._handleTournamentMatchReportClick(interaction, 2)
+        self.team1 = _TournamentReportButton(
+            _teamButtonLabel(team1_name, 1), discord.ButtonStyle.primary,
+            "shockwave:tournament:team1", team_number=1,
+        )
+        self.team2 = _TournamentReportButton(
+            _teamButtonLabel(team2_name, 2), discord.ButtonStyle.danger,
+            "shockwave:tournament:team2", team_number=2,
+        )
+        self.add_item(self.team1)
+        self.add_item(self.team2)
 
 
 # The posted roster's own buttons (team2_message only, see
@@ -1663,16 +1672,19 @@ class DuelResultView(discord.ui.View):
 # A Challenger Won/Target Won click posts this instead of paying out the
 # pot immediately - Confirm actually pays out (via _finishDuelResolution,
 # which re-fetches the duel's own row by id rather than trusting anything
-# stored here besides the id itself); Cancel/timeout restores the duel to
+# stored here besides the id itself) and then strips the original duel
+# message's own buttons via _clearMessageButtons, matching
+# ConfirmWinnerReportView; Cancel/timeout restores the duel to
 # AWAITING_RESULT via _restoreDuelAwaitingResult so its buttons work again.
 # Not persistent - a short, one-off confirmation window, same as
 # ConfirmWinnerReportView/ConfirmTournamentMatchReportView.
 class ConfirmDuelResultView(discord.ui.View):
-    def __init__(self, helperObj, duel_id, winner_is_challenger):
+    def __init__(self, helperObj, duel_id, winner_is_challenger, report_message=None):
         super().__init__(timeout=DUEL_CONFIRM_TIMEOUT_SECONDS)
         self.helperObj = helperObj
         self.duel_id = duel_id
         self.winner_is_challenger = winner_is_challenger
+        self.report_message = report_message
         self.message = None
 
     def _disable_buttons(self):
@@ -1687,6 +1699,7 @@ class ConfirmDuelResultView(discord.ui.View):
             content="Result confirmed - paying out the wager...", view=self
         )
         await self.helperObj._finishDuelResolution(self.duel_id, self.winner_is_challenger)
+        await self.helperObj._clearMessageButtons(self.report_message)
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction, button):
@@ -4653,10 +4666,10 @@ class helpers():
             f"match_{match_id}_vs.png"
         )
         msg = await channel.send(
-            f"**Match #{match_id}:** {team1.get_name()} vs {team2.get_name()} - press Team 1 if "
-            f"{team1.get_name()} won, or Team 2 if {team2.get_name()} won.",
+            f"**Match #{match_id}:** {team1.get_name()} vs {team2.get_name()} - press the winning "
+            "team's own button below.",
             file=matchup_file,
-            view=TournamentMatchReportView(self),
+            view=TournamentMatchReportView(self, team1.get_name(), team2.get_name()),
         )
 
         self.cursor.execute(
@@ -5226,6 +5239,7 @@ class helpers():
         self.update(guild_id, "active_tournament_match_id", match_id)
 
         await interaction.response.defer()
+        await self._clearMessageButtons(interaction.message)
         await channel.send(f"**Match #{match_id}:** {team1.get_name()} vs {team2.get_name()} is starting!")
         await self._openBetting(guild_id, channel)
 
@@ -5284,7 +5298,9 @@ class helpers():
         team2.deserializeTeam(team2_ser)
         name = team1.get_name() if winning_team == 1 else team2.get_name()
 
-        view = ConfirmTournamentMatchReportView(self, guild_id, match_id, winning_team, interaction.channel_id)
+        view = ConfirmTournamentMatchReportView(
+            self, guild_id, match_id, winning_team, interaction.channel_id, report_message=interaction.message
+        )
         await interaction.response.send_message(
             f"**{name}** reported as the winner of Match #{match_id} - Confirm to finalize it, or "
             "Cancel to report again.",
@@ -7171,113 +7187,6 @@ class helpers():
             f"You claimed your daily {DAILY_GOLD_AMOUNT} gold! Your balance is now {new_balance}."
         )
 
-    # TEMPORARY: backs /dev-give-gold (see bot.py's DEV_USER_ID guard,
-    # which is the only thing gating who can reach this) — remove both
-    # once no longer needed for testing.
-    async def devGiveGoldHelper(self, ctx):
-        guild_id = ctx.guild.id
-        user_id = ctx.user.id
-
-        self.ensureEconomyRow(guild_id, user_id, ctx.user.name)
-        self.cursor.execute(
-            "UPDATE economy SET balance = balance + ? WHERE guildId=? AND userId=?",
-            (DEV_GIVE_GOLD_AMOUNT, guild_id, user_id)
-        )
-        self.db.commit()
-
-        new_balance = self.getEconomy(guild_id, user_id, "balance")
-        await ctx.response.send_message(
-            f"Gave yourself {DEV_GIVE_GOLD_AMOUNT} gold! Your balance is now {new_balance}."
-        )
-
-    # TEMPORARY: backs /dev-test-role-balance (see bot.py's DEV_USER_ID
-    # guard) — a dry run of formRoleBalancedTeams against real elo, without
-    # creating a game, moving anyone, or touching team1/team2/mode/
-    # is_ranked, so the balancing logic can be sanity-checked without
-    # needing 10 people in voice at once. Pads a short voice channel out
-    # with other non-bot guild members (need not be online), clearly
-    # labelled as fill-ins in the reply. Remove this command (and
-    # devTestRoleBalanceHelper) once no longer needed for testing.
-    async def devTestRoleBalanceHelper(self, ctx):
-        guild_id = ctx.guild.id
-        voice_members = [m for m in ctx.user.voice.channel.members if not m.bot]
-
-        fill_ins = []
-        for member in ctx.guild.members:
-            if len(voice_members) + len(fill_ins) >= 10:
-                break
-            if member.bot or member in voice_members:
-                continue
-            fill_ins.append(member)
-
-        members = (voice_members + fill_ins)[:10]
-        if len(members) < 10:
-            await ctx.response.send_message(
-                f"Need 10 distinct non-bot guild members to test with, only found {len(members)}."
-            )
-            return
-
-        default_elo = self._defaultEloForGuild(guild_id)
-        members_with_elo = []
-        for member in members:
-            self.ensureEconomyRow(guild_id, member.id, member.name)
-            elo = self.getEconomy(guild_id, member.id, "elo")
-            members_with_elo.append((member, elo if elo is not None else default_elo))
-
-        # Most test/fill-in members have never run /setup, so without this
-        # they'd all come back "neutral" and the preview would never
-        # actually exercise the liked/disliked tiers. Anyone with no real
-        # preference on file gets a made-up liked role for the length of
-        # this call only — restored back to "no preference" in the finally
-        # block right after, since it's fake data invented purely for this
-        # dry run and shouldn't leak into that player's real /setup
-        # standing. ROLE_BALANCE_TEST_DISLIKE_COUNT of them also get a
-        # made-up disliked role, so the preview reliably shows the bigger
-        # disliked-role penalty at work instead of leaving it to chance
-        # whether any random run happens to roll one.
-        needs_preference = [
-            member for member, _elo in members_with_elo
-            if not any(self.getRolePreferences(guild_id, member.id))
-        ]
-        dislike_count = min(ROLE_BALANCE_TEST_DISLIKE_COUNT, len(needs_preference))
-        dislikers = {m.id for m in random.sample(needs_preference, dislike_count)}
-
-        randomized_ids = set()
-        for member in needs_preference:
-            fake_liked = random.choice(SETUP_ROLE_NAMES)
-            other_roles = [role for role in SETUP_ROLE_NAMES if role != fake_liked]
-            fake_disliked = [random.choice(other_roles)] if member.id in dislikers else []
-            self._applySetupRolePreferences(guild_id, member.id, [fake_liked], fake_disliked)
-            randomized_ids.add(member.id)
-
-        try:
-            side_a, side_b = self.formRoleBalancedTeams(guild_id, members_with_elo)
-        finally:
-            for user_id in randomized_ids:
-                self._applySetupRolePreferences(guild_id, user_id, [], [])
-
-        lines = ["**Role balance preview** (dry run - nothing was created or moved)"]
-        if fill_ins:
-            names = ", ".join(member.name for member in fill_ins)
-            lines.append(f"Filled in {len(fill_ins)} non-voice member(s) to reach 10: {names}")
-        if randomized_ids:
-            lines.append(
-                f"{len(randomized_ids)} player(s) had no real /setup preferences, so a random liked/disliked "
-                "role was made up for them just for this preview (marked with *)."
-            )
-
-        for label, side in (("Side A", side_a), ("Side B", side_b)):
-            total = sum(entry[4] for entry in side)
-            lines.append(f"\n**{label}** (total effective elo: {total})")
-            for member, elo, role, tier, effective_elo in side:
-                marker = "*" if member.id in randomized_ids else ""
-                lines.append(f"{role}: {member.name}{marker} - {tier} ({elo} -> {effective_elo})")
-
-        diff = abs(sum(entry[4] for entry in side_a) - sum(entry[4] for entry in side_b))
-        lines.append(f"\nEffective elo gap between sides: {diff}")
-
-        await ctx.response.send_message("\n".join(lines))
-
     # ---------------- Betting ----------------
 
     # Returns [(user_id, name), ...] for a team column ("team1"/"team2"), or
@@ -7832,6 +7741,7 @@ class helpers():
         await self._acceptDuel(
             guild_id, duel_id, channel_id, challenger_id, challenger_name, target_id, target_name, amount
         )
+        await self._clearMessageButtons(interaction.message)
 
     # DuelResultView's Challenger Won/Target Won button callback. A result
     # no longer pays out immediately - it posts a ConfirmDuelResultView
@@ -7866,7 +7776,7 @@ class helpers():
         self.db.commit()
 
         winner_name = challenger_name if winner_is_challenger else target_name
-        view = ConfirmDuelResultView(self, duel_id, winner_is_challenger)
+        view = ConfirmDuelResultView(self, duel_id, winner_is_challenger, report_message=interaction.message)
         await interaction.response.send_message(
             f"**{winner_name}** reported as the winner - Confirm to pay out the wager, or Cancel to "
             "report again.",
