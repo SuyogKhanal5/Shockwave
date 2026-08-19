@@ -60,13 +60,39 @@ commands. For that, see shockwave.netlify.app.
 
 ### Logging and database backups
 
-`bot.py` configures the root logger at import time: a `RotatingFileHandler`
-(`shockwave.log`, capped at 5MB × 3 backups so it can't grow unbounded) plus a
-plain console handler, both sharing one timestamped formatter. Configuring the
-root logger rather than just a `shockwave`-named one means discord.py's own
-internal logging (gateway, HTTP) lands in the same file, not just this
-project's own `logger.info`/`logger.error` calls. `shockwave.log*` is
-gitignored, same reasoning as `main.db` itself.
+`BASE_DIR` (`os.path.dirname(os.path.abspath(__file__))`) anchors every path
+`bot.py` touches — the log file, `main.db`, the backups folder, `token.txt` —
+to this file's own directory rather than the process's current working
+directory, matching how `helper.py`'s own asset paths already work (see
+`TEAM_LOGO_DIR`/`FONTS_DIR`/etc.). A relative path resolves against whatever
+directory the process happened to launch from: easy to get right on a dev
+machine (always `cd`-ing into the project folder first) and easy to get wrong
+under a service manager that doesn't set `WorkingDirectory` the same way.
+`token.txt` is also opened with `encoding="utf-8"` explicitly rather than
+whatever the platform's default text encoding happens to be (Windows' ANSI
+codepage vs. Linux's near-universal UTF-8) — harmless for a plain-ASCII token
+today, but not left to chance either.
+
+`bot.py` configures the root logger at import time: a custom
+`MaxLinesFileHandler` (`shockwave.log`) plus a plain console handler, both
+sharing one timestamped formatter. Configuring the root logger rather than
+just a `shockwave`-named one means discord.py's own internal logging
+(gateway, HTTP) lands in the same file, not just this project's own
+`logger.info`/`logger.error` calls. `shockwave.log*` is gitignored, same
+reasoning as `main.db` itself.
+
+`MaxLinesFileHandler` caps the file at `LOG_FILE_MAX_LINES` (10,000) lines,
+dropping the oldest ones once it grows past that — a single,
+chronologically-ordered file instead of `logging.handlers.RotatingFileHandler`'s
+size-based rotation into separate `shockwave.log`/`.1`/`.2`/`.3` files. It
+seeds its own in-memory line count from whatever's already on disk once, at
+construction (a previous run's leftover log), rather than assuming an empty
+file, so a trim that's already overdue happens on the very first line this
+run emits rather than only once the file grows past the cap all over again.
+Trimming itself (`_trim`) closes the handler's own stream, rewrites the file
+with just the last `max_lines` lines kept, and reopens it — no locking of its
+own, since `logging.Handler.handle()` already wraps every `emit()` call (and
+so this, reached from inside one) in `self.acquire()`/`release()`.
 
 `backupDatabaseTask` (a `discord.ext.tasks.loop(hours=24)`, started from
 `on_ready` the same way `rotateStatus` is, and guarded against double-starting
@@ -81,6 +107,75 @@ with the default `check_same_thread=True`, so handing it to a different
 thread would raise outright, and backing up a database this size finishes
 well within the time a trading-card render already blocks the loop for.
 `data/guildData/backups/` is gitignored, same reasoning as `main.db`.
+
+`LOG_LINE_MAX_LENGTH` (500) caps any single log line - a serialized team
+roster or a command's own object-repr params can run long, and one oversized
+line shouldn't be able to dominate the file. `_truncateForLog` is the shared
+helper that enforces it, used by the database, command, and completion
+logging below.
+
+Every database mutation is logged too, without needing to instrument each of
+the file's many individual `cursor.execute()` calls: `_logDatabaseStatement`
+is registered via `mainDB.set_trace_callback`, sqlite3's own hook that
+receives the text of every statement actually executed on the connection,
+with bound parameters already expanded inline rather than left as raw `?`
+placeholders. It filters to just `INSERT`/`UPDATE`/`DELETE` — a `SELECT`, or
+the trace callback's own `"BEGIN "` for an implicit transaction, isn't a
+mutation worth a permanent record. `logger._suppress_db_logging` mutes it
+during `_runStartupSelfTests` below, so the thousands of test-fixture writes
+a full suite run produces against its own in-memory databases don't flood the
+real log — parked on the shared `"shockwave"` logger object rather than a
+plain module global specifically because `_import_bot_module()` (see below)
+re-executes this whole file, under a fresh set of module globals, for every
+nested test it imports; `logging.getLogger(name)` returns the same singleton
+regardless of which reimport asks for it, so that's the one piece of state
+guaranteed to still be visible from inside those reimports. The line that
+initializes the flag guards itself with `hasattr` rather than unconditionally
+setting it to `False`, since that same line runs again on every nested
+reimport and would otherwise clobber `_runStartupSelfTests`' own `True` back
+to `False` the moment the very first nested test reimports the file.
+
+`LoggingCommandTree` (`bot.py`'s `tree`, subclassing `app_commands.CommandTree`)
+overrides `interaction_check` — a single global hook discord.py's own
+`CommandTree._call` runs before dispatching *any* application command in the
+tree — to log every real command invocation (name, params, calling user,
+guild) in one place, instead of instrumenting each of the ~40
+`@tree.command` functions individually. `interaction.command`/`.namespace`
+are independently-resolved cached properties on `Interaction`, so both are
+already available at this point even though the tree hasn't actually invoked
+the command yet. `interaction_check` also fires for autocomplete
+interactions (typing into a field with `@app_commands.autocomplete`), which
+would turn every keystroke into a logged "command called" - filtered out by
+checking `interaction.type is discord.InteractionType.application_command`.
+The override always returns `True` (matching the default implementation's
+behavior), so it never blocks anything; per-command checks like `/clear`'s
+`has_permissions` still run separately afterward, unaffected.
+
+A successful completion is logged separately, from `on_app_command_completion`
+— an event discord.py dispatches itself only once a command has actually run
+to completion without raising (see `CommandTree._call`), so it only ever
+fires for a genuine success, never a command that errored (that path goes
+through `on_app_command_error` instead) or one `interaction_check` rejected
+before it ran.
+
+`_runStartupSelfTests` runs the full `tests.py` suite before `client.run(token)`
+in the `if __name__ == "__main__":` guard. A passing run stays silent - only a
+failure is worth a log entry - so a broken deploy shows up in the log
+immediately rather than only being noticed once something breaks in
+production, without a "tests passed" line cluttering every single normal
+startup. A failing suite is logged as a warning naming exactly which tests
+failed (plus the full verbose output at debug level) rather than aborting
+startup: a real deploy should still come up and serve players even if, say, a
+test itself is stale, rather than a self-test regression taking the whole bot
+down. The `import
+tests` inside it is deliberately lazy (only reached when this file is run
+directly) rather than a top-level import, since `tests.py`'s own
+`_import_bot_module()` re-imports this file under the name `"bot"` for its
+own `BotModuleTestCase` tests — a top-level `import tests` here would make
+that circular. That same re-import (with `sqlite3.connect`/`open` patched
+away from the real database/token) is also what keeps running the suite from
+here safe: it never touches the real `main.db` or Discord, no matter how
+deep the self-test run's own nested re-imports go.
 
 ### Team formation
 

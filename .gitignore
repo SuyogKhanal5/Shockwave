@@ -5,8 +5,7 @@ __pycache__/
 .claude/
 data/guildData/serverInfo/main.db
 shockwave-site/
-# RotatingFileHandler output (see bot.py) - shockwave.log plus its rotated
-# shockwave.log.1/.2/.3 backups.
+# MaxLinesFileHandler output (see bot.py) - a single line-capped log file.
 shockwave.log*
 # Daily main.db snapshots (see backupDatabaseTask in bot.py) - data, not
 # source, same reasoning as main.db itself above.

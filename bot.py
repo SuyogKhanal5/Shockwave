@@ -7,24 +7,77 @@ import sqlite3
 import logging
 import time
 from datetime import datetime
-from logging.handlers import RotatingFileHandler
 import discord
 from discord import app_commands
 from discord.ext import tasks
 from TourneyClasses import Team, Player
 import helper
 
-# Logs to both the console and a rotating file (shockwave.log, capped at
-# 5MB x 3 backups so it can't grow unbounded) — the file is what survives
-# a restart or a run with no attached terminal (e.g. as a background
-# service), which stdout alone doesn't. Configured on the root logger so
-# discord.py's own internal logging (gateway, HTTP) is captured the same
-# way, not just this file's own logger calls.
-LOG_FILE = "shockwave.log"
+# Anchors every path below to this file's own directory rather than the
+# process's current working directory - matches helper.py's own asset
+# paths (see TEAM_LOGO_DIR/FONTS_DIR/etc., all built off
+# os.path.dirname(__file__)). A relative path resolves against whatever
+# directory the process happened to be launched from, which is easy to get
+# right by always `cd`-ing into the project folder first on a dev machine,
+# and easy to get wrong under a service manager (e.g. a systemd unit with
+# no WorkingDirectory=) that doesn't set that up the same way.
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Caps shockwave.log at a fixed number of lines rather than
+# RotatingFileHandler's size-based, multi-file rotation - a single,
+# chronologically-ordered file (oldest lines dropped once it grows past
+# LOG_FILE_MAX_LINES) instead of scattered across shockwave.log/.1/.2/.3.
+LOG_FILE_MAX_LINES = 10000
+
+
+class MaxLinesFileHandler(logging.FileHandler):
+    def __init__(self, filename, max_lines, encoding=None):
+        self.max_lines = max_lines
+        super().__init__(filename, mode="a", encoding=encoding)
+        # Seeded once from whatever's already on disk (a previous run's
+        # leftover log), so the very first emit this run already knows
+        # whether a trim is overdue instead of assuming an empty file.
+        self._line_count = self._countLines()
+
+    def _countLines(self):
+        try:
+            with open(self.baseFilename, encoding=self.encoding) as f:
+                return sum(1 for _ in f)
+        except OSError:
+            return 0
+
+    def emit(self, record):
+        super().emit(record)
+        self._line_count += 1
+        if self._line_count > self.max_lines:
+            self._trim()
+
+    # Drops the oldest lines so the file holds exactly max_lines. No
+    # locking of its own - Handler.handle() already wraps every emit()
+    # call (and so this, called from inside one) in self.acquire()/
+    # release(), so this is already safe against a concurrent emit from
+    # another thread.
+    def _trim(self):
+        self.stream.close()
+        with open(self.baseFilename, encoding=self.encoding) as f:
+            lines = f.readlines()
+        kept = lines[-self.max_lines:]
+        with open(self.baseFilename, "w", encoding=self.encoding) as f:
+            f.writelines(kept)
+        self._line_count = len(kept)
+        self.stream = self._open()
+
+
+# Logs to both the console and the line-capped file above — the file is
+# what survives a restart or a run with no attached terminal (e.g. as a
+# background service), which stdout alone doesn't. Configured on the root
+# logger so discord.py's own internal logging (gateway, HTTP) is captured
+# the same way, not just this file's own logger calls.
+LOG_FILE = os.path.join(BASE_DIR, "shockwave.log")
 _log_formatter = logging.Formatter(
     "[{asctime}] [{levelname:<8}] {name}: {message}", "%Y-%m-%d %H:%M:%S", style="{"
 )
-_file_handler = RotatingFileHandler(LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8")
+_file_handler = MaxLinesFileHandler(LOG_FILE, LOG_FILE_MAX_LINES, encoding="utf-8")
 _file_handler.setFormatter(_log_formatter)
 _console_handler = logging.StreamHandler()
 _console_handler.setFormatter(_log_formatter)
@@ -34,12 +87,16 @@ logger = logging.getLogger("shockwave")
 # Get token from text file
 token = ""
 
-with open("token.txt") as f:
+# encoding="utf-8" pinned explicitly rather than left to the platform
+# default text encoding, which differs (e.g. Windows' ANSI codepage vs.
+# Linux's near-universal UTF-8) - a plain ASCII token round-trips fine
+# either way, but there's no reason to leave that to chance.
+with open(os.path.join(BASE_DIR, "token.txt"), encoding="utf-8") as f:
     token = f.readline().strip()
 
 # Connect to Database
-dataFolder = "data/guildData/serverInfo/"
-dbpath = dataFolder + "main.db"
+dataFolder = os.path.join(BASE_DIR, "data", "guildData", "serverInfo")
+dbpath = os.path.join(dataFolder, "main.db")
 
 # sqlite3.connect() creates the database FILE on disk as a side effect of
 # connecting, even if it's empty — this check has to run before connect()
@@ -56,9 +113,39 @@ cursor = mainDB.cursor()
 
 # A single row change (a long serialized team roster in particular) can run
 # to thousands of characters once its bound parameters are expanded inline
-# below - capped so one oversized statement can't dominate the log file.
+# below, and a command's own params can include a full discord.py object
+# repr - capped so one oversized line can't dominate the log file. Shared
+# by _logDatabaseStatement below and LoggingCommandTree further down.
 LOG_LINE_MAX_LENGTH = 500
+
+
+def _truncateForLog(text):
+    if len(text) > LOG_LINE_MAX_LENGTH:
+        return text[:LOG_LINE_MAX_LENGTH] + "... (truncated)"
+    return text
+
+
 _MUTATING_SQL_PREFIXES = ("INSERT", "UPDATE", "DELETE")
+
+# Parked directly on the shared "shockwave" logger, not a plain bot.py
+# module global - _runStartupSelfTests below runs tests.py, whose own
+# _import_bot_module() re-executes this entire file under a fresh set of
+# module globals for every nested test it imports, so a bare module-level
+# flag here wouldn't be visible to a _logDatabaseStatement call made from
+# one of THOSE re-imported copies. logging.getLogger(name) always returns
+# the exact same singleton object process-wide regardless of which
+# reimport asks for it, so an attribute on that shared object is what
+# actually reaches every nested test's own DB writes too, muting the
+# thousands of test-fixture inserts/updates/deletes a self-test run
+# produces against its own in-memory databases - noise nobody deploying
+# this bot needs to see, unlike the real mutations this trace callback
+# exists for. Only initialized if missing (never unconditionally reset to
+# False) - this line itself runs again on every one of those nested
+# reimports, and unconditionally resetting it here would silently clobber
+# _runStartupSelfTests' own True right back to False the moment the very
+# first nested test reimports this file.
+if not hasattr(logger, "_suppress_db_logging"):
+    logger._suppress_db_logging = False
 
 
 # discord.py's own internal logging (View.on_error for a button callback,
@@ -75,9 +162,9 @@ def _logDatabaseStatement(sql):
     statement = sql.strip()
     if not statement.upper().startswith(_MUTATING_SQL_PREFIXES):
         return
-    if len(statement) > LOG_LINE_MAX_LENGTH:
-        statement = statement[:LOG_LINE_MAX_LENGTH] + "... (truncated)"
-    logger.info("DB: %s", statement)
+    if logger._suppress_db_logging:
+        return
+    logger.info("DB: %s", _truncateForLog(statement))
 
 
 mainDB.set_trace_callback(_logDatabaseStatement)
@@ -85,7 +172,7 @@ mainDB.set_trace_callback(_logDatabaseStatement)
 # Where daily database snapshots land (see backupDatabaseTask below) -
 # separate from serverInfo/ so a backup can never collide with or get
 # mistaken for the live database file.
-BACKUP_DIR = "data/guildData/backups"
+BACKUP_DIR = os.path.join(BASE_DIR, "data", "guildData", "backups")
 BACKUP_RETENTION_DAYS = 7
 
 
@@ -405,12 +492,48 @@ roles = {
     4: "Support - "
 }
 
+# A common "who/where" suffix for both the call and completion log lines
+# below - DM interactions have no guild, so that's spelled out rather than
+# crashing on interaction.guild.name.
+def _interactionLogContext(interaction):
+    guild = interaction.guild
+    guild_desc = f"{guild.name} ({guild.id})" if guild is not None else "DM"
+    return f"user={interaction.user} ({interaction.user.id}) guild={guild_desc}"
+
+
+# Logs every real command invocation (name, params, who, where) in one
+# place rather than instrumenting each of the ~40 @tree.command functions
+# individually - interaction_check is a global hook discord.py's own
+# CommandTree._call runs before dispatching ANY application command in the
+# tree. interaction.command/.namespace are independently-resolved cached
+# properties (see discord.py's Interaction class), so both are already
+# available here even though the tree hasn't actually invoked the command
+# yet. Only actual command invocations are logged, not every keystroke
+# into an autocomplete field - interaction_check also fires for those
+# (same InteractionType family), but InteractionType.application_command
+# excludes them. The default implementation this overrides just returns
+# True unconditionally, so returning True here (never blocking anything)
+# preserves that; per-command checks (e.g. /clear's has_permissions) still
+# run separately afterward and are unaffected by this.
+class LoggingCommandTree(app_commands.CommandTree):
+    async def interaction_check(self, interaction):
+        if interaction.type is discord.InteractionType.application_command:
+            command = interaction.command
+            name = command.qualified_name if command is not None else interaction.data.get("name", "?")
+            params = dict(interaction.namespace) if command is not None else {}
+            logger.info(
+                "Command called: /%s %s | %s",
+                name, _truncateForLog(str(params)), _interactionLogContext(interaction)
+            )
+        return True
+
+
 # create client object and slash commands
 intents = discord.Intents.default()
 intents.members = True
 intents.voice_states = True
 client = discord.Client(intents=intents)
-tree = app_commands.CommandTree(client)
+tree = LoggingCommandTree(client)
 helperObj.client = client
 
 # Pure personalization — the bot's Discord status cycles through these
@@ -564,6 +687,17 @@ async def on_guild_remove(ctx):
     cursor.execute("""DELETE FROM servers WHERE guildId=?""", (ctx.id,))
     mainDB.commit()
 
+
+
+# Companion to LoggingCommandTree.interaction_check's "Command called" line
+# — discord.py dispatches this event itself (see CommandTree._call) only
+# once a command has actually run to completion without raising, so this
+# only ever logs a genuine success, never a command that errored out (that
+# path logs separately via on_app_command_error below) or one interaction_
+# check rejected before it ran at all.
+@client.event
+async def on_app_command_completion(interaction, command):
+    logger.info("Command completed: /%s | %s", command.qualified_name, _interactionLogContext(interaction))
 
 
 # Catch-all for every slash command's errors. discord.py calls this after
@@ -1483,8 +1617,46 @@ async def roll(ctx, *, num: int):
         await ctx.response.send_message("Please use a number greater than 1.")
 
 
+# Runs the full test suite before connecting to Discord, so a broken
+# deploy shows up in the log immediately instead of only being noticed
+# once something breaks in production. `import tests` is lazy (only
+# reached from the __main__ guard below, i.e. only when this file is run
+# directly) rather than a top-level import, since tests.py's own
+# _import_bot_module() re-imports this file under the name "bot" - a
+# top-level `import tests` here would make that circular. tests.py's own
+# bot.py tests use that same re-import (with sqlite3.connect/open patched
+# away from the real database/token) precisely so running the suite here
+# never touches the real main.db or Discord. A failing suite is logged as
+# a warning (naming exactly which tests failed) rather than aborting
+# startup - a real deploy should still come up and serve players even if,
+# say, a test itself is stale, rather than a self-test regression taking
+# the whole bot down.
+def _runStartupSelfTests():
+    import io
+    import unittest
+
+    suite = unittest.TestLoader().loadTestsFromName("tests")
+    output = io.StringIO()
+    logger._suppress_db_logging = True
+    try:
+        result = unittest.TextTestRunner(stream=output, verbosity=2).run(suite)
+    finally:
+        logger._suppress_db_logging = False
+
+    if result.wasSuccessful():
+        return
+
+    logger.debug("Startup self-test output:\n%s", output.getvalue())
+    failed = [str(test) for test, _ in (result.failures + result.errors)]
+    logger.warning(
+        "Startup self-test: %d/%d tests failed - starting the bot anyway. Failed: %s",
+        len(failed), result.testsRun, _truncateForLog("; ".join(failed)),
+    )
+
+
 # Guarded so tests.py can import this module (to exercise command callbacks
 # and event handlers directly) without connecting to Discord as a side
 # effect of the import.
 if __name__ == "__main__":
+    _runStartupSelfTests()
     client.run(token)
