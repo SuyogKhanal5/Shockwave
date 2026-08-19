@@ -60,15 +60,13 @@ class Team:
 
     def add_player(self, player: Player) -> None:
         self.players.append(player)
-        # BUG FIX: this was commented out, which meant self.size stayed 0
-        # forever. Since deserializeTeam used self.size to know how many
-        # players to read back out of the serialized string, every team
-        # deserialized with ZERO players regardless of how many were added.
+        # Kept in sync manually - deserializeTeam uses self.size (not
+        # len(self.players)) to know how many players to read back out of
+        # the serialized string.
         self.size += 1
 
     def remove_player(self, player: Player) -> None:
         self.players.remove(player)
-        # BUG FIX: keep size in sync when removing too.
         self.size -= 1
 
     def set_name(self, name: str) -> None:
@@ -152,22 +150,18 @@ class Team:
         serializedCut = serialized[1:-1]
         serializedArr = serializedCut.split(', ')
 
-        # BUG FIX: this was never cast to int, so get_id() returned a
-        # string after every roundtrip through the database — silently
-        # breaking any `team.get_id() == some_int` comparison.
+        # Cast to int so get_id() doesn't return a string after a roundtrip
+        # through the database.
         self.id = int(serializedArr[0]) if serializedArr[0] not in ('', 'None') else None
         self.name = serializedArr[1]
 
         playerString = serializedArr[2]
         newPlayerList = []
 
-        # BUG FIX: the old loop used `range(int(serializedArr[3]))` to decide
-        # how many players to parse out — but serializedArr[3] is `self.size`,
-        # which (before the add_player fix above) was always 0, and even
-        # after the fix isn't guaranteed to equal len(self.players) in every
-        # code path. Instead, walk the length-prefixed playerString until
-        # it's fully consumed, which is self-describing and doesn't depend
-        # on a separate counter being correct.
+        # Walks the length-prefixed playerString until it's fully consumed
+        # rather than trusting serializedArr[3] (self.size) as a count,
+        # since self.size isn't guaranteed to equal len(self.players) in
+        # every code path.
         i = 0
         while i < len(playerString):
             j = 0
@@ -187,18 +181,12 @@ class Team:
 
         self.players = newPlayerList
 
-        # BUG FIX: these all previously indexed into `serialized` (the raw
-        # un-split original string) instead of `serializedArr` (the split
-        # fields), so they were reading garbage characters by position
-        # rather than the actual fields.
         self.size = int(serializedArr[3]) if serializedArr[3] not in ('', 'None') else len(newPlayerList)
         self.voice_channel = serializedArr[4]
 
-        # BUG FIX: this stored the raw "(id,name)" captain string as-is
-        # instead of parsing it back into a Player, so get_captain() never
-        # actually returned something with a usable .get_id() after a
-        # roundtrip through the database — every "is this player the
-        # captain" check downstream was comparing against a string.
+        # Parsed back into a Player (not left as the raw "(id,name)" string)
+        # so get_captain() returns something with a usable .get_id() after a
+        # roundtrip through the database.
         captainStr = serializedArr[5]
         if captainStr:
             captain = Player()
