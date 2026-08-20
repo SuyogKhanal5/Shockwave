@@ -61,7 +61,7 @@ commands. For that, see shockwave.netlify.app.
 ### Logging and database backups
 
 `BASE_DIR` (`os.path.dirname(os.path.abspath(__file__))`) anchors every path
-`bot.py` touches — the log file, `main.db`, the backups folder, `token.txt` —
+`bot.py` touches - the log file, `main.db`, the backups folder, `token.txt` -
 to this file's own directory rather than the process's current working
 directory, matching how `helper.py`'s own asset paths already work (see
 `TEAM_LOGO_DIR`/`FONTS_DIR`/etc.). A relative path resolves against whatever
@@ -70,7 +70,7 @@ machine (always `cd`-ing into the project folder first) and easy to get wrong
 under a service manager that doesn't set `WorkingDirectory` the same way.
 `token.txt` is also opened with `encoding="utf-8"` explicitly rather than
 whatever the platform's default text encoding happens to be (Windows' ANSI
-codepage vs. Linux's near-universal UTF-8) — harmless for a plain-ASCII token
+codepage vs. Linux's near-universal UTF-8) - harmless for a plain-ASCII token
 today, but not left to chance either.
 
 `bot.py` configures the root logger at import time: a custom
@@ -82,7 +82,7 @@ just a `shockwave`-named one means discord.py's own internal logging
 reasoning as `main.db` itself.
 
 `MaxLinesFileHandler` caps the file at `LOG_FILE_MAX_LINES` (10,000) lines,
-dropping the oldest ones once it grows past that — a single,
+dropping the oldest ones once it grows past that - a single,
 chronologically-ordered file instead of `logging.handlers.RotatingFileHandler`'s
 size-based rotation into separate `shockwave.log`/`.1`/`.2`/`.3` files. It
 seeds its own in-memory line count from whatever's already on disk once, at
@@ -90,7 +90,7 @@ construction (a previous run's leftover log), rather than assuming an empty
 file, so a trim that's already overdue happens on the very first line this
 run emits rather than only once the file grows past the cap all over again.
 Trimming itself (`_trim`) closes the handler's own stream, rewrites the file
-with just the last `max_lines` lines kept, and reopens it — no locking of its
+with just the last `max_lines` lines kept, and reopens it - no locking of its
 own, since `logging.Handler.handle()` already wraps every `emit()` call (and
 so this, reached from inside one) in `self.acquire()`/`release()`.
 
@@ -98,8 +98,8 @@ so this, reached from inside one) in `self.acquire()`/`release()`.
 `on_ready` the same way `rotateStatus` is, and guarded against double-starting
 on a reconnect the same way) snapshots `main.db` into
 `data/guildData/backups/` once a day, then deletes any backup older than
-`BACKUP_RETENTION_DAYS` (7). It uses `mainDB.backup(backup_conn)` — sqlite3's
-own point-in-time backup API — rather than a plain file copy, since `main.db`
+`BACKUP_RETENTION_DAYS` (7). It uses `mainDB.backup(backup_conn)` - sqlite3's
+own point-in-time backup API - rather than a plain file copy, since `main.db`
 is a live connection other code can be reading/writing between event loop
 ticks and copying the raw file risks capturing it mid-write. It runs directly
 on the event loop rather than via `asyncio.to_thread`: `mainDB` was opened
@@ -109,15 +109,17 @@ well within the time a trading-card render already blocks the loop for.
 `data/guildData/backups/` is gitignored, same reasoning as `main.db`.
 
 `restore_backup.py`, run standalone (`python restore_backup.py`) with the bot
-stopped, is how a host reverts to one of those snapshots — no in-Discord
+stopped, is how a host reverts to one of those snapshots - no in-Discord
 command for it, since `main.db` is one shared database across every guild
 the bot serves, and a live restore triggered by one server's admin would
 silently roll back every other server's data too. It lists backups
 newest-first with their timestamp and size, restores whichever one is
-picked (by number or filename), and — before overwriting anything — copies
+picked (by number or filename), and - before overwriting anything - copies
 the current live `main.db` into `data/guildData/backups/` as
 `main-before-restore-<timestamp>.db`, so restoring the wrong backup, or
-restoring at all, is itself undoable the same way.
+restoring at all, is itself undoable the same way. The step-by-step version
+of this, aimed at whoever's actually hosting a copy of the bot rather than
+reading this file, lives on shockwave.netlify.app's self-hosting guide.
 
 `LOG_LINE_MAX_LENGTH` (500) caps any single log line - a serialized team
 roster or a command's own object-repr params can run long, and one oversized
@@ -130,12 +132,12 @@ the file's many individual `cursor.execute()` calls: `_logDatabaseStatement`
 is registered via `mainDB.set_trace_callback`, sqlite3's own hook that
 receives the text of every statement actually executed on the connection,
 with bound parameters already expanded inline rather than left as raw `?`
-placeholders. It filters to just `INSERT`/`UPDATE`/`DELETE` — a `SELECT`, or
+placeholders. It filters to just `INSERT`/`UPDATE`/`DELETE` - a `SELECT`, or
 the trace callback's own `"BEGIN "` for an implicit transaction, isn't a
 mutation worth a permanent record. `logger._suppress_db_logging` mutes it
 during `_runStartupSelfTests` below, so the thousands of test-fixture writes
 a full suite run produces against its own in-memory databases don't flood the
-real log — parked on the shared `"shockwave"` logger object rather than a
+real log - parked on the shared `"shockwave"` logger object rather than a
 plain module global specifically because `_import_bot_module()` (see below)
 re-executes this whole file, under a fresh set of module globals, for every
 nested test it imports; `logging.getLogger(name)` returns the same singleton
@@ -147,9 +149,9 @@ reimport and would otherwise clobber `_runStartupSelfTests`' own `True` back
 to `False` the moment the very first nested test reimports the file.
 
 `LoggingCommandTree` (`bot.py`'s `tree`, subclassing `app_commands.CommandTree`)
-overrides `interaction_check` — a single global hook discord.py's own
+overrides `interaction_check` - a single global hook discord.py's own
 `CommandTree._call` runs before dispatching *any* application command in the
-tree — to log every real command invocation (name, params, calling user,
+tree - to log every real command invocation (name, params, calling user,
 guild) in one place, instead of instrumenting each of the ~40
 `@tree.command` functions individually. `interaction.command`/`.namespace`
 are independently-resolved cached properties on `Interaction`, so both are
@@ -164,20 +166,20 @@ behavior), so it never blocks anything; per-command checks like `/clear`'s
 
 The whole body is wrapped in its own `try`/`except Exception`, logging and
 swallowing rather than letting anything through. `interaction.command`/
-`.namespace` run discord.py's real option-resolution machinery — nothing a
-`FakeInteraction`-based test can faithfully exercise — and
+`.namespace` run discord.py's real option-resolution machinery - nothing a
+`FakeInteraction`-based test can faithfully exercise - and
 `CommandTree._from_interaction`'s own wrapper only catches `AppCommandError`
 around the whole dispatch, so anything else raised here previously escaped
 uncaught: the interaction died silently, Discord showed "This interaction
 failed", and neither `on_app_command_error` nor this file's own log ever
 saw it. This bit in production (a real `/team-create` call failing with
-nothing logged anywhere) before the `try`/`except` was added — a
+nothing logged anywhere) before the `try`/`except` was added - a
 logging-only hook, with no business reason to ever fail, needs to be
 structurally unable to take down the feature it's just supposed to be
 watching.
 
 A successful completion is logged separately, from `on_app_command_completion`
-— an event discord.py dispatches itself only once a command has actually run
+- an event discord.py dispatches itself only once a command has actually run
 to completion without raising (see `CommandTree._call`), so it only ever
 fires for a genuine success, never a command that errored (that path goes
 through `on_app_command_error` instead) or one `interaction_check` rejected
@@ -196,7 +198,7 @@ down. The `import
 tests` inside it is deliberately lazy (only reached when this file is run
 directly) rather than a top-level import, since `tests.py`'s own
 `_import_bot_module()` re-imports this file under the name `"bot"` for its
-own `BotModuleTestCase` tests — a top-level `import tests` here would make
+own `BotModuleTestCase` tests - a top-level `import tests` here would make
 that circular. That same re-import (with `sqlite3.connect`/`open` patched
 away from the real database/token) is also what keeps running the suite from
 here safe: it never touches the real `main.db` or Discord, no matter how
@@ -270,10 +272,10 @@ before, stopping once a full pass turns up no further improvement.
 Unlike those two, `ROLE_BALANCE_DISLIKED_ROLE_WIN_ELO_MULTIPLIER` (1.5) *does*
 touch real elo: `rankedTeamHelper` records every user_id who ended up on a
 disliked role in that particular split (`servers.disliked_role_user_ids`, a
-plain comma-separated list — set alongside `team1`/`team2`, so it lives and
+plain comma-separated list - set alongside `team1`/`team2`, so it lives and
 clears with them the same way, including surviving a `/reuse`), and
 `computeGameDeltas` multiplies up a winning player's own elo delta if their
-id is in that set for the game just resolved. Only a win earns it — a loss on
+id is in that set for the game just resolved. Only a win earns it - a loss on
 a disliked role gets no such break, just the plain team-average delta every
 teammate gets. It's a reward for actually pulling off a win on a less-wanted
 assignment, on top of whatever the normal team-average swing already gave
@@ -930,11 +932,11 @@ other guild's commands, for the whole time one image takes to render.
 `_imageToFile`'s own downscale is left on the main thread, a comparatively
 small cost next to the drawing itself. `_renderGrandFinalsImage` is the one
 render function that also reads from the database (which stage of Grand
-Finals has actually been played) — genuinely unsafe to run from a different
+Finals has actually been played) - genuinely unsafe to run from a different
 thread, since `self.cursor` was opened with sqlite3's default
 `check_same_thread=True`. It's split into `_grandFinalsRenderInputs` (the DB
 read, run on the calling thread) and `_buildGrandFinalsImage` (the pure
-drawing, the part that's actually offloaded) for exactly this reason —
+drawing, the part that's actually offloaded) for exactly this reason -
 `_renderGrandFinalsImage` itself is a synchronous convenience wrapper around
 both, kept fully synchronous for callers (and tests) that don't need the
 split.

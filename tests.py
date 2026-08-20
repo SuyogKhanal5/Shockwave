@@ -16,7 +16,7 @@ Layout:
   - bot.py tests: imports bot.py with its module-level DB connection and
     token read redirected away from the real project database and the
     real bot token (see _import_bot_module), then exercises command
-    callbacks and event handlers directly — never touches Discord or the
+    callbacks and event handlers directly - never touches Discord or the
     real data/guildData/serverInfo/main.db.
 """
 
@@ -194,7 +194,7 @@ class FakeDMChannel:
         self.send = AsyncMock()
 
 
-# Mimics just enough of discord.Asset for display_avatar — a .url plus a
+# Mimics just enough of discord.Asset for display_avatar - a .url plus a
 # .with_format() that swaps the extension, same as the real thing (see
 # statsHelper's with_format("png") call, which needs to work whether the
 # starting asset is already static or (like a GIF profile picture) animated).
@@ -207,7 +207,7 @@ def _fake_avatar_bytes():
 class FakeAsset:
     def __init__(self, url):
         self.url = url
-        # A real, decodable PNG by default — the trading card (see
+        # A real, decodable PNG by default - the trading card (see
         # _swapStatsForTradingCard) actually opens this with PIL, same
         # reason the fake logo files elsewhere had to stop being empty.
         self.read = AsyncMock(return_value=_fake_avatar_bytes())
@@ -228,13 +228,13 @@ class FakeMember:
         self.mention = f"<@{self.id}>"
         self.move_to = AsyncMock()
         self.create_dm = AsyncMock(return_value=FakeDMChannel())
-        # This server's own avatar for this member — deliberately a
+        # This server's own avatar for this member - deliberately a
         # different URL shape than FakeUser's below, so a test can tell
         # which one actually ended up on screen (see the avatar-toggle
         # tests for /stats and the trading card).
         self.display_avatar = FakeAsset(f"https://cdn.discordapp.com/embed/avatars/{self.id}.png")
         # Defaults to True so existing tests that don't care about
-        # permissions aren't affected — pass manage_guild=False to test
+        # permissions aren't affected - pass manage_guild=False to test
         # the insufficient-permission path.
         self.guild_permissions = SimpleNamespace(manage_guild=manage_guild)
 
@@ -246,7 +246,7 @@ class FakeMember:
         return self.name
 
 
-# The account-wide identity behind a FakeMember — distinct from it (a real
+# The account-wide identity behind a FakeMember - distinct from it (a real
 # discord.Member wraps a discord.User the same way), with its OWN avatar so
 # the per-server/global avatar toggle (see _resolveGlobalAvatarUrl/
 # _resolveCardAvatarImage) has something genuinely different to switch to
@@ -276,12 +276,12 @@ class FakeChannel:
         self.mention = f"<#{self.id}>"
         self.kind = kind
         self.guild = guild
-        # A fresh FakeMessage per call (not one shared return_value) — real
+        # A fresh FakeMessage per call (not one shared return_value) - real
         # Discord messages are distinct objects, and printEmbed's callers
         # now rely on team1_message/team2_message being genuinely different
         # messages (see _finalizeRoster, which reacts to team2's only).
         # channel=self matches real discord.Message, which always carries
-        # the channel it was sent/fetched in — _finalizeRoster reads it
+        # the channel it was sent/fetched in - _finalizeRoster reads it
         # straight off the message rather than needing it passed separately.
         self.send = AsyncMock(side_effect=lambda *a, **k: FakeMessage(channel=self))
         self.create_invite = AsyncMock(return_value="https://discord.gg/fake-invite")
@@ -345,7 +345,7 @@ class FakeClient:
         self._guilds = {g.id: g for g in guilds}
         self._users = {u.id: u for u in users}
         self.fetch_channel = AsyncMock()
-        # Cache miss (get_user returns None) is the common case in tests —
+        # Cache miss (get_user returns None) is the common case in tests -
         # fetch_user still resolves to a real (if auto-generated) FakeUser
         # rather than erroring, same as the real API always eventually
         # resolving a valid id.
@@ -372,7 +372,7 @@ class FakePayload:
 
 
 # ===========================================================================
-# TourneyClasses.py — pure logic, no I/O
+# TourneyClasses.py - pure logic, no I/O
 # ===========================================================================
 
 class PlayerTests(unittest.TestCase):
@@ -584,7 +584,7 @@ class BracketSerializationTests(unittest.TestCase):
 
 
 # ===========================================================================
-# helper.helpers — real in-memory sqlite db + fake discord objects
+# helper.helpers - real in-memory sqlite db + fake discord objects
 # ===========================================================================
 
 class HelperTestCase(unittest.IsolatedAsyncioTestCase):
@@ -714,7 +714,7 @@ class RerollRosterTests(HelperTestCase):
         self.helperObj.update(GUILD_ID, "roster_team2_message_id", 112)
 
     async def test_noop_without_a_tracked_roster_message(self):
-        # Nothing stored for this guild — should just return, not error.
+        # Nothing stored for this guild - should just return, not error.
         await self.helperObj._rerollRoster(GUILD_ID, self.channel)
         self.channel.fetch_message.assert_not_awaited()
 
@@ -796,14 +796,14 @@ class RosterActionViewTests(HelperTestCase):
         open_betting.assert_awaited_once_with(GUILD_ID, self.channel)
         matchup.assert_awaited_once()
         self.assertIsNone(self.helperObj.get(GUILD_ID, "roster_team2_message_id"))
-        # Cleared, not left alone — see test_move_false_clears_a_previously_set_original_channel.
+        # Cleared, not left alone - see test_move_false_clears_a_previously_set_original_channel.
         self.assertEqual(self.helperObj.get(GUILD_ID, "original_channel"), "")
         self.assertNotIn("Moved!", [c.args[0] for c in self.channel.send.call_args_list])
 
     async def test_move_false_clears_a_previously_set_original_channel(self):
         # captainsHelper captures original_channel at draft-start time,
         # independent of which button eventually starts the game (see
-        # captainsHelper) — a leftover value from a prior Start game is
+        # captainsHelper) - a leftover value from a prior Start game is
         # possible too. Either way, Start (no move) must override it so
         # moveMembersToOriginalChannel no-ops once this no-move game
         # resolves (winner reported or cancelled), instead of moving
@@ -839,7 +839,7 @@ class RosterActionViewTests(HelperTestCase):
         click.response.send_message.assert_awaited_once()
         self.assertIn("voice channel", click.response.send_message.call_args.args[0])
         self.assertNotIn("ephemeral", click.response.send_message.call_args.kwargs)
-        # Not consumed — the same click's intent should still be retryable.
+        # Not consumed - the same click's intent should still be retryable.
         self.assertEqual(self.helperObj.get(GUILD_ID, "roster_team2_message_id"), 112)
 
     async def test_missing_team_channels_self_heals_onto_defaults(self):
@@ -1158,7 +1158,7 @@ class RoleBalancedTeamAssignmentTests(HelperTestCase):
         # *already-formed* pair's members land on, not swap who plays what
         # role. Swapping just one Jungle player for one Top player (2000<->
         # 1000, 1000<->0) turns both pairs into a 1000/1000-ish mix that
-        # *does* have a diff-0 split — proving the swap step actually looks
+        # *does* have a diff-0 split - proving the swap step actually looks
         # past the initial partition instead of only re-splitting it.
         members = self._members()
         elos = {members[0].id: 2000, members[1].id: 0}
@@ -1309,7 +1309,7 @@ class CaptainsHelperTests(HelperTestCase):
         await self.helperObj.captainsHelper(ctx, captain1, captain1)
 
         ctx.response.send_message.assert_awaited_once_with("Mention two different people!")
-        # nothing should have been written — clearTeamsHelper never ran
+        # nothing should have been written - clearTeamsHelper never ran
         self.assertIsNone(self.helperObj.get(GUILD_ID, "team1"))
 
     async def test_missing_captain_rejected_without_crashing(self):
@@ -1411,7 +1411,7 @@ class ChooseTests(HelperTestCase):
         # team_size * 2 is expected to leave spectators undrafted, so with
         # 3 pool members and a team_size of 2 (1 pick needed per team),
         # both teams fill up after 2 picks while 1 spectator is still left
-        # in the pool — the old code never prompted /start in that case.
+        # in the pool - the old code never prompted /start in that case.
         captain1, captain2, pool, ctx = await self._draft_setup(
             [(501, "Pool1"), (502, "Pool2"), (503, "Pool3")]
         )
@@ -1475,7 +1475,7 @@ class ClearTeamsHelperTests(HelperTestCase):
         # Regression test: starting a new roster (or running /clear at all,
         # even just for something like clear_elo) used to silently wipe
         # team1/team2/original_channel out from under a game that was
-        # still being bet on or played — nothing refunded, nobody moved
+        # still being bet on or played - nothing refunded, nobody moved
         # back, and the eventual winner report would silently skip
         # elo/records entirely since getRosterPlayers found nothing left.
         og = FakeChannel("Lobby")
@@ -1581,7 +1581,7 @@ class ResetEloHelperTests(HelperTestCase):
 
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "elo"), helper_module.DEFAULT_ELO)
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 902, "elo"), helper_module.DEFAULT_ELO)
-        # balance/wins are untouched — only elo resets
+        # balance/wins are untouched - only elo resets
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "balance"), 500)
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "wins"), 3)
         # other guild's elo is untouched
@@ -1696,7 +1696,7 @@ class CreateTournamentHelperTests(HelperTestCase):
         ctx.response.send_message.assert_awaited_once_with(
             "Only a member with the Manage Server permission can overwrite an existing tournament."
         )
-        # nothing changed — the old tournament is still there untouched
+        # nothing changed - the old tournament is still there untouched
         self.assertEqual(self.helperObj.getTournament(GUILD_ID).get_name(), "Old Cup")
 
     async def test_creating_fresh_does_not_require_manage_guild_permission(self):
@@ -1984,7 +1984,7 @@ class TeamDeleteHelperTests(HelperTestCase):
         self.assertIn("Red", text)
         view = ctx.response.send_message.call_args.kwargs["view"]
         self.assertIs(view.message, posted_message)
-        # not deleted yet — only queued behind confirmation
+        # not deleted yet - only queued behind confirmation
         self.assertIsNotNone(self.helperObj.getTeamRow(GUILD_ID, "Red"))
 
     async def test_non_captain_admin_can_also_trigger_the_prompt(self):
@@ -2053,11 +2053,11 @@ class _FakeLogoDirTestCase(HelperTestCase):
     def setUp(self):
         super().setUp()
         # ignore_cleanup_errors: a test that sends a discord.File built from
-        # one of these without closing it (easy to forget — teamStatsHelper
+        # one of these without closing it (easy to forget - teamStatsHelper
         # attaches one internally) leaves the fd open, and Windows won't let
         # a directory delete out from under an open file the way POSIX does.
         self._logo_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
-        # Real, decodable 1x1 images — not just empty placeholder files —
+        # Real, decodable 1x1 images - not just empty placeholder files -
         # since _drawMatchupColumn's random-logo fallback (see
         # _renderMatchupImage) now actually opens one of these with PIL for
         # any team that doesn't have a logo of its own, not just the ones
@@ -2112,7 +2112,7 @@ class TeamLogoTests(_FakeLogoDirTestCase):
         self.assertEqual(persisted.get_logo_path(), "/some/custom/path.png")
 
     def test_loading_a_pre_existing_logo_less_team_self_heals(self):
-        # Simulates a team saved before this feature existed — no 10th
+        # Simulates a team saved before this feature existed - no 10th
         # (logo_path) field in its serialized data at all.
         self.cursor.execute(
             "INSERT INTO teams(guildId, name, data) VALUES(?, ?, ?)",
@@ -2308,7 +2308,7 @@ class TeamSetHelperTests(_FakeLogoDirTestCase):
         kwargs = ctx.response.send_message.call_args.kwargs
         self.assertIn("Demacia", kwargs["content"])
         self.assertIsInstance(kwargs["file"], discord.File)
-        # discord.File keeps its underlying fp open — close it so Windows
+        # discord.File keeps its underlying fp open - close it so Windows
         # doesn't hold the temp logo dir locked when tearDown deletes it.
         kwargs["file"].close()
 
@@ -2430,7 +2430,7 @@ class TeamInviteHelperTests(HelperTestCase):
         text = ctx.response.send_message.call_args.args[0]
         self.assertIn(bob.mention, text)
         self.assertIn(cleo.mention, text)
-        # one shared message, one shared Accept button — not one per invitee
+        # one shared message, one shared Accept button - not one per invitee
         self.assertIsInstance(
             ctx.response.send_message.call_args.kwargs["view"], helper_module.TeamInviteAcceptView
         )
@@ -2460,7 +2460,7 @@ class TeamInviteHelperTests(HelperTestCase):
         posted_message = FakeMessage(id=780)
         ctx.original_response.return_value = posted_message
 
-        # ctx.user (Alice, 901) is already on the team, botty is a bot —
+        # ctx.user (Alice, 901) is already on the team, botty is a bot -
         # both should be skipped with a note while Bob still gets invited.
         await self.helperObj.teamInviteHelper(ctx, "Red", [bob, ctx.user, botty])
 
@@ -3081,7 +3081,7 @@ class TeamStatsHelperTests(_FakeLogoDirTestCase):
         team.set_logo_path(None)
         self.helperObj.updateTeamData(team_id, team)
 
-        # An empty logo dir for this call specifically — otherwise
+        # An empty logo dir for this call specifically - otherwise
         # getTeamRow's own self-heal (_ensureLogo) would just reassign a
         # random one from the fake dir the moment teamStatsHelper reads
         # this team back, and there'd be no way to observe the "genuinely
@@ -3194,7 +3194,7 @@ class RenderTeamCardImageTests(_FakeLogoDirTestCase):
         team = self._team(roster_count=helper_module.TEAM_CARD_MAX_ROSTER_ROWS + 3)
         image = self.helperObj._renderTeamCardImage("Test Guild", team)
         # taller than a team with just one shown row would need, but not
-        # blown out to fit all N — the overflow line is what absorbs the
+        # blown out to fit all N - the overflow line is what absorbs the
         # rest instead of one row per extra player.
         small_team_image = self.helperObj._renderTeamCardImage("Test Guild", self._team(roster_count=1))
         self.assertGreater(image.height, small_team_image.height)
@@ -3228,13 +3228,13 @@ class RenderTeamCardImageTests(_FakeLogoDirTestCase):
 
         # the sampled color, boosted for readability against its own
         # derived background (see _ensureReadableAccent), shows up as the
-        # frame's own outline pixel — same observable proof
+        # frame's own outline pixel - same observable proof
         # RenderTradingCardImageTests uses for the player card's
         # customizable accent_color.
         mid_y = image.height // 2
         border_pixel = image.convert("RGB").getpixel((helper_module.BRACKET_LINE_WIDTH, mid_y))
         self.assertEqual(border_pixel, self._expectedReadableAccent(sampled_color))
-        # and it should actually differ from the raw sample here — a
+        # and it should actually differ from the raw sample here - a
         # forest green this dark needs boosting against its own (darker
         # still) derived background, exactly the scenario the mechanism
         # exists for.
@@ -3270,7 +3270,7 @@ class RenderTeamCardImageTests(_FakeLogoDirTestCase):
         self.assertEqual(border_pixel, self._expectedReadableAccent(sampled_color))
 
         # the boosted accent must clear the background's own lightened
-        # vignette center by the configured minimum contrast — the actual
+        # vignette center by the configured minimum contrast - the actual
         # readability guarantee this whole mechanism exists to provide.
         background_color = tuple(round(c * 0.28) for c in sampled_color)
         background_center = self.helperObj._lightenColor(background_color, 0.3)
@@ -3289,7 +3289,7 @@ class EnsureReadableAccentTests(HelperTestCase):
     def test_lightens_a_low_contrast_color_toward_white(self):
         color = self.helperObj._ensureReadableAccent((20, 20, 90), (80, 80, 88), min_contrast=90)
         self.assertNotEqual(color, (20, 20, 90))
-        # lightened toward white, not replaced with something unrelated —
+        # lightened toward white, not replaced with something unrelated -
         # each channel should only have moved up, never down or past 255.
         for original, boosted in zip((20, 20, 90), color):
             self.assertGreaterEqual(boosted, original)
@@ -3669,7 +3669,7 @@ class UseTeamsHelperTests(HelperTestCase):
         await self.helperObj.useTeamsHelper(ctx, "Red", "Blue", False)
 
         # useTeamsHelper sets id=1/id=2 on its own in-memory copy for
-        # _startRosterViaReaction's sake — the persistent team's row/id in
+        # _startRosterViaReaction's sake - the persistent team's row/id in
         # `teams` is untouched, since it never calls updateTeamData.
         after_id, stored_red = self.helperObj.getTeamRow(GUILD_ID, "Red")
         self.assertEqual(after_id, before_id)
@@ -3987,7 +3987,7 @@ class BuildBracketTests(HelperTestCase):
         self.assertIsNone(nodes[-1].next)
 
     def test_byes_are_never_paired_against_each_other(self):
-        # 6 teams in an 8-slot bracket needs 2 byes — a naive "real teams
+        # 6 teams in an 8-slot bracket needs 2 byes - a naive "real teams
         # first, byes at the tail, pair consecutively" seeding puts both
         # byes in the same first-round pair, which never has a winner to
         # report. Run it many times (buildBracket shuffles) to catch it
@@ -4099,7 +4099,7 @@ class ClearTournamentMatchesForGuildTests(HelperTestCase):
 
         new_id = self._insert_match(GUILD_ID)
         # continues past the other guild's highest id instead of colliding
-        # with it — _settleMatchWagers and the concurrent-betting-close
+        # with it - _settleMatchWagers and the concurrent-betting-close
         # timer both key off matchId alone, with no guildId in their WHERE
         # clause, so a reused id could settle or close out that guild's
         # still-live match.
@@ -4168,7 +4168,7 @@ class RenderBracketTextTests(HelperTestCase):
         self.assertIn("Cup", text)
         self.assertIn("Champion:** TBD", text)
         # the tree itself (team names, connectors) lives in the image now
-        # (renderBracketImages) — the text is just a short status line
+        # (renderBracketImages) - the text is just a short status line
         self.assertNotIn("```", text)
 
     async def test_resolved_winner_shows_real_name_instead_of_tbd(self):
@@ -4188,7 +4188,7 @@ class RenderBracketTextTests(HelperTestCase):
 
 
 # ===========================================================================
-# Bracket images — the winners/losers trees themselves are drawn as PNGs
+# Bracket images - the winners/losers trees themselves are drawn as PNGs
 # (see renderBracketImages) rather than ASCII art, so tests here check
 # structure (file count/names, valid PNG data, image doesn't crash and
 # grows sensibly with more/longer content) rather than exact pixel content.
@@ -4223,7 +4223,7 @@ class BracketImageTests(HelperTestCase):
         self.assertEqual([f.filename for f in files], ["winners_bracket.png", "losers_bracket.png"])
 
     def test_grand_finals_image_only_appears_once_game_one_is_played(self):
-        # renderBracketImages itself never includes the Grand Finals image —
+        # renderBracketImages itself never includes the Grand Finals image -
         # it's sent as its own separate message (see _sendBracketText), and
         # only once Grand Finals has actually been played, so it's covered
         # here via _renderGrandFinalsImage directly instead.
@@ -4240,7 +4240,7 @@ class BracketImageTests(HelperTestCase):
         # Before either bracket has a champion, there's nothing to draw yet.
         self.assertIsNone(self.helperObj._renderGrandFinalsImage(GUILD_ID, tournament))
 
-        # Both champions exist, but Grand Finals game 1 hasn't been played —
+        # Both champions exist, but Grand Finals game 1 hasn't been played -
         # still None, since "vs, nothing decided yet" isn't worth a message.
         wb_champion = self.helperObj._bracketRounds(wb_nodes)[-1][0]
         wb_champion.team = red
@@ -4261,7 +4261,7 @@ class BracketImageTests(HelperTestCase):
 
     def test_degenerate_two_team_double_elimination_has_no_losers_image(self):
         # only one winners-bracket match exists at all, so its loser has
-        # nobody left to play — no losers-bracket tree to draw
+        # nobody left to play - no losers-bracket tree to draw
         teams = [self._team(n) for n in ["Red", "Blue"]]
         wb_nodes = self.helperObj.buildBracket(teams)
         lb_nodes, lb_rounds, _ = self.helperObj.buildLosersBracket(wb_nodes)
@@ -4304,7 +4304,7 @@ class BracketImageTests(HelperTestCase):
     def test_losers_bracket_with_fresh_drop_in_leaves_renders_without_crashing(self):
         # Regression coverage for the losers-bracket "fresh drop-in" leaf
         # positioning (see _assignBracketPositions) across several team
-        # counts, including non-power-of-two ones — those feed winners-
+        # counts, including non-power-of-two ones - those feed winners-
         # bracket byes into the losers bracket, which used to need special-
         # case leading-blank padding in the old ASCII renderer; the pixel-
         # based layout needs no such handling, but this still guards
@@ -4334,7 +4334,7 @@ class BracketImageTests(HelperTestCase):
             return tournament, lb_rounds
 
         # 8 teams is the smallest losers bracket that clears
-        # BRACKET_TWO_SIDED_MIN_ROUNDS (4 losers-bracket rounds) — below
+        # BRACKET_TWO_SIDED_MIN_ROUNDS (4 losers-bracket rounds) - below
         # that it should stay on the single-sided renderer.
         _, small_lb_rounds = build_tournament(4)
         self.assertLess(len(small_lb_rounds), helper_module.BRACKET_TWO_SIDED_MIN_ROUNDS)
@@ -4344,7 +4344,7 @@ class BracketImageTests(HelperTestCase):
         large_image = self.helperObj._renderLosersBracketImage(large_tournament)
 
         # the two-sided layout converges toward the center, which for a
-        # roughly-symmetric bracket makes it noticeably wider than tall —
+        # roughly-symmetric bracket makes it noticeably wider than tall -
         # not a precise assertion, just a sanity check that something
         # structurally different is actually happening once the layout
         # switches over (the single-sided renderer would instead keep
@@ -4354,9 +4354,9 @@ class BracketImageTests(HelperTestCase):
 
     def test_losers_bracket_two_sided_merge_point_renders_without_crashing(self):
         # The smallest bracket that reaches the two-sided losers-bracket
-        # layout (8 teams — see BRACKET_TWO_SIDED_MIN_ROUNDS) also has the
+        # layout (8 teams - see BRACKET_TWO_SIDED_MIN_ROUNDS) also has the
         # smallest possible "merge point" halves (see
-        # _renderLosersTwoSidedTreeImage) — each just a single match deep.
+        # _renderLosersTwoSidedTreeImage) - each just a single match deep.
         # Exercises the boundary directly rather than relying on a bigger
         # bracket to happen to cover it.
         teams = [self._team(f"T{i}") for i in range(8)]
@@ -4382,7 +4382,7 @@ class BracketNodeTextColorTests(HelperTestCase):
     def test_winner_node_is_not_dimmed(self):
         red, blue = self._team("Red"), self._team("Blue")
         winner_node = BracketNode(team=red)
-        next_node = BracketNode(team=red)  # Red's name repeats — they won
+        next_node = BracketNode(team=red)  # Red's name repeats - they won
         winner_node.next = next_node
 
         self.assertEqual(self.helperObj._bracketNodeTextColor(winner_node), helper_module.BRACKET_TEXT_COLOR)
@@ -4390,7 +4390,7 @@ class BracketNodeTextColorTests(HelperTestCase):
     def test_loser_node_is_dimmed(self):
         red, blue = self._team("Red"), self._team("Blue")
         loser_node = BracketNode(team=blue)
-        next_node = BracketNode(team=red)  # Red's name shows up instead — Blue lost
+        next_node = BracketNode(team=red)  # Red's name shows up instead - Blue lost
         loser_node.next = next_node
 
         self.assertEqual(self.helperObj._bracketNodeTextColor(loser_node), helper_module.BRACKET_LINE_COLOR)
@@ -4451,7 +4451,7 @@ class GrandFinalsImageDimmingTests(HelperTestCase):
     def test_reset_stage_dims_whichever_side_lost_the_decider(self):
         wb_champion, lb_champion = self._team("Red"), self._team("Blue")
         # lb_champion won game 1 (forcing a reset), then wb_champion wins
-        # the decider — the reset stage's top is lb_champion, bottom is
+        # the decider - the reset stage's top is lb_champion, bottom is
         # wb_champion (see _buildGrandFinalsImage's stage construction).
         image, calls = self._drawn_colors(
             Tournament("Cup", 1, 4, True), wb_champion, lb_champion,
@@ -4511,7 +4511,7 @@ class RenderMatchupImageTests(_FakeLogoDirTestCase):
         team = Team()
         team.set_name(name)
         # extra_players added BEFORE the captain, so a naive "first player
-        # in the list" reading would get this wrong — _orderedRoster has to
+        # in the list" reading would get this wrong - _orderedRoster has to
         # actually float the captain to the front, not just happen to
         # already find them there.
         for player_id, player_name in extra_players:
@@ -4552,7 +4552,7 @@ class RenderMatchupImageTests(_FakeLogoDirTestCase):
     def test_team_with_no_logo_gets_a_random_built_in_one_instead_of_a_bare_ring(self):
         # /make-teams, /captains, etc. build ad-hoc Team objects that never
         # go through _ensureLogo (that's only ever called for persistent
-        # teams), so team.get_logo_path() is None for them — this is what
+        # teams), so team.get_logo_path() is None for them - this is what
         # picks a stand-in logo for the matchup graphic instead of just
         # drawing an empty ring.
         team1 = self._team("Red", captain_id=901, captain_name="Alice")
@@ -4568,7 +4568,7 @@ class RenderMatchupImageTests(_FakeLogoDirTestCase):
         for call in choice_mock.call_args_list:
             self.assertEqual(call.args[0], self.helperObj.listAvailableLogos())
 
-        # still leaves the team objects themselves untouched — nothing to
+        # still leaves the team objects themselves untouched - nothing to
         # persist a pick against for a team with no stable identity.
         self.assertIsNone(team1.get_logo_path())
         self.assertIsNone(team2.get_logo_path())
@@ -4576,7 +4576,7 @@ class RenderMatchupImageTests(_FakeLogoDirTestCase):
     def test_captain_star_gets_room_so_a_long_captain_name_is_not_clipped(self):
         # Regression: column_width() used to measure the captain's name
         # alone, ignoring the star _drawMatchupColumn draws just to its
-        # left — a name that already filled the column left the star (and
+        # left - a name that already filled the column left the star (and
         # sometimes the name's own left edge) clipped off the canvas.
         long_name = "flamebringer"
         captain_team = self._team("Red", captain_id=901, captain_name=long_name)
@@ -4614,7 +4614,7 @@ class RenderMatchupImageTests(_FakeLogoDirTestCase):
         )
         # No text-extraction from a rendered PNG, so this just confirms the
         # canvas grows to accommodate a long subtitle rather than clipping
-        # it — the actual string content is exercised by _matchRoundLabel's
+        # it - the actual string content is exercised by _matchRoundLabel's
         # and _postMatchReport's own tests.
         short_header_image = self.helperObj._renderMatchupImage(3, team1, team2, "R1", None, None)
         self.assertGreaterEqual(image.width, short_header_image.width)
@@ -5383,7 +5383,7 @@ class CorrectTournamentMatchHelperTests(HelperTestCase):
             bettor_ctx = FakeInteraction(self.guild, FakeMember(name, id=user_id), channel=self.channel)
             await self.helperObj.wagerHelper(bettor_ctx, 100, team, match_id)
 
-        # Resolved (wrongly) as Team 1 — Cleo wins the pot, Dan loses her bet.
+        # Resolved (wrongly) as Team 1 - Cleo wins the pot, Dan loses her bet.
         report_view = helper_module.TournamentMatchReportView(self.helperObj)
         report_click = FakeInteraction(
             self.guild, FakeMember("Ref", id=555),
@@ -5409,7 +5409,7 @@ class CorrectTournamentMatchHelperTests(HelperTestCase):
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 903, "losses"), 1)
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 904, "wins"), 1)
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 904, "losses"), 0)
-        # gold_wagered reflects each bettor's one real 100-gold bet — the
+        # gold_wagered reflects each bettor's one real 100-gold bet - the
         # reverse-then-reapply round trip doesn't double (or zero) it out.
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 903, "gold_wagered"), 100)
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 904, "gold_wagered"), 100)
@@ -5457,7 +5457,7 @@ class CorrectTournamentMatchHelperTests(HelperTestCase):
 
 
 # ===========================================================================
-# Double elimination — real losers bracket, Grand Finals, bracket reset.
+# Double elimination - real losers bracket, Grand Finals, bracket reset.
 # ===========================================================================
 
 class BuildLosersBracketTests(HelperTestCase):
@@ -5467,7 +5467,7 @@ class BuildLosersBracketTests(HelperTestCase):
         return team
 
     def test_degenerate_two_team_bracket_has_no_real_match(self):
-        # Only one winners-bracket match exists at all — its loser has
+        # Only one winners-bracket match exists at all - its loser has
         # nobody left to play, so they become the losers-bracket "champion"
         # directly, with no match ever created for them.
         teams = [self._team(f"T{i}") for i in range(2)]
@@ -5508,7 +5508,7 @@ class BuildLosersBracketTests(HelperTestCase):
     def test_playing_it_out_always_reaches_a_losers_champion(self):
         # Property-style coverage across a range of team counts (including
         # non-power-of-two, which feeds winners-bracket byes into the
-        # losers bracket) — every one of these should reach a real losers-
+        # losers bracket) - every one of these should reach a real losers-
         # bracket champion, distinct from the winners-bracket champion,
         # without crashing or stalling, regardless of how buildBracket's
         # random seeding shuffled things.
@@ -5724,7 +5724,7 @@ class RenderBracketTextDoubleEliminationTests(HelperTestCase):
     def test_omits_grand_finals_section_without_a_guild_id(self):
         # /test (the throwaway bracket-preview command) never creates real
         # tournament_matches rows, so it deliberately doesn't pass a
-        # guild_id — passing a real one could pick up an unrelated
+        # guild_id - passing a real one could pick up an unrelated
         # tournament's actual Grand Finals history for this guild.
         teams = [self._team(f"T{i}") for i in range(4)]
         wb_nodes = self.helperObj.buildBracket(teams)
@@ -5791,7 +5791,7 @@ class TournamentChampionNameTests(HelperTestCase):
 
     def test_double_elimination_returns_none_after_losers_champion_wins_game_one(self):
         tournament, teams = self._double_elim_setup()
-        self._insert_finals_row(0, teams, winner=2)  # Blue (losers bracket) won — reset needed
+        self._insert_finals_row(0, teams, winner=2)  # Blue (losers bracket) won - reset needed
         self.assertIsNone(self.helperObj._tournamentChampionName(GUILD_ID, tournament))
 
     def test_double_elimination_reset_winner_is_champion_regardless(self):
@@ -5825,7 +5825,7 @@ class DoubleEliminationMatchFlowTests(HelperTestCase):
 
     # Resolves every AWAITING_RESULT simultaneous-mode match, repeatedly,
     # until the WHOLE tournament (winners bracket, losers bracket, and
-    # Grand Finals — including a reset, if `winner_of` forces one) has an
+    # Grand Finals - including a reset, if `winner_of` forces one) has an
     # overall champion. `winner_of(team1, team2, bracket_type, round_index)`
     # picks 1 or 2.
     async def _play_out_simultaneous(self, winner_of):
@@ -5861,7 +5861,7 @@ class DoubleEliminationMatchFlowTests(HelperTestCase):
             tournament = self.helperObj.getTournament(GUILD_ID)
         self.fail("tournament never reached a champion")
 
-    # Same idea, but for sequential mode — drives each match through the
+    # Same idea, but for sequential mode - drives each match through the
     # real ready-check (as its own captain) + recordResult cycle.
     async def _play_out_sequential(self, winner_of):
         tournament = self.helperObj.getTournament(GUILD_ID)
@@ -5920,7 +5920,7 @@ class DoubleEliminationMatchFlowTests(HelperTestCase):
 
     async def test_tournament_completion_sends_the_grand_finals_bracket_image(self):
         # _resolveFinalsMatch used to skip reprinting the bracket entirely
-        # on tournament completion — every other match-resolution path
+        # on tournament completion - every other match-resolution path
         # (_resolveTournamentMatch, _resolveLosersMatch) already does this
         # after every single match, so the last bracket image anyone saw
         # was whatever the losers bracket looked like before Grand Finals
@@ -5956,7 +5956,7 @@ class DoubleEliminationMatchFlowTests(HelperTestCase):
         # Every one of _resolveTournamentMatch/_resolveLosersMatch/
         # _resolveFinalsMatch's paths needs to record its result against
         # the PERSISTED team row (see _recordMatchResult) for the
-        # leaderboard to ever show anything but 0W-0L — this exercises all
+        # leaderboard to ever show anything but 0W-0L - this exercises all
         # three (winners bracket, losers bracket, and Grand Finals all get
         # played out here) in one pass.
         red = _captained_team("Red", 901, "Alice")
@@ -6014,7 +6014,7 @@ class DoubleEliminationMatchFlowTests(HelperTestCase):
                 # let the losers-bracket side take game 1, forcing a reset
                 return 1 if team1.get_name() != "Red" else 2
             # everywhere else (including the reset match), Red always wins
-            # — stays undefeated through the winners bracket, then takes
+            # - stays undefeated through the winners bracket, then takes
             # the reset to become champion after dropping game 1.
             if team1.get_name() == "Red":
                 return 1
@@ -6038,7 +6038,7 @@ class DoubleEliminationMatchFlowTests(HelperTestCase):
 
     async def test_two_team_double_elimination_skips_straight_to_grand_finals(self):
         # The degenerate case: with only 2 teams, the single winners-
-        # bracket match's loser has nobody to play in the losers bracket —
+        # bracket match's loser has nobody to play in the losers bracket -
         # they go straight to Grand Finals as the "losers bracket champion".
         red = _captained_team("Red", 901, "Alice")
         blue = _captained_team("Blue", 902, "Bob")
@@ -6054,7 +6054,7 @@ class DoubleEliminationMatchFlowTests(HelperTestCase):
 
         messages = [c.args[0] for c in self.channel.send.call_args_list if c.args]
         self.assertTrue(any("Grand Finals" in m for m in messages))
-        # no losers-bracket ROUND ever plays — there's nothing to queue
+        # no losers-bracket ROUND ever plays - there's nothing to queue
         self.assertFalse(any("Losers Bracket Round" in m for m in messages))
 
 
@@ -6097,7 +6097,7 @@ class InterleavedLosersBracketTimingTests(HelperTestCase):
         await self.helperObj._resolveTournamentMatch(GUILD_ID, match_id, winning_team, self.channel.id)
 
     # 4 teams means one losers round (index 0) unlocked by winners round 0,
-    # and a second (index 1) unlocked by winners round 1 (the final) — see
+    # and a second (index 1) unlocked by winners round 1 (the final) - see
     # buildLosersBracket's wb_dependency comment. Once winners round 0
     # finishes, interleaved timing should start losers round 0 right away,
     # instead of moving straight on to the winners final.
@@ -6117,12 +6117,12 @@ class InterleavedLosersBracketTimingTests(HelperTestCase):
             await self._resolve(match_id, 1)
 
         self.assertEqual(len(self._matches(bracket_type="losers", round_index=0)), 1)
-        # winners round 1 (the final) must NOT have started yet — it's
+        # winners round 1 (the final) must NOT have started yet - it's
         # paused behind the now-unlocked losers round.
         self.assertEqual(len(self._matches(bracket_type="winners", round_index=1)), 0)
 
     # Once losers round 0 finishes, losers round 1 isn't ready yet (it
-    # needs winners round 1, the final, which hasn't been played) — so the
+    # needs winners round 1, the final, which hasn't been played) - so the
     # scheduler should resume the winners bracket instead of stalling.
     async def test_winners_resumes_once_the_unlocked_losers_round_finishes(self):
         red = _captained_team("Red", 901, "Alice")
@@ -6186,7 +6186,7 @@ class InterleavedLosersBracketTimingTests(HelperTestCase):
         )
         self.assertEqual(self.cursor.fetchone()[0], 1)
 
-    # after_winners is still the default — an interleaved-mode helper
+    # after_winners is still the default - an interleaved-mode helper
     # wasn't accidentally wired in as the new default for every double
     # elimination bracket.
     async def test_after_winners_is_still_the_default_timing(self):
@@ -6238,7 +6238,7 @@ class PrintEmbedTests(HelperTestCase):
 
         team1_message, team2_message = await self.helperObj.printEmbed(ctx, team1, team2)
 
-        # A fresh message per send() call, not one shared object — matters
+        # A fresh message per send() call, not one shared object - matters
         # since _finalizeRoster only ever reacts to the second one.
         self.assertIsNot(team1_message, team2_message)
         self.assertEqual(ctx.channel.send.await_count, 2)
@@ -6534,8 +6534,8 @@ class CancelGameHelperTests(HelperTestCase):
 
     async def test_cancel_on_ranked_game_refunds_bets_without_touching_elo(self):
         # Cancelling ends a ranked game early exactly like ending a regular
-        # game early: bets get refunded, and — since recordResult (the only
-        # place elo/game record ever change) never runs — elo and game
+        # game early: bets get refunded, and - since recordResult (the only
+        # place elo/game record ever change) never runs - elo and game
         # record are left completely untouched, not just "reset".
         team1 = Team(); team1.name = "Team 1"
         team1.add_player(Player(701, "P1"))
@@ -6567,13 +6567,13 @@ class CancelGameHelperTests(HelperTestCase):
         self.cursor.execute("SELECT COUNT(*) FROM wagers WHERE guildId=?", (GUILD_ID,))
         self.assertEqual(self.cursor.fetchone()[0], 0)
 
-        # rostered players never touched at all — no economy row even exists
+        # rostered players never touched at all - no economy row even exists
         self.assertIsNone(self.helperObj.getEconomy(GUILD_ID, 701, "elo"))
         self.assertIsNone(self.helperObj.getEconomy(GUILD_ID, 702, "elo"))
 
     async def test_no_original_channel_still_cancels_without_a_move(self):
         # A sequential tournament match deliberately blanks original_channel
-        # (see _handleReadyReaction) — cancelling one should still refund
+        # (see _handleReadyReaction) - cancelling one should still refund
         # bets and reset state, just without a "Moved everyone back" note.
         self.helperObj.update(GUILD_ID, "original_channel", "")
         self.helperObj.update(GUILD_ID, "betting_state", "OPEN")
@@ -6894,7 +6894,7 @@ class RecordResultTests(HelperTestCase):
         # Not necessarily the last message: a 400-gold payout on a 100-gold
         # bet is a 4x return, which also crosses the Jackpot achievement's
         # own 3x threshold and gets announced right after this one (see
-        # _announceAchievements) — scan every call instead of assuming
+        # _announceAchievements) - scan every call instead of assuming
         # this is the final one, same fix the First Blood case needed.
         messages = [c.args[0] for c in channel.send.call_args_list if c.args]
         self.assertTrue(any("won 400 gold (bet 100)" in m for m in messages))
@@ -6952,7 +6952,7 @@ class RecordResultTests(HelperTestCase):
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "wins"), 1)
 
     async def test_moves_everyone_back_when_guild_provided(self):
-        # regression test: recording a winner used to only pay out bets —
+        # regression test: recording a winner used to only pay out bets -
         # players stayed in their team channels until someone separately
         # ran /return.
         og = FakeChannel("Lobby")
@@ -7014,7 +7014,7 @@ class RecordResultTests(HelperTestCase):
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 702, "elo"), 984)
 
         # P1's first-ever win also earns the "First Blood" achievement,
-        # which posts its own announcement — check every message sent
+        # which posts its own announcement - check every message sent
         # rather than assuming the result message is the last (or only)
         # one.
         messages = [c.args[0] for c in channel.send.call_args_list]
@@ -7095,7 +7095,7 @@ class RecordResultTests(HelperTestCase):
 
     async def test_casual_game_with_roster_does_not_touch_elo(self):
         # regression test: /make-teams and /captains form rosters just like
-        # /ranked does, but is_ranked defaults to 0 for them — elo must stay
+        # /ranked does, but is_ranked defaults to 0 for them - elo must stay
         # untouched even though game_wins/game_losses still update.
         team1 = Team(); team1.name = "Team 1"
         team1.add_player(Player(701, "P1"))
@@ -7114,7 +7114,7 @@ class RecordResultTests(HelperTestCase):
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 702, "game_losses"), 1)
         self.assertNotIn("Elo:", channel.send.call_args.args[0])
         # a casual game bumps the combined game_wins/game_losses total but
-        # never the ranked-only subset — see getLeaderboardEntries's
+        # never the ranked-only subset - see getLeaderboardEntries's
         # casual = game_wins - ranked_wins derivation.
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 701, "ranked_wins"), 0)
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 702, "ranked_losses"), 0)
@@ -7178,8 +7178,8 @@ class ImbalanceRakeFractionTests(HelperTestCase):
         self.assertEqual(self.helperObj._imbalanceRakeFraction(100, 100), 0.0)
 
     def test_winners_being_the_minority_is_not_raked(self):
-        # A real upset — fewer people backed the eventual winner than the
-        # loser — shouldn't be taxed at all, only "safe" lopsided bets.
+        # A real upset - fewer people backed the eventual winner than the
+        # loser - shouldn't be taxed at all, only "safe" lopsided bets.
         self.assertEqual(self.helperObj._imbalanceRakeFraction(100, 300), 0.0)
 
     def test_maximally_lopsided_pool_hits_the_cap(self):
@@ -7236,7 +7236,7 @@ class ComputeGameDeltasTests(HelperTestCase):
         self.assertEqual(deltas[2]["ranked_losses"], 1)
 
     def test_missing_players_fall_back_to_the_given_default_elo(self):
-        # elo_lookup has no entry for either player — as if this guild has
+        # elo_lookup has no entry for either player - as if this guild has
         # a configured default_elo different from the global DEFAULT_ELO.
         deltas, summary = self.helperObj.computeGameDeltas(
             wagers=[], team1_roster=[(1, "A")], team2_roster=[(2, "B")],
@@ -7293,7 +7293,7 @@ class ComputeGameDeltasTests(HelperTestCase):
         self.assertEqual(deltas[1]["gold_won"], 0)
         self.assertEqual(deltas[1]["gold_lost"], 0)
         # the bettor's payout is untouched by (and doesn't touch) the
-        # participation reward — they're not on either roster.
+        # participation reward - they're not on either roster.
         self.assertEqual(deltas[901]["balance"], 100)
         self.assertEqual(deltas[901]["gold_won"], 0)
 
@@ -7364,7 +7364,7 @@ class ComputeGameDeltasTests(HelperTestCase):
 
     def test_reversing_deltas_never_unlocks_anything(self):
         # A correction's reversal (sign=-1) is "undo a wrongly-recorded
-        # result", not "grant a reward on the way back down" — the reapply
+        # result", not "grant a reward on the way back down" - the reapply
         # against the corrected winner that follows calls back in with
         # sign=1, which is what actually re-checks properly.
         self.helperObj.ensureEconomyRow(GUILD_ID, 701, "P1")
@@ -7565,7 +7565,7 @@ class ReportCorrectWinnerHelperTests(HelperTestCase):
         )
 
     async def test_corrects_bettor_payouts_when_winner_flips(self):
-        # No rosters — isolates the betting-correction math. Alice bet on
+        # No rosters - isolates the betting-correction math. Alice bet on
         # team1 (wrongly reported as the winner), Bob bet on team2 (the
         # actual winner).
         self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
@@ -7590,12 +7590,12 @@ class ReportCorrectWinnerHelperTests(HelperTestCase):
         # Bob's payout is raked: as the real winner he was also the heavy
         # favorite (300 vs Alice's 100 -> a 0.75 winning share), so
         # _imbalanceRakeFraction takes a 25% cut of the 100 losing pool
-        # (25 gold) before splitting it — 300 + (300/300)*75 = 375, not the
+        # (25 gold) before splitting it - 300 + (300/300)*75 = 375, not the
         # full 400 an unraked pari-mutuel split would've paid. That 25 gold
         # was already deducted from Alice's balance at bet time and simply
         # isn't credited to anyone now, so total balance across both
         # players (900 + 1075 = 1975) is 25 short of the original 2000,
-        # not conserved — that's the rake doing its job.
+        # not conserved - that's the rake doing its job.
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "balance"), 900)
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "wins"), 0)
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "losses"), 1)
@@ -7746,7 +7746,7 @@ class ReportCorrectWinnerHelperTests(HelperTestCase):
         self.assertIn("Team 2", message)
         self.assertIn("invalidated", message)
 
-        # nothing left to correct further — the last result is gone entirely
+        # nothing left to correct further - the last result is gone entirely
         self.assertIsNone(self.helperObj.getLastResult(GUILD_ID))
 
 
@@ -7803,7 +7803,7 @@ class StatsHelperTests(HelperTestCase):
     async def test_fields_are_grouped_ranked_then_casual_then_gold(self):
         # regression test: a blank inline=False spacer field used to force
         # the line break after the ranked row, but it still renders its
-        # own (invisible) name+value line — a big empty gap in the actual
+        # own (invisible) name+value line - a big empty gap in the actual
         # embed, not the clean break it looked like. Elo joining the
         # ranked row instead (rounding it out to a full 3 wide, same as
         # the other two rows) avoids needing a spacer at all.
@@ -7962,7 +7962,7 @@ class StatsViewTests(HelperTestCase):
         fetched_message.edit.assert_awaited_once()
         edited_embed = fetched_message.edit.call_args.kwargs["embed"]
         # fetch_user auto-generates a FakeUser(901) with its own distinct
-        # global avatar URL (see FakeClient.fetch_user) — this is that URL.
+        # global avatar URL (see FakeClient.fetch_user) - this is that URL.
         self.assertEqual(edited_embed.thumbnail.url, "https://cdn.discordapp.com/avatars/901/global.png")
         # everything else on the embed is untouched
         self.assertEqual(edited_embed.title, original_embed.title)
@@ -7997,7 +7997,7 @@ class StatsViewTests(HelperTestCase):
         self.assertEqual(edited_embed.thumbnail.url, server_avatar_url)
 
     async def test_toggle_noops_if_the_member_left_the_guild(self):
-        # Alice deliberately NOT added to self.guild.members — simulates
+        # Alice deliberately NOT added to self.guild.members - simulates
         # her having left, so the server avatar can't be resolved at all,
         # and there's nothing to toggle between.
         ctx = self._ctx()
@@ -8028,7 +8028,7 @@ class StatsViewTests(HelperTestCase):
 
         fetched_message.edit.assert_awaited_once()
         new_embed = fetched_message.edit.call_args.kwargs["embed"]
-        # the stats content is gone entirely — this is a full replacement,
+        # the stats content is gone entirely - this is a full replacement,
         # not just another field/thumbnail tweak like the avatar toggle.
         self.assertEqual(len(new_embed.fields), 0)
         self.assertIsNotNone(new_embed.image.url)
@@ -8200,7 +8200,7 @@ class StatsViewTests(HelperTestCase):
         await view.returnToStats.callback(self._click(fetched_message))
 
         fetched_message.edit.assert_awaited_once()
-        # back to the real /stats embed — fields restored, image attachment
+        # back to the real /stats embed - fields restored, image attachment
         # cleared out rather than left dangling behind the new embed.
         new_embed = fetched_message.edit.call_args.kwargs["embed"]
         self.assertGreater(len(new_embed.fields), 0)
@@ -8318,7 +8318,7 @@ class CheckAchievementsTests(HelperTestCase):
             self.db.commit()
             self.assertIn(key, self.helperObj._checkAchievements(GUILD_ID, 901))
 
-        # Every tier's title is distinct — reaching Immortal doesn't just
+        # Every tier's title is distinct - reaching Immortal doesn't just
         # mean four copies of "Veteran".
         unlocked = self.helperObj.getUnlockedCardTitles(GUILD_ID, 901)
         for _, key in ladder:
@@ -8494,7 +8494,7 @@ class ApplyGameDeltasAchievementTests(HelperTestCase):
         newly_unlocked = self.helperObj.applyGameDeltas(GUILD_ID, self._win_deltas(901), sign=-1)
         self.assertEqual(newly_unlocked, [])
         # reversing a win delta subtracts game_wins back to 0, but the
-        # streak counter itself is untouched by a reversal — same
+        # streak counter itself is untouched by a reversal - same
         # reasoning the elo-tier check already skips on sign<0 for.
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "current_win_streak"), 1)
 
@@ -8652,7 +8652,7 @@ class CardUnlocksTests(HelperTestCase):
         )
 
     def test_color_scheme_background_stays_the_raw_darkened_badge_color(self):
-        # Only the accent gets the readability boost — the background is
+        # Only the accent gets the readability boost - the background is
         # still the badge color's own straight 28%-darkened shade, same as
         # the team card's own derivation, so a scheme's overall mood still
         # authentically reflects the tier that earned it.
@@ -8677,7 +8677,7 @@ class CardUnlocksTests(HelperTestCase):
         self.assertEqual(self.helperObj.getUnlockedCardTitles(GUILD_ID, 901), ["Developer"])
 
     def test_shockwave_developer_always_has_developer_title_with_no_grant_needed(self):
-        # No card_unlocks row at all for this (guild, user) pair — the
+        # No card_unlocks row at all for this (guild, user) pair - the
         # hardcoded id check in getUnlockedCardTitles is what surfaces it,
         # not a stored grant, so it works in any guild, including ones
         # never explicitly granted.
@@ -8778,7 +8778,7 @@ class CardSetHelperTests(HelperTestCase):
         await self.helperObj.cardSetHelper(ctx, helper_module.CARD_TIER_REWARD_TITLES["Diamond"], None, None)
         message = ctx.response.send_message.call_args.args[0]
         self.assertIn("haven't unlocked", message)
-        # never touched — still whatever ensureCardSettings' own default is
+        # never touched - still whatever ensureCardSettings' own default is
         settings = self.helperObj.getCardSettings(GUILD_ID, 901)
         self.assertEqual(settings["title"], helper_module.CARD_DEFAULT_TITLE)
 
@@ -8820,7 +8820,7 @@ class CardSetHelperTests(HelperTestCase):
         await self.helperObj.cardSetHelper(ctx, None, "Diamond", None)
         message = ctx.response.send_message.call_args.args[0]
         self.assertIn("haven't unlocked", message)
-        # never touched — still whatever ensureCardSettings' own default is
+        # never touched - still whatever ensureCardSettings' own default is
         settings = self.helperObj.getCardSettings(GUILD_ID, 901)
         self.assertEqual(settings["accent_color"], helper_module.CARD_DEFAULT_ACCENT_COLOR)
 
@@ -8855,7 +8855,7 @@ class CardSetHelperTests(HelperTestCase):
     async def test_equipped_scheme_tracks_later_changes_to_its_catalog_entry(self):
         # A player who equips, say, "Fire" shouldn't have its colors frozen
         # forever at whatever they were computed to be the moment
-        # /card-set ran — color_scheme_name plus _resyncEquippedColorScheme
+        # /card-set ran - color_scheme_name plus _resyncEquippedColorScheme
         # (run from ensureCardSettings, so the very next /stats call picks
         # it up) keeps it tracking later tweaks to CARD_SHOP_COLOR_SCHEMES
         # (or to CARD_MIN_ACCENT_CONTRAST itself), the same staleness the
@@ -8885,7 +8885,7 @@ class CardSetHelperTests(HelperTestCase):
 
     async def test_a_hand_edited_custom_hex_is_never_resynced(self):
         # No color_scheme_name recorded here (setCardColorScheme wasn't
-        # used) — nothing for _resyncEquippedColorScheme to track, so a
+        # used) - nothing for _resyncEquippedColorScheme to track, so a
         # directly-written custom value stays exactly as set.
         self.helperObj.ensureCardSettings(GUILD_ID, 901)
         self.cursor.execute(
@@ -8989,7 +8989,7 @@ class ResetCardUnlocksHelperTests(HelperTestCase):
         self.assertEqual(settings["accent_color"], helper_module.CARD_DEFAULT_ACCENT_COLOR)
         self.assertEqual(settings["background_color"], helper_module.CARD_DEFAULT_BACKGROUND_COLOR)
 
-        # customized=0 again — a later /stats call's own default-resync
+        # customized=0 again - a later /stats call's own default-resync
         # logic won't be refused by a stale customized flag.
         self.cursor.execute(
             "SELECT customized, color_scheme_name FROM trading_cards WHERE guildId=? AND userId=?",
@@ -9177,7 +9177,7 @@ class ShopTests(HelperTestCase):
         self.assertIn("Noxus", names)
 
     async def test_every_shop_color_scheme_is_a_real_readable_hex_pair(self):
-        # Regression coverage for the whole catalog, not just one entry —
+        # Regression coverage for the whole catalog, not just one entry -
         # every CARD_SHOP_COLOR_SCHEMES name (Fire/Ice/each region
         # included) should unlock into a scheme with valid "#RRGGBB" hex
         # for both colors, run through the same _ensureReadableAccent
@@ -9473,7 +9473,7 @@ class RenderTradingCardImageTests(HelperTestCase):
 
     def test_no_stat_line_or_label_is_cut_off_by_the_card_edge(self):
         # regression test: the old 3-column layout could clip a long
-        # value against its own column's edge — every stat is one full-
+        # value against its own column's edge - every stat is one full-
         # width line now, so nothing should ever measure wider than the
         # space between the left margin and the card's right edge.
         settings = {
@@ -9541,7 +9541,7 @@ class RenderTradingCardImageTests(HelperTestCase):
         teams = [self._team(f"Team {i}") for i in range(helper_module.CARD_MAX_TEAM_ROWS + 3)]
 
         # Just confirms this doesn't crash and still produces a reasonably
-        # bounded image rather than growing one row per team forever —
+        # bounded image rather than growing one row per team forever -
         # the "+N more teams" line itself is exercised via the full
         # reaction-flow tests (HandleStatsReactionTests), which check
         # actual pixel/text content is harder to do without an OCR step.
@@ -9550,7 +9550,7 @@ class RenderTradingCardImageTests(HelperTestCase):
 
     def test_custom_colors_are_respected(self):
         # A hand-picked accent color should show up as the frame's outline
-        # pixel color — the simplest observable proof the setting actually
+        # pixel color - the simplest observable proof the setting actually
         # reached the renderer instead of silently falling back to default.
         settings = {
             "title": "X", "accent_color": "#00FF00", "background_color": "#000000",
@@ -9569,9 +9569,9 @@ class RenderTradingCardImageTests(HelperTestCase):
             "text_color": "#FFFFFF", "font_style": "default",
         }
         avatar = Image.new("RGBA", (64, 64), (255, 0, 0, 255))
-        # the header's top-right quadrant — where a username is drawn,
+        # the header's top-right quadrant - where a username is drawn,
         # right-aligned, mirroring the logo/guild-name block's own
-        # top-left placement — should differ once one is actually given.
+        # top-left placement - should differ once one is actually given.
         box = (
             helper_module.CARD_WIDTH // 2, 0,
             helper_module.CARD_WIDTH, helper_module.BRACKET_MARGIN + helper_module.BRACKET_LOGO_HEIGHT
@@ -9587,7 +9587,7 @@ class RenderTradingCardImageTests(HelperTestCase):
         self.assertNotEqual(list(without_username.getdata()), list(with_username.getdata()))
 
     def test_omitting_username_matches_the_pre_existing_render(self):
-        # username defaults to None — every caller written before this
+        # username defaults to None - every caller written before this
         # parameter existed passes exactly the same positional args it
         # always did, and should get exactly the same image back, not a
         # blank "@" or other placeholder in the corner.
@@ -9640,7 +9640,7 @@ class RenderTradingCardImageTests(HelperTestCase):
             self.assertNotEqual(self.helperObj._cardFontPaths(font_style)["name_font"], default_name_font)
 
     def test_every_font_style_uses_its_own_distinct_font_file(self):
-        # Not just distinct from "default" — distinct from every OTHER shop
+        # Not just distinct from "default" - distinct from every OTHER shop
         # style too, so two styles can't accidentally end up pointing at
         # the same bundled file.
         paths = {
@@ -9651,7 +9651,7 @@ class RenderTradingCardImageTests(HelperTestCase):
 
     def test_every_shop_font_file_actually_loads(self):
         # _loadFont silently degrades to PIL's built-in font on a bad path
-        # (OSError/ValueError caught and swallowed) — real for a genuinely
+        # (OSError/ValueError caught and swallowed) - real for a genuinely
         # missing/renamed style, but it means a corrupted or truncated font
         # FILE wouldn't be caught by any test that only goes through
         # _loadFont. Load each bundled shop-font file directly instead, so
@@ -9703,7 +9703,7 @@ class EloRankLabelTests(HelperTestCase):
 
     def test_plain_label_omits_the_leading_emoji(self):
         # eloRankLabelPlain is what the trading card uses (see
-        # _swapStatsForTradingCard) — PIL's bundled TTF fonts can't render
+        # _swapStatsForTradingCard) - PIL's bundled TTF fonts can't render
         # these emoji, so the card needs the tier text without one.
         self.assertEqual(self.helperObj.eloRankLabelPlain(1123), "Platinum III")
         self.assertEqual(self.helperObj.eloRankLabelPlain(1600), "Master")
@@ -9770,7 +9770,7 @@ class OpenBettingTests(HelperTestCase):
         self.assertIn("cancel the game", message_text)
 
         # The winner-report/cancel buttons go out immediately alongside the
-        # "betting is open" message — no waiting on the timer to close
+        # "betting is open" message - no waiting on the timer to close
         # betting first before anyone can report a winner or cancel.
         view = channel.send.call_args.kwargs["view"]
         self.assertIsInstance(view, helper_module.WinnerReportView)
@@ -9780,7 +9780,7 @@ class OpenBettingTests(HelperTestCase):
         self.assertEqual(view.team2.label, "Team 2 🔴")
 
         # _bettingTimer catches CancelledError itself (so a cancelled game
-        # never crashes with an unhandled exception) — once a task is
+        # never crashes with an unhandled exception) - once a task is
         # genuinely suspended on the sleep and then cancelled, that means
         # it finishes *normally* rather than raising, which is fine: what
         # actually matters is that it stops and cleans itself up.
@@ -9863,7 +9863,7 @@ class OpenBettingTests(HelperTestCase):
         await self.helperObj.bettingTasks[GUILD_ID]
 
         # The report message (with its reactions) was already posted by
-        # _openBetting itself — the timer firing only closes betting, it
+        # _openBetting itself - the timer firing only closes betting, it
         # doesn't post or replace anything report-related.
         self.assertEqual(self.helperObj.get(GUILD_ID, "betting_state"), "CLOSED")
         self.assertEqual(self.helperObj.get(GUILD_ID, "betting_message_id"), 12345)
@@ -10014,8 +10014,8 @@ class GetBettingTimerSecondsTests(HelperTestCase):
         )
 
     def test_falls_back_to_the_default_when_the_guild_has_no_row_at_all(self):
-        # A guild with no `servers` row at all (not just a null column) —
-        # /test's simulated tournament is one such case — shouldn't crash
+        # A guild with no `servers` row at all (not just a null column) -
+        # /test's simulated tournament is one such case - shouldn't crash
         # just because it wants a betting duration.
         self.assertEqual(
             self.helperObj._getBettingTimerSeconds(999999),
@@ -10194,7 +10194,7 @@ class PlaceTournamentWagerTests(HelperTestCase):
 
 class SettleMatchWagersTests(HelperTestCase):
     def _bet(self, match_id, user_id, name, team, amount):
-        # Mirrors only the state _settleMatchWagers reads/needs — a wager
+        # Mirrors only the state _settleMatchWagers reads/needs - a wager
         # row plus an economy row. The real wagerHelper flow debits `amount`
         # from balance up front and settlement only ever credits winnings
         # back, so starting from balance=0 lets a settled balance be
@@ -10272,7 +10272,7 @@ class WinnerReportViewTests(HelperTestCase):
         )
 
     async def test_valid_while_betting_is_still_open(self):
-        # A real game can finish before the nominal betting window closes —
+        # A real game can finish before the nominal betting window closes -
         # the report message's buttons are live from the moment the game
         # starts, not just after the timer closes betting.
         click = self._click()
@@ -10892,7 +10892,7 @@ class LeaderboardHelperTests(HelperTestCase):
             "game_wins=1, game_losses=6, gold_won=50, gold_lost=200, gold_wagered=250 "
             "WHERE guildId=? AND userId=902", (GUILD_ID,)
         )
-        # Cleo has no bets/games played yet — her win rates should be None.
+        # Cleo has no bets/games played yet - her win rates should be None.
         self.cursor.execute(
             "UPDATE economy SET elo=1000, balance=0 WHERE guildId=? AND userId=903", (GUILD_ID,)
         )
@@ -10941,7 +10941,7 @@ class LeaderboardHelperTests(HelperTestCase):
         self.assertEqual(entry["ranked_losses"], 1)
         self.assertAlmostEqual(entry["ranked_win_rate"], 3 / 4)
         # casual = the remainder of game_wins/game_losses after ranked is
-        # taken out — 5-3 wins, 2-1 losses.
+        # taken out - 5-3 wins, 2-1 losses.
         self.assertEqual(entry["casual_wins"], 2)
         self.assertEqual(entry["casual_losses"], 1)
         self.assertAlmostEqual(entry["casual_win_rate"], 2 / 3)
@@ -11083,7 +11083,7 @@ class TeamListPagingViewTests(HelperTestCase):
         click.response.edit_message.assert_not_awaited()
 
     async def test_preserves_sort_order_across_a_page_flip(self):
-        # sort_order='desc' with sort='name' reverses the alphabet — all 12
+        # sort_order='desc' with sort='name' reverses the alphabet - all 12
         # fake teams stay eligible (no search/recruiting_only filter here),
         # so there's still a real second page to flip to.
         self.cursor.execute(
@@ -11097,7 +11097,7 @@ class TeamListPagingViewTests(HelperTestCase):
         embed = click.response.edit_message.call_args.kwargs["embed"]
         self.assertIn("Descending", embed.footer.text)
         # descending by name: Lima..Charlie fill page 0, page 1 (this one)
-        # holds whatever's left — Bravo, Alpha — proving sort_order='desc'
+        # holds whatever's left - Bravo, Alpha - proving sort_order='desc'
         # carried over rather than resetting to ascending
         self.assertIn("Alpha", embed.description)
 
@@ -11107,8 +11107,8 @@ class MyTeamsPagingViewTests(_FakeLogoDirTestCase):
         return FakeInteraction(self.guild, FakeMember(name, id=user_id))
 
     async def asyncSetUp(self):
-        # _FakeLogoDirTestCase.setUp (sync) already ran by this point —
-        # IsolatedAsyncioTestCase calls setUp() then asyncSetUp() — so this
+        # _FakeLogoDirTestCase.setUp (sync) already ran by this point -
+        # IsolatedAsyncioTestCase calls setUp() then asyncSetUp() - so this
         # only needs to handle the parts that require awaiting.
         self.channel = FakeChannel("my-teams-chat")
         self.helperObj.client = FakeClient(channels=[self.channel], guilds=[self.guild])
@@ -11287,7 +11287,7 @@ class LeaderboardPagingViewTests(HelperTestCase):
 # Concurrency: "multiple servers sending commands at the same time" really
 # means multiple coroutines interleaved on discord.py's one asyncio event
 # loop, all sharing the one process-wide sqlite3 cursor (see helpers.__init__
-# in helper.py and its single instantiation in bot.py) — there's no thread
+# in helper.py and its single instantiation in bot.py) - there's no thread
 # parallelism to worry about, but two guilds' coroutines genuinely can
 # interleave at any `await` point. These run real asyncio.gather() calls
 # across genuinely different guild_ids (never mocking the concurrency away)
@@ -11325,7 +11325,7 @@ class ConcurrentMultiGuildCommandsTests(HelperTestCase):
             members=[self.member_b1, self.member_b2],
         )
 
-        # One shared client across both guilds — matches the real bot,
+        # One shared client across both guilds - matches the real bot,
         # which is a single process/single event loop no matter how many
         # servers it's in.
         self.helperObj.client = FakeClient(
@@ -11367,7 +11367,7 @@ class ConcurrentMultiGuildCommandsTests(HelperTestCase):
             )
 
         # each guild's own players only ever moved into that same guild's
-        # own channels — never the other guild's, even though both ran on
+        # own channels - never the other guild's, even though both ran on
         # the same event loop at "the same time"
         self.member_a1.move_to.assert_awaited_once_with(self.team1_a)
         self.member_a2.move_to.assert_awaited_once_with(self.team2_a)
@@ -11383,7 +11383,7 @@ class ConcurrentMultiGuildCommandsTests(HelperTestCase):
         # Forces genuine interleaving rather than hoping asyncio.gather
         # happens to produce it: guild A's very first move_to() suspends
         # for real, guaranteeing guild B's entire _handleRosterStartClick
-        # call — its own reads, writes, and moves — runs to completion
+        # call - its own reads, writes, and moves - runs to completion
         # while guild A is still mid-flight, sharing the one cursor the
         # whole time. Guild A must still resume and finish correctly.
         real_move_to = self.member_a1.move_to
@@ -11454,7 +11454,7 @@ class ConcurrentMultiGuildCommandsTests(HelperTestCase):
 
     async def test_concurrent_daily_claims_for_the_same_user_in_different_guilds(self):
         # The same real Discord account, active in two different servers,
-        # claiming /daily in both at once — each guild's economy row must
+        # claiming /daily in both at once - each guild's economy row must
         # be credited independently, not double-counted or merged.
         ctx_a = SimpleNamespace(
             guild=SimpleNamespace(id=self.guild_a), user=FakeMember("Alice", id=901),
@@ -11483,7 +11483,7 @@ class ConcurrentMultiGuildCommandsTests(HelperTestCase):
 
 
 # ===========================================================================
-# bot.py — import with DB/token side effects redirected away from the real
+# bot.py - import with DB/token side effects redirected away from the real
 # project database and the real bot token, then exercise command callbacks
 # and event handlers directly. Never connects to Discord.
 # ===========================================================================
@@ -11505,7 +11505,7 @@ def _import_bot_module():
 class BotModuleTestCase(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.bot = _import_bot_module()
-        # tree.sync() makes a real Discord API call — commands are global
+        # tree.sync() makes a real Discord API call - commands are global
         # definitions now (see syncCommandsToGuild in bot.py), copied/synced
         # to a guild dynamically on_ready/on_guild_join rather than one
         # hardcoded testing guild id, so on_guild_join (called throughout
@@ -11560,7 +11560,7 @@ class BotModuleTestCase(unittest.IsolatedAsyncioTestCase):
         return FakeInteraction(guild, user, channel=channel)
 
     # For commands that require the caller to be sitting in a voice
-    # channel (make-teams, captains, notify, ...) — _ctx()'s FakeMember has
+    # channel (make-teams, captains, notify, ...) - _ctx()'s FakeMember has
     # .voice = None by default, which would trip those guards.
     def _ctx_in_voice(self, guild_id=GUILD_ID):
         ctx = self._ctx(guild_id=guild_id)
@@ -11603,7 +11603,7 @@ class CommandRegistrationTests(BotModuleTestCase):
         guild_a = SimpleNamespace(id=1, name="Guild A")
         guild_b = SimpleNamespace(id=2, name="Guild B")
         # discord.Client.guilds is a read-only property backed by internal
-        # connection state — patch it at the class level via PropertyMock
+        # connection state - patch it at the class level via PropertyMock
         # rather than trying to assign the instance attribute directly.
         with patch.object(type(self.bot.client), "guilds", new_callable=PropertyMock) as mock_guilds:
             mock_guilds.return_value = [guild_a, guild_b]
@@ -12337,7 +12337,7 @@ class GlobalErrorHandlerTests(BotModuleTestCase):
     def _ctx_with_response_done(self, done):
         ctx = self._ctx()
         # discord.py's real InteractionResponse.is_done() is a plain sync
-        # method, not a coroutine — ctx.response is an AsyncMock, whose
+        # method, not a coroutine - ctx.response is an AsyncMock, whose
         # attributes default to AsyncMock too, so it has to be overridden
         # explicitly here rather than just awaited like everything else on it.
         ctx.response.is_done = MagicMock(return_value=done)
@@ -12366,7 +12366,7 @@ class GlobalErrorHandlerTests(BotModuleTestCase):
 
     async def test_skips_the_generic_message_if_a_local_handler_already_responded(self):
         # setBettingTimer_error/reportCorrectWinner_error/clearAll_error
-        # already send their own MissingPermissions message and return —
+        # already send their own MissingPermissions message and return -
         # discord.py calls this tree-wide handler right afterward
         # regardless (CommandTree._dispatch_error always calls both), so
         # without this check every permission error would get a second,
@@ -12940,7 +12940,7 @@ class ClearCommandTests(BotModuleTestCase):
         self.assertEqual(
             self.bot.helperObj.getEconomy(guild_id, 901, "elo"), helper_module.DEFAULT_ELO
         )
-        # balance is untouched — clear_elo only resets elo
+        # balance is untouched - clear_elo only resets elo
         self.assertEqual(self.bot.helperObj.getEconomy(guild_id, 901, "balance"), 250)
 
     async def test_cancelling_clear_confirmation_leaves_data_untouched(self):
@@ -13073,7 +13073,7 @@ class ClearCommandTests(BotModuleTestCase):
 
         ctx.response.send_message.assert_awaited_once()
         self.assertIn("clear_achievements", ctx.response.send_message.call_args.args[0])
-        # Nothing else ran either — not even the non-destructive team wipe.
+        # Nothing else ran either - not even the non-destructive team wipe.
         ctx.followup.send.assert_not_awaited()
 
     async def test_clear_achievements_for_a_user_can_combine_with_whole_server_clear_elo(self):
@@ -13365,7 +13365,7 @@ class MakeTeamsCommandTests(BotModuleTestCase):
         self.assertTrue(finalize_mock.call_args.args[-1])
 
     async def test_use_roles_explains_when_a_team_is_not_five(self):
-        # _setup_teams() gives each team 1 player, so roles can't apply —
+        # _setup_teams() gives each team 1 player, so roles can't apply -
         # continue normally (teams still get created and posted) but say
         # why no roles showed up.
         guild_id = 912
@@ -13406,7 +13406,7 @@ class MakeTeamsCommandTests(BotModuleTestCase):
              patch.object(self.bot.helperObj, "_finalizeRoster", AsyncMock()):
             await self._command("make-teams").callback(ctx, use_roles=True)
 
-        # only the trailing ready reminder — no role explanation needed
+        # only the trailing ready reminder - no role explanation needed
         ctx.channel.send.assert_awaited_once()
         self.assertNotIn("Roles need", ctx.channel.send.call_args.args[0])
         self.assertIn("Press Start", ctx.channel.send.call_args.args[0])
@@ -13490,7 +13490,7 @@ class RankedCommandTests(BotModuleTestCase):
 
     async def test_make_teams_ranked_passes_use_roles_through(self):
         # ranked=True short-circuits before the random-split flow even
-        # runs — randomizeTeamHelper must never be touched — but use_roles
+        # runs - randomizeTeamHelper must never be touched - but use_roles
         # is now forwarded into rankedTeamHelper instead of being dropped.
         ctx = self._ctx_in_voice()
         mock = AsyncMock()
@@ -13593,7 +13593,7 @@ class CaptainsCommandTests(BotModuleTestCase):
     async def test_use_random_picks_two_distinct_captains_from_voice_channel(self):
         # Regression test: this path used to store a plain Python list as
         # the "players" column, which sqlite3 can't bind as a parameter
-        # (InterfaceError) — it crashed before ever picking a captain.
+        # (InterfaceError) - it crashed before ever picking a captain.
         guild_id = 910
         await self._insert_guild_row(guild_id)
         members = [FakeMember(f"P{i}", id=1000 + i) for i in range(4)]
@@ -13696,7 +13696,7 @@ class ReportCorrectWinnerCommandTests(BotModuleTestCase):
 
 
 # ===========================================================================
-# restore_backup.py — a standalone ops script (run by whoever hosts the bot,
+# restore_backup.py - a standalone ops script (run by whoever hosts the bot,
 # with the bot itself stopped) for reverting main.db to one of
 # backupDatabaseTask's daily snapshots. Never imported by bot.py/helper.py,
 # so these tests exercise it directly - always against a throwaway temp

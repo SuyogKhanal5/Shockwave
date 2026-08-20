@@ -48,13 +48,13 @@ class Team:
         self.captain = None
         self.wins = 0
         self.losses = 0
-        # Target roster size for a persistent team (set via /team-create) —
+        # Target roster size for a persistent team (set via /team-create) -
         # distinct from `size`, which just mirrors len(players). Ephemeral
         # game-formation teams (/make-teams, /captains, /ranked, ...) never
         # set this and leave it None.
         self.team_size = None
         # Local file path to this team's uploaded logo image, or None if it
-        # hasn't set one. Just a path (e.g. into a saved-uploads folder) —
+        # hasn't set one. Just a path (e.g. into a saved-uploads folder) -
         # not the image data itself.
         self.logo_path = None
 
@@ -198,7 +198,7 @@ class Team:
         self.wins = int(serializedArr[6]) if serializedArr[6] not in ('', 'None') else 0
         self.losses = int(serializedArr[7]) if serializedArr[7] not in ('', 'None') else 0
 
-        # team_size was added after this format was already in use — older
+        # team_size was added after this format was already in use - older
         # serialized teams won't have a 9th field, so index defensively
         # instead of assuming it's there.
         if len(serializedArr) > 8 and serializedArr[8] not in ('', 'None'):
@@ -207,7 +207,7 @@ class Team:
             self.team_size = None
 
         # Same defensive treatment for logo_path, added as a 10th field
-        # after team_size — older serialized teams have neither.
+        # after team_size - older serialized teams have neither.
         if len(serializedArr) > 9 and serializedArr[9] not in ('', 'None'):
             self.logo_path = serializedArr[9]
         else:
@@ -226,28 +226,28 @@ class Tournament:
     def __init__(self, name=None, team_size=None, num_teams=None, double_elimination=False) -> None:
         self.name = name
         self.team_size = team_size
-        # Also doubles as the bracket size — how many team slots the
+        # Also doubles as the bracket size - how many team slots the
         # bracket is built for.
         self.num_teams = num_teams
         self.double_elimination = double_elimination
         self.teams = []    # Team objects registered for this tournament
         self.bracket = []  # rounds of matches, populated once the bracket is seeded
-        # Losers bracket — only populated for a double-elimination
+        # Losers bracket - only populated for a double-elimination
         # tournament (see helpers.buildLosersBracket). `losers_bracket_nodes`
         # is every node (leaves and results) in one flat list, the same
         # shape `bracket` uses; `losers_bracket_rounds` groups the RESULT
         # nodes by round (round sizes don't follow a simple halving pattern
         # the way the winners bracket's do, so unlike `bracket` this can't
-        # be re-derived from the flat list alone — it's stored explicitly).
+        # be re-derived from the flat list alone - it's stored explicitly).
         self.losers_bracket_nodes = []
         self.losers_bracket_rounds = []
         # Which winners-bracket round_index each losers_bracket_rounds[i]
-        # needs fully RESOLVED before it can start — None means it only
+        # needs fully RESOLVED before it can start - None means it only
         # depends on the previous losers round finishing, not on any new
         # winners-bracket input. See helpers.buildLosersBracket, which is
         # the only thing that ever populates this.
         self.losers_bracket_wb_dependency = []
-        # "after_winners" (default — the original behavior): the losers
+        # "after_winners" (default - the original behavior): the losers
         # bracket doesn't start at all until the winners bracket has
         # crowned its champion. "interleaved": each losers round starts
         # the moment the winners round it depends on resolves, without
@@ -310,7 +310,7 @@ class Tournament:
 
     # Adds `team` to this tournament's registered teams. A player can sit
     # on multiple teams in the server's teams table, but not on two
-    # different teams entered into the SAME tournament — raises if `team`
+    # different teams entered into the SAME tournament - raises if `team`
     # shares a player with a team already registered here.
     def register_team(self, team: Team) -> None:
         registered_ids = {
@@ -325,10 +325,10 @@ class Tournament:
 
 
 # One slot in a bracket. Each pair of sibling nodes (linked to each other
-# via `opponent`) shares a single `next` node — the empty slot ahead of
+# via `opponent`) shares a single `next` node - the empty slot ahead of
 # them that the winner of their match replaces, same as a real bracket
 # printout. `previous` is one of the two nodes that fed into this one
-# (the other is reachable via `previous.opponent`) — None for round-one
+# (the other is reachable via `previous.opponent`) - None for round-one
 # nodes, since they start with an actual team rather than a TBD winner.
 # `next` is None only for the finals node, since there's no round after it.
 #
@@ -337,7 +337,7 @@ class Tournament:
 # team that lost that match (set alongside `.team`, the winner, once the
 # match resolves), and `drop_to` is the losers-bracket leaf that loser
 # drops into. A bye-produced result (only one side ever had a team) never
-# gets a real `.loser` — there was no match, so nobody to drop down.
+# gets a real `.loser` - there was no match, so nobody to drop down.
 class BracketNode:
     def __init__(self, team=None) -> None:
         self.team = team
@@ -352,7 +352,7 @@ class BracketNode:
 # at each other), not something json.dumps can handle directly, so these
 # convert to/from a list of plain dicts referencing each other by index
 # into that same list. `drop_to` points into a DIFFERENT node list (the
-# losers bracket, for a winners-bracket node) — pass it as `drop_targets`
+# losers bracket, for a winners-bracket node) - pass it as `drop_targets`
 # so its index is resolved against that list instead of `nodes` itself;
 # omit it when serializing a bracket whose nodes never set `drop_to` (the
 # losers bracket's own nodes never do).
@@ -401,12 +401,12 @@ def deserialize_bracket(data: list, drop_targets: list = None) -> list:
     return nodes
 
 
-# Losers-bracket round grouping persistence — `rounds` is a list of rounds,
+# Losers-bracket round grouping persistence - `rounds` is a list of rounds,
 # each a list of RESULT nodes from `nodes` (the flat, already-serializable
 # list from serialize_bracket/deserialize_bracket above). Round sizes in
 # the losers bracket don't follow the winners bracket's simple halving
 # pattern, so this grouping can't be recomputed from the graph alone the
-# way _bracketRounds does for the winners bracket — it's stored explicitly
+# way _bracketRounds does for the winners bracket - it's stored explicitly
 # as index lists into `nodes`.
 def serialize_losers_rounds(rounds: list, nodes: list) -> list:
     index_of = {id(node): i for i, node in enumerate(nodes)}
