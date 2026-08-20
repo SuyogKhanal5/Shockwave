@@ -11,6 +11,7 @@ import itertools
 import json
 import math
 import os
+import time
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
@@ -176,9 +177,6 @@ BETTING_DURATION_SECONDS = 60
 # leave betting open for an unreasonable stretch.
 MAX_CONCURRENT_BETTING_SECONDS = 1800
 DAILY_GOLD_AMOUNT = 1000
-# TEMPORARY: how much /dev-give-gold hands out — see bot.py's DEV_USER_ID
-# guard. Remove alongside that command once it's no longer needed.
-DEV_GIVE_GOLD_AMOUNT = 1000
 # Reward every rostered player gets in computeGameDeltas for simply
 # finishing a game — casual or ranked, regardless of anything they bet
 # themselves — split by whether their side won or lost. Not a
@@ -239,11 +237,13 @@ ROLE_BALANCE_FILL_ORDER = ["Jungle", "Top", "Mid", "Bottom", "Support"]
 # swap - it already stops as soon as a full pass finds no improving swap,
 # this only guards against a pathological input oscillating forever.
 ROLE_BALANCE_MAX_REFINE_PASSES = 5
-# /dev-test-role-balance only - how many of the made-up-preference players
-# in that dry run get a disliked role along with their liked one, so the
-# preview reliably demonstrates the disliked-role penalty instead of
-# leaving it up to chance.
-ROLE_BALANCE_TEST_DISLIKE_COUNT = 3
+# Unlike the two penalties above, this one DOES touch real elo: a player
+# who wins while playing a role they marked disliked gets their normal
+# win delta multiplied up by this much (see computeGameDeltas) - a reward
+# for actually pulling off a win on a less-wanted assignment, on top of
+# whatever the normal team-average swing already gave them. Losing on a
+# disliked role earns no such bonus - only a win counts.
+ROLE_BALANCE_DISLIKED_ROLE_WIN_ELO_MULTIPLIER = 1.5
 # How long the /clear confirmation buttons stay clickable before the
 # reset is abandoned on its own.
 CLEAR_CONFIRM_TIMEOUT_SECONDS = 30
@@ -283,7 +283,11 @@ STATS_CARD_EMOJI = "\U0001F0CF"  # 🃏 decorates StatsView's Card button
 # swapping back to the plain /stats embed (which then gets its own Card
 # button restored, so the whole thing is a real back-and-forth toggle
 # rather than a one-way trip).
-STATS_RETURN_EMOJI = "\U0001faaa"  # 🪪 decorates StatsView's Back button
+STATS_RETURN_EMOJI = "↩️"  # ↩️ decorates StatsView's Back button — was 🪪
+# (U+1FAAA IDENTIFICATION CARD), which several Discord clients render as a
+# blank/missing glyph despite being valid Unicode; ↩️ is the same long-
+# established arrow TEAM_CARD_RETURN_EMOJI already uses for the identical
+# "back to the plain view" role on TeamStatsView.
 
 # Trading-card layout (see _renderTradingCardImage) — a portrait card
 # roughly the shape of a real trading card, reusing the same canvas/header
@@ -1246,22 +1250,25 @@ class ConfirmCancelGameView(discord.ui.View):
 
 
 # Same idea as ConfirmWinnerReportView, for a simultaneous-mode tournament
-# match's own 🔵/🔴 report instead of the guild-wide singleton one — a
-# separate view since a simultaneous round can have several matches (and
-# so several pending confirmations) live at once, each needing its own
-# match_id/channel_id rather than the one guild_id a normal game's report
-# has. Confirm calls _resolveTournamentMatch directly (the same function
-# recordResult's own tournament hook calls for sequential mode); Cancel/
-# timeout put the match back to AWAITING_RESULT via
+# match's own Team 1/Team 2 report instead of the guild-wide singleton one
+# — a separate view since a simultaneous round can have several matches
+# (and so several pending confirmations) live at once, each needing its
+# own match_id/channel_id rather than the one guild_id a normal game's
+# report has. Confirm calls _resolveTournamentMatch directly (the same
+# function recordResult's own tournament hook calls for sequential mode)
+# and then strips the original match message's own buttons via
+# _clearMessageButtons, matching ConfirmWinnerReportView; Cancel/timeout
+# put the match back to AWAITING_RESULT via
 # _restoreTournamentMatchAwaitingResult so it can be reacted on again.
 class ConfirmTournamentMatchReportView(discord.ui.View):
-    def __init__(self, helperObj, guild_id, match_id, winning_team, channel_id):
+    def __init__(self, helperObj, guild_id, match_id, winning_team, channel_id, report_message=None):
         super().__init__(timeout=WINNER_REPORT_CONFIRM_TIMEOUT_SECONDS)
         self.helperObj = helperObj
         self.guild_id = guild_id
         self.match_id = match_id
         self.winning_team = winning_team
         self.channel_id = channel_id
+        self.report_message = report_message
         self.message = None
 
     def _disable_buttons(self):
@@ -1278,6 +1285,7 @@ class ConfirmTournamentMatchReportView(discord.ui.View):
         await self.helperObj._resolveTournamentMatch(
             self.guild_id, self.match_id, self.winning_team, self.channel_id
         )
+        await self.helperObj._clearMessageButtons(self.report_message)
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction, button):
@@ -1324,27 +1332,40 @@ class TournamentReadyView(discord.ui.View):
         await self.helperObj._handleReadyClick(interaction)
 
 
+# Team 1/Team 2 are built per-message (dynamic add_item) rather than via
+# decorator so each match report can show the match's actual team names,
+# the same reasoning/shape _WinnerReportButton/WinnerReportView use.
+class _TournamentReportButton(discord.ui.Button):
+    def __init__(self, label, style, custom_id, team_number):
+        super().__init__(label=label, style=style, custom_id=custom_id)
+        self.team_number = team_number
+
+    async def callback(self, interaction):
+        await self.view.helperObj._handleTournamentMatchReportClick(interaction, self.team_number)
+
+
 # The simultaneous-mode match report message's own buttons - same
 # persistent shape as TournamentReadyView, for the same "can sit
 # AWAITING_RESULT indefinitely" reason. A press posts a
 # ConfirmTournamentMatchReportView instead of resolving immediately,
 # matching WinnerReportView/ConfirmWinnerReportView's two-step shape.
+# team1_name/team2_name default to "Team 1"/"Team 2" for the generic
+# instance client.add_view registers at startup (routing only); every
+# real send passes the match's actual names in.
 class TournamentMatchReportView(discord.ui.View):
-    def __init__(self, helperObj):
+    def __init__(self, helperObj, team1_name="Team 1", team2_name="Team 2"):
         super().__init__(timeout=None)
         self.helperObj = helperObj
-
-    @discord.ui.button(
-        label=f"Team 1 {TEAM_EMOJIS[1]}", style=discord.ButtonStyle.primary, custom_id="shockwave:tournament:team1"
-    )
-    async def team1(self, interaction, button):
-        await self.helperObj._handleTournamentMatchReportClick(interaction, 1)
-
-    @discord.ui.button(
-        label=f"Team 2 {TEAM_EMOJIS[2]}", style=discord.ButtonStyle.danger, custom_id="shockwave:tournament:team2"
-    )
-    async def team2(self, interaction, button):
-        await self.helperObj._handleTournamentMatchReportClick(interaction, 2)
+        self.team1 = _TournamentReportButton(
+            _teamButtonLabel(team1_name, 1), discord.ButtonStyle.primary,
+            "shockwave:tournament:team1", team_number=1,
+        )
+        self.team2 = _TournamentReportButton(
+            _teamButtonLabel(team2_name, 2), discord.ButtonStyle.danger,
+            "shockwave:tournament:team2", team_number=2,
+        )
+        self.add_item(self.team1)
+        self.add_item(self.team2)
 
 
 # The posted roster's own buttons (team2_message only, see
@@ -1663,16 +1684,19 @@ class DuelResultView(discord.ui.View):
 # A Challenger Won/Target Won click posts this instead of paying out the
 # pot immediately - Confirm actually pays out (via _finishDuelResolution,
 # which re-fetches the duel's own row by id rather than trusting anything
-# stored here besides the id itself); Cancel/timeout restores the duel to
+# stored here besides the id itself) and then strips the original duel
+# message's own buttons via _clearMessageButtons, matching
+# ConfirmWinnerReportView; Cancel/timeout restores the duel to
 # AWAITING_RESULT via _restoreDuelAwaitingResult so its buttons work again.
 # Not persistent - a short, one-off confirmation window, same as
 # ConfirmWinnerReportView/ConfirmTournamentMatchReportView.
 class ConfirmDuelResultView(discord.ui.View):
-    def __init__(self, helperObj, duel_id, winner_is_challenger):
+    def __init__(self, helperObj, duel_id, winner_is_challenger, report_message=None):
         super().__init__(timeout=DUEL_CONFIRM_TIMEOUT_SECONDS)
         self.helperObj = helperObj
         self.duel_id = duel_id
         self.winner_is_challenger = winner_is_challenger
+        self.report_message = report_message
         self.message = None
 
     def _disable_buttons(self):
@@ -1687,6 +1711,7 @@ class ConfirmDuelResultView(discord.ui.View):
             content="Result confirmed - paying out the wager...", view=self
         )
         await self.helperObj._finishDuelResolution(self.duel_id, self.winner_is_challenger)
+        await self.helperObj._clearMessageButtons(self.report_message)
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction, button):
@@ -2060,12 +2085,17 @@ class helpers():
         team2 = Team()
         team2.name = name2
 
+        disliked_role_ids = []
         if role_split is not None:
             side_a, side_b = role_split
-            for member, _elo, _role, _tier, _eff in side_a:
+            for member, _elo, _role, tier, _eff in side_a:
                 team1.add_player(Player(member.id, member.name))
-            for member, _elo, _role, _tier, _eff in side_b:
+                if tier == "disliked":
+                    disliked_role_ids.append(member.id)
+            for member, _elo, _role, tier, _eff in side_b:
                 team2.add_player(Player(member.id, member.name))
+                if tier == "disliked":
+                    disliked_role_ids.append(member.id)
             team1_members = [entry[0] for entry in side_a]
             team2_members = [entry[0] for entry in side_b]
         else:
@@ -2074,6 +2104,12 @@ class helpers():
                 team1.add_player(Player(member.id, member.name))
             for member in team2_members:
                 team2.add_player(Player(member.id, member.name))
+
+        # Read back by recordResult/reportCorrectWinnerHelper to credit the
+        # ROLE_BALANCE_DISLIKED_ROLE_WIN_ELO_MULTIPLIER bonus - stored as
+        # plain comma-separated text since it's never queried, only ever
+        # read back whole (see _dislikedRoleUserIds).
+        self.update(guild_id, "disliked_role_user_ids", ",".join(str(i) for i in disliked_role_ids))
 
         self.update(guild_id, "team1", team1.serializeTeam())
         self.update(guild_id, "team2", team2.serializeTeam())
@@ -2744,6 +2780,9 @@ class helpers():
         self.update(guild_id, "team_size", 5)
         self.update(guild_id, "mode", "Normal")
         self.update(guild_id, "turn", 1)
+        # Goes stale the moment team1/team2 do (see rankedTeamHelper) - a
+        # fresh roster's own players earned no disliked-role bonus yet.
+        self.update(guild_id, "disliked_role_user_ids", "")
         # Every team-formation path (/make-teams, /captains, either with or
         # without ranked:true) runs through here first — resetting is_ranked
         # to 0 by default means only the ranked-specific helpers, which
@@ -4109,18 +4148,19 @@ class helpers():
 
         return image
 
-    # A dedicated third image for just the Grand Finals stage: winners-
-    # bracket champion vs losers-bracket champion, and the decider "bracket
-    # reset" match if the losers-bracket side forced one by winning game 1.
-    # None until game 1 has actually been played — not just once both
-    # bracket champions exist, since "vs, nothing decided yet" isn't worth
-    # its own message (see _sendBracketText, which sends this separately
-    # from the winners/losers bracket images, and only when this isn't
-    # None). Split from the actual drawing (_buildGrandFinalsImage) so that
-    # code can also be exercised without a real guildId or any
-    # tournament_matches rows — see /test in bot.py, which simulates a full
-    # run entirely in memory.
-    def _renderGrandFinalsImage(self, guild_id, tournament, guild_name=None):
+    # The DB-dependent half of _renderGrandFinalsImage — everything needed
+    # to actually draw the stage except the drawing itself, or None if
+    # there's nothing worth drawing yet (either bracket champion still
+    # missing, or game 1 hasn't been played). Kept separate from
+    # _buildGrandFinalsImage (the pure, DB-free drawing) for two reasons:
+    # that code can be exercised without a real guildId or any
+    # tournament_matches rows (see /test in bot.py, which simulates a full
+    # run entirely in memory), and _buildGrandFinalsImage alone is safe to
+    # run via asyncio.to_thread (see _sendBracketText/printBracketHelper) —
+    # self.cursor was opened with sqlite3's default check_same_thread=True,
+    # so a DB read from a to_thread-offloaded worker thread would raise
+    # outright.
+    def _grandFinalsRenderInputs(self, guild_id, tournament):
         wb_rounds = self._bracketRounds(tournament.get_bracket())
         wb_champion = wb_rounds[-1][0].team if wb_rounds else None
         lb_rounds = tournament.get_losers_rounds()
@@ -4149,9 +4189,24 @@ class helpers():
         if game1_winner_name is None:
             return None
 
-        return self._buildGrandFinalsImage(
-            tournament, wb_champion, lb_champion, game1_winner_name, reset_winner_name, guild_name
-        )
+        return wb_champion, lb_champion, game1_winner_name, reset_winner_name
+
+    # A dedicated third image for just the Grand Finals stage: winners-
+    # bracket champion vs losers-bracket champion, and the decider "bracket
+    # reset" match if the losers-bracket side forced one by winning game 1.
+    # None until game 1 has actually been played — not just once both
+    # bracket champions exist, since "vs, nothing decided yet" isn't worth
+    # its own message (see _sendBracketText, which sends this separately
+    # from the winners/losers bracket images, and only when this isn't
+    # None). Synchronous convenience wrapper around
+    # _grandFinalsRenderInputs + _buildGrandFinalsImage for callers (and
+    # tests) that don't care about the thread-safety split those two exist
+    # for - see _sendBracketText/printBracketHelper for the caller that does.
+    def _renderGrandFinalsImage(self, guild_id, tournament, guild_name=None):
+        inputs = self._grandFinalsRenderInputs(guild_id, tournament)
+        if inputs is None:
+            return None
+        return self._buildGrandFinalsImage(tournament, *inputs, guild_name)
 
     # The pure rendering half of _renderGrandFinalsImage — no DB access, just
     # the two bracket champions and however far Grand Finals has resolved
@@ -4459,7 +4514,7 @@ class helpers():
     # put in the subtitle.
     async def _sendMatchupImage(self, channel, team1, team2, label):
         guild_name = channel.guild.name if channel.guild is not None else None
-        image = self._renderMatchupImage(None, team1, team2, label, None, guild_name)
+        image = await asyncio.to_thread(self._renderMatchupImage, None, team1, team2, label, None, guild_name)
         await channel.send(file=self._imageToFile(image, "matchup.png"))
 
     # Maps the "mode" stored per-guild (set by /make-teams, /captains,
@@ -4563,13 +4618,17 @@ class helpers():
     # buried it instead of standing out.
     async def _sendBracketText(self, channel, tournament, guild_id=None):
         guild_name = channel.guild.name if channel.guild is not None else None
-        await channel.send(
-            self.renderBracketText(tournament, guild_id),
-            files=self.renderBracketImages(tournament, guild_name)
-        )
+        bracket_files = await asyncio.to_thread(self.renderBracketImages, tournament, guild_name)
+        await channel.send(self.renderBracketText(tournament, guild_id), files=bracket_files)
         if guild_id is not None:
-            finals_image = self._renderGrandFinalsImage(guild_id, tournament, guild_name)
-            if finals_image is not None:
+            # The DB read half runs here, not inside the offloaded thread
+            # (self.cursor is thread-affined) - only the pure drawing that
+            # depends on it is actually offloaded.
+            finals_inputs = self._grandFinalsRenderInputs(guild_id, tournament)
+            if finals_inputs is not None:
+                finals_image = await asyncio.to_thread(
+                    self._buildGrandFinalsImage, tournament, *finals_inputs, guild_name
+                )
                 await channel.send(files=[self._imageToFile(finals_image, "grand_finals.png")])
 
     async def printBracketHelper(self, ctx):
@@ -4579,12 +4638,16 @@ class helpers():
                 "No tournament set up for this server - use /tournament-create first."
             )
             return
-        await ctx.response.send_message(
-            self.renderBracketText(tournament, ctx.guild.id),
-            files=self.renderBracketImages(tournament, ctx.guild.name)
-        )
-        finals_image = self._renderGrandFinalsImage(ctx.guild.id, tournament, ctx.guild.name)
-        if finals_image is not None:
+        bracket_files = await asyncio.to_thread(self.renderBracketImages, tournament, ctx.guild.name)
+        await ctx.response.send_message(self.renderBracketText(tournament, ctx.guild.id), files=bracket_files)
+        # The DB read half runs here, not inside the offloaded thread
+        # (self.cursor is thread-affined) - only the pure drawing that
+        # depends on it is actually offloaded.
+        finals_inputs = self._grandFinalsRenderInputs(ctx.guild.id, tournament)
+        if finals_inputs is not None:
+            finals_image = await asyncio.to_thread(
+                self._buildGrandFinalsImage, tournament, *finals_inputs, ctx.guild.name
+            )
             await ctx.channel.send(files=[self._imageToFile(finals_image, "grand_finals.png")])
 
     # "Where in the tournament is this match" — the matchup graphic's
@@ -4615,10 +4678,10 @@ class helpers():
         tournament = self.getTournament(guild_id)
         round_label = self._matchRoundLabel(tournament, round_index, bracket_type)
         guild_name = channel.guild.name if channel.guild is not None else None
-        matchup_file = self._imageToFile(
-            self._renderMatchupImage(match_id, team1, team2, round_label, tournament.get_name(), guild_name),
-            f"match_{match_id}_vs.png"
+        matchup_image = await asyncio.to_thread(
+            self._renderMatchupImage, match_id, team1, team2, round_label, tournament.get_name(), guild_name
         )
+        matchup_file = self._imageToFile(matchup_image, f"match_{match_id}_vs.png")
         msg = await channel.send(
             f"**Match #{match_id}:** {team1.get_name()} vs {team2.get_name()} - press Ready below "
             "when ready to play (either captain)!",
@@ -4648,15 +4711,15 @@ class helpers():
         tournament = self.getTournament(guild_id)
         round_label = self._matchRoundLabel(tournament, round_index, bracket_type)
         guild_name = channel.guild.name if channel.guild is not None else None
-        matchup_file = self._imageToFile(
-            self._renderMatchupImage(match_id, team1, team2, round_label, tournament.get_name(), guild_name),
-            f"match_{match_id}_vs.png"
+        matchup_image = await asyncio.to_thread(
+            self._renderMatchupImage, match_id, team1, team2, round_label, tournament.get_name(), guild_name
         )
+        matchup_file = self._imageToFile(matchup_image, f"match_{match_id}_vs.png")
         msg = await channel.send(
-            f"**Match #{match_id}:** {team1.get_name()} vs {team2.get_name()} - press Team 1 if "
-            f"{team1.get_name()} won, or Team 2 if {team2.get_name()} won.",
+            f"**Match #{match_id}:** {team1.get_name()} vs {team2.get_name()} - press the winning "
+            "team's own button below.",
             file=matchup_file,
-            view=TournamentMatchReportView(self),
+            view=TournamentMatchReportView(self, team1.get_name(), team2.get_name()),
         )
 
         self.cursor.execute(
@@ -5226,6 +5289,7 @@ class helpers():
         self.update(guild_id, "active_tournament_match_id", match_id)
 
         await interaction.response.defer()
+        await self._clearMessageButtons(interaction.message)
         await channel.send(f"**Match #{match_id}:** {team1.get_name()} vs {team2.get_name()} is starting!")
         await self._openBetting(guild_id, channel)
 
@@ -5284,7 +5348,9 @@ class helpers():
         team2.deserializeTeam(team2_ser)
         name = team1.get_name() if winning_team == 1 else team2.get_name()
 
-        view = ConfirmTournamentMatchReportView(self, guild_id, match_id, winning_team, interaction.channel_id)
+        view = ConfirmTournamentMatchReportView(
+            self, guild_id, match_id, winning_team, interaction.channel_id, report_message=interaction.message
+        )
         await interaction.response.send_message(
             f"**{name}** reported as the winner of Match #{match_id} - Confirm to finalize it, or "
             "Cancel to report again.",
@@ -6771,7 +6837,7 @@ class helpers():
         team = self.getTeamById(guild_id, team_id)
         if team is None:
             return
-        card_image = self._renderTeamCardImage(guild_name, team)
+        card_image = await asyncio.to_thread(self._renderTeamCardImage, guild_name, team)
         file = self._imageToFile(card_image, "team_card.png")
 
         embed = discord.Embed(color=discord.Color.gold())
@@ -7171,114 +7237,19 @@ class helpers():
             f"You claimed your daily {DAILY_GOLD_AMOUNT} gold! Your balance is now {new_balance}."
         )
 
-    # TEMPORARY: backs /dev-give-gold (see bot.py's DEV_USER_ID guard,
-    # which is the only thing gating who can reach this) — remove both
-    # once no longer needed for testing.
-    async def devGiveGoldHelper(self, ctx):
-        guild_id = ctx.guild.id
-        user_id = ctx.user.id
-
-        self.ensureEconomyRow(guild_id, user_id, ctx.user.name)
-        self.cursor.execute(
-            "UPDATE economy SET balance = balance + ? WHERE guildId=? AND userId=?",
-            (DEV_GIVE_GOLD_AMOUNT, guild_id, user_id)
-        )
-        self.db.commit()
-
-        new_balance = self.getEconomy(guild_id, user_id, "balance")
-        await ctx.response.send_message(
-            f"Gave yourself {DEV_GIVE_GOLD_AMOUNT} gold! Your balance is now {new_balance}."
-        )
-
-    # TEMPORARY: backs /dev-test-role-balance (see bot.py's DEV_USER_ID
-    # guard) — a dry run of formRoleBalancedTeams against real elo, without
-    # creating a game, moving anyone, or touching team1/team2/mode/
-    # is_ranked, so the balancing logic can be sanity-checked without
-    # needing 10 people in voice at once. Pads a short voice channel out
-    # with other non-bot guild members (need not be online), clearly
-    # labelled as fill-ins in the reply. Remove this command (and
-    # devTestRoleBalanceHelper) once no longer needed for testing.
-    async def devTestRoleBalanceHelper(self, ctx):
-        guild_id = ctx.guild.id
-        voice_members = [m for m in ctx.user.voice.channel.members if not m.bot]
-
-        fill_ins = []
-        for member in ctx.guild.members:
-            if len(voice_members) + len(fill_ins) >= 10:
-                break
-            if member.bot or member in voice_members:
-                continue
-            fill_ins.append(member)
-
-        members = (voice_members + fill_ins)[:10]
-        if len(members) < 10:
-            await ctx.response.send_message(
-                f"Need 10 distinct non-bot guild members to test with, only found {len(members)}."
-            )
-            return
-
-        default_elo = self._defaultEloForGuild(guild_id)
-        members_with_elo = []
-        for member in members:
-            self.ensureEconomyRow(guild_id, member.id, member.name)
-            elo = self.getEconomy(guild_id, member.id, "elo")
-            members_with_elo.append((member, elo if elo is not None else default_elo))
-
-        # Most test/fill-in members have never run /setup, so without this
-        # they'd all come back "neutral" and the preview would never
-        # actually exercise the liked/disliked tiers. Anyone with no real
-        # preference on file gets a made-up liked role for the length of
-        # this call only — restored back to "no preference" in the finally
-        # block right after, since it's fake data invented purely for this
-        # dry run and shouldn't leak into that player's real /setup
-        # standing. ROLE_BALANCE_TEST_DISLIKE_COUNT of them also get a
-        # made-up disliked role, so the preview reliably shows the bigger
-        # disliked-role penalty at work instead of leaving it to chance
-        # whether any random run happens to roll one.
-        needs_preference = [
-            member for member, _elo in members_with_elo
-            if not any(self.getRolePreferences(guild_id, member.id))
-        ]
-        dislike_count = min(ROLE_BALANCE_TEST_DISLIKE_COUNT, len(needs_preference))
-        dislikers = {m.id for m in random.sample(needs_preference, dislike_count)}
-
-        randomized_ids = set()
-        for member in needs_preference:
-            fake_liked = random.choice(SETUP_ROLE_NAMES)
-            other_roles = [role for role in SETUP_ROLE_NAMES if role != fake_liked]
-            fake_disliked = [random.choice(other_roles)] if member.id in dislikers else []
-            self._applySetupRolePreferences(guild_id, member.id, [fake_liked], fake_disliked)
-            randomized_ids.add(member.id)
-
-        try:
-            side_a, side_b = self.formRoleBalancedTeams(guild_id, members_with_elo)
-        finally:
-            for user_id in randomized_ids:
-                self._applySetupRolePreferences(guild_id, user_id, [], [])
-
-        lines = ["**Role balance preview** (dry run - nothing was created or moved)"]
-        if fill_ins:
-            names = ", ".join(member.name for member in fill_ins)
-            lines.append(f"Filled in {len(fill_ins)} non-voice member(s) to reach 10: {names}")
-        if randomized_ids:
-            lines.append(
-                f"{len(randomized_ids)} player(s) had no real /setup preferences, so a random liked/disliked "
-                "role was made up for them just for this preview (marked with *)."
-            )
-
-        for label, side in (("Side A", side_a), ("Side B", side_b)):
-            total = sum(entry[4] for entry in side)
-            lines.append(f"\n**{label}** (total effective elo: {total})")
-            for member, elo, role, tier, effective_elo in side:
-                marker = "*" if member.id in randomized_ids else ""
-                lines.append(f"{role}: {member.name}{marker} - {tier} ({elo} -> {effective_elo})")
-
-        diff = abs(sum(entry[4] for entry in side_a) - sum(entry[4] for entry in side_b))
-        lines.append(f"\nEffective elo gap between sides: {diff}")
-
-        await ctx.response.send_message("\n".join(lines))
-
     # ---------------- Betting ----------------
+
+    # user_ids from the current roster's own disliked_role_user_ids column
+    # (see rankedTeamHelper) — whoever got stuck with a role they marked
+    # disliked when this team1/team2 split was formed, for computeGameDeltas
+    # to credit the ROLE_BALANCE_DISLIKED_ROLE_WIN_ELO_MULTIPLIER bonus to
+    # if they win. Empty for a roleless split, a casual game, or any roster
+    # formed before this column existed.
+    def _dislikedRoleUserIds(self, guild_id):
+        raw = self.get(guild_id, "disliked_role_user_ids")
+        if not raw:
+            return frozenset()
+        return frozenset(int(uid) for uid in raw.split(","))
 
     # Returns [(user_id, name), ...] for a team column ("team1"/"team2"), or
     # [] if that side hasn't been set up — never crashes on an unset column,
@@ -7495,6 +7466,11 @@ class helpers():
 
         self.update(guild_id, "betting_state", "OPEN")
         self.update(guild_id, "betting_channel_id", channel.id)
+        # Read back by reconcileStaleBettingWindows (called from on_ready)
+        # to work out how much of the window was actually left if the bot
+        # restarts mid-window - the in-memory timer task below doesn't
+        # survive that, only a process reconnect.
+        self.update(guild_id, "betting_opened_at", int(time.time()))
 
         team1_name = self.getRosterName(guild_id, "team1", "Team 1", escape=False)
         team2_name = self.getRosterName(guild_id, "team2", "Team 2", escape=False)
@@ -7521,16 +7497,22 @@ class helpers():
         task = asyncio.create_task(self._bettingTimer(guild_id, channel, duration))
         self.bettingTasks[guild_id] = task
 
-    # Just closes the betting window once the configured duration elapses —
-    # the winner-report message (and its reactions) already went out with
-    # the "betting is open" one in _openBetting, so there's nothing left
-    # for this to post beyond the closed notice itself.
+    # The actual "close it" side effect a betting window's own expiry has —
+    # split out of _bettingTimer so reconcileStaleBettingWindows can reach
+    # it directly too, for a window whose remaining time had already
+    # elapsed by the time the bot came back up. The winner-report message
+    # (and its buttons) already went out with the "betting is open" one in
+    # _openBetting, so there's nothing left for this to post beyond the
+    # closed notice itself.
+    async def _closeBettingWindow(self, guild_id, channel):
+        self.update(guild_id, "betting_state", "CLOSED")
+        await channel.send("🔒 Betting is now closed! No more wagers will be accepted for this game.")
+
+    # Just waits out the configured duration, then closes the window.
     async def _bettingTimer(self, guild_id, channel, duration):
         try:
             await asyncio.sleep(duration)
-
-            self.update(guild_id, "betting_state", "CLOSED")
-            await channel.send("🔒 Betting is now closed! No more wagers will be accepted for this game.")
+            await self._closeBettingWindow(guild_id, channel)
         except asyncio.CancelledError:
             # CANCEL_GAME_EMOJI (or a fresh ▶️ click) ended the game before
             # betting closed — cancelBettingHelper already handles the
@@ -7548,6 +7530,48 @@ class helpers():
         task = self.bettingTasks.pop(guild_id, None)
         if task is not None and not task.done():
             task.cancel()
+
+    # Called once from on_ready. _bettingTimer's own countdown is only ever
+    # an in-memory asyncio.Task (self.bettingTasks) - lost on a genuine
+    # process restart, though not on a mere gateway reconnect, where
+    # on_ready can also fire but self.bettingTasks is untouched (guarded
+    # against below by skipping any guild that already has a live task,
+    # so a reconnect can't stomp a window that was never actually
+    # interrupted). Without this, a guild whose betting_state was OPEN at
+    # the moment of a restart would stay OPEN forever - nobody left to
+    # ever flip it to CLOSED, so /wager would keep accepting new bets
+    # indefinitely past when the timer should have closed it. Resumes the
+    # remaining time via betting_opened_at rather than just closing
+    # outright, so a window that had, say, 55 of its 60 seconds left when
+    # the bot restarted still gets roughly that long rather than being cut
+    # short.
+    async def reconcileStaleBettingWindows(self, client):
+        self.cursor.execute(
+            "SELECT guildId, betting_channel_id, betting_opened_at FROM servers WHERE betting_state='OPEN'"
+        )
+        rows = self.cursor.fetchall()
+        for guild_id, channel_id, opened_at in rows:
+            if guild_id in self.bettingTasks:
+                continue
+            channel = client.get_channel(channel_id) if channel_id is not None else None
+            if channel is None:
+                # Channel deleted, or not yet in cache - leave the window
+                # open rather than guessing; it's still fully resolvable
+                # by hand via the report/cancel buttons either way.
+                continue
+
+            duration = self._getBettingTimerSeconds(guild_id)
+            # opened_at is only unset for a window that was already open
+            # before this column existed - treated as already expired
+            # rather than guessing how long ago it actually opened.
+            elapsed = (int(time.time()) - opened_at) if opened_at is not None else duration
+            remaining = duration - elapsed
+
+            if remaining > 0:
+                task = asyncio.create_task(self._bettingTimer(guild_id, channel, remaining))
+                self.bettingTasks[guild_id] = task
+            else:
+                await self._closeBettingWindow(guild_id, channel)
 
     # Undoes _handleWinnerReportPick's own synchronous betting_message_id
     # clear once a pending winner confirmation is cancelled or times out,
@@ -7722,16 +7746,19 @@ class helpers():
         team2_name = self.getRosterName(guild_id, "team2", "Team 2")
         elo_lookup = self.getEloLookup(guild_id, team1_roster + team2_roster)
         is_ranked = bool(self.get(guild_id, "is_ranked"))
+        disliked_role_user_ids = self._dislikedRoleUserIds(guild_id)
 
         deltas, summary = self.computeGameDeltas(
             allWagers, team1_roster, team2_roster, elo_lookup, winning_team, is_ranked,
             default_elo=self._defaultEloForGuild(guild_id),
             team1_name=team1_name, team2_name=team2_name,
+            disliked_role_user_ids=disliked_role_user_ids,
         )
         newly_unlocked = self.applyGameDeltas(guild_id, deltas)
         self.saveLastResult(
             guild_id, winning_team, allWagers, team1_roster, team2_roster, deltas, is_ranked,
             team1_name=team1_name, team2_name=team2_name,
+            disliked_role_user_ids=disliked_role_user_ids,
         )
 
         await channel.send(self.formatResultMessage(winning_team, summary))
@@ -7832,6 +7859,7 @@ class helpers():
         await self._acceptDuel(
             guild_id, duel_id, channel_id, challenger_id, challenger_name, target_id, target_name, amount
         )
+        await self._clearMessageButtons(interaction.message)
 
     # DuelResultView's Challenger Won/Target Won button callback. A result
     # no longer pays out immediately - it posts a ConfirmDuelResultView
@@ -7866,7 +7894,7 @@ class helpers():
         self.db.commit()
 
         winner_name = challenger_name if winner_is_challenger else target_name
-        view = ConfirmDuelResultView(self, duel_id, winner_is_challenger)
+        view = ConfirmDuelResultView(self, duel_id, winner_is_challenger, report_message=interaction.message)
         await interaction.response.send_message(
             f"**{winner_name}** reported as the winner - Confirm to pay out the wager, or Cancel to "
             "report again.",
@@ -8020,7 +8048,7 @@ class helpers():
     #   summary: display-only info for formatResultMessage().
     def computeGameDeltas(
         self, wagers, team1_roster, team2_roster, elo_lookup, winning_team, is_ranked=False,
-        default_elo=DEFAULT_ELO, team1_name="Team 1", team2_name="Team 2",
+        default_elo=DEFAULT_ELO, team1_name="Team 1", team2_name="Team 2", disliked_role_user_ids=frozenset(),
     ):
         deltas = {}
 
@@ -8059,6 +8087,7 @@ class helpers():
         elo_changes = []
         winner_count = 0
         loser_count = 0
+        disliked_role_bonus_players = []
         if team1_roster or team2_roster:
             elo_delta1 = elo_delta2 = 0
             if is_ranked:
@@ -8072,9 +8101,25 @@ class helpers():
                 elo_delta1 = round(ELO_K_FACTOR * (actual1 - expected1))
                 elo_delta2 = round(ELO_K_FACTOR * ((1 - actual1) - (1 - expected1)))
 
+            # A win on a role marked disliked (see rankedTeamHelper's own
+            # disliked_role_user_ids) earns more than the team-average swing
+            # every teammate gets - a losing player on a disliked role gets
+            # no such break, only a win counts. Multiplies rather than adds
+            # a flat bonus, so it scales with how much elo was actually on
+            # the line that game rather than being a fixed number regardless
+            # of the matchup.
+            def _playerEloDelta(user_id, username, base_delta, is_winning_side):
+                if not (is_ranked and is_winning_side and user_id in disliked_role_user_ids):
+                    return base_delta
+                boosted = round(base_delta * ROLE_BALANCE_DISLIKED_ROLE_WIN_ELO_MULTIPLIER)
+                if boosted != base_delta:
+                    disliked_role_bonus_players.append((username, boosted))
+                return boosted
+
             for user_id, username in team1_roster:
                 bump(
-                    user_id, username, elo=elo_delta1,
+                    user_id, username,
+                    elo=_playerEloDelta(user_id, username, elo_delta1, winning_team == 1),
                     balance=GAME_WIN_GOLD if winning_team == 1 else GAME_LOSS_GOLD,
                     game_wins=1 if winning_team == 1 else 0,
                     game_losses=0 if winning_team == 1 else 1,
@@ -8083,7 +8128,8 @@ class helpers():
                 )
             for user_id, username in team2_roster:
                 bump(
-                    user_id, username, elo=elo_delta2,
+                    user_id, username,
+                    elo=_playerEloDelta(user_id, username, elo_delta2, winning_team == 2),
                     balance=GAME_WIN_GOLD if winning_team == 2 else GAME_LOSS_GOLD,
                     game_wins=1 if winning_team == 2 else 0,
                     game_losses=0 if winning_team == 2 else 1,
@@ -8104,6 +8150,7 @@ class helpers():
             "no_winning_bets": bool(wagers) and not winning_bettors,
             "winning_bettors": winning_bettors,
             "elo_changes": elo_changes,
+            "disliked_role_bonus_players": disliked_role_bonus_players,
             "winner_gold_count": winner_count,
             "loser_gold_count": loser_count,
             "team1_name": team1_name,
@@ -8210,6 +8257,12 @@ class helpers():
                 "Elo: " + ", ".join(f"{name} {delta:+d}" for name, delta in summary["elo_changes"])
             )
 
+        if summary.get("disliked_role_bonus_players"):
+            lines.append(
+                "Disliked-role win bonus: "
+                + ", ".join(f"{name} {delta:+d}" for name, delta in summary["disliked_role_bonus_players"])
+            )
+
         winner_count = summary.get("winner_gold_count", 0)
         loser_count = summary.get("loser_gold_count", 0)
         if winner_count or loser_count:
@@ -8231,7 +8284,7 @@ class helpers():
     # a new result overwrites the previous snapshot.
     def saveLastResult(
         self, guild_id, winning_team, wagers, team1_roster, team2_roster, deltas, is_ranked=False,
-        team1_name="Team 1", team2_name="Team 2",
+        team1_name="Team 1", team2_name="Team 2", disliked_role_user_ids=frozenset(),
     ):
         payload = {
             "winning_team": winning_team,
@@ -8242,6 +8295,11 @@ class helpers():
             "is_ranked": is_ranked,
             "team1_name": team1_name,
             "team2_name": team2_name,
+            # So reportCorrectWinnerHelper's own recomputation still credits
+            # whoever actually played a disliked role this game, no matter
+            # how much later the correction happens or what team1/team2
+            # have moved on to since.
+            "disliked_role_user_ids": list(disliked_role_user_ids),
         }
         self.cursor.execute(
             "INSERT OR REPLACE INTO last_result(guildId, data) VALUES(?, ?)",
@@ -8261,6 +8319,7 @@ class helpers():
         payload["team2_roster"] = [tuple(p) for p in payload["team2_roster"]]
         payload["deltas"] = {int(uid): d for uid, d in payload["deltas"].items()}
         payload.setdefault("is_ranked", False)
+        payload["disliked_role_user_ids"] = frozenset(payload.get("disliked_role_user_ids", []))
         return payload
 
     # Fully undoes the last resolved game — reverses last["deltas"] the
@@ -8357,16 +8416,19 @@ class helpers():
         team1_roster = last["team1_roster"]
         team2_roster = last["team2_roster"]
         is_ranked = last["is_ranked"]
+        disliked_role_user_ids = last["disliked_role_user_ids"]
         elo_lookup = self.getEloLookup(guild_id, team1_roster + team2_roster)
         new_deltas, summary = self.computeGameDeltas(
             last["wagers"], team1_roster, team2_roster, elo_lookup, correct_team, is_ranked,
             default_elo=self._defaultEloForGuild(guild_id),
             team1_name=team1_name, team2_name=team2_name,
+            disliked_role_user_ids=disliked_role_user_ids,
         )
         newly_unlocked = self.applyGameDeltas(guild_id, new_deltas)
         self.saveLastResult(
             guild_id, correct_team, last["wagers"], team1_roster, team2_roster, new_deltas, is_ranked,
             team1_name=team1_name, team2_name=team2_name,
+            disliked_role_user_ids=disliked_role_user_ids,
         )
 
         previous_name = team1_name if last["winning_team"] == 1 else team2_name
@@ -9001,7 +9063,8 @@ class helpers():
         except Exception:
             avatar_image = Image.new("RGBA", (CARD_AVATAR_SIZE, CARD_AVATAR_SIZE), BRACKET_BACKGROUND_CENTER)
 
-        card_image = self._renderTradingCardImage(
+        card_image = await asyncio.to_thread(
+            self._renderTradingCardImage,
             guild_name, display_name, avatar_image, settings, stats, teams, username=member.name
         )
         return self._imageToFile(card_image, "trading_card.png")
@@ -9344,7 +9407,7 @@ class helpers():
         cached = self._cachedPreviewFiles(stem)
 
         if not cached:
-            images = self._renderPreviewImages(preview_type)
+            images = await asyncio.to_thread(self._renderPreviewImages, preview_type)
             os.makedirs(PREVIEW_DIR, exist_ok=True)
             for i, image in enumerate(images, start=1):
                 path = os.path.join(PREVIEW_DIR, f"{stem}-{i}.png")
@@ -9904,7 +9967,8 @@ class helpers():
             avatar_image = Image.new("RGBA", (CARD_AVATAR_SIZE, CARD_AVATAR_SIZE), BRACKET_BACKGROUND_CENTER)
 
         username = member.name if member is not None else None
-        card_image = self._renderTradingCardImage(
+        card_image = await asyncio.to_thread(
+            self._renderTradingCardImage,
             guild_name, display_name, avatar_image, settings, stats, teams, username=username
         )
         file = self._imageToFile(card_image, "trading_card.png")
@@ -10117,8 +10181,10 @@ class helpers():
         return max(1, -(-len(entries) // LEADERBOARD_PAGE_SIZE))  # ceil division
 
     # Builds one page of the leaderboard embed. `stat` is None for the
-    # default overview (sorted by elo, showing elo/record together) or one
-    # of LEADERBOARD_STAT_LABELS for a single ranked stat.
+    # default overview (sorted by elo, showing elo alongside the ranked
+    # win/loss record — not the combined game_wins/game_losses total, since
+    # elo itself only ever moves from ranked games) or one of
+    # LEADERBOARD_STAT_LABELS for a single stat.
     def _renderLeaderboardEmbed(self, guild_name, entries_sorted, stat, order, page):
         total_pages = self._leaderboardPageCount(entries_sorted)
         start = page * LEADERBOARD_PAGE_SIZE
@@ -10135,7 +10201,7 @@ class helpers():
             if stat is None:
                 lines.append(
                     f"**#{rank}.** {entry['username']} - Elo: {entry['elo']} | "
-                    f"Record: {entry['game_wins']}W-{entry['game_losses']}L"
+                    f"Ranked: {entry['ranked_wins']}W-{entry['ranked_losses']}L"
                 )
             else:
                 lines.append(

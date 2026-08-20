@@ -58,6 +58,160 @@ commands. For that, see shockwave.netlify.app.
   per-guild keeps registration effectively instant while still needing zero
   server-specific configuration.
 
+### Logging and database backups
+
+`BASE_DIR` (`os.path.dirname(os.path.abspath(__file__))`) anchors every path
+`bot.py` touches — the log file, `main.db`, the backups folder, `token.txt` —
+to this file's own directory rather than the process's current working
+directory, matching how `helper.py`'s own asset paths already work (see
+`TEAM_LOGO_DIR`/`FONTS_DIR`/etc.). A relative path resolves against whatever
+directory the process happened to launch from: easy to get right on a dev
+machine (always `cd`-ing into the project folder first) and easy to get wrong
+under a service manager that doesn't set `WorkingDirectory` the same way.
+`token.txt` is also opened with `encoding="utf-8"` explicitly rather than
+whatever the platform's default text encoding happens to be (Windows' ANSI
+codepage vs. Linux's near-universal UTF-8) — harmless for a plain-ASCII token
+today, but not left to chance either.
+
+`bot.py` configures the root logger at import time: a custom
+`MaxLinesFileHandler` (`shockwave.log`) plus a plain console handler, both
+sharing one timestamped formatter. Configuring the root logger rather than
+just a `shockwave`-named one means discord.py's own internal logging
+(gateway, HTTP) lands in the same file, not just this project's own
+`logger.info`/`logger.error` calls. `shockwave.log*` is gitignored, same
+reasoning as `main.db` itself.
+
+`MaxLinesFileHandler` caps the file at `LOG_FILE_MAX_LINES` (10,000) lines,
+dropping the oldest ones once it grows past that — a single,
+chronologically-ordered file instead of `logging.handlers.RotatingFileHandler`'s
+size-based rotation into separate `shockwave.log`/`.1`/`.2`/`.3` files. It
+seeds its own in-memory line count from whatever's already on disk once, at
+construction (a previous run's leftover log), rather than assuming an empty
+file, so a trim that's already overdue happens on the very first line this
+run emits rather than only once the file grows past the cap all over again.
+Trimming itself (`_trim`) closes the handler's own stream, rewrites the file
+with just the last `max_lines` lines kept, and reopens it — no locking of its
+own, since `logging.Handler.handle()` already wraps every `emit()` call (and
+so this, reached from inside one) in `self.acquire()`/`release()`.
+
+`backupDatabaseTask` (a `discord.ext.tasks.loop(hours=24)`, started from
+`on_ready` the same way `rotateStatus` is, and guarded against double-starting
+on a reconnect the same way) snapshots `main.db` into
+`data/guildData/backups/` once a day, then deletes any backup older than
+`BACKUP_RETENTION_DAYS` (7). It uses `mainDB.backup(backup_conn)` — sqlite3's
+own point-in-time backup API — rather than a plain file copy, since `main.db`
+is a live connection other code can be reading/writing between event loop
+ticks and copying the raw file risks capturing it mid-write. It runs directly
+on the event loop rather than via `asyncio.to_thread`: `mainDB` was opened
+with the default `check_same_thread=True`, so handing it to a different
+thread would raise outright, and backing up a database this size finishes
+well within the time a trading-card render already blocks the loop for.
+`data/guildData/backups/` is gitignored, same reasoning as `main.db`.
+
+`restore_backup.py`, run standalone (`python restore_backup.py`) with the bot
+stopped, is how a host reverts to one of those snapshots — no in-Discord
+command for it, since `main.db` is one shared database across every guild
+the bot serves, and a live restore triggered by one server's admin would
+silently roll back every other server's data too. It lists backups
+newest-first with their timestamp and size, restores whichever one is
+picked (by number or filename), and — before overwriting anything — copies
+the current live `main.db` into `data/guildData/backups/` as
+`main-before-restore-<timestamp>.db`, so restoring the wrong backup, or
+restoring at all, is itself undoable the same way.
+
+`LOG_LINE_MAX_LENGTH` (500) caps any single log line - a serialized team
+roster or a command's own object-repr params can run long, and one oversized
+line shouldn't be able to dominate the file. `_truncateForLog` is the shared
+helper that enforces it, used by the database, command, and completion
+logging below.
+
+Every database mutation is logged too, without needing to instrument each of
+the file's many individual `cursor.execute()` calls: `_logDatabaseStatement`
+is registered via `mainDB.set_trace_callback`, sqlite3's own hook that
+receives the text of every statement actually executed on the connection,
+with bound parameters already expanded inline rather than left as raw `?`
+placeholders. It filters to just `INSERT`/`UPDATE`/`DELETE` — a `SELECT`, or
+the trace callback's own `"BEGIN "` for an implicit transaction, isn't a
+mutation worth a permanent record. `logger._suppress_db_logging` mutes it
+during `_runStartupSelfTests` below, so the thousands of test-fixture writes
+a full suite run produces against its own in-memory databases don't flood the
+real log — parked on the shared `"shockwave"` logger object rather than a
+plain module global specifically because `_import_bot_module()` (see below)
+re-executes this whole file, under a fresh set of module globals, for every
+nested test it imports; `logging.getLogger(name)` returns the same singleton
+regardless of which reimport asks for it, so that's the one piece of state
+guaranteed to still be visible from inside those reimports. The line that
+initializes the flag guards itself with `hasattr` rather than unconditionally
+setting it to `False`, since that same line runs again on every nested
+reimport and would otherwise clobber `_runStartupSelfTests`' own `True` back
+to `False` the moment the very first nested test reimports the file.
+
+`LoggingCommandTree` (`bot.py`'s `tree`, subclassing `app_commands.CommandTree`)
+overrides `interaction_check` — a single global hook discord.py's own
+`CommandTree._call` runs before dispatching *any* application command in the
+tree — to log every real command invocation (name, params, calling user,
+guild) in one place, instead of instrumenting each of the ~40
+`@tree.command` functions individually. `interaction.command`/`.namespace`
+are independently-resolved cached properties on `Interaction`, so both are
+already available at this point even though the tree hasn't actually invoked
+the command yet. `interaction_check` also fires for autocomplete
+interactions (typing into a field with `@app_commands.autocomplete`), which
+would turn every keystroke into a logged "command called" - filtered out by
+checking `interaction.type is discord.InteractionType.application_command`.
+The override always returns `True` (matching the default implementation's
+behavior), so it never blocks anything; per-command checks like `/clear`'s
+`has_permissions` still run separately afterward, unaffected.
+
+The whole body is wrapped in its own `try`/`except Exception`, logging and
+swallowing rather than letting anything through. `interaction.command`/
+`.namespace` run discord.py's real option-resolution machinery — nothing a
+`FakeInteraction`-based test can faithfully exercise — and
+`CommandTree._from_interaction`'s own wrapper only catches `AppCommandError`
+around the whole dispatch, so anything else raised here previously escaped
+uncaught: the interaction died silently, Discord showed "This interaction
+failed", and neither `on_app_command_error` nor this file's own log ever
+saw it. This bit in production (a real `/team-create` call failing with
+nothing logged anywhere) before the `try`/`except` was added — a
+logging-only hook, with no business reason to ever fail, needs to be
+structurally unable to take down the feature it's just supposed to be
+watching.
+
+A successful completion is logged separately, from `on_app_command_completion`
+— an event discord.py dispatches itself only once a command has actually run
+to completion without raising (see `CommandTree._call`), so it only ever
+fires for a genuine success, never a command that errored (that path goes
+through `on_app_command_error` instead) or one `interaction_check` rejected
+before it ran.
+
+`_runStartupSelfTests` runs the full `tests.py` suite before `client.run(token)`
+in the `if __name__ == "__main__":` guard. A passing run stays silent - only a
+failure is worth a log entry - so a broken deploy shows up in the log
+immediately rather than only being noticed once something breaks in
+production, without a "tests passed" line cluttering every single normal
+startup. A failing suite is logged as a warning naming exactly which tests
+failed (plus the full verbose output at debug level) rather than aborting
+startup: a real deploy should still come up and serve players even if, say, a
+test itself is stale, rather than a self-test regression taking the whole bot
+down. The `import
+tests` inside it is deliberately lazy (only reached when this file is run
+directly) rather than a top-level import, since `tests.py`'s own
+`_import_bot_module()` re-imports this file under the name `"bot"` for its
+own `BotModuleTestCase` tests — a top-level `import tests` here would make
+that circular. That same re-import (with `sqlite3.connect`/`open` patched
+away from the real database/token) is also what keeps running the suite from
+here safe: it never touches the real `main.db` or Discord, no matter how
+deep the self-test run's own nested re-imports go.
+
+`_runStartupSelfTests` also raises the `"asyncio"` and `"discord"` loggers to
+`ERROR` for the run's duration, restoring their prior levels after (same
+try/finally shape as `logger._suppress_db_logging` above). `IsolatedAsyncioTestCase`
+(every async test in the suite) always runs its event loop with `debug=True`,
+which logs a `WARNING` through the `"asyncio"` logger for any callback slower
+than 100ms - meaningless test-fixture timing noise, not a real bug, but both
+loggers propagate to the same root handlers this file's own `logging.basicConfig`
+call configured, same as `"shockwave"` itself, so without this they'd land
+straight in this file's own log every time the suite runs.
+
 ### Team formation
 
 `/make-teams` and `/captains` both build two `Team` objects seeded from whoever
@@ -112,6 +266,23 @@ pairwise role swaps between players and keeping any swap that lets
 `_splitRoleBalancedTeams` (a brute force over which of each role's two players
 lands on which side, 32 combinations) find a tighter effective-elo split than
 before, stopping once a full pass turns up no further improvement.
+
+Unlike those two, `ROLE_BALANCE_DISLIKED_ROLE_WIN_ELO_MULTIPLIER` (1.5) *does*
+touch real elo: `rankedTeamHelper` records every user_id who ended up on a
+disliked role in that particular split (`servers.disliked_role_user_ids`, a
+plain comma-separated list — set alongside `team1`/`team2`, so it lives and
+clears with them the same way, including surviving a `/reuse`), and
+`computeGameDeltas` multiplies up a winning player's own elo delta if their
+id is in that set for the game just resolved. Only a win earns it — a loss on
+a disliked role gets no such break, just the plain team-average delta every
+teammate gets. It's a reward for actually pulling off a win on a less-wanted
+assignment, on top of whatever the normal team-average swing already gave
+that player; `formatResultMessage` lists who earned it and how much as its
+own "Disliked-role win bonus" line whenever `summary["disliked_role_bonus_players"]`
+isn't empty. The bonus is snapshotted into `last_result` too (see
+`saveLastResult`/`getLastResult`), so `/report-correct-winner` recomputes it
+correctly for whoever the real winner turns out to be, no matter how much
+later the correction happens or what `team1`/`team2` have moved on to since.
 
 Forming a roster through any of these always runs `clearTeamsHelper` first,
 which resets `is_ranked` to 0 among other things. Only `ranked:true` sets it
@@ -205,7 +376,16 @@ bot keeps responding to other commands, so the countdown runs as its own
 `asyncio.create_task` (`_bettingTimer`), tracked per-guild in
 `self.bettingTasks` so Cancel Game or a fresh Start/Start (no move) click can
 cancel it instead of leaving it to fire later against a game that no longer
-exists.
+exists. `_openBetting` also stamps `betting_opened_at` (unix seconds) on the
+`servers` row - `self.bettingTasks` is only ever in-memory, lost on a genuine
+process restart (though not a mere gateway reconnect, where it's untouched).
+Without that timestamp, a guild that had `betting_state=OPEN` at the moment of
+a restart would stay `OPEN` forever, since nobody would ever flip it to
+`CLOSED` again. `reconcileStaleBettingWindows`, called once from `on_ready`,
+resumes any such window with whatever time it actually had left (or closes it
+outright if that time had already passed), skipping any guild that already
+has a live task tracked (the reconnect case) so it can't stomp a window that
+was never actually interrupted.
 
 The headline text comes from whichever `mode` string
 (`"Normal"`/`"Ranked"`/`"Captains"`/`"Ranked Captains"`) the most recent
@@ -418,13 +598,16 @@ message id.
 Nothing is escrowed at challenge time, only a balance sanity-check, so a
 challenge that's never accepted doesn't leave anyone's gold stuck. Both
 players' gold is only locked once the target presses Accept
-(`DuelAcceptView`), at which point a second message goes out with a
-`DuelResultView` (Challenger Won/Target Won buttons). Picking a result posts a
-`ConfirmDuelResultView` rather than paying out immediately - the same
-two-step confirm shape the team-game winner report uses, for the same reason
-(a real gold transfer shouldn't hinge on one accidental click). Both
-`DuelAcceptView` and `DuelResultView` are persistent, same reasoning as
-`WinnerReportView`; `ConfirmDuelResultView` is a short-lived confirm view like
+(`DuelAcceptView`), which also strips that Accept button via
+`_clearMessageButtons` right after `_acceptDuel` runs, at which point a second
+message goes out with a `DuelResultView` (Challenger Won/Target Won buttons).
+Picking a result posts a `ConfirmDuelResultView` rather than paying out
+immediately - the same two-step confirm shape the team-game winner report
+uses, for the same reason (a real gold transfer shouldn't hinge on one
+accidental click). Confirming there also strips the result message's own
+buttons, matching `ConfirmWinnerReportView`. Both `DuelAcceptView` and
+`DuelResultView` are persistent, same reasoning as `WinnerReportView`;
+`ConfirmDuelResultView` is a short-lived confirm view like
 `ConfirmWinnerReportView`.
 
 ### Leaderboard paging
@@ -738,6 +921,24 @@ jagged line or glyph edge. Every pixel-valued layout constant (font sizes,
 margins, line widths, radii, ...) is already expressed at the supersampled
 scale, so the drawing code itself never has to think about the scale factor.
 
+Every top-level render call (`renderBracketImages`, `_buildGrandFinalsImage`,
+`_renderMatchupImage`, `_renderTeamCardImage`, `_renderTradingCardImage`,
+`_renderPreviewImages`) is invoked via `asyncio.to_thread` from its own async
+caller, not called directly - Pillow's actual drawing work (many draw/text/
+paste calls per image) would otherwise block the event loop, and so every
+other guild's commands, for the whole time one image takes to render.
+`_imageToFile`'s own downscale is left on the main thread, a comparatively
+small cost next to the drawing itself. `_renderGrandFinalsImage` is the one
+render function that also reads from the database (which stage of Grand
+Finals has actually been played) — genuinely unsafe to run from a different
+thread, since `self.cursor` was opened with sqlite3's default
+`check_same_thread=True`. It's split into `_grandFinalsRenderInputs` (the DB
+read, run on the calling thread) and `_buildGrandFinalsImage` (the pure
+drawing, the part that's actually offloaded) for exactly this reason —
+`_renderGrandFinalsImage` itself is a synchronous convenience wrapper around
+both, kept fully synchronous for callers (and tests) that don't need the
+split.
+
 A bracket 16+ teams deep (`BRACKET_TWO_SIDED_MIN_ROUNDS`) renders as two
 mirrored halves converging toward a champion in the center, the same layout a
 printed tournament bracket poster uses, keeping the image roughly square instead
@@ -776,26 +977,29 @@ image's own canvas/header drawing code (`_createBracketCanvas`,
 
 Sequential mode reuses the ordinary game cycle rather than reimplementing it.
 Pressing a match's ready-check button (`TournamentReadyView`, either captain)
-sets `servers.team1`/`team2` to that match's two teams and calls
+sets `servers.team1`/`team2` to that match's two teams, strips the ready-check
+message's own Ready button via `_clearMessageButtons`, and calls
 `_openBetting`, the exact function `RosterActionView`'s own Start handler
-calls, so betting, the Team 1/Team 2 winner report, and payouts all work
-unmodified. The only addition is `active_tournament_match_id`, a column on
-`servers` that's `None` for every ordinary game and only gets set while a
-tournament match is borrowing the cycle. `recordResult` checks it once its
-normal work is done and, if set, hands off to `_resolveTournamentMatch` to
-advance the bracket. `TournamentReadyView`, like every other view backing a
-flow that can sit open indefinitely, is persistent.
+calls, so betting, the winner report, and payouts all work unmodified. The
+only addition is `active_tournament_match_id`, a column on `servers` that's
+`None` for every ordinary game and only gets set while a tournament match is
+borrowing the cycle. `recordResult` checks it once its normal work is done
+and, if set, hands off to `_resolveTournamentMatch` to advance the bracket.
+`TournamentReadyView`, like every other view backing a flow that can sit open
+indefinitely, is persistent.
 
 Simultaneous mode can't reuse that cycle, since `team1`/`team2` and
 `betting_state` are guild-wide singletons and simultaneous mode needs several
 matches live at once. It skips movement entirely and posts every match's own
-`TournamentMatchReportView` (Team 1/Team 2 buttons) at once, scoped by each
-match's own row instead of guild state. Betting still happens, just through a
-second, match-scoped path (`_openConcurrentTournamentBetting`/
+`TournamentMatchReportView` at once, scoped by each match's own row instead of
+guild state. Its two buttons are built per-message from the match's actual
+team names (`_teamButtonLabel`, the same helper/pattern `WinnerReportView`
+uses), not a fixed "Team 1"/"Team 2" label. Betting still happens, just
+through a second, match-scoped path (`_openConcurrentTournamentBetting`/
 `tournament_wagers`) instead of the singleton `wagers` table a normal game
 uses.
 
-A Team 1/Team 2 click on a simultaneous match doesn't resolve it right away
+A team-button click on a simultaneous match doesn't resolve it right away
 either, the same reasoning `ConfirmWinnerReportView` has for a normal game. It
 posts a `ConfirmTournamentMatchReportView` instead
 (`_handleTournamentMatchReportClick`), first flipping the match's `state` from
@@ -807,7 +1011,9 @@ second near-simultaneous click on the same match can't also pass the
 `bettingClosed=1` closes `/wager match_id:` on that match immediately, since
 otherwise it would stay open for the whole confirmation window and let someone
 bet on whichever side just got reported before it's even confirmed. Confirm
-calls `_resolveTournamentMatch` directly. Cancel or a timeout calls
+calls `_resolveTournamentMatch` directly, then strips the original match
+message's own buttons via `_clearMessageButtons`, matching
+`ConfirmWinnerReportView`. Cancel or a timeout calls
 `_restoreTournamentMatchAwaitingResult`, a conditional `UPDATE ... WHERE id=?
 AND state='CONFIRMING'` that puts the match back to `AWAITING_RESULT` so its
 buttons work again, but only if nothing else has resolved it a different way

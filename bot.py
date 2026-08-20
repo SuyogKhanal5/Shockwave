@@ -1,33 +1,179 @@
 # Import Statements
 import random
 import itertools
-import traceback
+import os
 import os.path as path
 import sqlite3
+import logging
+import time
+from datetime import datetime
 import discord
 from discord import app_commands
 from discord.ext import tasks
 from TourneyClasses import Team, Player
 import helper
 
+# Anchors every path below to this file's own directory rather than the
+# process's current working directory - matches helper.py's own asset
+# paths (see TEAM_LOGO_DIR/FONTS_DIR/etc., all built off
+# os.path.dirname(__file__)). A relative path resolves against whatever
+# directory the process happened to be launched from, which is easy to get
+# right by always `cd`-ing into the project folder first on a dev machine,
+# and easy to get wrong under a service manager (e.g. a systemd unit with
+# no WorkingDirectory=) that doesn't set that up the same way.
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Caps shockwave.log at a fixed number of lines rather than
+# RotatingFileHandler's size-based, multi-file rotation - a single,
+# chronologically-ordered file (oldest lines dropped once it grows past
+# LOG_FILE_MAX_LINES) instead of scattered across shockwave.log/.1/.2/.3.
+LOG_FILE_MAX_LINES = 10000
+
+
+class MaxLinesFileHandler(logging.FileHandler):
+    def __init__(self, filename, max_lines, encoding=None):
+        self.max_lines = max_lines
+        super().__init__(filename, mode="a", encoding=encoding)
+        # Seeded once from whatever's already on disk (a previous run's
+        # leftover log), so the very first emit this run already knows
+        # whether a trim is overdue instead of assuming an empty file.
+        self._line_count = self._countLines()
+
+    def _countLines(self):
+        try:
+            with open(self.baseFilename, encoding=self.encoding) as f:
+                return sum(1 for _ in f)
+        except OSError:
+            return 0
+
+    def emit(self, record):
+        super().emit(record)
+        self._line_count += 1
+        if self._line_count > self.max_lines:
+            self._trim()
+
+    # Drops the oldest lines so the file holds exactly max_lines. No
+    # locking of its own - Handler.handle() already wraps every emit()
+    # call (and so this, called from inside one) in self.acquire()/
+    # release(), so this is already safe against a concurrent emit from
+    # another thread.
+    def _trim(self):
+        self.stream.close()
+        with open(self.baseFilename, encoding=self.encoding) as f:
+            lines = f.readlines()
+        kept = lines[-self.max_lines:]
+        with open(self.baseFilename, "w", encoding=self.encoding) as f:
+            f.writelines(kept)
+        self._line_count = len(kept)
+        self.stream = self._open()
+
+
+# Logs to both the console and the line-capped file above — the file is
+# what survives a restart or a run with no attached terminal (e.g. as a
+# background service), which stdout alone doesn't. Configured on the root
+# logger so discord.py's own internal logging (gateway, HTTP) is captured
+# the same way, not just this file's own logger calls.
+LOG_FILE = os.path.join(BASE_DIR, "shockwave.log")
+_log_formatter = logging.Formatter(
+    "[{asctime}] [{levelname:<8}] {name}: {message}", "%Y-%m-%d %H:%M:%S", style="{"
+)
+_file_handler = MaxLinesFileHandler(LOG_FILE, LOG_FILE_MAX_LINES, encoding="utf-8")
+_file_handler.setFormatter(_log_formatter)
+_console_handler = logging.StreamHandler()
+_console_handler.setFormatter(_log_formatter)
+logging.basicConfig(level=logging.INFO, handlers=[_file_handler, _console_handler])
+logger = logging.getLogger("shockwave")
+
 # Get token from text file
 token = ""
 
-with open("token.txt") as f:
+# encoding="utf-8" pinned explicitly rather than left to the platform
+# default text encoding, which differs (e.g. Windows' ANSI codepage vs.
+# Linux's near-universal UTF-8) - a plain ASCII token round-trips fine
+# either way, but there's no reason to leave that to chance.
+with open(os.path.join(BASE_DIR, "token.txt"), encoding="utf-8") as f:
     token = f.readline().strip()
 
 # Connect to Database
-dataFolder = "data/guildData/serverInfo/"
-dbpath = dataFolder + "main.db"
+dataFolder = os.path.join(BASE_DIR, "data", "guildData", "serverInfo")
+dbpath = os.path.join(dataFolder, "main.db")
 
 # sqlite3.connect() creates the database FILE on disk as a side effect of
 # connecting, even if it's empty — this check has to run before connect()
 # or the file will always already exist by the time it's checked, and
 # CREATE TABLE below will never execute, even on a brand new install.
+# makedirs is needed first too - a fresh clone has no data/ tree at all
+# (it's gitignored), and sqlite3.connect() doesn't create missing parent
+# directories, only the file itself.
+os.makedirs(dataFolder, exist_ok=True)
 db_already_existed = path.isfile(dbpath)
 
 mainDB = sqlite3.connect(dbpath)
 cursor = mainDB.cursor()
+
+# A single row change (a long serialized team roster in particular) can run
+# to thousands of characters once its bound parameters are expanded inline
+# below, and a command's own params can include a full discord.py object
+# repr - capped so one oversized line can't dominate the log file. Shared
+# by _logDatabaseStatement below and LoggingCommandTree further down.
+LOG_LINE_MAX_LENGTH = 500
+
+
+def _truncateForLog(text):
+    if len(text) > LOG_LINE_MAX_LENGTH:
+        return text[:LOG_LINE_MAX_LENGTH] + "... (truncated)"
+    return text
+
+
+_MUTATING_SQL_PREFIXES = ("INSERT", "UPDATE", "DELETE")
+
+# Parked directly on the shared "shockwave" logger, not a plain bot.py
+# module global - _runStartupSelfTests below runs tests.py, whose own
+# _import_bot_module() re-executes this entire file under a fresh set of
+# module globals for every nested test it imports, so a bare module-level
+# flag here wouldn't be visible to a _logDatabaseStatement call made from
+# one of THOSE re-imported copies. logging.getLogger(name) always returns
+# the exact same singleton object process-wide regardless of which
+# reimport asks for it, so an attribute on that shared object is what
+# actually reaches every nested test's own DB writes too, muting the
+# thousands of test-fixture inserts/updates/deletes a self-test run
+# produces against its own in-memory databases - noise nobody deploying
+# this bot needs to see, unlike the real mutations this trace callback
+# exists for. Only initialized if missing (never unconditionally reset to
+# False) - this line itself runs again on every one of those nested
+# reimports, and unconditionally resetting it here would silently clobber
+# _runStartupSelfTests' own True right back to False the moment the very
+# first nested test reimports this file.
+if not hasattr(logger, "_suppress_db_logging"):
+    logger._suppress_db_logging = False
+
+
+# discord.py's own internal logging (View.on_error for a button callback,
+# Loop._error for a background task) and on_app_command_error below already
+# funnel unhandled exceptions into this same root-configured logger - this
+# covers the other half: every database write. sqlite3's trace callback
+# receives each executed statement with its bound parameters already
+# expanded inline (not the raw `?` placeholders), so this reads as a real
+# audit trail rather than opaque parameterized SQL. Everything that isn't
+# an INSERT/UPDATE/DELETE (SELECTs, the trace callback's own "BEGIN " for
+# an implicit transaction) is filtered out - only mutations are "important
+# actions" worth a permanent record.
+def _logDatabaseStatement(sql):
+    statement = sql.strip()
+    if not statement.upper().startswith(_MUTATING_SQL_PREFIXES):
+        return
+    if logger._suppress_db_logging:
+        return
+    logger.info("DB: %s", _truncateForLog(statement))
+
+
+mainDB.set_trace_callback(_logDatabaseStatement)
+
+# Where daily database snapshots land (see backupDatabaseTask below) -
+# separate from serverInfo/ so a backup can never collide with or get
+# mistaken for the live database file.
+BACKUP_DIR = os.path.join(BASE_DIR, "data", "guildData", "backups")
+BACKUP_RETENTION_DAYS = 7
 
 
 def ensure_column(table, column, coltype="", default=None):
@@ -52,7 +198,7 @@ if not db_already_existed:
         "betting_state, betting_message_id, betting_channel_id, is_ranked, "
         "active_tournament_match_id, wager_channel, betting_timer_seconds, "
         "roster_team1_message_id, roster_team2_message_id, roster_channel_id, roster_use_roles, "
-        "default_elo)"
+        "default_elo, betting_opened_at, disliked_role_user_ids)"
     )
     mainDB.commit()
 else:
@@ -69,6 +215,10 @@ else:
     ensure_column("servers", "betting_state", "TEXT", "'NONE'")
     ensure_column("servers", "betting_message_id", "INTEGER")
     ensure_column("servers", "betting_channel_id", "INTEGER")
+    # When the current betting window was opened (unix seconds) - lets
+    # reconcileStaleBettingWindows (called from on_ready) work out how much
+    # of the window was actually left if the bot restarts mid-window.
+    ensure_column("servers", "betting_opened_at", "INTEGER")
     # Whether the current team1/team2 game was formed with ranked:true (on
     # /make-teams or /captains) — gates whether recordResult touches anyone's elo.
     ensure_column("servers", "is_ranked", "INTEGER", "0")
@@ -101,6 +251,14 @@ else:
     # this guild (see helpers._defaultEloForGuild) — NULL until an admin
     # sets it, meaning "use the global helper.DEFAULT_ELO (1000)".
     ensure_column("servers", "default_elo", "INTEGER")
+    # Comma-separated user ids of whoever the current team1/team2 roster
+    # assigned a disliked role to (rankedTeamHelper, ranked:true
+    # use_roles:true only) — read back by recordResult/
+    # reportCorrectWinnerHelper so a win on a disliked role earns the
+    # ROLE_BALANCE_DISLIKED_ROLE_WIN_ELO_MULTIPLIER bonus. Lives and clears
+    # alongside team1/team2 (see clearTeamsHelper), not per-result, so a
+    # reused roster (/reuse) still gets credit for the same assignments.
+    ensure_column("servers", "disliked_role_user_ids", "TEXT")
 
 # Per-member currency: gold balance plus win/loss and wagering stats, one
 # row per (guild, user).
@@ -346,12 +504,83 @@ roles = {
     4: "Support - "
 }
 
+# A common "who/where" suffix for both the call and completion log lines
+# below - DM interactions have no guild, so that's spelled out rather than
+# crashing on interaction.guild.name.
+def _interactionLogContext(interaction):
+    guild = interaction.guild
+    guild_desc = f"{guild.name} ({guild.id})" if guild is not None else "DM"
+    return f"user={interaction.user} ({interaction.user.id}) guild={guild_desc}"
+
+
+# Best-effort snapshot of the interaction an error was raised from, appended
+# to on_app_command_error's log line so a failure is diagnosable from the
+# log alone (which command, with what parameters, for whom) instead of
+# needing a live repro. interaction.command/.namespace run the same real
+# discord.py option-resolution machinery LoggingCommandTree.interaction_check
+# above has to guard against - wrapped the same way here so a dump failure
+# never swallows the actual error it was trying to add context to.
+def _errorVariableDump(interaction):
+    try:
+        command = interaction.command
+        name = command.qualified_name if command is not None else interaction.data.get("name", "?")
+        params = dict(interaction.namespace) if command is not None else {}
+    except Exception:
+        name, params = "?", "<unresolvable>"
+    return f"command=/{name} params={params} {_interactionLogContext(interaction)}"
+
+
+# Logs every real command invocation (name, params, who, where) in one
+# place rather than instrumenting each of the ~40 @tree.command functions
+# individually - interaction_check is a global hook discord.py's own
+# CommandTree._call runs before dispatching ANY application command in the
+# tree. interaction.command/.namespace are independently-resolved cached
+# properties (see discord.py's Interaction class), so both are already
+# available here even though the tree hasn't actually invoked the command
+# yet. Only actual command invocations are logged, not every keystroke
+# into an autocomplete field - interaction_check also fires for those
+# (same InteractionType family), but InteractionType.application_command
+# excludes them. The default implementation this overrides just returns
+# True unconditionally, so returning True here (never blocking anything)
+# preserves that; per-command checks (e.g. /clear's has_permissions) still
+# run separately afterward and are unaffected by this.
+#
+# BUG FOUND IN PRODUCTION: interaction.command/.namespace run discord.py's
+# own real option-resolution machinery (Namespace.__init__ in particular
+# indexes each option's fields directly, not via .get()), which nothing in
+# tests.py can faithfully exercise — every test here goes through a plain
+# FakeInteraction with no real payload to resolve. Worse, CommandTree.
+# _from_interaction's own wrapper only catches AppCommandError around the
+# whole dispatch, so any OTHER exception raised in here (a logging-only
+# path with no business reason to ever fail) escaped uncaught, silently
+# killing the interaction before the command it was meant to observe ever
+# ran — Discord shows "This interaction failed" and nothing reaches
+# on_app_command_error or this file's own log at all. A try/except around
+# the entire body, unconditionally returning True either way, is what
+# makes this hook genuinely unable to take down the feature it's just
+# supposed to be watching.
+class LoggingCommandTree(app_commands.CommandTree):
+    async def interaction_check(self, interaction):
+        try:
+            if interaction.type is discord.InteractionType.application_command:
+                command = interaction.command
+                name = command.qualified_name if command is not None else interaction.data.get("name", "?")
+                params = dict(interaction.namespace) if command is not None else {}
+                logger.info(
+                    "Command called: /%s %s | %s",
+                    name, _truncateForLog(str(params)), _interactionLogContext(interaction)
+                )
+        except Exception:
+            logger.exception("LoggingCommandTree.interaction_check failed - continuing without logging this call")
+        return True
+
+
 # create client object and slash commands
 intents = discord.Intents.default()
 intents.members = True
 intents.voice_states = True
 client = discord.Client(intents=intents)
-tree = app_commands.CommandTree(client)
+tree = LoggingCommandTree(client)
 helperObj.client = client
 
 # Pure personalization — the bot's Discord status cycles through these
@@ -379,7 +608,45 @@ async def rotateStatus():
     try:
         await client.change_presence(activity=discord.Game(name=next(_orianna_quote_cycle)))
     except Exception:
-        pass
+        logger.debug("Presence update skipped - connection not settled yet.", exc_info=True)
+
+
+# Snapshots main.db into BACKUP_DIR and prunes anything older than
+# BACKUP_RETENTION_DAYS. Uses sqlite3's own backup() API rather than a
+# plain file copy - main.db is a live connection other code can be
+# reading/writing between event loop ticks, and copying the raw file
+# risks capturing it mid-write; backup() takes a proper point-in-time
+# snapshot instead. Runs on the event loop rather than a thread: mainDB
+# was opened with the default check_same_thread=True, so handing it to a
+# different thread (e.g. via asyncio.to_thread) would raise outright, and
+# a 100KB-scale database backs up in well under the time a trading-card
+# render already blocks the loop for.
+def _backupDatabase():
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup_path = os.path.join(BACKUP_DIR, f"main-{timestamp}.db")
+    backup_conn = sqlite3.connect(backup_path)
+    try:
+        mainDB.backup(backup_conn)
+    finally:
+        backup_conn.close()
+
+    cutoff = time.time() - BACKUP_RETENTION_DAYS * 86400
+    for name in os.listdir(BACKUP_DIR):
+        entry_path = os.path.join(BACKUP_DIR, name)
+        if os.path.isfile(entry_path) and os.path.getmtime(entry_path) < cutoff:
+            os.remove(entry_path)
+
+
+# Runs immediately on .start() (an on_ready right after boot always gets a
+# fresh snapshot) and then every 24 hours after.
+@tasks.loop(hours=24)
+async def backupDatabaseTask():
+    try:
+        _backupDatabase()
+        logger.info("Database backup completed.")
+    except Exception:
+        logger.exception("Database backup failed.")
 
 
 # Commands are registered on `tree` with no guild= at all (see every
@@ -409,7 +676,7 @@ def ensure_guild_row(guild_id, guild_name):
     cursor.execute(
         "INSERT INTO servers VALUES(?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, "
         "NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'NONE', NULL, NULL, 0, NULL, NULL, ?, "
-        "NULL, NULL, NULL, 0, NULL)",
+        "NULL, NULL, NULL, 0, NULL, NULL, NULL)",
         (guild_id, guild_name, helper.BETTING_DURATION_SECONDS)
     )
     mainDB.commit()
@@ -422,8 +689,11 @@ async def on_ready():
         ensure_guild_row(guild.id, guild.name)
     if not rotateStatus.is_running():
         rotateStatus.start()
+    if not backupDatabaseTask.is_running():
+        backupDatabaseTask.start()
     registerPersistentViews()
-    print('Command: Shockwave')
+    await helperObj.reconcileStaleBettingWindows(client)
+    logger.info("Shockwave is ready - logged in as %s.", client.user)
 
 
 # Persistent views (every button has a fixed custom_id, timeout=None) need
@@ -467,6 +737,27 @@ async def on_guild_remove(ctx):
 
 
 
+# Companion to LoggingCommandTree.interaction_check's "Command called" line
+# — discord.py dispatches this event itself (see CommandTree._call) only
+# once a command has actually run to completion without raising, so this
+# only ever logs a genuine success, never a command that errored out (that
+# path logs separately via on_app_command_error below) or one interaction_
+# check rejected before it ran at all.
+@client.event
+async def on_app_command_completion(interaction, command):
+    # discord.py's own Client._run_event already keeps an exception here
+    # from propagating anywhere harmful (it's routed to on_error instead,
+    # and this fires only after the command it's about already fully
+    # succeeded and responded) - caught explicitly anyway so a bug in this
+    # logging-only path still reaches this file's own log instead of only
+    # discord.py's default stderr-only on_error, matching interaction_check's
+    # own reasoning above.
+    try:
+        logger.info("Command completed: /%s | %s", command.qualified_name, _interactionLogContext(interaction))
+    except Exception:
+        logger.exception("on_app_command_completion logging failed")
+
+
 # Catch-all for every slash command's errors. discord.py calls this after
 # ANY command's own local .error handler runs too (CommandTree._dispatch_
 # error always calls both, not one or the other — see setBettingTimer_error/
@@ -482,7 +773,11 @@ async def on_app_command_error(interaction, error):
         message = "You don't have permission to use this command."
     else:
         message = "Something went wrong running that command. Try again, and let an admin know if it keeps happening."
-        traceback.print_exception(type(error), error, error.__traceback__)
+        logger.error(
+            "Unhandled application command error | %s",
+            _truncateForLog(_errorVariableDump(interaction)),
+            exc_info=(type(error), error, error.__traceback__),
+        )
 
     # A local .error handler that already responded to this interaction
     # (e.g. the MissingPermissions branch above, handled first by
@@ -754,8 +1049,6 @@ COMMAND_HELP = {
     "tournament-print-bracket": "Prints the current bracket.",
     "tournament-start": "Starts playing the current round of the bracket. mode is Sequential (one match at a time) or Simultaneous (all at once, no betting).",
     "roll": "Rolls a random number between 1 and num.",
-    "dev-give-gold": "Temporary developer-only tool for testing the economy - grants yourself 1000 gold. Only usable by the hardcoded DEV_USER_ID.",
-    "dev-test-role-balance": "Temporary developer-only tool for testing role-aware ranked balancing - previews the Top/Jungle/Mid/Bottom/Support split (with each pick's tier and effective elo) that /make-teams ranked:true use_roles:true would produce for your voice channel, padding out fewer than 10 people with other guild members if needed. Anyone without real /setup preferences gets a random liked/disliked role made up just for the preview, cleared again right after. Doesn't create a game, move anyone, or touch team1/team2/is_ranked. Only usable by the hardcoded DEV_USER_ID.",
     "setup": "Introduces Shockwave, creates your personal solo team, and walks you through picking which roles you like/dislike playing (press a role to toggle it, then press Confirm) for future role-aware team balancing. solo_team_name is only required the first time. Run it any time afterward to update either. Unlocks the Onboarded achievement the first time.",
     "help": "Shows this message, or details on one command.",
 }
@@ -1386,42 +1679,63 @@ async def roll(ctx, *, num: int):
         await ctx.response.send_message("Please use a number greater than 1.")
 
 
-# TEMPORARY dev tool for testing the economy without grinding /daily or
-# real games — hardcoded to one Discord user id rather than a permission
-# check, since this isn't a real admin feature anyone else should be able
-# to run. Remove this command (and DEV_USER_ID) once it's no longer needed.
-DEV_USER_ID = 217743368959164416
+# Runs the full test suite before connecting to Discord, so a broken
+# deploy shows up in the log immediately instead of only being noticed
+# once something breaks in production. `import tests` is lazy (only
+# reached from the __main__ guard below, i.e. only when this file is run
+# directly) rather than a top-level import, since tests.py's own
+# _import_bot_module() re-imports this file under the name "bot" - a
+# top-level `import tests` here would make that circular. tests.py's own
+# bot.py tests use that same re-import (with sqlite3.connect/open patched
+# away from the real database/token) precisely so running the suite here
+# never touches the real main.db or Discord. A failing suite is logged as
+# a warning (naming exactly which tests failed) rather than aborting
+# startup - a real deploy should still come up and serve players even if,
+# say, a test itself is stale, rather than a self-test regression taking
+# the whole bot down.
+def _runStartupSelfTests():
+    import io
+    import unittest
 
+    suite = unittest.TestLoader().loadTestsFromName("tests")
+    output = io.StringIO()
+    logger._suppress_db_logging = True
+    # IsolatedAsyncioTestCase (Python 3.11+) always runs its event loop with
+    # debug=True, which logs a WARNING through the "asyncio" logger for
+    # every callback slower than 100ms - meaningless test-fixture timing
+    # noise (a slow CI machine, not a real bug), not something a deploy's
+    # actual log needs to carry. "discord" throws in its own startup noise
+    # (e.g. "PyNaCl is not installed") on every one of tests.py's nested
+    # bot.py reimports. Both loggers propagate to the same root handlers
+    # this file's own logging.basicConfig call configured, same as
+    # "shockwave" itself, so without this they'd land straight in this
+    # file's own log. Raised for the suite's duration only and restored
+    # after, same try/finally shape as _suppress_db_logging above.
+    noisy_loggers = [logging.getLogger("asyncio"), logging.getLogger("discord")]
+    prior_levels = [lg.level for lg in noisy_loggers]
+    for noisy_logger in noisy_loggers:
+        noisy_logger.setLevel(logging.ERROR)
+    try:
+        result = unittest.TextTestRunner(stream=output, verbosity=2).run(suite)
+    finally:
+        logger._suppress_db_logging = False
+        for noisy_logger, level in zip(noisy_loggers, prior_levels):
+            noisy_logger.setLevel(level)
 
-@tree.command(
-    name="dev-give-gold",
-    description="Temporary developer tool: grants yourself 1000 gold for testing"
-)
-async def devGiveGold(ctx):
-    if ctx.user.id != DEV_USER_ID:
-        await ctx.response.send_message("This command is not available.")
+    if result.wasSuccessful():
         return
-    await helperObj.devGiveGoldHelper(ctx)
 
-
-@tree.command(
-    name="dev-test-role-balance",
-    description="Temporary developer tool: previews a role-aware ranked split without creating a game"
-)
-async def devTestRoleBalance(ctx):
-    if ctx.user.id != DEV_USER_ID:
-        await ctx.response.send_message("This command is not available.")
-        return
-    if ctx.user.voice is None or ctx.user.voice.channel is None:
-        await ctx.response.send_message(
-            "You need to be in a voice channel to preview a role balance from it - join one and try again."
-        )
-        return
-    await helperObj.devTestRoleBalanceHelper(ctx)
+    logger.debug("Startup self-test output:\n%s", output.getvalue())
+    failed = [str(test) for test, _ in (result.failures + result.errors)]
+    logger.warning(
+        "Startup self-test: %d/%d tests failed - starting the bot anyway. Failed: %s",
+        len(failed), result.testsRun, _truncateForLog("; ".join(failed)),
+    )
 
 
 # Guarded so tests.py can import this module (to exercise command callbacks
 # and event handlers directly) without connecting to Discord as a side
 # effect of the import.
 if __name__ == "__main__":
+    _runStartupSelfTests()
     client.run(token)

@@ -24,12 +24,15 @@ import asyncio
 import contextlib
 import io
 import itertools
+import logging
 import os
 import random
 import re
 import sqlite3
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, mock_open, patch
@@ -43,6 +46,7 @@ from TourneyClasses import (
 )
 import helper as helper_module
 from helper import helpers as Helpers
+import restore_backup
 
 GUILD_ID = 555000111
 
@@ -60,7 +64,7 @@ SERVERS_SCHEMA = (
     "betting_state, betting_message_id, betting_channel_id, is_ranked, "
     "active_tournament_match_id, wager_channel, betting_timer_seconds, "
     "roster_team1_message_id, roster_team2_message_id, roster_channel_id, "
-    "roster_use_roles DEFAULT 0, default_elo)"
+    "roster_use_roles DEFAULT 0, default_elo, betting_opened_at, disliked_role_user_ids)"
 )
 ECONOMY_SCHEMA = (
     "CREATE TABLE economy(guildId, userId, username, balance, wins, losses, "
@@ -163,7 +167,7 @@ def insert_guild_row(cursor, db, guild_id=GUILD_ID, name="Test Guild"):
     cursor.execute(
         "INSERT INTO servers VALUES(?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, "
         "NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'NONE', NULL, NULL, 0, NULL, NULL, ?, "
-        "NULL, NULL, NULL, 0, NULL)",
+        "NULL, NULL, NULL, 0, NULL, NULL, NULL)",
         (guild_id, name, helper_module.BETTING_DURATION_SECONDS),
     )
     db.commit()
@@ -233,6 +237,13 @@ class FakeMember:
         # permissions aren't affected — pass manage_guild=False to test
         # the insufficient-permission path.
         self.guild_permissions = SimpleNamespace(manage_guild=manage_guild)
+
+    # A real discord.Member/discord.User stringifies to its username (see
+    # _interactionLogContext in bot.py, which builds a log line straight
+    # from f"user={interaction.user}") - without this, str(member) falls
+    # back to the default object repr instead.
+    def __str__(self):
+        return self.name
 
 
 # The account-wide identity behind a FakeMember — distinct from it (a real
@@ -1016,6 +1027,48 @@ class RankedTeamHelperTests(HelperTestCase):
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 401, "elo"), helper_module.DEFAULT_ELO)
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 402, "elo"), helper_module.DEFAULT_ELO)
 
+    async def test_use_roles_persists_who_got_a_disliked_role(self):
+        members = [FakeMember(f"P{i}", id=800 + i) for i in range(10)]
+        # Everyone dislikes Jungle, so the balancer is forced to put two of
+        # them there anyway (see RoleBalancedTeamAssignmentTests' own
+        # "forces disliked players" test) - members[0]/[1] deterministically,
+        # since nobody has any other stated preference to break the tie.
+        for member in members:
+            self.helperObj._applySetupRolePreferences(GUILD_ID, member.id, [], ["Jungle"])
+        voice_channel = FakeChannel("Lobby", members=members)
+        user = FakeMember("Caller")
+        user.voice = FakeVoiceState(voice_channel)
+        ctx = FakeInteraction(self.guild, user)
+
+        await self.helperObj.rankedTeamHelper(ctx, use_roles=True)
+
+        self.assertEqual(
+            self.helperObj._dislikedRoleUserIds(GUILD_ID), {members[0].id, members[1].id}
+        )
+
+    async def test_no_disliked_assignments_leaves_the_column_empty(self):
+        members = [FakeMember(f"P{i}", id=810 + i) for i in range(10)]
+        voice_channel = FakeChannel("Lobby", members=members)
+        user = FakeMember("Caller")
+        user.voice = FakeVoiceState(voice_channel)
+        ctx = FakeInteraction(self.guild, user)
+
+        await self.helperObj.rankedTeamHelper(ctx, use_roles=True)
+
+        self.assertEqual(self.helperObj._dislikedRoleUserIds(GUILD_ID), frozenset())
+
+    async def test_roleless_game_clears_any_stale_disliked_role_ids(self):
+        self.helperObj.update(GUILD_ID, "disliked_role_user_ids", "111,222")
+        members = [FakeMember(f"P{i}", id=300 + i) for i in range(6)]
+        voice_channel = FakeChannel("Lobby", members=members)
+        user = FakeMember("Caller")
+        user.voice = FakeVoiceState(voice_channel)
+        ctx = FakeInteraction(self.guild, user)
+
+        await self.helperObj.rankedTeamHelper(ctx)  # use_roles defaults to False
+
+        self.assertEqual(self.helperObj._dislikedRoleUserIds(GUILD_ID), frozenset())
+
 
 class RoleBalancedTeamAssignmentTests(HelperTestCase):
     def _members(self, n=10, start_id=800):
@@ -1399,6 +1452,7 @@ class ClearTeamsHelperTests(HelperTestCase):
     async def test_resets_fields_to_defaults(self):
         self.helperObj.update(GUILD_ID, "team1", "stale-data")
         self.helperObj.update(GUILD_ID, "original_channel", "stale-data")
+        self.helperObj.update(GUILD_ID, "disliked_role_user_ids", "111,222")
 
         ctx = FakeInteraction(self.guild, FakeMember("Caller"))
         await self.helperObj.clearTeamsHelper(ctx)
@@ -1410,6 +1464,7 @@ class ClearTeamsHelperTests(HelperTestCase):
         self.assertEqual(self.helperObj.get(GUILD_ID, "team_size"), 5)
         self.assertEqual(self.helperObj.get(GUILD_ID, "mode"), "Normal")
         self.assertEqual(self.helperObj.get(GUILD_ID, "turn"), 1)
+        self.assertEqual(self.helperObj._dislikedRoleUserIds(GUILD_ID), frozenset())
 
     async def test_does_not_send_a_cancellation_when_no_game_is_active(self):
         ctx = FakeInteraction(self.guild, FakeMember("Caller"))
@@ -4729,6 +4784,234 @@ class StartTournamentHelperTests(HelperTestCase):
         self.assertEqual(self.cursor.fetchone()[0], 1)
 
 
+# ===========================================================================
+# Every top-level Pillow render (matchup graphics, bracket images, trading/
+# team cards, previews) is invoked via asyncio.to_thread from its own async
+# caller rather than directly - see the readme's own "Every top-level render
+# call..." paragraph. patch("asyncio.to_thread", wraps=asyncio.to_thread)
+# below intercepts the call (to prove the offload actually happened) while
+# still delegating to the real asyncio.to_thread, so the rest of each test's
+# own assertions exercise genuinely-threaded, not mocked-away, behavior.
+# ===========================================================================
+
+class ImageRenderThreadOffloadTests(HelperTestCase):
+    def setUp(self):
+        super().setUp()
+        self.channel = FakeChannel("game-chat", guild=self.guild)
+        self.channel.send = AsyncMock(side_effect=lambda *a, **k: FakeMessage())
+        self.helperObj.client = FakeClient(channels=[self.channel], guilds=[self.guild])
+
+    def _team(self, name):
+        team = Team()
+        team.set_name(name)
+        return team
+
+    async def test_casual_matchup_image_is_offloaded(self):
+        team1, team2 = self._team("Red"), self._team("Blue")
+        with patch("asyncio.to_thread", wraps=asyncio.to_thread) as mock_to_thread:
+            await self.helperObj._sendMatchupImage(self.channel, team1, team2, "Normal")
+
+        mock_to_thread.assert_awaited_once_with(
+            self.helperObj._renderMatchupImage, None, team1, team2, "Normal", None, self.guild.name
+        )
+        # The real renderer actually ran (in the executor) and produced a
+        # real file, not just a recorded call - proves wraps= genuinely
+        # delegated rather than the offload silently swallowing the work.
+        self.channel.send.assert_awaited_once()
+        self.assertIsInstance(self.channel.send.call_args.kwargs["file"], discord.File)
+
+    async def test_sequential_ready_check_matchup_image_is_offloaded(self):
+        red = _captained_team("Red", 901, "Alice")
+        blue = _captained_team("Blue", 902, "Bob")
+        tournament = Tournament("Cup", 1, 2)
+        tournament.register_team(red)
+        tournament.register_team(blue)
+        tournament.set_bracket(self.helperObj.buildBracket([red, blue]))
+        self.helperObj.saveTournament(GUILD_ID, tournament)
+
+        with patch("asyncio.to_thread", wraps=asyncio.to_thread) as mock_to_thread:
+            await self.helperObj.startTournamentHelper(
+                FakeInteraction(self.guild, FakeMember("Alice", id=901), channel=self.channel), "sequential"
+            )
+
+        render_calls = [c for c in mock_to_thread.await_args_list if c.args[0] == self.helperObj._renderMatchupImage]
+        self.assertEqual(len(render_calls), 1)
+
+    async def test_bracket_images_are_offloaded(self):
+        red = _captained_team("Red", 901, "Alice")
+        blue = _captained_team("Blue", 902, "Bob")
+        tournament = Tournament("Cup", 1, 2)
+        tournament.register_team(red)
+        tournament.register_team(blue)
+        tournament.set_bracket(self.helperObj.buildBracket([red, blue]))
+
+        with patch("asyncio.to_thread", wraps=asyncio.to_thread) as mock_to_thread:
+            await self.helperObj._sendBracketText(self.channel, tournament, GUILD_ID)
+
+        bracket_calls = [c for c in mock_to_thread.await_args_list if c.args[0] == self.helperObj.renderBracketImages]
+        self.assertEqual(len(bracket_calls), 1)
+
+    async def test_grand_finals_drawing_is_offloaded_but_its_db_read_is_not(self):
+        red, blue, cleo, dan = (self._team(n) for n in ["Red", "Blue", "Cleo Team", "Dan Team"])
+        wb_nodes = self.helperObj.buildBracket([red, blue, cleo, dan])
+        lb_nodes, lb_rounds, _ = self.helperObj.buildLosersBracket(wb_nodes)
+        tournament = Tournament("Cup", 1, 4, True)
+        tournament.set_bracket(wb_nodes)
+        tournament.set_losers_bracket(lb_nodes, lb_rounds)
+        self.helperObj._bracketRounds(wb_nodes)[-1][0].team = red
+        lb_rounds[-1][0].team = blue
+        self.cursor.execute(
+            "INSERT INTO tournament_matches"
+            "(guildId, roundIndex, nodeIndex, team1, team2, state, mode, messageId, channelId, winner, "
+            "bracketType) VALUES(?, 0, -1, ?, ?, 'RESOLVED', 'sequential', NULL, NULL, 1, 'finals')",
+            (GUILD_ID, red.serializeTeam(), blue.serializeTeam())
+        )
+        self.db.commit()
+
+        with patch("asyncio.to_thread", wraps=asyncio.to_thread) as mock_to_thread:
+            await self.helperObj._sendBracketText(self.channel, tournament, GUILD_ID)
+
+        # _buildGrandFinalsImage (the pure drawing) goes through the
+        # offload; _grandFinalsRenderInputs (the DB read feeding it) is
+        # never handed to asyncio.to_thread at all - self.cursor is
+        # thread-affined (sqlite3's default check_same_thread=True), so
+        # offloading that half outright would crash instead.
+        offloaded = {c.args[0] for c in mock_to_thread.await_args_list}
+        self.assertIn(self.helperObj._buildGrandFinalsImage, offloaded)
+        self.assertNotIn(self.helperObj._grandFinalsRenderInputs, offloaded)
+        self.assertNotIn(self.helperObj._renderGrandFinalsImage, offloaded)
+        finals_calls = [
+            c for c in self.channel.send.call_args_list
+            if any(f.filename == "grand_finals.png" for f in c.kwargs.get("files", []))
+        ]
+        self.assertEqual(len(finals_calls), 1)
+
+    async def test_team_card_render_is_offloaded(self):
+        await self.helperObj.createTeamHelper(
+            FakeInteraction(self.guild, FakeMember("Alice", id=901)), "Red", 5
+        )
+        team_id, _ = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        message = FakeMessage()
+
+        with patch("asyncio.to_thread", wraps=asyncio.to_thread) as mock_to_thread:
+            await self.helperObj._swapTeamStatsForCard(message, GUILD_ID, "Test Guild", team_id)
+
+        render_calls = [c for c in mock_to_thread.await_args_list if c.args[0] == self.helperObj._renderTeamCardImage]
+        self.assertEqual(len(render_calls), 1)
+        message.edit.assert_awaited_once()
+
+    async def test_trading_card_render_is_offloaded(self):
+        member = FakeMember("Alice", id=901)
+        with patch("asyncio.to_thread", wraps=asyncio.to_thread) as mock_to_thread:
+            file = await self.helperObj._renderMemberTradingCardFile(GUILD_ID, "Test Guild", member)
+
+        render_calls = [
+            c for c in mock_to_thread.await_args_list if c.args[0] == self.helperObj._renderTradingCardImage
+        ]
+        self.assertEqual(len(render_calls), 1)
+        self.assertIsInstance(file, discord.File)
+
+    async def test_preview_image_render_is_offloaded(self):
+        # ignore_cleanup_errors: previewHelper's own discord.File(path) keeps
+        # the rendered PNG open past this block on Windows, which won't let
+        # a directory delete out from under an open file the way POSIX does
+        # (same reasoning _FakeLogoDirTestCase's own temp dir uses this for).
+        preview_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        try:
+            ctx = FakeInteraction(self.guild, FakeMember("Alice", id=901), channel=self.channel)
+            with patch.object(helper_module, "PREVIEW_DIR", preview_dir.name), \
+                 patch("asyncio.to_thread", wraps=asyncio.to_thread) as mock_to_thread:
+                await self.helperObj.previewHelper(ctx, "Fonts")
+        finally:
+            preview_dir.cleanup()
+
+        render_calls = [
+            c for c in mock_to_thread.await_args_list if c.args[0] == self.helperObj._renderPreviewImages
+        ]
+        self.assertEqual(len(render_calls), 1)
+        ctx.response.send_message.assert_awaited_once()
+
+    async def test_render_does_not_block_the_event_loop(self):
+        # Proves the offload is genuine, not just present in the call graph:
+        # a slow render (blocked here on a threading.Event, since it runs in
+        # a worker thread, not on the event loop) must not stop an unrelated
+        # coroutine from making progress on the loop while it's in flight.
+        render_started = threading.Event()
+        release_render = threading.Event()
+        real_render = self.helperObj._renderMatchupImage
+
+        def slow_render(*args, **kwargs):
+            render_started.set()
+            release_render.wait(timeout=5)
+            return real_render(*args, **kwargs)
+
+        progress = []
+
+        async def other_work():
+            for i in range(3):
+                await asyncio.sleep(0)
+                progress.append(i)
+
+        with patch.object(self.helperObj, "_renderMatchupImage", side_effect=slow_render):
+            team1, team2 = self._team("Red"), self._team("Blue")
+            render_task = asyncio.create_task(
+                self.helperObj._sendMatchupImage(self.channel, team1, team2, "Normal")
+            )
+            await asyncio.to_thread(render_started.wait, 5)
+
+            # The render is now blocked inside its worker thread - the event
+            # loop itself must still be free to run something else.
+            await other_work()
+            self.assertEqual(progress, [0, 1, 2])
+            self.assertFalse(render_task.done())
+
+            release_render.set()
+            await render_task
+
+        self.channel.send.assert_awaited_once()
+
+    async def test_simultaneous_round_offloads_a_separate_render_per_match(self):
+        # "Simultaneous" mode posts every match in a round at once (see
+        # _startRound) - each match's own matchup image still goes through
+        # its own independent asyncio.to_thread call, and each ends up with
+        # the correct, un-mixed-up pair of teams rather than one match's
+        # render bleeding into another's.
+        red = _captained_team("Red", 901, "Alice")
+        blue = _captained_team("Blue", 902, "Bob")
+        cleo = _captained_team("Cleo Team", 903, "Cleo")
+        dan = _captained_team("Dan Team", 904, "Dan")
+        tournament = Tournament("Cup", 1, 4)
+        for team in (red, blue, cleo, dan):
+            tournament.register_team(team)
+        tournament.set_bracket(self.helperObj.buildBracket([red, blue, cleo, dan]))
+        self.helperObj.saveTournament(GUILD_ID, tournament)
+
+        with patch("asyncio.to_thread", wraps=asyncio.to_thread) as mock_to_thread:
+            await self.helperObj.startTournamentHelper(
+                FakeInteraction(self.guild, FakeMember("Alice", id=901), channel=self.channel), "simultaneous"
+            )
+
+        render_calls = [c for c in mock_to_thread.await_args_list if c.args[0] == self.helperObj._renderMatchupImage]
+        self.assertEqual(len(render_calls), 2)  # one independent offload per match
+
+        # Each match's own pair of teams reached its own render call intact
+        # - team1/team2 are args[2]/args[3] (args[1] is the match_id). Who
+        # actually plays whom is random (buildBracket shuffles seeding), so
+        # this checks the pairing is internally consistent rather than
+        # asserting one specific bracket - two disjoint pairs, together
+        # covering all four teams exactly once, is what "no cross-match
+        # mix-up" actually means here.
+        rendered_pairs = [frozenset((c.args[2].get_name(), c.args[3].get_name())) for c in render_calls]
+        for pair in rendered_pairs:
+            self.assertEqual(len(pair), 2)
+        all_teams_seen = set().union(*rendered_pairs)
+        self.assertEqual(all_teams_seen, {"Red", "Blue", "Cleo Team", "Dan Team"})
+        self.assertEqual(sum(len(pair) for pair in rendered_pairs), len(all_teams_seen))
+
+        file_calls = [c for c in self.channel.send.call_args_list if "file" in c.kwargs]
+        self.assertEqual(len(file_calls), 2)
+
+
 class TournamentReadyAndReportViewTests(HelperTestCase):
     def setUp(self):
         super().setUp()
@@ -6737,6 +7020,48 @@ class RecordResultTests(HelperTestCase):
         messages = [c.args[0] for c in channel.send.call_args_list]
         self.assertTrue(any("Elo:" in m for m in messages))
 
+    async def test_winning_on_a_disliked_role_earns_bonus_elo(self):
+        team1 = Team(); team1.name = "Team 1"
+        team1.add_player(Player(701, "P1"))
+        team2 = Team(); team2.name = "Team 2"
+        team2.add_player(Player(702, "P2"))
+        self.helperObj.update(GUILD_ID, "team1", team1.serializeTeam())
+        self.helperObj.update(GUILD_ID, "team2", team2.serializeTeam())
+        self.helperObj.update(GUILD_ID, "is_ranked", 1)
+        # rankedTeamHelper is what would normally set this, keyed on the
+        # user_id who got stuck with a disliked role for this roster.
+        self.helperObj.update(GUILD_ID, "disliked_role_user_ids", "701")
+
+        channel = FakeChannel("game-chat")
+        await self.helperObj.recordResult(GUILD_ID, 1, channel)
+
+        # Equal starting elo -> a plain 50/50 win is +16; P1 played a
+        # disliked role and won, so ROLE_BALANCE_DISLIKED_ROLE_WIN_ELO_MULTIPLIER
+        # applies on top of that.
+        boosted = round(16 * helper_module.ROLE_BALANCE_DISLIKED_ROLE_WIN_ELO_MULTIPLIER)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 701, "elo"), 1000 + boosted)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 702, "elo"), 984)
+
+        messages = [c.args[0] for c in channel.send.call_args_list]
+        self.assertTrue(any("Disliked-role win bonus: P1" in m for m in messages))
+
+    async def test_losing_on_a_disliked_role_earns_no_bonus(self):
+        team1 = Team(); team1.name = "Team 1"
+        team1.add_player(Player(701, "P1"))
+        team2 = Team(); team2.name = "Team 2"
+        team2.add_player(Player(702, "P2"))
+        self.helperObj.update(GUILD_ID, "team1", team1.serializeTeam())
+        self.helperObj.update(GUILD_ID, "team2", team2.serializeTeam())
+        self.helperObj.update(GUILD_ID, "is_ranked", 1)
+        self.helperObj.update(GUILD_ID, "disliked_role_user_ids", "701")
+
+        channel = FakeChannel("game-chat")
+        await self.helperObj.recordResult(GUILD_ID, 2, channel)  # P1's team loses
+
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 701, "elo"), 984)
+        messages = [c.args[0] for c in channel.send.call_args_list]
+        self.assertFalse(any("Disliked-role win bonus" in m for m in messages))
+
     async def test_underdog_win_gains_more_elo_than_favorite_win(self):
         team1 = Team(); team1.name = "Team 1"
         team1.add_player(Player(701, "Underdog"))
@@ -7058,6 +7383,50 @@ class ComputeGameDeltasTests(HelperTestCase):
 
         self.assertEqual(self.helperObj.getUnlockedCardTitles(GUILD_ID, 701), [])
 
+    def test_disliked_role_win_bonus_boosts_only_that_players_elo(self):
+        deltas, summary = self.helperObj.computeGameDeltas(
+            wagers=[], team1_roster=[(1, "A"), (2, "B")], team2_roster=[(3, "C")],
+            elo_lookup={1: 1000, 2: 1000, 3: 1000}, winning_team=1, is_ranked=True,
+            disliked_role_user_ids={1},
+        )
+        # An even matchup's plain team delta is +16/-16 - player 1 (won on a
+        # disliked role) gets it multiplied up; player 2, on the same
+        # winning team but no disliked role, gets the plain team delta.
+        boosted = round(16 * helper_module.ROLE_BALANCE_DISLIKED_ROLE_WIN_ELO_MULTIPLIER)
+        self.assertEqual(deltas[1]["elo"], boosted)
+        self.assertEqual(deltas[2]["elo"], 16)
+        self.assertEqual(deltas[3]["elo"], -16)
+        self.assertEqual(summary["disliked_role_bonus_players"], [("A", boosted)])
+
+    def test_disliked_role_bonus_does_not_apply_to_a_loss(self):
+        deltas, summary = self.helperObj.computeGameDeltas(
+            wagers=[], team1_roster=[(1, "A")], team2_roster=[(2, "B")],
+            elo_lookup={1: 1000, 2: 1000}, winning_team=2, is_ranked=True,
+            disliked_role_user_ids={1},
+        )
+        # Player 1 is on the disliked-role list but LOST this game - no
+        # bonus, just the plain losing-side delta.
+        self.assertEqual(deltas[1]["elo"], -16)
+        self.assertEqual(summary["disliked_role_bonus_players"], [])
+
+    def test_disliked_role_bonus_does_not_apply_to_a_casual_game(self):
+        deltas, summary = self.helperObj.computeGameDeltas(
+            wagers=[], team1_roster=[(1, "A")], team2_roster=[(2, "B")],
+            elo_lookup={1: 1000, 2: 1000}, winning_team=1, is_ranked=False,
+            disliked_role_user_ids={1},
+        )
+        self.assertEqual(deltas[1]["elo"], 0)
+        self.assertEqual(summary["disliked_role_bonus_players"], [])
+
+    def test_disliked_role_bonus_ignores_players_outside_the_given_set(self):
+        deltas, summary = self.helperObj.computeGameDeltas(
+            wagers=[], team1_roster=[(1, "A")], team2_roster=[(2, "B")],
+            elo_lookup={1: 1000, 2: 1000}, winning_team=1, is_ranked=True,
+            disliked_role_user_ids=frozenset(),
+        )
+        self.assertEqual(deltas[1]["elo"], 16)
+        self.assertEqual(summary["disliked_role_bonus_players"], [])
+
 
 class FormatResultMessageTests(HelperTestCase):
     def test_uses_the_summarys_team_names(self):
@@ -7097,6 +7466,24 @@ class FormatResultMessageTests(HelperTestCase):
             f"1 winning player earned {helper_module.GAME_WIN_GOLD} gold each just for playing.", message
         )
 
+    def test_disliked_role_bonus_line_appears_when_someone_earned_it(self):
+        _deltas, summary = self.helperObj.computeGameDeltas(
+            wagers=[], team1_roster=[(1, "A")], team2_roster=[(2, "B")],
+            elo_lookup={1: 1000, 2: 1000}, winning_team=1, is_ranked=True,
+            disliked_role_user_ids={1},
+        )
+        message = self.helperObj.formatResultMessage(1, summary)
+        boosted = round(16 * helper_module.ROLE_BALANCE_DISLIKED_ROLE_WIN_ELO_MULTIPLIER)
+        self.assertIn(f"Disliked-role win bonus: A {boosted:+d}", message)
+
+    def test_no_disliked_role_bonus_line_when_nobody_earned_it(self):
+        _deltas, summary = self.helperObj.computeGameDeltas(
+            wagers=[], team1_roster=[(1, "A")], team2_roster=[(2, "B")],
+            elo_lookup={1: 1000, 2: 1000}, winning_team=1, is_ranked=True,
+        )
+        message = self.helperObj.formatResultMessage(1, summary)
+        self.assertNotIn("Disliked-role win bonus", message)
+
     def test_no_participation_line_when_nobody_was_rostered(self):
         message = self.helperObj.formatResultMessage(1, {
             "no_bets": True, "no_winning_bets": False, "winning_bettors": [], "elo_changes": [],
@@ -7130,6 +7517,15 @@ class SaveGetLastResultTests(HelperTestCase):
         # not given above -> generic fallback
         self.assertEqual(loaded["team1_name"], "Team 1")
         self.assertEqual(loaded["team2_name"], "Team 2")
+        self.assertEqual(loaded["disliked_role_user_ids"], frozenset())
+
+    def test_round_trips_disliked_role_user_ids(self):
+        self.helperObj.saveLastResult(
+            GUILD_ID, winning_team=1, wagers=[], team1_roster=[(701, "P1")], team2_roster=[(702, "P2")],
+            deltas={}, disliked_role_user_ids={701},
+        )
+        loaded = self.helperObj.getLastResult(GUILD_ID)
+        self.assertEqual(loaded["disliked_role_user_ids"], frozenset({701}))
 
     def test_round_trips_the_given_team_names(self):
         self.helperObj.saveLastResult(
@@ -7218,6 +7614,36 @@ class ReportCorrectWinnerHelperTests(HelperTestCase):
 
         # a further correction is possible from the new baseline
         self.assertEqual(self.helperObj.getLastResult(GUILD_ID)["winning_team"], 2)
+
+    async def test_correction_still_credits_the_disliked_role_bonus(self):
+        team1 = Team(); team1.name = "Team 1"
+        team1.add_player(Player(701, "P1"))
+        team2 = Team(); team2.name = "Team 2"
+        team2.add_player(Player(702, "P2"))
+        self.helperObj.update(GUILD_ID, "team1", team1.serializeTeam())
+        self.helperObj.update(GUILD_ID, "team2", team2.serializeTeam())
+        self.helperObj.update(GUILD_ID, "is_ranked", 1)
+        self.helperObj.update(GUILD_ID, "disliked_role_user_ids", "701")
+
+        channel = FakeChannel("game-chat")
+        await self.helperObj.recordResult(GUILD_ID, 2, channel)  # misreported: P1's team "loses"
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 701, "elo"), 984)
+
+        ctx = FakeInteraction(self.guild, FakeMember("Admin"))
+        await self.helperObj.reportCorrectWinnerHelper(ctx, 1)  # actually won
+
+        # Back to 1000 (the wrong loss reversed) plus the disliked-role
+        # bonus for the real win, recomputed from the last_result snapshot
+        # rather than losing track of who was on a disliked role once
+        # team1/team2 may have already moved on to a new roster.
+        boosted = round(16 * helper_module.ROLE_BALANCE_DISLIKED_ROLE_WIN_ELO_MULTIPLIER)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 701, "elo"), 1000 + boosted)
+        # Not necessarily the last message: P1's first-ever recorded win
+        # also earns the "First Blood" achievement, announced separately
+        # right after (see _announceAchievements) - scan every message
+        # rather than assuming the result message is the final one.
+        messages = [c.args[0] for c in ctx.channel.send.call_args_list if c.args]
+        self.assertTrue(any("Disliked-role win bonus: P1" in m for m in messages))
 
     async def test_corrects_elo_and_game_record_when_teams_started_equal(self):
         team1 = Team(); team1.name = "Team 1"
@@ -9413,6 +9839,21 @@ class OpenBettingTests(HelperTestCase):
         task.cancel()
         await asyncio.wait([task])
 
+    async def test_records_when_betting_opened(self):
+        channel = FakeChannel("game-chat")
+        before = int(time.time())
+
+        await self.helperObj._openBetting(GUILD_ID, channel)
+
+        opened_at = self.helperObj.get(GUILD_ID, "betting_opened_at")
+        self.assertIsNotNone(opened_at)
+        self.assertGreaterEqual(opened_at, before)
+        self.assertLessEqual(opened_at, int(time.time()))
+
+        task = self.helperObj.bettingTasks[GUILD_ID]
+        task.cancel()
+        await asyncio.wait([task])
+
     async def test_timer_closes_betting_without_touching_the_report_message(self):
         self.helperObj.update(GUILD_ID, "betting_timer_seconds", 0)
         channel = FakeChannel("game-chat")
@@ -9460,6 +9901,104 @@ class OpenBettingTests(HelperTestCase):
         second_task = self.helperObj.bettingTasks[GUILD_ID]
         second_task.cancel()
         await asyncio.wait([second_task])
+
+
+class ReconcileStaleBettingWindowsTests(HelperTestCase):
+    def setUp(self):
+        super().setUp()
+        self.channel = FakeChannel("game-chat")
+        self.helperObj.client = FakeClient(channels=[self.channel], guilds=[self.guild])
+        self.helperObj.update(GUILD_ID, "betting_state", "OPEN")
+        self.helperObj.update(GUILD_ID, "betting_channel_id", self.channel.id)
+        self.helperObj.update(GUILD_ID, "betting_timer_seconds", 60)
+
+    async def _cleanup_task(self, guild_id=GUILD_ID):
+        task = self.helperObj.bettingTasks.pop(guild_id, None)
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.wait([task])
+
+    async def test_resumes_with_the_remaining_time_for_a_window_still_within_its_window(self):
+        self.helperObj.update(GUILD_ID, "betting_opened_at", int(time.time()) - 40)  # 40 of 60s used
+
+        await self.helperObj.reconcileStaleBettingWindows(self.helperObj.client)
+
+        self.assertIn(GUILD_ID, self.helperObj.bettingTasks)
+        self.assertEqual(self.helperObj.get(GUILD_ID, "betting_state"), "OPEN")
+        self.channel.send.assert_not_awaited()
+        await self._cleanup_task()
+
+    async def test_closes_a_window_whose_remaining_time_already_elapsed(self):
+        self.helperObj.update(GUILD_ID, "betting_opened_at", int(time.time()) - 120)  # 60s window, long over
+
+        await self.helperObj.reconcileStaleBettingWindows(self.helperObj.client)
+
+        self.assertNotIn(GUILD_ID, self.helperObj.bettingTasks)
+        self.assertEqual(self.helperObj.get(GUILD_ID, "betting_state"), "CLOSED")
+        self.channel.send.assert_awaited_once()
+        self.assertIn("closed", self.channel.send.call_args.args[0])
+
+    async def test_treats_a_missing_opened_at_as_already_expired(self):
+        # Only unset for a window that predates the betting_opened_at
+        # column - closed outright rather than guessing how long ago it
+        # actually opened.
+        self.helperObj.update(GUILD_ID, "betting_opened_at", None)
+
+        await self.helperObj.reconcileStaleBettingWindows(self.helperObj.client)
+
+        self.assertNotIn(GUILD_ID, self.helperObj.bettingTasks)
+        self.assertEqual(self.helperObj.get(GUILD_ID, "betting_state"), "CLOSED")
+
+    async def test_does_not_double_start_a_window_that_already_has_a_live_task(self):
+        # A mere gateway reconnect (not a real process restart) can also
+        # fire on_ready, but self.bettingTasks survives that - reconciling
+        # it again would stomp a window that was never actually
+        # interrupted.
+        self.helperObj.update(GUILD_ID, "betting_opened_at", int(time.time()) - 120)
+        placeholder = asyncio.create_task(asyncio.sleep(100))
+        self.helperObj.bettingTasks[GUILD_ID] = placeholder
+
+        await self.helperObj.reconcileStaleBettingWindows(self.helperObj.client)
+
+        self.assertEqual(self.helperObj.get(GUILD_ID, "betting_state"), "OPEN")
+        self.channel.send.assert_not_awaited()
+        self.assertIs(self.helperObj.bettingTasks[GUILD_ID], placeholder)
+        await self._cleanup_task()
+
+    async def test_leaves_the_window_alone_if_the_channel_is_unresolvable(self):
+        self.helperObj.update(GUILD_ID, "betting_opened_at", int(time.time()) - 120)
+        self.helperObj.update(GUILD_ID, "betting_channel_id", 999999999)
+
+        await self.helperObj.reconcileStaleBettingWindows(self.helperObj.client)
+
+        self.assertNotIn(GUILD_ID, self.helperObj.bettingTasks)
+        self.assertEqual(self.helperObj.get(GUILD_ID, "betting_state"), "OPEN")
+
+    async def test_ignores_guilds_that_are_not_currently_open(self):
+        self.helperObj.update(GUILD_ID, "betting_state", "NONE")
+
+        await self.helperObj.reconcileStaleBettingWindows(self.helperObj.client)
+
+        self.assertNotIn(GUILD_ID, self.helperObj.bettingTasks)
+        self.channel.send.assert_not_awaited()
+
+    async def test_reconciles_every_open_guild_independently(self):
+        guild2 = FakeGuild(id=GUILD_ID + 1)
+        channel2 = FakeChannel("game-chat-2")
+        self.helperObj.client = FakeClient(channels=[self.channel, channel2], guilds=[self.guild, guild2])
+        insert_guild_row(self.cursor, self.db, guild_id=GUILD_ID + 1, name="Second Guild")
+        self.helperObj.update(GUILD_ID + 1, "betting_state", "OPEN")
+        self.helperObj.update(GUILD_ID + 1, "betting_channel_id", channel2.id)
+        self.helperObj.update(GUILD_ID + 1, "betting_timer_seconds", 60)
+        self.helperObj.update(GUILD_ID + 1, "betting_opened_at", int(time.time()) - 40)
+        self.helperObj.update(GUILD_ID, "betting_opened_at", int(time.time()) - 120)
+
+        await self.helperObj.reconcileStaleBettingWindows(self.helperObj.client)
+
+        self.assertEqual(self.helperObj.get(GUILD_ID, "betting_state"), "CLOSED")
+        self.assertEqual(self.helperObj.get(GUILD_ID + 1, "betting_state"), "OPEN")
+        self.assertIn(GUILD_ID + 1, self.helperObj.bettingTasks)
+        await self._cleanup_task(GUILD_ID + 1)
 
 
 class GetBettingTimerSecondsTests(HelperTestCase):
@@ -10453,7 +10992,7 @@ class LeaderboardHelperTests(HelperTestCase):
         )
         self.assertEqual(self.cursor.fetchone(), (GUILD_ID, channel.id, "balance", "asc", 0))
 
-    async def test_overview_mode_defaults_sort_to_elo_and_shows_elo_and_record(self):
+    async def test_overview_mode_defaults_sort_to_elo_and_shows_elo_and_ranked_record(self):
         self._seed_players()
         ctx = self._ctx()
 
@@ -10464,8 +11003,21 @@ class LeaderboardHelperTests(HelperTestCase):
         lines = embed.description.split("\n")
         self.assertTrue(lines[0].startswith("**#1.** Alice"))  # highest elo (1300)
         self.assertIn("Elo:", lines[0])
-        self.assertIn("Record:", lines[0])
+        self.assertIn("Ranked:", lines[0])
         self.assertNotIn("Balance:", lines[0])
+
+    async def test_overview_mode_record_reflects_ranked_not_combined_wins(self):
+        self._seed_players()
+        entries = self.helperObj.getLeaderboardEntries(GUILD_ID)
+        alice = next(e for e in entries if e["username"] == "Alice")
+        self.assertNotEqual(alice["ranked_wins"], alice["game_wins"])
+        ctx = self._ctx()
+
+        await self.helperObj.leaderboardHelper(ctx, None, "desc")
+
+        embed = ctx.response.send_message.call_args.kwargs["embed"]
+        lines = embed.description.split("\n")
+        self.assertIn(f"Ranked: {alice['ranked_wins']}W-{alice['ranked_losses']}L", lines[0])
 
 
 class TeamListPagingViewTests(HelperTestCase):
@@ -10962,9 +11514,37 @@ class BotModuleTestCase(unittest.IsolatedAsyncioTestCase):
         # to leave real.
         self._sync_patch = patch.object(self.bot.tree, "sync", AsyncMock())
         self._sync_patch.start()
+        # _backupDatabase writes a real snapshot file into the real
+        # data/guildData/backups/ - BACKUP_DIR is anchored to this file's
+        # own directory (BASE_DIR), not redirected by _import_bot_module()
+        # the way sqlite3.connect/open are, so any test that calls
+        # on_ready() (which starts backupDatabaseTask, and tasks.loop runs
+        # its coroutine immediately on .start()) would otherwise leave a
+        # real, if garbage, test-fixture-derived .db file behind on disk
+        # every single time the suite runs. Saved before patching so a
+        # test that specifically wants the real thing (see
+        # BackupDatabaseTests) can still call it directly, bypassing the
+        # mock, without needing to stop and restart this patch.
+        self._real_backupDatabase = self.bot._backupDatabase
+        self._backup_patch = patch.object(self.bot, "_backupDatabase", MagicMock())
+        self._backup_patch.start()
+        # Every mutating statement any test in this class runs (through
+        # helperObj, command callbacks, on_guild_join, ...) would otherwise
+        # log through _logDatabaseStatement - mainDB.set_trace_callback is
+        # already registered by the time _import_bot_module() returns, and
+        # this flag lives on the shared "shockwave" logger singleton (see
+        # bot.py), not anything _import_bot_module() itself resets. Pure
+        # test-fixture noise nobody deploying this bot needs to see, unlike
+        # the real mutations that logging exists for - only worth knowing
+        # about if a test actually fails, not on every passing run.
+        # LogDatabaseStatementTests flips this back off for its own body,
+        # since it specifically exercises the active-logging behavior.
+        self.bot.logger._suppress_db_logging = True
 
     def tearDown(self):
+        self.bot.logger._suppress_db_logging = False
         self._sync_patch.stop()
+        self._backup_patch.stop()
         self.bot.mainDB.close()
         sys.modules.pop("bot", None)
 
@@ -11000,7 +11580,7 @@ class CommandRegistrationTests(BotModuleTestCase):
             "achievements",
             "leaderboard", "help", "make-teams", "report-correct-winner",
             "captains", "choose", "clear", "notify",
-            "roll", "dev-give-gold", "dev-test-role-balance", "tournament-create", "team-create", "team-set",
+            "roll", "tournament-create", "team-create", "team-set",
             "team-rename", "team-delete",
             "team-invite", "team-stats", "team-list", "my-teams",
             "tournament-register", "tournament-create-bracket",
@@ -11335,6 +11915,423 @@ class GuildLifecycleEventTests(BotModuleTestCase):
         self.bot.cursor.execute("SELECT COUNT(*) FROM servers WHERE guildId=?", (780,))
         self.assertEqual(self.bot.cursor.fetchone()[0], 1)
 
+    async def test_on_ready_reconciles_stale_betting_windows(self):
+        with patch.object(self.bot.helperObj, "reconcileStaleBettingWindows", AsyncMock()) as mock_reconcile:
+            await self.bot.on_ready()
+        mock_reconcile.assert_awaited_once_with(self.bot.client)
+
+
+class LoggingCommandTreeTests(BotModuleTestCase):
+    def _interaction(self, itype, command=None, namespace=None, guild="default", data=None):
+        return SimpleNamespace(
+            type=itype,
+            command=command,
+            namespace=namespace if namespace is not None else {},
+            user=FakeMember("Alice", id=901),
+            guild=FakeGuild(id=GUILD_ID) if guild == "default" else guild,
+            data=data if data is not None else {"name": "unknown"},
+        )
+
+    async def test_logs_a_real_command_invocation(self):
+        command = SimpleNamespace(qualified_name="wager")
+        interaction = self._interaction(
+            discord.InteractionType.application_command, command=command, namespace={"amount": 100, "team": 1},
+        )
+
+        with self.assertLogs(self.bot.logger, level="INFO") as cm:
+            result = await self.bot.tree.interaction_check(interaction)
+
+        self.assertTrue(result)
+        self.assertEqual(len(cm.output), 1)
+        self.assertIn("Command called: /wager", cm.output[0])
+        self.assertIn("amount", cm.output[0])
+        self.assertIn("Alice", cm.output[0])
+        self.assertIn(str(GUILD_ID), cm.output[0])
+
+    async def test_does_not_log_autocomplete_interactions(self):
+        # interaction_check fires for these too (same code path in
+        # CommandTree._call) - every keystroke into an autocomplete field
+        # would otherwise get logged as if it were a real command call.
+        command = SimpleNamespace(qualified_name="wager")
+        interaction = self._interaction(discord.InteractionType.autocomplete, command=command)
+
+        with self.assertNoLogs(self.bot.logger, level="INFO"):
+            result = await self.bot.tree.interaction_check(interaction)
+
+        self.assertTrue(result)
+
+    async def test_falls_back_to_the_raw_data_name_when_the_command_is_unresolved(self):
+        interaction = self._interaction(
+            discord.InteractionType.application_command, command=None, data={"name": "mystery"},
+        )
+
+        with self.assertLogs(self.bot.logger, level="INFO") as cm:
+            await self.bot.tree.interaction_check(interaction)
+
+        self.assertIn("Command called: /mystery", cm.output[0])
+
+    async def test_dm_interaction_logs_dm_instead_of_a_guild(self):
+        command = SimpleNamespace(qualified_name="roll")
+        interaction = self._interaction(discord.InteractionType.application_command, command=command, guild=None)
+
+        with self.assertLogs(self.bot.logger, level="INFO") as cm:
+            await self.bot.tree.interaction_check(interaction)
+
+        self.assertIn("guild=DM", cm.output[0])
+
+    async def test_always_returns_true(self):
+        # The default implementation this overrides is a no-op check that
+        # always allows the interaction through - logging must never
+        # change that.
+        interaction = self._interaction(discord.InteractionType.ping)
+        result = await self.bot.tree.interaction_check(interaction)
+        self.assertTrue(result)
+
+    async def test_survives_an_exception_from_real_discord_py_resolution(self):
+        # Regression: interaction.command/.namespace run discord.py's own
+        # real option-resolution machinery, which nothing else in this
+        # class can faithfully exercise - every other test here hands it a
+        # plain SimpleNamespace with .command/.namespace already resolved,
+        # never anything that could actually raise the way a real
+        # Interaction's cached_slot_property can. CommandTree.
+        # _from_interaction's own wrapper only catches AppCommandError
+        # around the whole dispatch, so before this method wrapped its own
+        # body, anything else raised here silently killed the interaction
+        # (Discord shows "This interaction failed", nothing reaches
+        # on_app_command_error or the log at all) instead of just skipping
+        # this one log line and letting the real command still run.
+        class _RaisingInteraction:
+            type = discord.InteractionType.application_command
+            data = {"name": "team-create"}
+            user = FakeMember("Alice", id=901)
+            guild = FakeGuild(id=GUILD_ID)
+
+            @property
+            def command(self):
+                raise RuntimeError("simulated discord.py internals failure")
+
+        interaction = _RaisingInteraction()
+
+        with self.assertLogs(self.bot.logger, level="ERROR") as cm:
+            result = await self.bot.tree.interaction_check(interaction)
+
+        self.assertTrue(result)
+        self.assertIn("interaction_check failed", cm.output[0])
+
+
+class AppCommandCompletionTests(BotModuleTestCase):
+    async def test_logs_a_successful_completion(self):
+        command = SimpleNamespace(qualified_name="wager")
+        interaction = SimpleNamespace(user=FakeMember("Alice", id=901), guild=FakeGuild(id=GUILD_ID))
+
+        with self.assertLogs(self.bot.logger, level="INFO") as cm:
+            await self.bot.on_app_command_completion(interaction, command)
+
+        self.assertEqual(len(cm.output), 1)
+        self.assertIn("Command completed: /wager", cm.output[0])
+        self.assertIn("Alice", cm.output[0])
+        self.assertIn(str(GUILD_ID), cm.output[0])
+
+    async def test_dm_interaction_logs_dm_instead_of_a_guild(self):
+        command = SimpleNamespace(qualified_name="roll")
+        interaction = SimpleNamespace(user=FakeMember("Alice", id=901), guild=None)
+
+        with self.assertLogs(self.bot.logger, level="INFO") as cm:
+            await self.bot.on_app_command_completion(interaction, command)
+
+        self.assertIn("guild=DM", cm.output[0])
+
+    async def test_survives_a_logging_failure(self):
+        # This fires only once the command it's about has already fully
+        # succeeded and responded, so a bug here can't fail the
+        # interaction the way interaction_check's own could - still caught
+        # explicitly so it reaches this file's own log instead of only
+        # discord.py's default stderr-only on_error.
+        class _RaisingCommand:
+            @property
+            def qualified_name(self):
+                raise RuntimeError("simulated failure")
+
+        interaction = SimpleNamespace(user=FakeMember("Alice", id=901), guild=FakeGuild(id=GUILD_ID))
+
+        with self.assertLogs(self.bot.logger, level="ERROR") as cm:
+            await self.bot.on_app_command_completion(interaction, _RaisingCommand())
+
+        self.assertIn("on_app_command_completion logging failed", cm.output[0])
+
+
+class LogDatabaseStatementTests(BotModuleTestCase):
+    def setUp(self):
+        super().setUp()
+        # This class exercises _logDatabaseStatement's own active-logging
+        # behavior directly, unlike every other BotModuleTestCase test (all
+        # of which suppress it by default in the parent setUp - pure
+        # test-fixture noise nobody deploying this bot needs to see).
+        self.bot.logger._suppress_db_logging = False
+
+    async def test_logs_insert_update_and_delete(self):
+        for sql in ("INSERT INTO x VALUES (1)", "UPDATE x SET y=1", "DELETE FROM x WHERE y=1"):
+            with self.assertLogs(self.bot.logger, level="INFO") as cm:
+                self.bot._logDatabaseStatement(sql)
+            self.assertEqual(cm.output, [f"INFO:shockwave:DB: {sql}"])
+
+    async def test_does_not_log_select_or_an_implicit_transaction_begin(self):
+        with self.assertNoLogs(self.bot.logger, level="INFO"):
+            self.bot._logDatabaseStatement("SELECT * FROM x")
+            self.bot._logDatabaseStatement("BEGIN ")
+
+    async def test_truncates_an_oversized_statement(self):
+        long_sql = "INSERT INTO x VALUES ('" + ("a" * 1000) + "')"
+        with self.assertLogs(self.bot.logger, level="INFO") as cm:
+            self.bot._logDatabaseStatement(long_sql)
+
+        logged = cm.output[0]
+        self.assertIn("... (truncated)", logged)
+        self.assertLess(len(logged), len(long_sql))
+
+    async def test_respects_the_suppression_flag(self):
+        self.bot.logger._suppress_db_logging = True
+        with self.assertNoLogs(self.bot.logger, level="INFO"):
+            self.bot._logDatabaseStatement("INSERT INTO x VALUES (1)")
+
+    async def test_a_real_mutation_reaches_the_log_via_the_trace_callback(self):
+        # End-to-end: an actual cursor.execute against mainDB (which has
+        # set_trace_callback(_logDatabaseStatement) registered - see
+        # bot.py) reaches the log, not just a direct call to the function
+        # in isolation.
+        self.bot.cursor.execute("CREATE TABLE IF NOT EXISTS _log_test(x)")
+        with self.assertLogs(self.bot.logger, level="INFO") as cm:
+            self.bot.cursor.execute("INSERT INTO _log_test VALUES (1)")
+        self.assertIn("_log_test", cm.output[0])
+        self.assertIn("DB:", cm.output[0])
+
+
+class BackupDatabaseTests(BotModuleTestCase):
+    def setUp(self):
+        super().setUp()
+        # The real _backupDatabase (see self._real_backupDatabase, saved by
+        # the parent setUp before _backupDatabase itself gets mocked out)
+        # writes wherever BACKUP_DIR points - redirected to a throwaway
+        # temp directory here so this class's own real-backup assertions
+        # never touch data/guildData/backups/.
+        self._temp_backup_dir = tempfile.TemporaryDirectory()
+        self._backup_dir_patch = patch.object(self.bot, "BACKUP_DIR", self._temp_backup_dir.name)
+        self._backup_dir_patch.start()
+
+    def tearDown(self):
+        self._backup_dir_patch.stop()
+        self._temp_backup_dir.cleanup()
+        super().tearDown()
+
+    def test_creates_a_snapshot_file(self):
+        self.assertEqual(os.listdir(self._temp_backup_dir.name), [])
+
+        self._real_backupDatabase()
+
+        files = os.listdir(self._temp_backup_dir.name)
+        self.assertEqual(len(files), 1)
+        self.assertTrue(files[0].startswith("main-") and files[0].endswith(".db"))
+
+    def test_snapshot_contains_the_live_databases_data(self):
+        self.bot.cursor.execute("INSERT INTO servers(guildId, serverName) VALUES (?, ?)", (999, "Backup Test"))
+        self.bot.mainDB.commit()
+
+        self._real_backupDatabase()
+
+        backup_name = os.listdir(self._temp_backup_dir.name)[0]
+        conn = sqlite3.connect(os.path.join(self._temp_backup_dir.name, backup_name))
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT serverName FROM servers WHERE guildId=?", (999,))
+            self.assertEqual(cur.fetchone(), ("Backup Test",))
+        finally:
+            conn.close()
+
+    def test_prunes_backups_older_than_the_retention_window_but_keeps_recent_ones(self):
+        old_path = os.path.join(self._temp_backup_dir.name, "main-old.db")
+        open(old_path, "w").close()
+        old_time = time.time() - (self.bot.BACKUP_RETENTION_DAYS + 1) * 86400
+        os.utime(old_path, (old_time, old_time))
+
+        recent_path = os.path.join(self._temp_backup_dir.name, "main-recent.db")
+        open(recent_path, "w").close()
+
+        self._real_backupDatabase()
+
+        remaining = os.listdir(self._temp_backup_dir.name)
+        self.assertNotIn("main-old.db", remaining)
+        self.assertIn("main-recent.db", remaining)
+
+    async def test_backup_database_task_calls_the_real_backup_and_logs_success(self):
+        with patch.object(self.bot, "_backupDatabase", MagicMock()) as mock_backup:
+            with self.assertLogs(self.bot.logger, level="INFO") as cm:
+                await self.bot.backupDatabaseTask.coro()
+        mock_backup.assert_called_once()
+        self.assertIn("Database backup completed", cm.output[0])
+
+    async def test_backup_database_task_logs_and_swallows_a_failure(self):
+        with patch.object(self.bot, "_backupDatabase", MagicMock(side_effect=OSError("disk full"))):
+            with self.assertLogs(self.bot.logger, level="ERROR") as cm:
+                await self.bot.backupDatabaseTask.coro()  # must not raise
+        self.assertIn("Database backup failed", cm.output[0])
+
+
+class RunStartupSelfTestsTests(BotModuleTestCase):
+    def _patch_loader(self, testcase_cls):
+        return patch.object(
+            unittest.TestLoader, "loadTestsFromName",
+            lambda self, name: unittest.TestLoader().loadTestsFromTestCase(testcase_cls),
+        )
+
+    def test_a_passing_suite_logs_nothing(self):
+        class _AllPass(unittest.TestCase):
+            def test_a(self):
+                pass
+
+        with self._patch_loader(_AllPass), self.assertNoLogs(self.bot.logger):
+            self.bot._runStartupSelfTests()
+
+    def test_a_failing_suite_logs_a_warning_naming_the_failures(self):
+        class _SomeFail(unittest.TestCase):
+            def test_fails(self):
+                self.fail("boom")
+
+            def test_errors(self):
+                raise ValueError("boom")
+
+            def test_passes(self):
+                pass
+
+        with self._patch_loader(_SomeFail):
+            with self.assertLogs(self.bot.logger, level="WARNING") as cm:
+                self.bot._runStartupSelfTests()
+
+        self.assertEqual(len(cm.output), 1)
+        self.assertIn("2/3 tests failed", cm.output[0])
+        self.assertIn("test_fails", cm.output[0])
+        self.assertIn("test_errors", cm.output[0])
+        self.assertNotIn("test_passes", cm.output[0])
+
+    def test_suppresses_db_logging_during_the_run_and_restores_it_after(self):
+        bot_module = self.bot
+        seen_during_run = []
+
+        class _ChecksSuppression(unittest.TestCase):
+            def test_records_suppression_state(self):
+                seen_during_run.append(bot_module.logger._suppress_db_logging)
+
+        bot_module.logger._suppress_db_logging = False
+        with self._patch_loader(_ChecksSuppression):
+            bot_module._runStartupSelfTests()
+
+        self.assertEqual(seen_during_run, [True])
+        self.assertFalse(bot_module.logger._suppress_db_logging)
+
+    def test_restores_suppression_state_even_if_the_run_itself_raises(self):
+        self.bot.logger._suppress_db_logging = False
+        with patch.object(unittest.TextTestRunner, "run", side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                self.bot._runStartupSelfTests()
+        self.assertFalse(self.bot.logger._suppress_db_logging)
+
+    def test_raises_asyncio_and_discord_logger_levels_during_the_run_and_restores_them_after(self):
+        # IsolatedAsyncioTestCase always runs its loop with debug=True,
+        # which logs slow-callback WARNINGs through the "asyncio" logger -
+        # harmless test-fixture timing noise that would otherwise land in
+        # this file's own log (see _runStartupSelfTests). Confirms the
+        # level is actually raised for the run's duration, not just reset
+        # to some hardcoded default afterward regardless of what it was.
+        bot_module = self.bot
+        asyncio_logger = logging.getLogger("asyncio")
+        discord_logger = logging.getLogger("discord")
+        asyncio_logger.setLevel(logging.DEBUG)
+        discord_logger.setLevel(logging.WARNING)
+        seen_during_run = []
+
+        class _ChecksLevels(unittest.TestCase):
+            def test_records_levels(self):
+                seen_during_run.append((asyncio_logger.level, discord_logger.level))
+
+        try:
+            with self._patch_loader(_ChecksLevels):
+                bot_module._runStartupSelfTests()
+
+            self.assertEqual(seen_during_run, [(logging.ERROR, logging.ERROR)])
+            self.assertEqual(asyncio_logger.level, logging.DEBUG)
+            self.assertEqual(discord_logger.level, logging.WARNING)
+        finally:
+            asyncio_logger.setLevel(logging.NOTSET)
+            discord_logger.setLevel(logging.NOTSET)
+
+    def test_restores_noisy_logger_levels_even_if_the_run_itself_raises(self):
+        asyncio_logger = logging.getLogger("asyncio")
+        discord_logger = logging.getLogger("discord")
+        asyncio_logger.setLevel(logging.DEBUG)
+        discord_logger.setLevel(logging.WARNING)
+
+        try:
+            with patch.object(unittest.TextTestRunner, "run", side_effect=RuntimeError("boom")):
+                with self.assertRaises(RuntimeError):
+                    self.bot._runStartupSelfTests()
+
+            self.assertEqual(asyncio_logger.level, logging.DEBUG)
+            self.assertEqual(discord_logger.level, logging.WARNING)
+        finally:
+            asyncio_logger.setLevel(logging.NOTSET)
+            discord_logger.setLevel(logging.NOTSET)
+
+
+class MaxLinesFileHandlerTests(BotModuleTestCase):
+    def setUp(self):
+        super().setUp()
+        self._temp_dir = tempfile.TemporaryDirectory()
+        self._log_path = os.path.join(self._temp_dir.name, "test.log")
+        self._loggers_to_clean = []
+
+    def tearDown(self):
+        for name, handler in self._loggers_to_clean:
+            logging.getLogger(name).removeHandler(handler)
+            handler.close()
+        self._temp_dir.cleanup()
+        super().tearDown()
+
+    def _logger_with_handler(self, name, max_lines):
+        handler = self.bot.MaxLinesFileHandler(self._log_path, max_lines, encoding="utf-8")
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        test_logger = logging.getLogger(name)
+        test_logger.addHandler(handler)
+        test_logger.propagate = False
+        test_logger.setLevel(logging.INFO)
+        self._loggers_to_clean.append((name, handler))
+        return test_logger
+
+    def _read_lines(self):
+        with open(self._log_path, encoding="utf-8") as f:
+            return f.read().splitlines()
+
+    def test_trims_to_the_most_recent_lines_once_over_the_cap(self):
+        test_logger = self._logger_with_handler("maxlines_trim", max_lines=3)
+        for i in range(1, 6):
+            test_logger.info(f"line {i}")
+
+        self.assertEqual(self._read_lines(), ["line 3", "line 4", "line 5"])
+
+    def test_stays_untouched_while_under_the_cap(self):
+        test_logger = self._logger_with_handler("maxlines_under_cap", max_lines=10)
+        test_logger.info("only line")
+
+        self.assertEqual(self._read_lines(), ["only line"])
+
+    def test_seeds_its_line_count_from_a_pre_existing_file(self):
+        with open(self._log_path, "w", encoding="utf-8") as f:
+            f.write("old1\nold2\nold3\nold4\n")
+
+        test_logger = self._logger_with_handler("maxlines_seeded", max_lines=5)
+        test_logger.info("new1")
+        test_logger.info("new2")
+
+        self.assertEqual(self._read_lines(), ["old2", "old3", "old4", "new1", "new2"])
+
 
 class GlobalErrorHandlerTests(BotModuleTestCase):
     def _ctx_with_response_done(self, done):
@@ -11388,6 +12385,47 @@ class GlobalErrorHandlerTests(BotModuleTestCase):
         await self.bot.tree.on_error(ctx, error)
 
         ctx.response.send_message.assert_not_awaited()
+
+    async def test_unexpected_error_appends_a_variable_dump_to_the_log(self):
+        ctx = self._ctx_with_response_done(False)
+        ctx.command = SimpleNamespace(qualified_name="wager")
+        ctx.namespace = {"amount": 250, "team": 1}
+        error = ValueError("boom")
+
+        with self.assertLogs(self.bot.logger, level="ERROR") as cm:
+            await self.bot.tree.on_error(ctx, error)
+
+        self.assertIn("command=/wager", cm.output[0])
+        self.assertIn("amount", cm.output[0])
+        self.assertIn("250", cm.output[0])
+        self.assertIn("Caller", cm.output[0])
+        self.assertIn(str(GUILD_ID), cm.output[0])
+
+    async def test_missing_permissions_does_not_log_a_variable_dump(self):
+        # Only the "something went wrong" branch needs the extra diagnostic
+        # context - MissingPermissions already gets a specific, expected
+        # user-facing message and isn't a bug to dump state for.
+        ctx = self._ctx_with_response_done(False)
+        error = app_commands.MissingPermissions(["manage_guild"])
+
+        with self.assertNoLogs(self.bot.logger, level="ERROR"):
+            await self.bot.tree.on_error(ctx, error)
+
+    async def test_variable_dump_falls_back_when_command_is_unresolved(self):
+        # _ctx()'s FakeInteraction has no .command/.namespace/.data at all
+        # by default, the same "real discord.py resolution can fail" shape
+        # LoggingCommandTreeTests.test_survives_an_exception_from_real_
+        # discord_py_resolution covers for interaction_check - the dump
+        # must degrade to "?"/unresolvable instead of raising and losing
+        # the original error's own log line.
+        ctx = self._ctx_with_response_done(False)
+        error = ValueError("boom")
+
+        with self.assertLogs(self.bot.logger, level="ERROR") as cm:
+            await self.bot.tree.on_error(ctx, error)
+
+        self.assertIn("command=/?", cm.output[0])
+        self.assertIn("<unresolvable>", cm.output[0])
 
 
 class CommandDelegationTests(BotModuleTestCase):
@@ -11764,179 +12802,6 @@ class RollCommandTests(BotModuleTestCase):
         message = ctx.response.send_message.call_args.args[0]
         self.assertTrue(message.startswith("You rolled "))
         self.assertTrue(1 <= int(message.split()[-1]) <= 6)
-
-
-# TEMPORARY: covers /dev-give-gold — see bot.py's DEV_USER_ID guard.
-# Remove alongside that command once it's no longer needed.
-class DevGiveGoldCommandTests(BotModuleTestCase):
-    def _dev_ctx(self, guild_id=GUILD_ID):
-        guild = FakeGuild(id=guild_id)
-        dev = FakeMember("Dev", id=self.bot.DEV_USER_ID)
-        return FakeInteraction(guild, dev)
-
-    async def test_rejects_anyone_who_is_not_the_hardcoded_dev(self):
-        ctx = self._ctx()  # default FakeMember id=1, not DEV_USER_ID
-        mock = AsyncMock()
-        with patch.object(self.bot.helperObj, "devGiveGoldHelper", mock):
-            await self._command("dev-give-gold").callback(ctx)
-        mock.assert_not_awaited()
-        ctx.response.send_message.assert_awaited_once_with("This command is not available.")
-
-    async def test_grants_gold_to_the_dev(self):
-        guild_id = 911
-        await self._insert_guild_row(guild_id)
-        ctx = self._dev_ctx(guild_id=guild_id)
-
-        await self._command("dev-give-gold").callback(ctx)
-
-        self.assertEqual(
-            self.bot.helperObj.getEconomy(guild_id, self.bot.DEV_USER_ID, "balance"),
-            helper_module.DEV_GIVE_GOLD_AMOUNT,
-        )
-        ctx.response.send_message.assert_awaited_once()
-        message = ctx.response.send_message.call_args.args[0]
-        self.assertIn(str(helper_module.DEV_GIVE_GOLD_AMOUNT), message)
-
-
-class DevTestRoleBalanceCommandTests(BotModuleTestCase):
-    def _dev_ctx(self, guild_id=GUILD_ID, voice_channel=None, guild_members=None):
-        guild = FakeGuild(id=guild_id, members=guild_members)
-        dev = FakeMember("Dev", id=self.bot.DEV_USER_ID)
-        dev.voice = FakeVoiceState(voice_channel)
-        return FakeInteraction(guild, dev)
-
-    async def test_rejects_anyone_who_is_not_the_hardcoded_dev(self):
-        ctx = self._ctx()  # default FakeMember id=1, not DEV_USER_ID
-        mock = AsyncMock()
-        with patch.object(self.bot.helperObj, "devTestRoleBalanceHelper", mock):
-            await self._command("dev-test-role-balance").callback(ctx)
-        mock.assert_not_awaited()
-        ctx.response.send_message.assert_awaited_once_with("This command is not available.")
-
-    async def test_rejects_when_not_in_a_voice_channel(self):
-        ctx = self._dev_ctx()
-        mock = AsyncMock()
-        with patch.object(self.bot.helperObj, "devTestRoleBalanceHelper", mock):
-            await self._command("dev-test-role-balance").callback(ctx)
-        mock.assert_not_awaited()
-        ctx.response.send_message.assert_awaited_once_with(
-            "You need to be in a voice channel to preview a role balance from it - join one and try again."
-        )
-
-    async def test_rejects_when_the_guild_has_fewer_than_ten_distinct_non_bot_members(self):
-        guild_id = 919
-        await self._insert_guild_row(guild_id)
-        members = [FakeMember(f"P{i}", id=970 + i) for i in range(4)]
-        voice_channel = FakeChannel("Lobby", members=members)
-        ctx = self._dev_ctx(guild_id=guild_id, voice_channel=voice_channel, guild_members=members)
-
-        with patch.object(self.bot.helperObj, "formRoleBalancedTeams") as balance_mock:
-            await self._command("dev-test-role-balance").callback(ctx)
-
-        balance_mock.assert_not_called()
-        message = ctx.response.send_message.call_args.args[0]
-        self.assertIn("Need 10 distinct", message)
-
-    async def test_previews_a_role_balance_without_creating_a_game(self):
-        guild_id = 920
-        await self._insert_guild_row(guild_id)
-        members = [FakeMember(f"P{i}", id=980 + i) for i in range(10)]
-        voice_channel = FakeChannel("Lobby", members=members)
-        ctx = self._dev_ctx(guild_id=guild_id, voice_channel=voice_channel, guild_members=members)
-
-        await self._command("dev-test-role-balance").callback(ctx)
-
-        self.assertIsNone(self.bot.helperObj.get(guild_id, "team1"))
-        self.assertIsNone(self.bot.helperObj.get(guild_id, "team2"))
-        self.assertEqual(self.bot.helperObj.get(guild_id, "is_ranked"), 0)
-        ctx.response.send_message.assert_awaited_once()
-        message = ctx.response.send_message.call_args.args[0]
-        self.assertIn("dry run", message)
-        for role in helper_module.SETUP_ROLE_NAMES:
-            self.assertIn(role, message)
-        self.assertNotIn("Filled in", message)
-
-    async def test_pads_a_short_voice_channel_with_other_guild_members(self):
-        guild_id = 921
-        await self._insert_guild_row(guild_id)
-        voice_members = [FakeMember(f"V{i}", id=990 + i) for i in range(3)]
-        extra_members = [FakeMember(f"G{i}", id=1000 + i) for i in range(10)]
-        voice_channel = FakeChannel("Lobby", members=voice_members)
-        ctx = self._dev_ctx(
-            guild_id=guild_id, voice_channel=voice_channel, guild_members=voice_members + extra_members
-        )
-
-        await self._command("dev-test-role-balance").callback(ctx)
-
-        message = ctx.response.send_message.call_args.args[0]
-        self.assertIn("Filled in 7 non-voice member(s) to reach 10", message)
-
-    async def test_makes_up_roles_for_members_with_no_real_setup_preferences(self):
-        guild_id = 922
-        await self._insert_guild_row(guild_id)
-        members = [FakeMember(f"P{i}", id=1020 + i) for i in range(10)]
-        voice_channel = FakeChannel("Lobby", members=members)
-        ctx = self._dev_ctx(guild_id=guild_id, voice_channel=voice_channel, guild_members=members)
-
-        await self._command("dev-test-role-balance").callback(ctx)
-
-        message = ctx.response.send_message.call_args.args[0]
-        self.assertIn("no real /setup preferences", message)
-        self.assertIn("*", message)
-        # every player's made-up preference is fake data for this preview
-        # only - none of it should still be on file afterward
-        for member in members:
-            liked, disliked = self.bot.helperObj.getRolePreferences(guild_id, member.id)
-            self.assertEqual((liked, disliked), ([], []))
-
-    async def test_a_few_made_up_players_reliably_get_a_disliked_role(self):
-        # Whether a disliked preference actually surfaces as that player's
-        # displayed tier depends on whether the balancer ends up forcing
-        # them into it, so this checks what actually got written during
-        # setup (a non-empty 4th arg) rather than the final reply text.
-        guild_id = 925
-        await self._insert_guild_row(guild_id)
-        members = [FakeMember(f"P{i}", id=1080 + i) for i in range(10)]
-        voice_channel = FakeChannel("Lobby", members=members)
-        ctx = self._dev_ctx(guild_id=guild_id, voice_channel=voice_channel, guild_members=members)
-
-        real_apply = self.bot.helperObj._applySetupRolePreferences
-        with patch.object(self.bot.helperObj, "_applySetupRolePreferences", wraps=real_apply) as apply_mock:
-            await self._command("dev-test-role-balance").callback(ctx)
-
-        disliked_calls = [call for call in apply_mock.call_args_list if call.args[3]]
-        self.assertEqual(len(disliked_calls), helper_module.ROLE_BALANCE_TEST_DISLIKE_COUNT)
-
-    async def test_respects_and_does_not_mark_real_setup_preferences(self):
-        guild_id = 923
-        await self._insert_guild_row(guild_id)
-        members = [FakeMember(f"P{i}", id=1040 + i) for i in range(10)]
-        voice_channel = FakeChannel("Lobby", members=members)
-        ctx = self._dev_ctx(guild_id=guild_id, voice_channel=voice_channel, guild_members=members)
-        self.bot.helperObj._applySetupRolePreferences(guild_id, members[0].id, ["Jungle"], [])
-
-        await self._command("dev-test-role-balance").callback(ctx)
-
-        message = ctx.response.send_message.call_args.args[0]
-        self.assertNotIn(f"{members[0].name}*", message)
-        # the one real preference on file is left untouched afterward
-        liked, disliked = self.bot.helperObj.getRolePreferences(guild_id, members[0].id)
-        self.assertEqual((liked, disliked), (["Jungle"], []))
-
-    async def test_preferences_are_restored_even_if_balancing_raises(self):
-        guild_id = 924
-        await self._insert_guild_row(guild_id)
-        members = [FakeMember(f"P{i}", id=1060 + i) for i in range(10)]
-        voice_channel = FakeChannel("Lobby", members=members)
-        ctx = self._dev_ctx(guild_id=guild_id, voice_channel=voice_channel, guild_members=members)
-
-        with patch.object(self.bot.helperObj, "formRoleBalancedTeams", side_effect=ValueError("boom")):
-            with self.assertRaises(ValueError):
-                await self._command("dev-test-role-balance").callback(ctx)
-
-        for member in members:
-            liked, disliked = self.bot.helperObj.getRolePreferences(guild_id, member.id)
-            self.assertEqual((liked, disliked), ([], []))
 
 
 class ClearCommandTests(BotModuleTestCase):
@@ -12828,6 +13693,165 @@ class ReportCorrectWinnerCommandTests(BotModuleTestCase):
 
         with self.assertRaises(RuntimeError):
             await cmd.on_error(ctx, RuntimeError("boom"))
+
+
+# ===========================================================================
+# restore_backup.py — a standalone ops script (run by whoever hosts the bot,
+# with the bot itself stopped) for reverting main.db to one of
+# backupDatabaseTask's daily snapshots. Never imported by bot.py/helper.py,
+# so these tests exercise it directly - always against a throwaway temp
+# directory (DB_PATH/BACKUP_DIR patched for the duration of each test),
+# never the real data/guildData/ paths it points at by default.
+# ===========================================================================
+
+class RestoreBackupTests(unittest.TestCase):
+    def setUp(self):
+        self._real_db_path = restore_backup.DB_PATH
+        self._real_backup_dir = restore_backup.BACKUP_DIR
+        self._tmp = tempfile.TemporaryDirectory()
+        serverinfo_dir = os.path.join(self._tmp.name, "serverInfo")
+        self.backups_dir = os.path.join(self._tmp.name, "backups")
+        os.makedirs(serverinfo_dir)
+        os.makedirs(self.backups_dir)
+        self.db_path = os.path.join(serverinfo_dir, "main.db")
+        restore_backup.DB_PATH = self.db_path
+        restore_backup.BACKUP_DIR = self.backups_dir
+
+    def tearDown(self):
+        restore_backup.DB_PATH = self._real_db_path
+        restore_backup.BACKUP_DIR = self._real_backup_dir
+        self._tmp.cleanup()
+
+    def _write_db(self, content):
+        with open(self.db_path, "wb") as f:
+            f.write(content)
+
+    def _read_db(self):
+        with open(self.db_path, "rb") as f:
+            return f.read()
+
+    def _write_backup(self, name, content, mtime):
+        path = os.path.join(self.backups_dir, name)
+        with open(path, "wb") as f:
+            f.write(content)
+        os.utime(path, (mtime, mtime))
+        return path
+
+    def test_list_backups_sorts_newest_first(self):
+        self._write_backup("main-20260101-010000.db", b"old", mtime=1000)
+        self._write_backup("main-20260215-030000.db", b"new", mtime=2000)
+
+        self.assertEqual(
+            restore_backup._listBackups(), ["main-20260215-030000.db", "main-20260101-010000.db"]
+        )
+
+    def test_list_backups_excludes_safety_backups_and_empty_dir(self):
+        self.assertEqual(restore_backup._listBackups(), [])
+        self._write_backup("main-20260101-010000.db", b"old", mtime=1000)
+        self._write_backup("main-before-restore-20260101-010000.db", b"safety", mtime=1500)
+
+        self.assertEqual(restore_backup._listBackups(), ["main-20260101-010000.db"])
+
+    def test_resolve_choice_by_index_and_filename(self):
+        backups = ["main-20260215-030000.db", "main-20260101-010000.db"]
+
+        self.assertEqual(restore_backup._resolveChoice(backups, "1"), backups[0])
+        self.assertEqual(restore_backup._resolveChoice(backups, "2"), backups[1])
+        self.assertEqual(restore_backup._resolveChoice(backups, backups[1]), backups[1])
+        self.assertIsNone(restore_backup._resolveChoice(backups, "0"))
+        self.assertIsNone(restore_backup._resolveChoice(backups, "99"))
+        self.assertIsNone(restore_backup._resolveChoice(backups, "not-a-backup.db"))
+
+    def test_format_size_scales_units(self):
+        self.assertEqual(restore_backup._formatSize(500), "500B")
+        self.assertEqual(restore_backup._formatSize(2048), "2.0KB")
+        self.assertEqual(restore_backup._formatSize(5 * 1024 * 1024), "5.0MB")
+
+    def test_main_restores_the_chosen_backup_by_index(self):
+        self._write_db(b"LIVE-BEFORE")
+        self._write_backup("main-20260101-010000.db", b"OLDER", mtime=1000)
+        self._write_backup("main-20260215-030000.db", b"NEWER", mtime=2000)
+
+        with patch.object(sys, "argv", ["restore_backup.py", "1"]), \
+             patch("builtins.input", return_value="yes"):
+            restore_backup.main()
+
+        self.assertEqual(self._read_db(), b"NEWER")
+
+    def test_main_restores_the_chosen_backup_by_filename(self):
+        self._write_db(b"LIVE-BEFORE")
+        self._write_backup("main-20260101-010000.db", b"OLDER", mtime=1000)
+
+        with patch.object(sys, "argv", ["restore_backup.py", "main-20260101-010000.db"]), \
+             patch("builtins.input", return_value="yes"):
+            restore_backup.main()
+
+        self.assertEqual(self._read_db(), b"OLDER")
+
+    def test_main_saves_a_safety_backup_of_the_live_db_before_overwriting(self):
+        self._write_db(b"LIVE-BEFORE")
+        self._write_backup("main-20260101-010000.db", b"OLDER", mtime=1000)
+
+        with patch.object(sys, "argv", ["restore_backup.py", "1"]), \
+             patch("builtins.input", return_value="yes"):
+            restore_backup.main()
+
+        safety_files = [n for n in os.listdir(self.backups_dir) if n.startswith("main-before-restore-")]
+        self.assertEqual(len(safety_files), 1)
+        with open(os.path.join(self.backups_dir, safety_files[0]), "rb") as f:
+            self.assertEqual(f.read(), b"LIVE-BEFORE")
+
+    def test_main_does_not_save_a_safety_backup_when_there_was_no_live_db_yet(self):
+        # A fresh install being seeded from a backup for the first time -
+        # nothing to protect since main.db doesn't exist yet.
+        self._write_backup("main-20260101-010000.db", b"OLDER", mtime=1000)
+
+        with patch.object(sys, "argv", ["restore_backup.py", "1"]), \
+             patch("builtins.input", return_value="yes"):
+            restore_backup.main()
+
+        self.assertEqual(self._read_db(), b"OLDER")
+        safety_files = [n for n in os.listdir(self.backups_dir) if n.startswith("main-before-restore-")]
+        self.assertEqual(safety_files, [])
+
+    def test_main_blank_input_cancels_without_modifying_anything(self):
+        self._write_db(b"UNTOUCHED")
+        self._write_backup("main-20260101-010000.db", b"OLDER", mtime=1000)
+
+        with patch.object(sys, "argv", ["restore_backup.py"]), \
+             patch("builtins.input", return_value=""):
+            restore_backup.main()
+
+        self.assertEqual(self._read_db(), b"UNTOUCHED")
+        self.assertEqual(os.listdir(self.backups_dir), ["main-20260101-010000.db"])
+
+    def test_main_declining_confirmation_cancels_without_modifying_anything(self):
+        self._write_db(b"UNTOUCHED")
+        self._write_backup("main-20260101-010000.db", b"OLDER", mtime=1000)
+
+        with patch.object(sys, "argv", ["restore_backup.py", "1"]), \
+             patch("builtins.input", return_value="no"):
+            restore_backup.main()
+
+        self.assertEqual(self._read_db(), b"UNTOUCHED")
+
+    def test_main_out_of_range_choice_exits_nonzero_without_modifying_anything(self):
+        self._write_db(b"UNTOUCHED")
+        self._write_backup("main-20260101-010000.db", b"OLDER", mtime=1000)
+
+        with patch.object(sys, "argv", ["restore_backup.py", "99"]), \
+             patch("builtins.input", return_value="yes"):
+            with self.assertRaises(SystemExit) as cm:
+                restore_backup.main()
+
+        self.assertNotEqual(cm.exception.code, 0)
+        self.assertEqual(self._read_db(), b"UNTOUCHED")
+
+    def test_main_with_no_backups_present_returns_without_raising(self):
+        # No main.db yet either - the very first run on a fresh install,
+        # before backupDatabaseTask has ever produced a snapshot.
+        restore_backup.main()
+        self.assertFalse(os.path.isfile(self.db_path))
 
 
 if __name__ == "__main__":
