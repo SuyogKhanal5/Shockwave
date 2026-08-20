@@ -151,6 +151,20 @@ The override always returns `True` (matching the default implementation's
 behavior), so it never blocks anything; per-command checks like `/clear`'s
 `has_permissions` still run separately afterward, unaffected.
 
+The whole body is wrapped in its own `try`/`except Exception`, logging and
+swallowing rather than letting anything through. `interaction.command`/
+`.namespace` run discord.py's real option-resolution machinery — nothing a
+`FakeInteraction`-based test can faithfully exercise — and
+`CommandTree._from_interaction`'s own wrapper only catches `AppCommandError`
+around the whole dispatch, so anything else raised here previously escaped
+uncaught: the interaction died silently, Discord showed "This interaction
+failed", and neither `on_app_command_error` nor this file's own log ever
+saw it. This bit in production (a real `/team-create` call failing with
+nothing logged anywhere) before the `try`/`except` was added — a
+logging-only hook, with no business reason to ever fail, needs to be
+structurally unable to take down the feature it's just supposed to be
+watching.
+
 A successful completion is logged separately, from `on_app_command_completion`
 — an event discord.py dispatches itself only once a command has actually run
 to completion without raising (see `CommandTree._call`), so it only ever
@@ -176,6 +190,16 @@ that circular. That same re-import (with `sqlite3.connect`/`open` patched
 away from the real database/token) is also what keeps running the suite from
 here safe: it never touches the real `main.db` or Discord, no matter how
 deep the self-test run's own nested re-imports go.
+
+`_runStartupSelfTests` also raises the `"asyncio"` and `"discord"` loggers to
+`ERROR` for the run's duration, restoring their prior levels after (same
+try/finally shape as `logger._suppress_db_logging` above). `IsolatedAsyncioTestCase`
+(every async test in the suite) always runs its event loop with `debug=True`,
+which logs a `WARNING` through the `"asyncio"` logger for any callback slower
+than 100ms - meaningless test-fixture timing noise, not a real bug, but both
+loggers propagate to the same root handlers this file's own `logging.basicConfig`
+call configured, same as `"shockwave"` itself, so without this they'd land
+straight in this file's own log every time the suite runs.
 
 ### Team formation
 
@@ -231,6 +255,23 @@ pairwise role swaps between players and keeping any swap that lets
 `_splitRoleBalancedTeams` (a brute force over which of each role's two players
 lands on which side, 32 combinations) find a tighter effective-elo split than
 before, stopping once a full pass turns up no further improvement.
+
+Unlike those two, `ROLE_BALANCE_DISLIKED_ROLE_WIN_ELO_MULTIPLIER` (1.5) *does*
+touch real elo: `rankedTeamHelper` records every user_id who ended up on a
+disliked role in that particular split (`servers.disliked_role_user_ids`, a
+plain comma-separated list — set alongside `team1`/`team2`, so it lives and
+clears with them the same way, including surviving a `/reuse`), and
+`computeGameDeltas` multiplies up a winning player's own elo delta if their
+id is in that set for the game just resolved. Only a win earns it — a loss on
+a disliked role gets no such break, just the plain team-average delta every
+teammate gets. It's a reward for actually pulling off a win on a less-wanted
+assignment, on top of whatever the normal team-average swing already gave
+that player; `formatResultMessage` lists who earned it and how much as its
+own "Disliked-role win bonus" line whenever `summary["disliked_role_bonus_players"]`
+isn't empty. The bonus is snapshotted into `last_result` too (see
+`saveLastResult`/`getLastResult`), so `/report-correct-winner` recomputes it
+correctly for whoever the real winner turns out to be, no matter how much
+later the correction happens or what `team1`/`team2` have moved on to since.
 
 Forming a roster through any of these always runs `clearTeamsHelper` first,
 which resets `is_ranked` to 0 among other things. Only `ranked:true` sets it
@@ -324,7 +365,16 @@ bot keeps responding to other commands, so the countdown runs as its own
 `asyncio.create_task` (`_bettingTimer`), tracked per-guild in
 `self.bettingTasks` so Cancel Game or a fresh Start/Start (no move) click can
 cancel it instead of leaving it to fire later against a game that no longer
-exists.
+exists. `_openBetting` also stamps `betting_opened_at` (unix seconds) on the
+`servers` row - `self.bettingTasks` is only ever in-memory, lost on a genuine
+process restart (though not a mere gateway reconnect, where it's untouched).
+Without that timestamp, a guild that had `betting_state=OPEN` at the moment of
+a restart would stay `OPEN` forever, since nobody would ever flip it to
+`CLOSED` again. `reconcileStaleBettingWindows`, called once from `on_ready`,
+resumes any such window with whatever time it actually had left (or closes it
+outright if that time had already passed), skipping any guild that already
+has a live task tracked (the reconnect case) so it can't stomp a window that
+was never actually interrupted.
 
 The headline text comes from whichever `mode` string
 (`"Normal"`/`"Ranked"`/`"Captains"`/`"Ranked Captains"`) the most recent
@@ -859,6 +909,24 @@ its own, so rendering bigger and shrinking down is the standard way around a
 jagged line or glyph edge. Every pixel-valued layout constant (font sizes,
 margins, line widths, radii, ...) is already expressed at the supersampled
 scale, so the drawing code itself never has to think about the scale factor.
+
+Every top-level render call (`renderBracketImages`, `_buildGrandFinalsImage`,
+`_renderMatchupImage`, `_renderTeamCardImage`, `_renderTradingCardImage`,
+`_renderPreviewImages`) is invoked via `asyncio.to_thread` from its own async
+caller, not called directly - Pillow's actual drawing work (many draw/text/
+paste calls per image) would otherwise block the event loop, and so every
+other guild's commands, for the whole time one image takes to render.
+`_imageToFile`'s own downscale is left on the main thread, a comparatively
+small cost next to the drawing itself. `_renderGrandFinalsImage` is the one
+render function that also reads from the database (which stage of Grand
+Finals has actually been played) — genuinely unsafe to run from a different
+thread, since `self.cursor` was opened with sqlite3's default
+`check_same_thread=True`. It's split into `_grandFinalsRenderInputs` (the DB
+read, run on the calling thread) and `_buildGrandFinalsImage` (the pure
+drawing, the part that's actually offloaded) for exactly this reason —
+`_renderGrandFinalsImage` itself is a synchronous convenience wrapper around
+both, kept fully synchronous for callers (and tests) that don't need the
+split.
 
 A bracket 16+ teams deep (`BRACKET_TWO_SIDED_MIN_ROUNDS`) renders as two
 mirrored halves converging toward a champion in the center, the same layout a

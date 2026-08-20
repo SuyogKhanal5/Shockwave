@@ -198,7 +198,7 @@ if not db_already_existed:
         "betting_state, betting_message_id, betting_channel_id, is_ranked, "
         "active_tournament_match_id, wager_channel, betting_timer_seconds, "
         "roster_team1_message_id, roster_team2_message_id, roster_channel_id, roster_use_roles, "
-        "default_elo)"
+        "default_elo, betting_opened_at, disliked_role_user_ids)"
     )
     mainDB.commit()
 else:
@@ -215,6 +215,10 @@ else:
     ensure_column("servers", "betting_state", "TEXT", "'NONE'")
     ensure_column("servers", "betting_message_id", "INTEGER")
     ensure_column("servers", "betting_channel_id", "INTEGER")
+    # When the current betting window was opened (unix seconds) - lets
+    # reconcileStaleBettingWindows (called from on_ready) work out how much
+    # of the window was actually left if the bot restarts mid-window.
+    ensure_column("servers", "betting_opened_at", "INTEGER")
     # Whether the current team1/team2 game was formed with ranked:true (on
     # /make-teams or /captains) — gates whether recordResult touches anyone's elo.
     ensure_column("servers", "is_ranked", "INTEGER", "0")
@@ -247,6 +251,14 @@ else:
     # this guild (see helpers._defaultEloForGuild) — NULL until an admin
     # sets it, meaning "use the global helper.DEFAULT_ELO (1000)".
     ensure_column("servers", "default_elo", "INTEGER")
+    # Comma-separated user ids of whoever the current team1/team2 roster
+    # assigned a disliked role to (rankedTeamHelper, ranked:true
+    # use_roles:true only) — read back by recordResult/
+    # reportCorrectWinnerHelper so a win on a disliked role earns the
+    # ROLE_BALANCE_DISLIKED_ROLE_WIN_ELO_MULTIPLIER bonus. Lives and clears
+    # alongside team1/team2 (see clearTeamsHelper), not per-result, so a
+    # reused roster (/reuse) still gets credit for the same assignments.
+    ensure_column("servers", "disliked_role_user_ids", "TEXT")
 
 # Per-member currency: gold balance plus win/loss and wagering stats, one
 # row per (guild, user).
@@ -501,6 +513,23 @@ def _interactionLogContext(interaction):
     return f"user={interaction.user} ({interaction.user.id}) guild={guild_desc}"
 
 
+# Best-effort snapshot of the interaction an error was raised from, appended
+# to on_app_command_error's log line so a failure is diagnosable from the
+# log alone (which command, with what parameters, for whom) instead of
+# needing a live repro. interaction.command/.namespace run the same real
+# discord.py option-resolution machinery LoggingCommandTree.interaction_check
+# above has to guard against - wrapped the same way here so a dump failure
+# never swallows the actual error it was trying to add context to.
+def _errorVariableDump(interaction):
+    try:
+        command = interaction.command
+        name = command.qualified_name if command is not None else interaction.data.get("name", "?")
+        params = dict(interaction.namespace) if command is not None else {}
+    except Exception:
+        name, params = "?", "<unresolvable>"
+    return f"command=/{name} params={params} {_interactionLogContext(interaction)}"
+
+
 # Logs every real command invocation (name, params, who, where) in one
 # place rather than instrumenting each of the ~40 @tree.command functions
 # individually - interaction_check is a global hook discord.py's own
@@ -515,16 +544,34 @@ def _interactionLogContext(interaction):
 # True unconditionally, so returning True here (never blocking anything)
 # preserves that; per-command checks (e.g. /clear's has_permissions) still
 # run separately afterward and are unaffected by this.
+#
+# BUG FOUND IN PRODUCTION: interaction.command/.namespace run discord.py's
+# own real option-resolution machinery (Namespace.__init__ in particular
+# indexes each option's fields directly, not via .get()), which nothing in
+# tests.py can faithfully exercise — every test here goes through a plain
+# FakeInteraction with no real payload to resolve. Worse, CommandTree.
+# _from_interaction's own wrapper only catches AppCommandError around the
+# whole dispatch, so any OTHER exception raised in here (a logging-only
+# path with no business reason to ever fail) escaped uncaught, silently
+# killing the interaction before the command it was meant to observe ever
+# ran — Discord shows "This interaction failed" and nothing reaches
+# on_app_command_error or this file's own log at all. A try/except around
+# the entire body, unconditionally returning True either way, is what
+# makes this hook genuinely unable to take down the feature it's just
+# supposed to be watching.
 class LoggingCommandTree(app_commands.CommandTree):
     async def interaction_check(self, interaction):
-        if interaction.type is discord.InteractionType.application_command:
-            command = interaction.command
-            name = command.qualified_name if command is not None else interaction.data.get("name", "?")
-            params = dict(interaction.namespace) if command is not None else {}
-            logger.info(
-                "Command called: /%s %s | %s",
-                name, _truncateForLog(str(params)), _interactionLogContext(interaction)
-            )
+        try:
+            if interaction.type is discord.InteractionType.application_command:
+                command = interaction.command
+                name = command.qualified_name if command is not None else interaction.data.get("name", "?")
+                params = dict(interaction.namespace) if command is not None else {}
+                logger.info(
+                    "Command called: /%s %s | %s",
+                    name, _truncateForLog(str(params)), _interactionLogContext(interaction)
+                )
+        except Exception:
+            logger.exception("LoggingCommandTree.interaction_check failed - continuing without logging this call")
         return True
 
 
@@ -629,7 +676,7 @@ def ensure_guild_row(guild_id, guild_name):
     cursor.execute(
         "INSERT INTO servers VALUES(?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, "
         "NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'NONE', NULL, NULL, 0, NULL, NULL, ?, "
-        "NULL, NULL, NULL, 0, NULL)",
+        "NULL, NULL, NULL, 0, NULL, NULL, NULL)",
         (guild_id, guild_name, helper.BETTING_DURATION_SECONDS)
     )
     mainDB.commit()
@@ -645,6 +692,7 @@ async def on_ready():
     if not backupDatabaseTask.is_running():
         backupDatabaseTask.start()
     registerPersistentViews()
+    await helperObj.reconcileStaleBettingWindows(client)
     logger.info("Shockwave is ready - logged in as %s.", client.user)
 
 
@@ -697,7 +745,17 @@ async def on_guild_remove(ctx):
 # check rejected before it ran at all.
 @client.event
 async def on_app_command_completion(interaction, command):
-    logger.info("Command completed: /%s | %s", command.qualified_name, _interactionLogContext(interaction))
+    # discord.py's own Client._run_event already keeps an exception here
+    # from propagating anywhere harmful (it's routed to on_error instead,
+    # and this fires only after the command it's about already fully
+    # succeeded and responded) - caught explicitly anyway so a bug in this
+    # logging-only path still reaches this file's own log instead of only
+    # discord.py's default stderr-only on_error, matching interaction_check's
+    # own reasoning above.
+    try:
+        logger.info("Command completed: /%s | %s", command.qualified_name, _interactionLogContext(interaction))
+    except Exception:
+        logger.exception("on_app_command_completion logging failed")
 
 
 # Catch-all for every slash command's errors. discord.py calls this after
@@ -715,7 +773,11 @@ async def on_app_command_error(interaction, error):
         message = "You don't have permission to use this command."
     else:
         message = "Something went wrong running that command. Try again, and let an admin know if it keeps happening."
-        logger.error("Unhandled application command error", exc_info=(type(error), error, error.__traceback__))
+        logger.error(
+            "Unhandled application command error | %s",
+            _truncateForLog(_errorVariableDump(interaction)),
+            exc_info=(type(error), error, error.__traceback__),
+        )
 
     # A local .error handler that already responded to this interaction
     # (e.g. the MissingPermissions branch above, handled first by
@@ -1638,10 +1700,27 @@ def _runStartupSelfTests():
     suite = unittest.TestLoader().loadTestsFromName("tests")
     output = io.StringIO()
     logger._suppress_db_logging = True
+    # IsolatedAsyncioTestCase (Python 3.11+) always runs its event loop with
+    # debug=True, which logs a WARNING through the "asyncio" logger for
+    # every callback slower than 100ms - meaningless test-fixture timing
+    # noise (a slow CI machine, not a real bug), not something a deploy's
+    # actual log needs to carry. "discord" throws in its own startup noise
+    # (e.g. "PyNaCl is not installed") on every one of tests.py's nested
+    # bot.py reimports. Both loggers propagate to the same root handlers
+    # this file's own logging.basicConfig call configured, same as
+    # "shockwave" itself, so without this they'd land straight in this
+    # file's own log. Raised for the suite's duration only and restored
+    # after, same try/finally shape as _suppress_db_logging above.
+    noisy_loggers = [logging.getLogger("asyncio"), logging.getLogger("discord")]
+    prior_levels = [lg.level for lg in noisy_loggers]
+    for noisy_logger in noisy_loggers:
+        noisy_logger.setLevel(logging.ERROR)
     try:
         result = unittest.TextTestRunner(stream=output, verbosity=2).run(suite)
     finally:
         logger._suppress_db_logging = False
+        for noisy_logger, level in zip(noisy_loggers, prior_levels):
+            noisy_logger.setLevel(level)
 
     if result.wasSuccessful():
         return

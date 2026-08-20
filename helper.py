@@ -11,6 +11,7 @@ import itertools
 import json
 import math
 import os
+import time
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
@@ -236,6 +237,13 @@ ROLE_BALANCE_FILL_ORDER = ["Jungle", "Top", "Mid", "Bottom", "Support"]
 # swap - it already stops as soon as a full pass finds no improving swap,
 # this only guards against a pathological input oscillating forever.
 ROLE_BALANCE_MAX_REFINE_PASSES = 5
+# Unlike the two penalties above, this one DOES touch real elo: a player
+# who wins while playing a role they marked disliked gets their normal
+# win delta multiplied up by this much (see computeGameDeltas) - a reward
+# for actually pulling off a win on a less-wanted assignment, on top of
+# whatever the normal team-average swing already gave them. Losing on a
+# disliked role earns no such bonus - only a win counts.
+ROLE_BALANCE_DISLIKED_ROLE_WIN_ELO_MULTIPLIER = 1.5
 # How long the /clear confirmation buttons stay clickable before the
 # reset is abandoned on its own.
 CLEAR_CONFIRM_TIMEOUT_SECONDS = 30
@@ -275,7 +283,11 @@ STATS_CARD_EMOJI = "\U0001F0CF"  # 🃏 decorates StatsView's Card button
 # swapping back to the plain /stats embed (which then gets its own Card
 # button restored, so the whole thing is a real back-and-forth toggle
 # rather than a one-way trip).
-STATS_RETURN_EMOJI = "\U0001faaa"  # 🪪 decorates StatsView's Back button
+STATS_RETURN_EMOJI = "↩️"  # ↩️ decorates StatsView's Back button — was 🪪
+# (U+1FAAA IDENTIFICATION CARD), which several Discord clients render as a
+# blank/missing glyph despite being valid Unicode; ↩️ is the same long-
+# established arrow TEAM_CARD_RETURN_EMOJI already uses for the identical
+# "back to the plain view" role on TeamStatsView.
 
 # Trading-card layout (see _renderTradingCardImage) — a portrait card
 # roughly the shape of a real trading card, reusing the same canvas/header
@@ -2073,12 +2085,17 @@ class helpers():
         team2 = Team()
         team2.name = name2
 
+        disliked_role_ids = []
         if role_split is not None:
             side_a, side_b = role_split
-            for member, _elo, _role, _tier, _eff in side_a:
+            for member, _elo, _role, tier, _eff in side_a:
                 team1.add_player(Player(member.id, member.name))
-            for member, _elo, _role, _tier, _eff in side_b:
+                if tier == "disliked":
+                    disliked_role_ids.append(member.id)
+            for member, _elo, _role, tier, _eff in side_b:
                 team2.add_player(Player(member.id, member.name))
+                if tier == "disliked":
+                    disliked_role_ids.append(member.id)
             team1_members = [entry[0] for entry in side_a]
             team2_members = [entry[0] for entry in side_b]
         else:
@@ -2087,6 +2104,12 @@ class helpers():
                 team1.add_player(Player(member.id, member.name))
             for member in team2_members:
                 team2.add_player(Player(member.id, member.name))
+
+        # Read back by recordResult/reportCorrectWinnerHelper to credit the
+        # ROLE_BALANCE_DISLIKED_ROLE_WIN_ELO_MULTIPLIER bonus - stored as
+        # plain comma-separated text since it's never queried, only ever
+        # read back whole (see _dislikedRoleUserIds).
+        self.update(guild_id, "disliked_role_user_ids", ",".join(str(i) for i in disliked_role_ids))
 
         self.update(guild_id, "team1", team1.serializeTeam())
         self.update(guild_id, "team2", team2.serializeTeam())
@@ -2757,6 +2780,9 @@ class helpers():
         self.update(guild_id, "team_size", 5)
         self.update(guild_id, "mode", "Normal")
         self.update(guild_id, "turn", 1)
+        # Goes stale the moment team1/team2 do (see rankedTeamHelper) - a
+        # fresh roster's own players earned no disliked-role bonus yet.
+        self.update(guild_id, "disliked_role_user_ids", "")
         # Every team-formation path (/make-teams, /captains, either with or
         # without ranked:true) runs through here first — resetting is_ranked
         # to 0 by default means only the ranked-specific helpers, which
@@ -4122,18 +4148,19 @@ class helpers():
 
         return image
 
-    # A dedicated third image for just the Grand Finals stage: winners-
-    # bracket champion vs losers-bracket champion, and the decider "bracket
-    # reset" match if the losers-bracket side forced one by winning game 1.
-    # None until game 1 has actually been played — not just once both
-    # bracket champions exist, since "vs, nothing decided yet" isn't worth
-    # its own message (see _sendBracketText, which sends this separately
-    # from the winners/losers bracket images, and only when this isn't
-    # None). Split from the actual drawing (_buildGrandFinalsImage) so that
-    # code can also be exercised without a real guildId or any
-    # tournament_matches rows — see /test in bot.py, which simulates a full
-    # run entirely in memory.
-    def _renderGrandFinalsImage(self, guild_id, tournament, guild_name=None):
+    # The DB-dependent half of _renderGrandFinalsImage — everything needed
+    # to actually draw the stage except the drawing itself, or None if
+    # there's nothing worth drawing yet (either bracket champion still
+    # missing, or game 1 hasn't been played). Kept separate from
+    # _buildGrandFinalsImage (the pure, DB-free drawing) for two reasons:
+    # that code can be exercised without a real guildId or any
+    # tournament_matches rows (see /test in bot.py, which simulates a full
+    # run entirely in memory), and _buildGrandFinalsImage alone is safe to
+    # run via asyncio.to_thread (see _sendBracketText/printBracketHelper) —
+    # self.cursor was opened with sqlite3's default check_same_thread=True,
+    # so a DB read from a to_thread-offloaded worker thread would raise
+    # outright.
+    def _grandFinalsRenderInputs(self, guild_id, tournament):
         wb_rounds = self._bracketRounds(tournament.get_bracket())
         wb_champion = wb_rounds[-1][0].team if wb_rounds else None
         lb_rounds = tournament.get_losers_rounds()
@@ -4162,9 +4189,24 @@ class helpers():
         if game1_winner_name is None:
             return None
 
-        return self._buildGrandFinalsImage(
-            tournament, wb_champion, lb_champion, game1_winner_name, reset_winner_name, guild_name
-        )
+        return wb_champion, lb_champion, game1_winner_name, reset_winner_name
+
+    # A dedicated third image for just the Grand Finals stage: winners-
+    # bracket champion vs losers-bracket champion, and the decider "bracket
+    # reset" match if the losers-bracket side forced one by winning game 1.
+    # None until game 1 has actually been played — not just once both
+    # bracket champions exist, since "vs, nothing decided yet" isn't worth
+    # its own message (see _sendBracketText, which sends this separately
+    # from the winners/losers bracket images, and only when this isn't
+    # None). Synchronous convenience wrapper around
+    # _grandFinalsRenderInputs + _buildGrandFinalsImage for callers (and
+    # tests) that don't care about the thread-safety split those two exist
+    # for - see _sendBracketText/printBracketHelper for the caller that does.
+    def _renderGrandFinalsImage(self, guild_id, tournament, guild_name=None):
+        inputs = self._grandFinalsRenderInputs(guild_id, tournament)
+        if inputs is None:
+            return None
+        return self._buildGrandFinalsImage(tournament, *inputs, guild_name)
 
     # The pure rendering half of _renderGrandFinalsImage — no DB access, just
     # the two bracket champions and however far Grand Finals has resolved
@@ -4472,7 +4514,7 @@ class helpers():
     # put in the subtitle.
     async def _sendMatchupImage(self, channel, team1, team2, label):
         guild_name = channel.guild.name if channel.guild is not None else None
-        image = self._renderMatchupImage(None, team1, team2, label, None, guild_name)
+        image = await asyncio.to_thread(self._renderMatchupImage, None, team1, team2, label, None, guild_name)
         await channel.send(file=self._imageToFile(image, "matchup.png"))
 
     # Maps the "mode" stored per-guild (set by /make-teams, /captains,
@@ -4576,13 +4618,17 @@ class helpers():
     # buried it instead of standing out.
     async def _sendBracketText(self, channel, tournament, guild_id=None):
         guild_name = channel.guild.name if channel.guild is not None else None
-        await channel.send(
-            self.renderBracketText(tournament, guild_id),
-            files=self.renderBracketImages(tournament, guild_name)
-        )
+        bracket_files = await asyncio.to_thread(self.renderBracketImages, tournament, guild_name)
+        await channel.send(self.renderBracketText(tournament, guild_id), files=bracket_files)
         if guild_id is not None:
-            finals_image = self._renderGrandFinalsImage(guild_id, tournament, guild_name)
-            if finals_image is not None:
+            # The DB read half runs here, not inside the offloaded thread
+            # (self.cursor is thread-affined) - only the pure drawing that
+            # depends on it is actually offloaded.
+            finals_inputs = self._grandFinalsRenderInputs(guild_id, tournament)
+            if finals_inputs is not None:
+                finals_image = await asyncio.to_thread(
+                    self._buildGrandFinalsImage, tournament, *finals_inputs, guild_name
+                )
                 await channel.send(files=[self._imageToFile(finals_image, "grand_finals.png")])
 
     async def printBracketHelper(self, ctx):
@@ -4592,12 +4638,16 @@ class helpers():
                 "No tournament set up for this server - use /tournament-create first."
             )
             return
-        await ctx.response.send_message(
-            self.renderBracketText(tournament, ctx.guild.id),
-            files=self.renderBracketImages(tournament, ctx.guild.name)
-        )
-        finals_image = self._renderGrandFinalsImage(ctx.guild.id, tournament, ctx.guild.name)
-        if finals_image is not None:
+        bracket_files = await asyncio.to_thread(self.renderBracketImages, tournament, ctx.guild.name)
+        await ctx.response.send_message(self.renderBracketText(tournament, ctx.guild.id), files=bracket_files)
+        # The DB read half runs here, not inside the offloaded thread
+        # (self.cursor is thread-affined) - only the pure drawing that
+        # depends on it is actually offloaded.
+        finals_inputs = self._grandFinalsRenderInputs(ctx.guild.id, tournament)
+        if finals_inputs is not None:
+            finals_image = await asyncio.to_thread(
+                self._buildGrandFinalsImage, tournament, *finals_inputs, ctx.guild.name
+            )
             await ctx.channel.send(files=[self._imageToFile(finals_image, "grand_finals.png")])
 
     # "Where in the tournament is this match" — the matchup graphic's
@@ -4628,10 +4678,10 @@ class helpers():
         tournament = self.getTournament(guild_id)
         round_label = self._matchRoundLabel(tournament, round_index, bracket_type)
         guild_name = channel.guild.name if channel.guild is not None else None
-        matchup_file = self._imageToFile(
-            self._renderMatchupImage(match_id, team1, team2, round_label, tournament.get_name(), guild_name),
-            f"match_{match_id}_vs.png"
+        matchup_image = await asyncio.to_thread(
+            self._renderMatchupImage, match_id, team1, team2, round_label, tournament.get_name(), guild_name
         )
+        matchup_file = self._imageToFile(matchup_image, f"match_{match_id}_vs.png")
         msg = await channel.send(
             f"**Match #{match_id}:** {team1.get_name()} vs {team2.get_name()} - press Ready below "
             "when ready to play (either captain)!",
@@ -4661,10 +4711,10 @@ class helpers():
         tournament = self.getTournament(guild_id)
         round_label = self._matchRoundLabel(tournament, round_index, bracket_type)
         guild_name = channel.guild.name if channel.guild is not None else None
-        matchup_file = self._imageToFile(
-            self._renderMatchupImage(match_id, team1, team2, round_label, tournament.get_name(), guild_name),
-            f"match_{match_id}_vs.png"
+        matchup_image = await asyncio.to_thread(
+            self._renderMatchupImage, match_id, team1, team2, round_label, tournament.get_name(), guild_name
         )
+        matchup_file = self._imageToFile(matchup_image, f"match_{match_id}_vs.png")
         msg = await channel.send(
             f"**Match #{match_id}:** {team1.get_name()} vs {team2.get_name()} - press the winning "
             "team's own button below.",
@@ -6787,7 +6837,7 @@ class helpers():
         team = self.getTeamById(guild_id, team_id)
         if team is None:
             return
-        card_image = self._renderTeamCardImage(guild_name, team)
+        card_image = await asyncio.to_thread(self._renderTeamCardImage, guild_name, team)
         file = self._imageToFile(card_image, "team_card.png")
 
         embed = discord.Embed(color=discord.Color.gold())
@@ -7189,6 +7239,18 @@ class helpers():
 
     # ---------------- Betting ----------------
 
+    # user_ids from the current roster's own disliked_role_user_ids column
+    # (see rankedTeamHelper) — whoever got stuck with a role they marked
+    # disliked when this team1/team2 split was formed, for computeGameDeltas
+    # to credit the ROLE_BALANCE_DISLIKED_ROLE_WIN_ELO_MULTIPLIER bonus to
+    # if they win. Empty for a roleless split, a casual game, or any roster
+    # formed before this column existed.
+    def _dislikedRoleUserIds(self, guild_id):
+        raw = self.get(guild_id, "disliked_role_user_ids")
+        if not raw:
+            return frozenset()
+        return frozenset(int(uid) for uid in raw.split(","))
+
     # Returns [(user_id, name), ...] for a team column ("team1"/"team2"), or
     # [] if that side hasn't been set up — never crashes on an unset column,
     # unlike Team().deserializeTeam(None/"").
@@ -7404,6 +7466,11 @@ class helpers():
 
         self.update(guild_id, "betting_state", "OPEN")
         self.update(guild_id, "betting_channel_id", channel.id)
+        # Read back by reconcileStaleBettingWindows (called from on_ready)
+        # to work out how much of the window was actually left if the bot
+        # restarts mid-window - the in-memory timer task below doesn't
+        # survive that, only a process reconnect.
+        self.update(guild_id, "betting_opened_at", int(time.time()))
 
         team1_name = self.getRosterName(guild_id, "team1", "Team 1", escape=False)
         team2_name = self.getRosterName(guild_id, "team2", "Team 2", escape=False)
@@ -7430,16 +7497,22 @@ class helpers():
         task = asyncio.create_task(self._bettingTimer(guild_id, channel, duration))
         self.bettingTasks[guild_id] = task
 
-    # Just closes the betting window once the configured duration elapses —
-    # the winner-report message (and its reactions) already went out with
-    # the "betting is open" one in _openBetting, so there's nothing left
-    # for this to post beyond the closed notice itself.
+    # The actual "close it" side effect a betting window's own expiry has —
+    # split out of _bettingTimer so reconcileStaleBettingWindows can reach
+    # it directly too, for a window whose remaining time had already
+    # elapsed by the time the bot came back up. The winner-report message
+    # (and its buttons) already went out with the "betting is open" one in
+    # _openBetting, so there's nothing left for this to post beyond the
+    # closed notice itself.
+    async def _closeBettingWindow(self, guild_id, channel):
+        self.update(guild_id, "betting_state", "CLOSED")
+        await channel.send("🔒 Betting is now closed! No more wagers will be accepted for this game.")
+
+    # Just waits out the configured duration, then closes the window.
     async def _bettingTimer(self, guild_id, channel, duration):
         try:
             await asyncio.sleep(duration)
-
-            self.update(guild_id, "betting_state", "CLOSED")
-            await channel.send("🔒 Betting is now closed! No more wagers will be accepted for this game.")
+            await self._closeBettingWindow(guild_id, channel)
         except asyncio.CancelledError:
             # CANCEL_GAME_EMOJI (or a fresh ▶️ click) ended the game before
             # betting closed — cancelBettingHelper already handles the
@@ -7457,6 +7530,48 @@ class helpers():
         task = self.bettingTasks.pop(guild_id, None)
         if task is not None and not task.done():
             task.cancel()
+
+    # Called once from on_ready. _bettingTimer's own countdown is only ever
+    # an in-memory asyncio.Task (self.bettingTasks) - lost on a genuine
+    # process restart, though not on a mere gateway reconnect, where
+    # on_ready can also fire but self.bettingTasks is untouched (guarded
+    # against below by skipping any guild that already has a live task,
+    # so a reconnect can't stomp a window that was never actually
+    # interrupted). Without this, a guild whose betting_state was OPEN at
+    # the moment of a restart would stay OPEN forever - nobody left to
+    # ever flip it to CLOSED, so /wager would keep accepting new bets
+    # indefinitely past when the timer should have closed it. Resumes the
+    # remaining time via betting_opened_at rather than just closing
+    # outright, so a window that had, say, 55 of its 60 seconds left when
+    # the bot restarted still gets roughly that long rather than being cut
+    # short.
+    async def reconcileStaleBettingWindows(self, client):
+        self.cursor.execute(
+            "SELECT guildId, betting_channel_id, betting_opened_at FROM servers WHERE betting_state='OPEN'"
+        )
+        rows = self.cursor.fetchall()
+        for guild_id, channel_id, opened_at in rows:
+            if guild_id in self.bettingTasks:
+                continue
+            channel = client.get_channel(channel_id) if channel_id is not None else None
+            if channel is None:
+                # Channel deleted, or not yet in cache - leave the window
+                # open rather than guessing; it's still fully resolvable
+                # by hand via the report/cancel buttons either way.
+                continue
+
+            duration = self._getBettingTimerSeconds(guild_id)
+            # opened_at is only unset for a window that was already open
+            # before this column existed - treated as already expired
+            # rather than guessing how long ago it actually opened.
+            elapsed = (int(time.time()) - opened_at) if opened_at is not None else duration
+            remaining = duration - elapsed
+
+            if remaining > 0:
+                task = asyncio.create_task(self._bettingTimer(guild_id, channel, remaining))
+                self.bettingTasks[guild_id] = task
+            else:
+                await self._closeBettingWindow(guild_id, channel)
 
     # Undoes _handleWinnerReportPick's own synchronous betting_message_id
     # clear once a pending winner confirmation is cancelled or times out,
@@ -7631,16 +7746,19 @@ class helpers():
         team2_name = self.getRosterName(guild_id, "team2", "Team 2")
         elo_lookup = self.getEloLookup(guild_id, team1_roster + team2_roster)
         is_ranked = bool(self.get(guild_id, "is_ranked"))
+        disliked_role_user_ids = self._dislikedRoleUserIds(guild_id)
 
         deltas, summary = self.computeGameDeltas(
             allWagers, team1_roster, team2_roster, elo_lookup, winning_team, is_ranked,
             default_elo=self._defaultEloForGuild(guild_id),
             team1_name=team1_name, team2_name=team2_name,
+            disliked_role_user_ids=disliked_role_user_ids,
         )
         newly_unlocked = self.applyGameDeltas(guild_id, deltas)
         self.saveLastResult(
             guild_id, winning_team, allWagers, team1_roster, team2_roster, deltas, is_ranked,
             team1_name=team1_name, team2_name=team2_name,
+            disliked_role_user_ids=disliked_role_user_ids,
         )
 
         await channel.send(self.formatResultMessage(winning_team, summary))
@@ -7930,7 +8048,7 @@ class helpers():
     #   summary: display-only info for formatResultMessage().
     def computeGameDeltas(
         self, wagers, team1_roster, team2_roster, elo_lookup, winning_team, is_ranked=False,
-        default_elo=DEFAULT_ELO, team1_name="Team 1", team2_name="Team 2",
+        default_elo=DEFAULT_ELO, team1_name="Team 1", team2_name="Team 2", disliked_role_user_ids=frozenset(),
     ):
         deltas = {}
 
@@ -7969,6 +8087,7 @@ class helpers():
         elo_changes = []
         winner_count = 0
         loser_count = 0
+        disliked_role_bonus_players = []
         if team1_roster or team2_roster:
             elo_delta1 = elo_delta2 = 0
             if is_ranked:
@@ -7982,9 +8101,25 @@ class helpers():
                 elo_delta1 = round(ELO_K_FACTOR * (actual1 - expected1))
                 elo_delta2 = round(ELO_K_FACTOR * ((1 - actual1) - (1 - expected1)))
 
+            # A win on a role marked disliked (see rankedTeamHelper's own
+            # disliked_role_user_ids) earns more than the team-average swing
+            # every teammate gets - a losing player on a disliked role gets
+            # no such break, only a win counts. Multiplies rather than adds
+            # a flat bonus, so it scales with how much elo was actually on
+            # the line that game rather than being a fixed number regardless
+            # of the matchup.
+            def _playerEloDelta(user_id, username, base_delta, is_winning_side):
+                if not (is_ranked and is_winning_side and user_id in disliked_role_user_ids):
+                    return base_delta
+                boosted = round(base_delta * ROLE_BALANCE_DISLIKED_ROLE_WIN_ELO_MULTIPLIER)
+                if boosted != base_delta:
+                    disliked_role_bonus_players.append((username, boosted))
+                return boosted
+
             for user_id, username in team1_roster:
                 bump(
-                    user_id, username, elo=elo_delta1,
+                    user_id, username,
+                    elo=_playerEloDelta(user_id, username, elo_delta1, winning_team == 1),
                     balance=GAME_WIN_GOLD if winning_team == 1 else GAME_LOSS_GOLD,
                     game_wins=1 if winning_team == 1 else 0,
                     game_losses=0 if winning_team == 1 else 1,
@@ -7993,7 +8128,8 @@ class helpers():
                 )
             for user_id, username in team2_roster:
                 bump(
-                    user_id, username, elo=elo_delta2,
+                    user_id, username,
+                    elo=_playerEloDelta(user_id, username, elo_delta2, winning_team == 2),
                     balance=GAME_WIN_GOLD if winning_team == 2 else GAME_LOSS_GOLD,
                     game_wins=1 if winning_team == 2 else 0,
                     game_losses=0 if winning_team == 2 else 1,
@@ -8014,6 +8150,7 @@ class helpers():
             "no_winning_bets": bool(wagers) and not winning_bettors,
             "winning_bettors": winning_bettors,
             "elo_changes": elo_changes,
+            "disliked_role_bonus_players": disliked_role_bonus_players,
             "winner_gold_count": winner_count,
             "loser_gold_count": loser_count,
             "team1_name": team1_name,
@@ -8120,6 +8257,12 @@ class helpers():
                 "Elo: " + ", ".join(f"{name} {delta:+d}" for name, delta in summary["elo_changes"])
             )
 
+        if summary.get("disliked_role_bonus_players"):
+            lines.append(
+                "Disliked-role win bonus: "
+                + ", ".join(f"{name} {delta:+d}" for name, delta in summary["disliked_role_bonus_players"])
+            )
+
         winner_count = summary.get("winner_gold_count", 0)
         loser_count = summary.get("loser_gold_count", 0)
         if winner_count or loser_count:
@@ -8141,7 +8284,7 @@ class helpers():
     # a new result overwrites the previous snapshot.
     def saveLastResult(
         self, guild_id, winning_team, wagers, team1_roster, team2_roster, deltas, is_ranked=False,
-        team1_name="Team 1", team2_name="Team 2",
+        team1_name="Team 1", team2_name="Team 2", disliked_role_user_ids=frozenset(),
     ):
         payload = {
             "winning_team": winning_team,
@@ -8152,6 +8295,11 @@ class helpers():
             "is_ranked": is_ranked,
             "team1_name": team1_name,
             "team2_name": team2_name,
+            # So reportCorrectWinnerHelper's own recomputation still credits
+            # whoever actually played a disliked role this game, no matter
+            # how much later the correction happens or what team1/team2
+            # have moved on to since.
+            "disliked_role_user_ids": list(disliked_role_user_ids),
         }
         self.cursor.execute(
             "INSERT OR REPLACE INTO last_result(guildId, data) VALUES(?, ?)",
@@ -8171,6 +8319,7 @@ class helpers():
         payload["team2_roster"] = [tuple(p) for p in payload["team2_roster"]]
         payload["deltas"] = {int(uid): d for uid, d in payload["deltas"].items()}
         payload.setdefault("is_ranked", False)
+        payload["disliked_role_user_ids"] = frozenset(payload.get("disliked_role_user_ids", []))
         return payload
 
     # Fully undoes the last resolved game — reverses last["deltas"] the
@@ -8267,16 +8416,19 @@ class helpers():
         team1_roster = last["team1_roster"]
         team2_roster = last["team2_roster"]
         is_ranked = last["is_ranked"]
+        disliked_role_user_ids = last["disliked_role_user_ids"]
         elo_lookup = self.getEloLookup(guild_id, team1_roster + team2_roster)
         new_deltas, summary = self.computeGameDeltas(
             last["wagers"], team1_roster, team2_roster, elo_lookup, correct_team, is_ranked,
             default_elo=self._defaultEloForGuild(guild_id),
             team1_name=team1_name, team2_name=team2_name,
+            disliked_role_user_ids=disliked_role_user_ids,
         )
         newly_unlocked = self.applyGameDeltas(guild_id, new_deltas)
         self.saveLastResult(
             guild_id, correct_team, last["wagers"], team1_roster, team2_roster, new_deltas, is_ranked,
             team1_name=team1_name, team2_name=team2_name,
+            disliked_role_user_ids=disliked_role_user_ids,
         )
 
         previous_name = team1_name if last["winning_team"] == 1 else team2_name
@@ -8911,7 +9063,8 @@ class helpers():
         except Exception:
             avatar_image = Image.new("RGBA", (CARD_AVATAR_SIZE, CARD_AVATAR_SIZE), BRACKET_BACKGROUND_CENTER)
 
-        card_image = self._renderTradingCardImage(
+        card_image = await asyncio.to_thread(
+            self._renderTradingCardImage,
             guild_name, display_name, avatar_image, settings, stats, teams, username=member.name
         )
         return self._imageToFile(card_image, "trading_card.png")
@@ -9254,7 +9407,7 @@ class helpers():
         cached = self._cachedPreviewFiles(stem)
 
         if not cached:
-            images = self._renderPreviewImages(preview_type)
+            images = await asyncio.to_thread(self._renderPreviewImages, preview_type)
             os.makedirs(PREVIEW_DIR, exist_ok=True)
             for i, image in enumerate(images, start=1):
                 path = os.path.join(PREVIEW_DIR, f"{stem}-{i}.png")
@@ -9814,7 +9967,8 @@ class helpers():
             avatar_image = Image.new("RGBA", (CARD_AVATAR_SIZE, CARD_AVATAR_SIZE), BRACKET_BACKGROUND_CENTER)
 
         username = member.name if member is not None else None
-        card_image = self._renderTradingCardImage(
+        card_image = await asyncio.to_thread(
+            self._renderTradingCardImage,
             guild_name, display_name, avatar_image, settings, stats, teams, username=username
         )
         file = self._imageToFile(card_image, "trading_card.png")
@@ -10027,8 +10181,10 @@ class helpers():
         return max(1, -(-len(entries) // LEADERBOARD_PAGE_SIZE))  # ceil division
 
     # Builds one page of the leaderboard embed. `stat` is None for the
-    # default overview (sorted by elo, showing elo/record together) or one
-    # of LEADERBOARD_STAT_LABELS for a single ranked stat.
+    # default overview (sorted by elo, showing elo alongside the ranked
+    # win/loss record — not the combined game_wins/game_losses total, since
+    # elo itself only ever moves from ranked games) or one of
+    # LEADERBOARD_STAT_LABELS for a single stat.
     def _renderLeaderboardEmbed(self, guild_name, entries_sorted, stat, order, page):
         total_pages = self._leaderboardPageCount(entries_sorted)
         start = page * LEADERBOARD_PAGE_SIZE
@@ -10045,7 +10201,7 @@ class helpers():
             if stat is None:
                 lines.append(
                     f"**#{rank}.** {entry['username']} - Elo: {entry['elo']} | "
-                    f"Record: {entry['game_wins']}W-{entry['game_losses']}L"
+                    f"Ranked: {entry['ranked_wins']}W-{entry['ranked_losses']}L"
                 )
             else:
                 lines.append(
