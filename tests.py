@@ -46,6 +46,7 @@ from TourneyClasses import (
 )
 import helper as helper_module
 from helper import helpers as Helpers
+import restore_backup
 
 GUILD_ID = 555000111
 
@@ -13692,6 +13693,165 @@ class ReportCorrectWinnerCommandTests(BotModuleTestCase):
 
         with self.assertRaises(RuntimeError):
             await cmd.on_error(ctx, RuntimeError("boom"))
+
+
+# ===========================================================================
+# restore_backup.py — a standalone ops script (run by whoever hosts the bot,
+# with the bot itself stopped) for reverting main.db to one of
+# backupDatabaseTask's daily snapshots. Never imported by bot.py/helper.py,
+# so these tests exercise it directly - always against a throwaway temp
+# directory (DB_PATH/BACKUP_DIR patched for the duration of each test),
+# never the real data/guildData/ paths it points at by default.
+# ===========================================================================
+
+class RestoreBackupTests(unittest.TestCase):
+    def setUp(self):
+        self._real_db_path = restore_backup.DB_PATH
+        self._real_backup_dir = restore_backup.BACKUP_DIR
+        self._tmp = tempfile.TemporaryDirectory()
+        serverinfo_dir = os.path.join(self._tmp.name, "serverInfo")
+        self.backups_dir = os.path.join(self._tmp.name, "backups")
+        os.makedirs(serverinfo_dir)
+        os.makedirs(self.backups_dir)
+        self.db_path = os.path.join(serverinfo_dir, "main.db")
+        restore_backup.DB_PATH = self.db_path
+        restore_backup.BACKUP_DIR = self.backups_dir
+
+    def tearDown(self):
+        restore_backup.DB_PATH = self._real_db_path
+        restore_backup.BACKUP_DIR = self._real_backup_dir
+        self._tmp.cleanup()
+
+    def _write_db(self, content):
+        with open(self.db_path, "wb") as f:
+            f.write(content)
+
+    def _read_db(self):
+        with open(self.db_path, "rb") as f:
+            return f.read()
+
+    def _write_backup(self, name, content, mtime):
+        path = os.path.join(self.backups_dir, name)
+        with open(path, "wb") as f:
+            f.write(content)
+        os.utime(path, (mtime, mtime))
+        return path
+
+    def test_list_backups_sorts_newest_first(self):
+        self._write_backup("main-20260101-010000.db", b"old", mtime=1000)
+        self._write_backup("main-20260215-030000.db", b"new", mtime=2000)
+
+        self.assertEqual(
+            restore_backup._listBackups(), ["main-20260215-030000.db", "main-20260101-010000.db"]
+        )
+
+    def test_list_backups_excludes_safety_backups_and_empty_dir(self):
+        self.assertEqual(restore_backup._listBackups(), [])
+        self._write_backup("main-20260101-010000.db", b"old", mtime=1000)
+        self._write_backup("main-before-restore-20260101-010000.db", b"safety", mtime=1500)
+
+        self.assertEqual(restore_backup._listBackups(), ["main-20260101-010000.db"])
+
+    def test_resolve_choice_by_index_and_filename(self):
+        backups = ["main-20260215-030000.db", "main-20260101-010000.db"]
+
+        self.assertEqual(restore_backup._resolveChoice(backups, "1"), backups[0])
+        self.assertEqual(restore_backup._resolveChoice(backups, "2"), backups[1])
+        self.assertEqual(restore_backup._resolveChoice(backups, backups[1]), backups[1])
+        self.assertIsNone(restore_backup._resolveChoice(backups, "0"))
+        self.assertIsNone(restore_backup._resolveChoice(backups, "99"))
+        self.assertIsNone(restore_backup._resolveChoice(backups, "not-a-backup.db"))
+
+    def test_format_size_scales_units(self):
+        self.assertEqual(restore_backup._formatSize(500), "500B")
+        self.assertEqual(restore_backup._formatSize(2048), "2.0KB")
+        self.assertEqual(restore_backup._formatSize(5 * 1024 * 1024), "5.0MB")
+
+    def test_main_restores_the_chosen_backup_by_index(self):
+        self._write_db(b"LIVE-BEFORE")
+        self._write_backup("main-20260101-010000.db", b"OLDER", mtime=1000)
+        self._write_backup("main-20260215-030000.db", b"NEWER", mtime=2000)
+
+        with patch.object(sys, "argv", ["restore_backup.py", "1"]), \
+             patch("builtins.input", return_value="yes"):
+            restore_backup.main()
+
+        self.assertEqual(self._read_db(), b"NEWER")
+
+    def test_main_restores_the_chosen_backup_by_filename(self):
+        self._write_db(b"LIVE-BEFORE")
+        self._write_backup("main-20260101-010000.db", b"OLDER", mtime=1000)
+
+        with patch.object(sys, "argv", ["restore_backup.py", "main-20260101-010000.db"]), \
+             patch("builtins.input", return_value="yes"):
+            restore_backup.main()
+
+        self.assertEqual(self._read_db(), b"OLDER")
+
+    def test_main_saves_a_safety_backup_of_the_live_db_before_overwriting(self):
+        self._write_db(b"LIVE-BEFORE")
+        self._write_backup("main-20260101-010000.db", b"OLDER", mtime=1000)
+
+        with patch.object(sys, "argv", ["restore_backup.py", "1"]), \
+             patch("builtins.input", return_value="yes"):
+            restore_backup.main()
+
+        safety_files = [n for n in os.listdir(self.backups_dir) if n.startswith("main-before-restore-")]
+        self.assertEqual(len(safety_files), 1)
+        with open(os.path.join(self.backups_dir, safety_files[0]), "rb") as f:
+            self.assertEqual(f.read(), b"LIVE-BEFORE")
+
+    def test_main_does_not_save_a_safety_backup_when_there_was_no_live_db_yet(self):
+        # A fresh install being seeded from a backup for the first time -
+        # nothing to protect since main.db doesn't exist yet.
+        self._write_backup("main-20260101-010000.db", b"OLDER", mtime=1000)
+
+        with patch.object(sys, "argv", ["restore_backup.py", "1"]), \
+             patch("builtins.input", return_value="yes"):
+            restore_backup.main()
+
+        self.assertEqual(self._read_db(), b"OLDER")
+        safety_files = [n for n in os.listdir(self.backups_dir) if n.startswith("main-before-restore-")]
+        self.assertEqual(safety_files, [])
+
+    def test_main_blank_input_cancels_without_modifying_anything(self):
+        self._write_db(b"UNTOUCHED")
+        self._write_backup("main-20260101-010000.db", b"OLDER", mtime=1000)
+
+        with patch.object(sys, "argv", ["restore_backup.py"]), \
+             patch("builtins.input", return_value=""):
+            restore_backup.main()
+
+        self.assertEqual(self._read_db(), b"UNTOUCHED")
+        self.assertEqual(os.listdir(self.backups_dir), ["main-20260101-010000.db"])
+
+    def test_main_declining_confirmation_cancels_without_modifying_anything(self):
+        self._write_db(b"UNTOUCHED")
+        self._write_backup("main-20260101-010000.db", b"OLDER", mtime=1000)
+
+        with patch.object(sys, "argv", ["restore_backup.py", "1"]), \
+             patch("builtins.input", return_value="no"):
+            restore_backup.main()
+
+        self.assertEqual(self._read_db(), b"UNTOUCHED")
+
+    def test_main_out_of_range_choice_exits_nonzero_without_modifying_anything(self):
+        self._write_db(b"UNTOUCHED")
+        self._write_backup("main-20260101-010000.db", b"OLDER", mtime=1000)
+
+        with patch.object(sys, "argv", ["restore_backup.py", "99"]), \
+             patch("builtins.input", return_value="yes"):
+            with self.assertRaises(SystemExit) as cm:
+                restore_backup.main()
+
+        self.assertNotEqual(cm.exception.code, 0)
+        self.assertEqual(self._read_db(), b"UNTOUCHED")
+
+    def test_main_with_no_backups_present_returns_without_raising(self):
+        # No main.db yet either - the very first run on a fresh install,
+        # before backupDatabaseTask has ever produced a snapshot.
+        restore_backup.main()
+        self.assertFalse(os.path.isfile(self.db_path))
 
 
 if __name__ == "__main__":

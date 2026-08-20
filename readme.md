@@ -108,6 +108,17 @@ thread would raise outright, and backing up a database this size finishes
 well within the time a trading-card render already blocks the loop for.
 `data/guildData/backups/` is gitignored, same reasoning as `main.db`.
 
+`restore_backup.py`, run standalone (`python restore_backup.py`) with the bot
+stopped, is how a host reverts to one of those snapshots — no in-Discord
+command for it, since `main.db` is one shared database across every guild
+the bot serves, and a live restore triggered by one server's admin would
+silently roll back every other server's data too. It lists backups
+newest-first with their timestamp and size, restores whichever one is
+picked (by number or filename), and — before overwriting anything — copies
+the current live `main.db` into `data/guildData/backups/` as
+`main-before-restore-<timestamp>.db`, so restoring the wrong backup, or
+restoring at all, is itself undoable the same way.
+
 `LOG_LINE_MAX_LENGTH` (500) caps any single log line - a serialized team
 roster or a command's own object-repr params can run long, and one oversized
 line shouldn't be able to dominate the file. `_truncateForLog` is the shared
