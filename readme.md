@@ -196,12 +196,12 @@ process for them to leak into in the first place.
 
 Results come back via `--junitxml=<path>`, pytest-xdist's own
 already-stitched-across-workers summary - one `<testsuite tests=... failures=...
-errors=...>` with a `<testcase>` per test, `<failure>`/`<error>` children on
-whichever ones didn't pass - parsed with `xml.etree.ElementTree` rather than
-scraping worker-interleaved terminal output. A passing run stays silent - only
-a failure is worth a log entry - so a normal startup never gets a "tests
-passed" line cluttering it. A failing suite logs a warning naming exactly
-which tests failed (`classname.name`, read straight off the XML) plus the
+errors=... time=...>` with a `<testcase>` per test, `<failure>`/`<error>`
+children on whichever ones didn't pass - parsed with `xml.etree.ElementTree`
+rather than scraping worker-interleaved terminal output. Every run logs one
+info-level line off that summary (`967/967 passed in 24.1s.`), pass or fail.
+A failing suite additionally logs a warning naming exactly which tests
+failed (`classname.name`, read straight off the XML) plus the
 full subprocess output at debug level, rather than aborting startup: a real
 deploy should still come up and serve players even if, say, a test itself is
 stale, rather than a self-test regression taking the whole bot down. The same
@@ -1518,9 +1518,9 @@ round that never got a row as resolved once play has moved past it.
 | `wagers` | active team-game bets (singleton, one per guild/player) | cleared out (paid or refunded) once the game resolves |
 | `tournament_wagers` | active simultaneous-tournament-match bets (one per match/player) | cleared out once that specific match resolves |
 | `duels` | active `/wager-against` challenges | one row per challenge, several can be open at once |
-| `leaderboards` | posted `/leaderboard` messages | which filter/order/page each message is currently showing |
+| `leaderboards` | posted `/leaderboard` messages | which filter/order/page each message is currently showing, plus `cards`/`cardShown` for cards:true mode |
 | `my_team_views` | posted `/my-teams` messages | which page (and whose team list) each message is currently showing |
-| `team_list_views` | posted `/team-list` messages | which filter/sort/page each message is currently showing |
+| `team_list_views` | posted `/team-list` messages | which filter/sort/page each message is currently showing (`memberIds`/`memberNames` for the member filter), plus `cards`/`cardShown` for cards:true mode |
 | `last_result` | one row per guild | a snapshot of the most recently resolved game, for `/report-correct-winner` |
 | `teams` | persistent named teams | one row per team: captain, roster, target size, voice channel, `logo_path` |
 | `tournaments` | one row per guild | name, team/bracket size, elimination type, registered teams, the winners bracket, and (double elimination only) the losers bracket |

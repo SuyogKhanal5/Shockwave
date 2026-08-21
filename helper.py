@@ -1501,9 +1501,16 @@ class TeamStatsView(discord.ui.View):
 # client.add_view) since nothing ever expires one of these pages on its
 # own, the same open-ended reasoning as WinnerReportView.
 class LeaderboardPagingView(discord.ui.View):
-    def __init__(self, helperObj):
+    def __init__(self, helperObj, cards=False, card_shown=False):
         super().__init__(timeout=None)
         self.helperObj = helperObj
+        if not cards:
+            self.remove_item(self.showCard)
+            self.remove_item(self.returnToStats)
+        elif card_shown:
+            self.remove_item(self.showCard)
+        else:
+            self.remove_item(self.returnToStats)
 
     @discord.ui.button(label=LEADERBOARD_FIRST_EMOJI, style=discord.ButtonStyle.secondary, custom_id="shockwave:leaderboard:first")
     async def first(self, interaction, button):
@@ -1520,6 +1527,36 @@ class LeaderboardPagingView(discord.ui.View):
     @discord.ui.button(label=LEADERBOARD_LAST_EMOJI, style=discord.ButtonStyle.secondary, custom_id="shockwave:leaderboard:last")
     async def last(self, interaction, button):
         await self.helperObj._handleLeaderboardPageClick(interaction, "last")
+
+    # Re-sorts the same filter in the other direction without re-running
+    # the command - same "independent toggle buttons, not one cycling
+    # button" shape ShopSortView already established, just persisted in
+    # `leaderboards` (this view is timeout=None/persistent) rather than
+    # held as plain instance state the way ShopSortView's own short-lived
+    # view can get away with.
+    @discord.ui.button(label="Ascending", style=discord.ButtonStyle.secondary, custom_id="shockwave:leaderboard:asc")
+    async def ascending(self, interaction, button):
+        await self.helperObj._handleLeaderboardOrderClick(interaction, "asc")
+
+    @discord.ui.button(label="Descending", style=discord.ButtonStyle.secondary, custom_id="shockwave:leaderboard:desc")
+    async def descending(self, interaction, button):
+        await self.helperObj._handleLeaderboardOrderClick(interaction, "desc")
+
+    # /team-list's own Card/Back toggle (see TeamListPagingView), carried
+    # over here - cards mode swaps the summary list for one player's full
+    # /stats embed per page, and this additionally lets that flip over to
+    # their actual trading card. Never shown at all outside cards mode.
+    @discord.ui.button(
+        label=f"Card {STATS_CARD_EMOJI}", style=discord.ButtonStyle.primary, custom_id="shockwave:leaderboard:show_card",
+    )
+    async def showCard(self, interaction, button):
+        await self.helperObj._handleLeaderboardShowCardClick(interaction)
+
+    @discord.ui.button(
+        label=f"Back {STATS_RETURN_EMOJI}", style=discord.ButtonStyle.primary, custom_id="shockwave:leaderboard:return",
+    )
+    async def returnToStats(self, interaction, button):
+        await self.helperObj._handleLeaderboardReturnClick(interaction)
 
 
 # See LeaderboardPagingView - same shape, /my-teams' own table/handler.
@@ -1545,11 +1582,25 @@ class MyTeamsPagingView(discord.ui.View):
         await self.helperObj._handleMyTeamsPageClick(interaction, "last")
 
 
-# See LeaderboardPagingView - same shape, /team-list's own table/handler.
+# See LeaderboardPagingView for the paging buttons - /team-list's own
+# table/handler. `cards` (only ever True for a /team-list cards:true
+# message) additionally offers TeamStatsView's own Card/Back toggle, so
+# the currently-paged team's plain stats card can be swapped for its
+# actual trading card - `card_shown` picks which of the two is attached to
+# THIS message, same "registered template and one message's real button
+# set don't have to match" reasoning RosterActionView's own include_reroll
+# already established. Never shown at all for a plain (non-cards) list.
 class TeamListPagingView(discord.ui.View):
-    def __init__(self, helperObj):
+    def __init__(self, helperObj, cards=False, card_shown=False):
         super().__init__(timeout=None)
         self.helperObj = helperObj
+        if not cards:
+            self.remove_item(self.showCard)
+            self.remove_item(self.returnToStats)
+        elif card_shown:
+            self.remove_item(self.showCard)
+        else:
+            self.remove_item(self.returnToStats)
 
     @discord.ui.button(label=LEADERBOARD_FIRST_EMOJI, style=discord.ButtonStyle.secondary, custom_id="shockwave:team_list:first")
     async def first(self, interaction, button):
@@ -1566,6 +1617,18 @@ class TeamListPagingView(discord.ui.View):
     @discord.ui.button(label=LEADERBOARD_LAST_EMOJI, style=discord.ButtonStyle.secondary, custom_id="shockwave:team_list:last")
     async def last(self, interaction, button):
         await self.helperObj._handleTeamListPageClick(interaction, "last")
+
+    @discord.ui.button(
+        label=f"Card {TEAM_CARD_EMOJI}", style=discord.ButtonStyle.primary, custom_id="shockwave:team_list:show_card",
+    )
+    async def showCard(self, interaction, button):
+        await self.helperObj._handleTeamListShowCardClick(interaction)
+
+    @discord.ui.button(
+        label=f"Back {TEAM_CARD_RETURN_EMOJI}", style=discord.ButtonStyle.primary, custom_id="shockwave:team_list:return",
+    )
+    async def returnToStats(self, interaction, button):
+        await self.helperObj._handleTeamListReturnClick(interaction)
 
 
 # Lets whoever ran /shop re-sort the listing by price or by owned status,
@@ -5705,10 +5768,14 @@ class helpers():
     # keeps only teams that HAVE a target size (set via /team-create) and
     # haven't reached it yet - a team with no target size is an ephemeral
     # game-formation roster, never "recruiting" in the sense this filter
-    # means. `sort`/`order` are always applied, even filtered down to
-    # nothing, so a page-flip on an empty result still has a stable (if
-    # empty) list to re-render instead of erroring.
-    def _filterAndSortTeams(self, guild_id, search, recruiting_only, sort, order):
+    # means. `member_ids` (a set, possibly empty/None) keeps only teams
+    # whose roster is a superset of it - every given member has to be on
+    # the SAME team, not just any of them, so this is how to find "the
+    # team with both Alice and Bob" rather than a broad "any team either
+    # of them happens to be on" search. `sort`/`order` are always applied,
+    # even filtered down to nothing, so a page-flip on an empty result
+    # still has a stable (if empty) list to re-render instead of erroring.
+    def _filterAndSortTeams(self, guild_id, search, recruiting_only, sort, order, member_ids=None):
         teams = self.getTeamsForGuild(guild_id)
 
         if search:
@@ -5719,6 +5786,12 @@ class helpers():
             teams = [
                 (team_id, team) for team_id, team in teams
                 if team.get_team_size() is not None and team.get_size() < team.get_team_size()
+            ]
+
+        if member_ids:
+            teams = [
+                (team_id, team) for team_id, team in teams
+                if member_ids <= {p.get_id() for p in team.get_players()}
             ]
 
         def sort_key(entry):
@@ -5739,7 +5812,7 @@ class helpers():
     def _teamListPageCount(self, teams):
         return max(1, -(-len(teams) // LEADERBOARD_PAGE_SIZE))
 
-    def _renderTeamListEmbed(self, guild_name, teams_sorted, search, recruiting_only, sort, order, page):
+    def _renderTeamListEmbed(self, guild_name, teams_sorted, search, recruiting_only, sort, order, page, member_names=None):
         total_pages = self._teamListPageCount(teams_sorted)
         start = page * LEADERBOARD_PAGE_SIZE
         page_teams = teams_sorted[start:start + LEADERBOARD_PAGE_SIZE]
@@ -5766,6 +5839,8 @@ class helpers():
             active_filters.append(f'search "{search}"')
         if recruiting_only:
             active_filters.append("recruiting only")
+        if member_names:
+            active_filters.append(f"with {', '.join(member_names)}")
         filter_text = f" · {', '.join(active_filters)}" if active_filters else ""
         order_label = "Ascending" if order == "asc" else "Descending"
         embed.set_footer(
@@ -5776,66 +5851,219 @@ class helpers():
 
     # Posts the first page with its own TeamListPagingView, same pattern
     # as leaderboardHelper/myTeamsHelper - clicking a button
-    # (_handleTeamListPageClick) edits this same message.
-    async def teamListHelper(self, ctx, search, recruiting_only, sort, order):
+    # (_handleTeamListPageClick) edits this same message. `cards` switches
+    # to the exact same one-team-full-stats-card-per-page rendering
+    # /my-teams uses (_renderMyTeamsEmbed/_myTeamsPageCount take a plain
+    # list of (team_id, team) tuples and don't care where it came from),
+    # just sourced from every team matching search/recruiting_only/sort/
+    # order/members instead of one player's own teams - /my-teams for the
+    # whole server, in effect. `members` (a list of up to 5 discord.Member,
+    # possibly empty) is stored as two parallel CSV columns rather than
+    # re-derived on every page flip: memberIds is what _filterAndSortTeams
+    # actually filters on, memberNames is purely the footer's display text
+    # - resolving live Discord members back from bare stored ids on every
+    # click would be needless API calls for something that never changes
+    # for the life of this message.
+    async def teamListHelper(self, ctx, search, recruiting_only, sort, order, cards=False, members=None):
         guild_id = ctx.guild.id
+        members = members or []
+        member_ids = {m.id for m in members}
+        member_names = [m.display_name for m in members]
 
-        teams_sorted = self._filterAndSortTeams(guild_id, search, recruiting_only, sort, order)
+        teams_sorted = self._filterAndSortTeams(guild_id, search, recruiting_only, sort, order, member_ids)
         if not teams_sorted:
-            message = "No teams have been created in this server yet!" if not (search or recruiting_only) \
-                else "No teams match those filters."
+            message = "No teams have been created in this server yet!" \
+                if not (search or recruiting_only or member_ids) else "No teams match those filters."
             await ctx.response.send_message(message)
             return
 
-        embed = self._renderTeamListEmbed(
-            ctx.guild.name, teams_sorted, search, recruiting_only, sort, order, page=0
-        )
-        await ctx.response.send_message(embed=embed, view=TeamListPagingView(self))
+        if cards:
+            view = TeamListPagingView(self, cards=True, card_shown=False)
+            embed, file = self._renderMyTeamsEmbed(teams_sorted, page=0)
+            if file is not None:
+                await ctx.response.send_message(embed=embed, file=file, view=view)
+            else:
+                await ctx.response.send_message(embed=embed, view=view)
+        else:
+            view = TeamListPagingView(self)
+            embed = self._renderTeamListEmbed(
+                ctx.guild.name, teams_sorted, search, recruiting_only, sort, order, page=0,
+                member_names=member_names,
+            )
+            await ctx.response.send_message(embed=embed, view=view)
         msg = await ctx.original_response()
 
         self.cursor.execute(
             "INSERT OR REPLACE INTO team_list_views"
-            "(messageId, guildId, channelId, search, recruitingOnly, sort, sort_order, page) "
-            "VALUES(?, ?, ?, ?, ?, ?, ?, 0)",
-            (msg.id, guild_id, ctx.channel.id, search, int(recruiting_only), sort, order)
+            "(messageId, guildId, channelId, search, recruitingOnly, sort, sort_order, page, cards, cardShown, "
+            "memberIds, memberNames) "
+            "VALUES(?, ?, ?, ?, ?, ?, ?, 0, ?, 0, ?, ?)",
+            (
+                msg.id, guild_id, ctx.channel.id, search, int(recruiting_only), sort, order, int(cards),
+                ",".join(str(i) for i in member_ids), ",".join(member_names),
+            )
         )
         self.db.commit()
 
+    # The trading-card counterpart to _renderMyTeamsEmbed - same
+    # (teams_sorted, page) -> (embed, file) shape, but the team's actual
+    # trading-card image (_renderTeamCardImage) instead of its plain stats
+    # embed, with the same "Team X/N" footer so paging still has something
+    # to orient by while looking at cards instead of stats. Offloaded to a
+    # thread the same way every other Pillow render is. Shared by
+    # _handleTeamListShowCardClick and _handleTeamListPageClick's own
+    # cardShown branch, rather than each rebuilding this independently.
+    async def _renderTeamListCardEmbed(self, guild_name, teams_sorted, page):
+        _team_id, team = teams_sorted[page]
+        card_image = await asyncio.to_thread(self._renderTeamCardImage, guild_name, team)
+        file = self._imageToFile(card_image, "team_card.png")
+        embed = discord.Embed(color=discord.Color.gold())
+        embed.set_image(url=f"attachment://{file.filename}")
+        embed.set_footer(text=f"Team {page + 1}/{len(teams_sorted)}")
+        return embed, file
+
     # TeamListPagingView's button callback - no-ops (with a plain
     # ephemeral note) unless the interaction's message still matches an
-    # active /team-list page view.
+    # active /team-list page view. cardShown (only meaningful in cards
+    # mode) carries across the flip, so paging while looking at a team's
+    # trading card keeps showing trading cards, and paging on the plain
+    # stats card keeps showing stats.
     async def _handleTeamListPageClick(self, interaction, direction):
         guild_id = interaction.guild_id
         if guild_id is None:
             return
 
         self.cursor.execute(
-            "SELECT search, recruitingOnly, sort, sort_order, page FROM team_list_views "
-            "WHERE guildId=? AND messageId=?",
+            "SELECT search, recruitingOnly, sort, sort_order, page, cards, cardShown, memberIds, memberNames "
+            "FROM team_list_views WHERE guildId=? AND messageId=?",
             (guild_id, interaction.message.id)
         )
         row = self.cursor.fetchone()
         if row is None:
             await interaction.response.send_message("This list is no longer live.", ephemeral=True)
             return
-        search, recruiting_only, sort, order, page = row
+        search, recruiting_only, sort, order, page, cards, card_shown, member_ids_raw, member_names_raw = row
         recruiting_only = bool(recruiting_only)
+        cards = bool(cards)
+        card_shown = bool(card_shown)
+        member_ids = {int(x) for x in member_ids_raw.split(",") if x} if member_ids_raw else set()
+        member_names = member_names_raw.split(",") if member_names_raw else []
 
-        teams_sorted = self._filterAndSortTeams(guild_id, search, recruiting_only, sort, order)
-        total_pages = self._teamListPageCount(teams_sorted)
+        teams_sorted = self._filterAndSortTeams(guild_id, search, recruiting_only, sort, order, member_ids)
+        if cards and not teams_sorted:
+            # _renderTeamListEmbed tolerates an empty list gracefully (its
+            # own "No teams match those filters" text), but
+            # _renderMyTeamsEmbed/_renderTeamListCardEmbed both index
+            # straight into teams[page] and would raise on an empty list -
+            # same guard _handleMyTeamsPageClick already needs for the
+            # same reason.
+            await interaction.response.defer()
+            return
+        total_pages = self._myTeamsPageCount(teams_sorted) if cards else self._teamListPageCount(teams_sorted)
+        page = min(page, total_pages - 1)
         new_page = self._computeNewPage(direction, page, total_pages)
 
         if new_page == page:
             await interaction.response.defer()
             return
 
-        guild_name = interaction.guild.name if interaction.guild is not None else ""
-        embed = self._renderTeamListEmbed(guild_name, teams_sorted, search, recruiting_only, sort, order, new_page)
-        await interaction.response.edit_message(embed=embed)
+        if cards:
+            guild_name = interaction.guild.name if interaction.guild is not None else ""
+            if card_shown:
+                embed, file = await self._renderTeamListCardEmbed(guild_name, teams_sorted, new_page)
+            else:
+                embed, file = self._renderMyTeamsEmbed(teams_sorted, new_page)
+            if file is not None:
+                await interaction.response.edit_message(embed=embed, attachments=[file])
+            else:
+                await interaction.response.edit_message(embed=embed, attachments=[])
+        else:
+            guild_name = interaction.guild.name if interaction.guild is not None else ""
+            embed = self._renderTeamListEmbed(
+                guild_name, teams_sorted, search, recruiting_only, sort, order, new_page,
+                member_names=member_names,
+            )
+            await interaction.response.edit_message(embed=embed)
 
         self.cursor.execute(
             "UPDATE team_list_views SET page=? WHERE guildId=? AND messageId=?",
             (new_page, guild_id, interaction.message.id)
+        )
+        self.db.commit()
+
+    # TeamListPagingView's Card button callback (cards mode only) - swaps
+    # the currently-paged team's plain stats card for its actual trading
+    # card. Re-derives which team is "current" from the view's own stored
+    # filter/sort/page rather than trusting a fixed team_id, since /team-
+    # list cards:true pages through many teams (unlike /team-stats' own
+    # Card button, which only ever has the one team it was posted for).
+    async def _handleTeamListShowCardClick(self, interaction):
+        guild_id = interaction.guild_id
+        message = interaction.message
+
+        self.cursor.execute(
+            "SELECT search, recruitingOnly, sort, sort_order, page, memberIds FROM team_list_views "
+            "WHERE guildId=? AND messageId=? AND cards=1 AND cardShown=0",
+            (guild_id, message.id)
+        )
+        row = self.cursor.fetchone()
+        if row is None:
+            await interaction.response.send_message("This team list view is no longer live.", ephemeral=True)
+            return
+        search, recruiting_only, sort, order, page, member_ids_raw = row
+        recruiting_only = bool(recruiting_only)
+        member_ids = {int(x) for x in member_ids_raw.split(",") if x} if member_ids_raw else set()
+
+        teams_sorted = self._filterAndSortTeams(guild_id, search, recruiting_only, sort, order, member_ids)
+        if not teams_sorted:
+            await interaction.response.send_message("This team list view is no longer live.", ephemeral=True)
+            return
+        page = min(page, len(teams_sorted) - 1)
+
+        await interaction.response.defer()
+        guild_name = interaction.guild.name if interaction.guild is not None else ""
+        embed, file = await self._renderTeamListCardEmbed(guild_name, teams_sorted, page)
+        await message.edit(
+            embed=embed, attachments=[file], view=TeamListPagingView(self, cards=True, card_shown=True)
+        )
+        self.cursor.execute(
+            "UPDATE team_list_views SET cardShown=1 WHERE guildId=? AND messageId=?",
+            (guild_id, message.id)
+        )
+        self.db.commit()
+
+    # TeamListPagingView's Back button callback - the reverse swap.
+    async def _handleTeamListReturnClick(self, interaction):
+        guild_id = interaction.guild_id
+        message = interaction.message
+
+        self.cursor.execute(
+            "SELECT search, recruitingOnly, sort, sort_order, page, memberIds FROM team_list_views "
+            "WHERE guildId=? AND messageId=? AND cards=1 AND cardShown=1",
+            (guild_id, message.id)
+        )
+        row = self.cursor.fetchone()
+        if row is None:
+            await interaction.response.send_message("This team list view is no longer live.", ephemeral=True)
+            return
+        search, recruiting_only, sort, order, page, member_ids_raw = row
+        recruiting_only = bool(recruiting_only)
+        member_ids = {int(x) for x in member_ids_raw.split(",") if x} if member_ids_raw else set()
+
+        teams_sorted = self._filterAndSortTeams(guild_id, search, recruiting_only, sort, order, member_ids)
+        if not teams_sorted:
+            await interaction.response.send_message("This team list view is no longer live.", ephemeral=True)
+            return
+        page = min(page, len(teams_sorted) - 1)
+
+        await interaction.response.defer()
+        embed, file = self._renderMyTeamsEmbed(teams_sorted, page)
+        edit_kwargs = {"embed": embed, "attachments": [file] if file is not None else []}
+        edit_kwargs["view"] = TeamListPagingView(self, cards=True, card_shown=False)
+        await message.edit(**edit_kwargs)
+        self.cursor.execute(
+            "UPDATE team_list_views SET cardShown=0 WHERE guildId=? AND messageId=?",
+            (guild_id, message.id)
         )
         self.db.commit()
 
@@ -8664,6 +8892,28 @@ class helpers():
                 return None
         return user.display_avatar.with_format("png").url
 
+    # _resolveGuildMember first, falling back to a plain discord.User (the
+    # same global-account resolution _resolveGlobalAvatarUrl's own
+    # fallback uses) if they've left the guild - /leaderboard's cards:true
+    # mode needs a real target for _buildStatsEmbed regardless of current
+    # guild membership, unlike /stats itself (only ever reachable by
+    # someone currently in the guild to run the command at all, and never
+    # paged through a whole roster the way a leaderboard is). None only if
+    # the Discord account itself no longer resolves either way.
+    async def _resolveGuildMemberOrUser(self, guild_id, user_id):
+        member = await self._resolveGuildMember(guild_id, user_id)
+        if member is not None:
+            return member
+        if self.client is None:
+            return None
+        user = self.client.get_user(user_id)
+        if user is not None:
+            return user
+        try:
+            return await self.client.fetch_user(user_id)
+        except discord.HTTPException:
+            return None
+
     # Converts a "#RRGGBB" hex string (trading_cards' own storage format -
     # portable and human-editable, unlike a raw RGB tuple) back to the
     # (r, g, b) tuple PIL wants. Falls back to `fallback` for anything that
@@ -10285,10 +10535,39 @@ class helpers():
         embed.set_footer(text=f"Page {page + 1}/{total_pages} · {order_label}")
         return embed
 
+    # cards:true's stats-side rendering - one player's full /stats embed
+    # per page instead of a compact ranked row, sourced from the same
+    # entries_sorted list the summary list itself pages through (so it's
+    # whichever stat/order was actually asked for, not always elo).
+    # Reuses _buildStatsEmbed outright (same fields, same lazy tier-reward/
+    # achievement self-heal /stats itself gets) rather than rebuilding its
+    # field layout from the entry dict a second time, at the cost of one
+    # live member/user resolution per page - _resolveGuildMemberOrUser
+    # (unlike /stats' own target, always someone currently in the guild to
+    # have run the command) has to cope with paging past someone who's
+    # since left, so a plain discord.User (global account, no per-server
+    # data) still works, and only the astronomically rare "account doesn't
+    # resolve at all anymore" case falls back to a bare embed built
+    # straight from the entry dict's own username.
+    async def _renderLeaderboardEntryStatsEmbed(self, guild_id, entries_sorted, page):
+        entry = entries_sorted[page]
+        target = await self._resolveGuildMemberOrUser(guild_id, entry["user_id"])
+        if target is not None:
+            embed = self._buildStatsEmbed(guild_id, target)
+        else:
+            embed = discord.Embed(title=f"{entry['username']}'s Stats", color=discord.Color.gold())
+        embed.set_footer(text=f"Player {page + 1}/{len(entries_sorted)}")
+        return embed
+
     # Posts the first page with its own LeaderboardPagingView - clicking a
     # button (_handleLeaderboardPageClick) edits this same message rather than
     # posting a new one, so the current view is tracked by messageId here.
-    async def leaderboardHelper(self, ctx, stat, order):
+    # `cards` switches to _renderLeaderboardEntryStatsEmbed's one-player-
+    # per-page rendering instead, /my-teams-style, with its own Card/Back
+    # toggle over to that player's actual trading card (see
+    # LeaderboardPagingView) - the whole leaderboard, /stats-card by
+    # /stats-card, in whatever order was asked for.
+    async def leaderboardHelper(self, ctx, stat, order, cards=False):
         guild_id = ctx.guild.id
 
         entries = self.getLeaderboardEntries(guild_id)
@@ -10297,29 +10576,198 @@ class helpers():
             return
 
         entries_sorted = self._sortLeaderboardEntries(entries, stat if stat is not None else "elo", order)
-        embed = self._renderLeaderboardEmbed(ctx.guild.name, entries_sorted, stat, order, page=0)
-
-        await ctx.response.send_message(embed=embed, view=LeaderboardPagingView(self))
+        if cards:
+            view = LeaderboardPagingView(self, cards=True, card_shown=False)
+            embed = await self._renderLeaderboardEntryStatsEmbed(guild_id, entries_sorted, page=0)
+        else:
+            view = LeaderboardPagingView(self)
+            embed = self._renderLeaderboardEmbed(ctx.guild.name, entries_sorted, stat, order, page=0)
+        await ctx.response.send_message(embed=embed, view=view)
         msg = await ctx.original_response()
 
         self.cursor.execute(
-            "INSERT OR REPLACE INTO leaderboards(messageId, guildId, channelId, filter, sort_order, page) "
-            "VALUES(?, ?, ?, ?, ?, 0)",
-            (msg.id, guild_id, ctx.channel.id, stat, order)
+            "INSERT OR REPLACE INTO leaderboards"
+            "(messageId, guildId, channelId, filter, sort_order, page, cards, cardShown) "
+            "VALUES(?, ?, ?, ?, ?, 0, ?, 0)",
+            (msg.id, guild_id, ctx.channel.id, stat, order, int(cards))
         )
         self.db.commit()
 
     # LeaderboardPagingView's button callback - no-ops (with a plain
     # ephemeral note) unless the interaction's message still matches an
-    # active leaderboard page view.
+    # active leaderboard page view. cardShown (only meaningful in cards
+    # mode) carries across the flip, same reasoning
+    # _handleTeamListPageClick's own cardShown branch already established.
     async def _handleLeaderboardPageClick(self, interaction, direction):
         guild_id = interaction.guild_id
         if guild_id is None:
             return
 
         self.cursor.execute(
-            "SELECT filter, sort_order, page FROM leaderboards WHERE guildId=? AND messageId=?",
+            "SELECT filter, sort_order, page, cards, cardShown FROM leaderboards "
+            "WHERE guildId=? AND messageId=?",
             (guild_id, interaction.message.id)
+        )
+        row = self.cursor.fetchone()
+        if row is None:
+            await interaction.response.send_message("This leaderboard is no longer live.", ephemeral=True)
+            return
+        stat, order, page, cards, card_shown = row
+        cards = bool(cards)
+        card_shown = bool(card_shown)
+
+        entries = self.getLeaderboardEntries(guild_id)
+        entries_sorted = self._sortLeaderboardEntries(entries, stat if stat is not None else "elo", order)
+        if cards and not entries_sorted:
+            # Everyone who ever had an economy row got cleared out from
+            # under this view (/clear clear_economy since it was posted) -
+            # same empty-list guard _handleTeamListPageClick needs for the
+            # same reason (_renderLeaderboardEntryStatsEmbed indexes
+            # straight into entries_sorted[page]).
+            await interaction.response.defer()
+            return
+        total_pages = self._myTeamsPageCount(entries_sorted) if cards else self._leaderboardPageCount(entries_sorted)
+        page = min(page, total_pages - 1)
+        new_page = self._computeNewPage(direction, page, total_pages)
+
+        if new_page == page:
+            await interaction.response.defer()
+            return
+
+        guild_name = interaction.guild.name if interaction.guild is not None else ""
+        if cards:
+            if card_shown:
+                entry = entries_sorted[new_page]
+                target = await self._resolveGuildMemberOrUser(guild_id, entry["user_id"])
+                embed, file = await self._renderLeaderboardCardEmbed(guild_id, guild_name, entries_sorted, new_page, target)
+                await interaction.response.edit_message(embed=embed, attachments=[file])
+            else:
+                embed = await self._renderLeaderboardEntryStatsEmbed(guild_id, entries_sorted, new_page)
+                await interaction.response.edit_message(embed=embed, attachments=[])
+        else:
+            embed = self._renderLeaderboardEmbed(guild_name, entries_sorted, stat, order, new_page)
+            await interaction.response.edit_message(embed=embed)
+
+        self.cursor.execute(
+            "UPDATE leaderboards SET page=? WHERE guildId=? AND messageId=?",
+            (new_page, guild_id, interaction.message.id)
+        )
+        self.db.commit()
+
+    # /leaderboard's own Ascending/Descending buttons (see
+    # LeaderboardPagingView) - re-sorts the same filter/mode in the other
+    # direction without re-running the command, resetting to page 0 since
+    # ascending and descending page N generally show entirely different
+    # players. Whichever of the three renderings (list, stats card, or
+    # trading card) is currently active stays active - only the order
+    # changes.
+    async def _handleLeaderboardOrderClick(self, interaction, order):
+        guild_id = interaction.guild_id
+        if guild_id is None:
+            return
+
+        self.cursor.execute(
+            "SELECT filter, sort_order, cards, cardShown FROM leaderboards WHERE guildId=? AND messageId=?",
+            (guild_id, interaction.message.id)
+        )
+        row = self.cursor.fetchone()
+        if row is None:
+            await interaction.response.send_message("This leaderboard is no longer live.", ephemeral=True)
+            return
+        stat, current_order, cards, card_shown = row
+        cards = bool(cards)
+        card_shown = bool(card_shown)
+
+        if order == current_order:
+            await interaction.response.defer()
+            return
+
+        entries = self.getLeaderboardEntries(guild_id)
+        entries_sorted = self._sortLeaderboardEntries(entries, stat if stat is not None else "elo", order)
+        guild_name = interaction.guild.name if interaction.guild is not None else ""
+
+        if cards and not entries_sorted:
+            await interaction.response.defer()
+            return
+
+        if cards:
+            if card_shown:
+                entry = entries_sorted[0]
+                target = await self._resolveGuildMemberOrUser(guild_id, entry["user_id"])
+                embed, file = await self._renderLeaderboardCardEmbed(guild_id, guild_name, entries_sorted, 0, target)
+                await interaction.response.edit_message(embed=embed, attachments=[file])
+            else:
+                embed = await self._renderLeaderboardEntryStatsEmbed(guild_id, entries_sorted, 0)
+                await interaction.response.edit_message(embed=embed, attachments=[])
+        else:
+            embed = self._renderLeaderboardEmbed(guild_name, entries_sorted, stat, order, 0)
+            await interaction.response.edit_message(embed=embed)
+
+        self.cursor.execute(
+            "UPDATE leaderboards SET sort_order=?, page=0 WHERE guildId=? AND messageId=?",
+            (order, guild_id, interaction.message.id)
+        )
+        self.db.commit()
+
+    # The trading-card counterpart to _renderLeaderboardEntryStatsEmbed -
+    # same (entries_sorted, page) -> (embed, file) shape, but the player's
+    # actual trading card (_renderTradingCardImage, via the same avatar/
+    # settings/teams lookups _swapStatsForTradingCard already does) with a
+    # "Player X/N" footer so paging still has something to orient by while
+    # looking at cards instead of stats. `target`, already resolved by the
+    # caller (both callers need it for other reasons - see
+    # _resolveGuildMemberOrUser's own None-tolerance), is passed straight
+    # through rather than re-resolved here.
+    async def _renderLeaderboardCardEmbed(self, guild_id, guild_name, entries_sorted, page, target):
+        entry = entries_sorted[page]
+        user_id = entry["user_id"]
+        display_name = target.display_name if target is not None else entry["username"]
+
+        self.cursor.execute(
+            "SELECT elo, ranked_wins, ranked_losses FROM economy WHERE guildId=? AND userId=?",
+            (guild_id, user_id)
+        )
+        elo, ranked_wins, ranked_losses = self.cursor.fetchone()
+        ranked_games = ranked_wins + ranked_losses
+        stats = {
+            "elo": elo, "elo_rank": self.eloRankLabelPlain(elo),
+            "ranked_wins": ranked_wins, "ranked_losses": ranked_losses,
+            "ranked_win_rate": f"{(ranked_wins / ranked_games) * 100:.1f}%" if ranked_games > 0 else "N/A",
+        }
+
+        teams = [team for _, team in self.getTeamsForPlayer(guild_id, user_id)]
+        settings = self.getCardSettings(guild_id, user_id)
+
+        avatar_image = await self._resolveCardAvatarImage(target, False)
+        if avatar_image is None:
+            avatar_image = Image.new("RGBA", (CARD_AVATAR_SIZE, CARD_AVATAR_SIZE), BRACKET_BACKGROUND_CENTER)
+
+        username = target.name if target is not None else None
+        card_image = await asyncio.to_thread(
+            self._renderTradingCardImage,
+            guild_name, display_name, avatar_image, settings, stats, teams, username=username
+        )
+        file = self._imageToFile(card_image, "trading_card.png")
+
+        embed = discord.Embed(color=discord.Color.gold())
+        embed.set_image(url=f"attachment://{file.filename}")
+        embed.set_footer(text=f"Player {page + 1}/{len(entries_sorted)}")
+        return embed, file
+
+    # LeaderboardPagingView's Card button callback (cards mode only) -
+    # swaps the currently-paged player's stats card for their actual
+    # trading card. Re-derives which player is "current" from the view's
+    # own stored filter/order/page rather than trusting a fixed user_id,
+    # same reasoning _handleTeamListShowCardClick already established for
+    # /team-list cards:true.
+    async def _handleLeaderboardShowCardClick(self, interaction):
+        guild_id = interaction.guild_id
+        message = interaction.message
+
+        self.cursor.execute(
+            "SELECT filter, sort_order, page FROM leaderboards "
+            "WHERE guildId=? AND messageId=? AND cards=1 AND cardShown=0",
+            (guild_id, message.id)
         )
         row = self.cursor.fetchone()
         if row is None:
@@ -10329,20 +10777,56 @@ class helpers():
 
         entries = self.getLeaderboardEntries(guild_id)
         entries_sorted = self._sortLeaderboardEntries(entries, stat if stat is not None else "elo", order)
-        total_pages = self._leaderboardPageCount(entries_sorted)
-        new_page = self._computeNewPage(direction, page, total_pages)
-
-        if new_page == page:
-            await interaction.response.defer()
+        if not entries_sorted:
+            await interaction.response.send_message("This leaderboard is no longer live.", ephemeral=True)
             return
+        page = min(page, len(entries_sorted) - 1)
 
+        await interaction.response.defer()
         guild_name = interaction.guild.name if interaction.guild is not None else ""
-        embed = self._renderLeaderboardEmbed(guild_name, entries_sorted, stat, order, new_page)
-        await interaction.response.edit_message(embed=embed)
+        entry = entries_sorted[page]
+        target = await self._resolveGuildMemberOrUser(guild_id, entry["user_id"])
+        embed, file = await self._renderLeaderboardCardEmbed(guild_id, guild_name, entries_sorted, page, target)
+        await message.edit(
+            embed=embed, attachments=[file], view=LeaderboardPagingView(self, cards=True, card_shown=True)
+        )
+        self.cursor.execute(
+            "UPDATE leaderboards SET cardShown=1 WHERE guildId=? AND messageId=?",
+            (guild_id, message.id)
+        )
+        self.db.commit()
+
+    # LeaderboardPagingView's Back button callback - the reverse swap.
+    async def _handleLeaderboardReturnClick(self, interaction):
+        guild_id = interaction.guild_id
+        message = interaction.message
 
         self.cursor.execute(
-            "UPDATE leaderboards SET page=? WHERE guildId=? AND messageId=?",
-            (new_page, guild_id, interaction.message.id)
+            "SELECT filter, sort_order, page FROM leaderboards "
+            "WHERE guildId=? AND messageId=? AND cards=1 AND cardShown=1",
+            (guild_id, message.id)
+        )
+        row = self.cursor.fetchone()
+        if row is None:
+            await interaction.response.send_message("This leaderboard is no longer live.", ephemeral=True)
+            return
+        stat, order, page = row
+
+        entries = self.getLeaderboardEntries(guild_id)
+        entries_sorted = self._sortLeaderboardEntries(entries, stat if stat is not None else "elo", order)
+        if not entries_sorted:
+            await interaction.response.send_message("This leaderboard is no longer live.", ephemeral=True)
+            return
+        page = min(page, len(entries_sorted) - 1)
+
+        await interaction.response.defer()
+        embed = await self._renderLeaderboardEntryStatsEmbed(guild_id, entries_sorted, page)
+        await message.edit(
+            embed=embed, attachments=[], view=LeaderboardPagingView(self, cards=True, card_shown=False)
+        )
+        self.cursor.execute(
+            "UPDATE leaderboards SET cardShown=0 WHERE guildId=? AND messageId=?",
+            (guild_id, message.id)
         )
         self.db.commit()
 

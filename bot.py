@@ -287,11 +287,18 @@ cursor.execute(
     "challengerId, challengerName, targetId, targetName, amount, state)"
 )
 # One row per posted /leaderboard message, tracking which page it's
-# currently showing so the paging buttons know what to re-render.
+# currently showing so the paging buttons know what to re-render. cards/
+# cardShown are /team-list's own cards:true toggle carried over here -
+# see the identically-named columns on team_list_views for what each one
+# means; LeaderboardPagingView reads both back the same way
+# TeamListPagingView does.
 cursor.execute(
     "CREATE TABLE IF NOT EXISTS leaderboards("
-    "messageId INTEGER PRIMARY KEY, guildId, channelId, filter, sort_order, page)"
+    "messageId INTEGER PRIMARY KEY, guildId, channelId, filter, sort_order, page, "
+    "cards INTEGER DEFAULT 0, cardShown INTEGER DEFAULT 0)"
 )
+ensure_column("leaderboards", "cards", "INTEGER", "0")
+ensure_column("leaderboards", "cardShown", "INTEGER", "0")
 # One row per posted /my-teams message - same paging idea as leaderboards
 # above, but scoped to a single caller (userId) rather than the whole
 # guild's stats, since each page here is one of THEIR teams, not a page of
@@ -371,8 +378,29 @@ cursor.execute(
 # resetting to the unfiltered/default-sorted list.
 cursor.execute(
     "CREATE TABLE IF NOT EXISTS team_list_views("
-    "messageId INTEGER PRIMARY KEY, guildId, channelId, search, recruitingOnly, sort, sort_order, page)"
+    "messageId INTEGER PRIMARY KEY, guildId, channelId, search, recruitingOnly, sort, sort_order, page, "
+    "cards INTEGER DEFAULT 0, cardShown INTEGER DEFAULT 0, memberIds, memberNames)"
 )
+# 1 when a posted /team-list message is in "cards" mode (one team's full
+# stats card per page, same shape as /my-teams, sourced from the same
+# filtered/sorted team list a plain /team-list would show) rather than the
+# default summary-list mode - _handleTeamListPageClick reads this back to
+# know which of the two ways to re-render on a page flip. cardShown further
+# narrows cards mode: 0 for that team's plain stats card, 1 for its actual
+# trading card (see TeamListPagingView's own Card/Back toggle) - carried
+# across a page flip so paging while looking at trading cards keeps
+# showing trading cards, not stats. memberIds (comma-separated user ids,
+# same "" for none / CSV otherwise shape servers.disliked_role_user_ids
+# uses) narrows the list to teams rostering every one of them -
+# memberNames is the same set's display names, captured once at post time
+# purely for the footer text so a page flip never needs to re-resolve
+# Discord members from bare ids. All reached by an existing database whose
+# team_list_views predates these columns - the CREATE TABLE above already
+# includes them for a fresh one.
+ensure_column("team_list_views", "cards", "INTEGER", "0")
+ensure_column("team_list_views", "cardShown", "INTEGER", "0")
+ensure_column("team_list_views", "memberIds", "TEXT")
+ensure_column("team_list_views", "memberNames", "TEXT")
 # Every persistent team in a server. Distinct from the ephemeral team1/
 # team2 columns on `servers` (which hold whatever roster the last /make-
 # teams or /captains produced) - these are named teams a player can be
@@ -954,7 +982,8 @@ async def shopBuy(ctx, item: str):
 )
 @app_commands.describe(
     filter="Which stat to rank by - omit for an overview of elo, balance, and record",
-    order="Highest-first or lowest-first - defaults to highest-first"
+    order="Highest-first or lowest-first - defaults to highest-first",
+    cards="Flip through each player's full stats card one at a time, like /my-teams, instead of a ranked list",
 )
 @app_commands.choices(filter=[
     app_commands.Choice(name="Elo", value="elo"),
@@ -979,11 +1008,11 @@ async def shopBuy(ctx, item: str):
     app_commands.Choice(name="Ascending (lowest first)", value="asc"),
 ])
 async def leaderboard(
-    ctx, filter: app_commands.Choice[str] = None, order: app_commands.Choice[str] = None
+    ctx, filter: app_commands.Choice[str] = None, order: app_commands.Choice[str] = None, cards: bool = False
 ):
     stat = filter.value if filter is not None else None
     sort_order = order.value if order is not None else "desc"
-    await helperObj.leaderboardHelper(ctx, stat, sort_order)
+    await helperObj.leaderboardHelper(ctx, stat, sort_order, cards)
 
 
 SITE_COMMANDS_URL = "https://addshockwave.com/commands.html"
@@ -1008,7 +1037,7 @@ COMMAND_HELP = {
     "shop": "Browse every trading-card title, color scheme, and font purchasable with gold, with a ✅ next to anything you already own. Sort: Price / Sort: Owned buttons under the listing re-sort each category (Ascending/Descending toggle which way) without needing to re-run the command.",
     "achievements": "Browse every gameplay achievement, what it takes to earn it, and whether you already have. Earning one unlocks its title for /card-set and posts a one-time announcement in the channel.",
     "shop-buy": "Purchases a trading-card cosmetic with gold, permanently unlocking it for /card-set. Refuses if you already own it or can't afford it.",
-    "leaderboard": "Ranks the server by a stat, including ranked-only and casual-only wins/losses/win rate. Omit filter for an elo-sorted overview. Buttons page through the results.",
+    "leaderboard": "Ranks the server by a stat, including ranked-only and casual-only wins/losses/win rate. Omit filter for an elo-sorted overview. Buttons page through the results, and Ascending/Descending buttons flip the sort direction without re-running the command. cards:true flips through each player's full stats card one at a time instead, same as /my-teams but ranked - a Card button on that view swaps the current player's stats card for their actual trading card, and stays selected as you keep paging.",
     "report-correct-winner": "Fixes a misreported winner - undoes and reapplies the payouts, records, and elo. invalidate undoes the last game entirely instead (bets refunded, nothing reapplied), as if it never happened. Requires Manage Server.",
     "team-create": "Creates a persistent team with you as its captain, or captain as its captain if given.",
     "team-set": "Sets a persistent team's voice channel and/or logo, any combination in one call. new_voice_channel creates a fresh one named after the team. The team's captain, or anyone with Manage Server, can do this.",
@@ -1019,7 +1048,7 @@ COMMAND_HELP = {
     "team-leave": "Removes you from a persistent team's roster. Anyone rostered can do this to themselves, no permission needed - except the team's captain, who has to use /team-delete instead since there's no one to hand the captaincy to.",
     "my-teams": "Lists the teams you're a rostered player on in this server, with paging to flip through each one's full stats card.",
     "team-stats": "Shows a persistent team's captain, roster, voice channel, and win/loss record. Press Card to swap it for a team card - its logo as the focal point, colors sampled from that logo, captain/roster/record/win rate. Back swaps back.",
-    "team-list": "Browse every team in the server with filtering (name search, recruiting-only) and sorting (name, wins, losses, win rate, roster size - sort:\"Win Rate\" order:\"Descending\" for the old /team-leaderboard ranking). Buttons page through it.",
+    "team-list": "Browse every team in the server with filtering (name search, recruiting-only, up to 5 members who all have to be on the roster) and sorting (name, wins, losses, win rate, roster size - sort:\"Win Rate\" order:\"Descending\" to rank teams by win rate). Buttons page through it. cards:true flips through each team's full stats card one at a time instead, same as /my-teams but for every team in the server - a Card button on that view swaps the current team's stats card for its actual trading card, and stays selected as you keep paging.",
     "team-use": "Loads two persistent teams straight into a casual or ranked game, skipping the random-split-or-draft step. Posts a roster with the same Start/Start (no move) buttons as /make-teams to start it.",
     "reuse": "Re-posts the exact same two teams from whichever of /make-teams, /captains, or /team-use ran last, instead of drawing a fresh random split or captains draft. Stays ranked if the last game was ranked, casual if it was casual. Cancels an actively in-progress game from those same teams first (refund + move back) if there is one.",
     "tournament-create": "Creates an empty tournament shell for this server - name, team size, and bracket size. One tournament per server.",
@@ -1579,6 +1608,12 @@ async def myTeams(ctx, member: discord.Member = None):
     recruiting_only="Only show teams still short of their target roster size",
     sort="What to sort by - defaults to name",
     order="Ascending or descending - defaults to ascending",
+    cards="Flip through each team's full stats card one at a time, like /my-teams, instead of a summary list",
+    member_1="Only show teams that have this member on their roster",
+    member_2="Also required on the roster (optional)",
+    member_3="Also required on the roster (optional)",
+    member_4="Also required on the roster (optional)",
+    member_5="Also required on the roster (optional)",
 )
 @app_commands.choices(sort=[
     app_commands.Choice(name="Name", value="name"),
@@ -1593,11 +1628,14 @@ async def myTeams(ctx, member: discord.Member = None):
 ])
 async def teamList(
     ctx, search: str = None, recruiting_only: bool = False,
-    sort: app_commands.Choice[str] = None, order: app_commands.Choice[str] = None,
+    sort: app_commands.Choice[str] = None, order: app_commands.Choice[str] = None, cards: bool = False,
+    member_1: discord.Member = None, member_2: discord.Member = None, member_3: discord.Member = None,
+    member_4: discord.Member = None, member_5: discord.Member = None,
 ):
     sort_value = sort.value if sort is not None else "name"
     order_value = order.value if order is not None else "asc"
-    await helperObj.teamListHelper(ctx, search, recruiting_only, sort_value, order_value)
+    members = [m for m in (member_1, member_2, member_3, member_4, member_5) if m is not None]
+    await helperObj.teamListHelper(ctx, search, recruiting_only, sort_value, order_value, cards, members)
 
 
 @tree.command(
@@ -1693,9 +1731,11 @@ async def roll(ctx, *, num: int):
 # structured XML, rather than scraping worker-interleaved terminal
 # output. `cwd=BASE_DIR` and `sys.executable` keep this correct
 # regardless of the process's own working directory or which Python
-# environment is actually running the bot. A failing suite - or pytest
+# environment is actually running the bot. Every run logs one info-level
+# summary line (how many passed out of how many, and how long the whole
+# subprocess took) regardless of outcome. A failing suite - or pytest
 # itself failing to launch or produce a report at all, e.g. a stale
-# install missing pytest-xdist - is logged as a warning rather than
+# install missing pytest-xdist - additionally logs a warning rather than
 # aborting startup: a real deploy should still come up and serve players
 # even if, say, a test itself is stale, rather than a self-test
 # regression taking the whole bot down.
@@ -1731,6 +1771,9 @@ def _runStartupSelfTests():
 
     total = int(suite.get("tests", 0))
     failed_count = int(suite.get("failures", 0)) + int(suite.get("errors", 0))
+    duration_seconds = float(suite.get("time", 0))
+    logger.info("Startup self-test: %d/%d passed in %.1fs.", total - failed_count, total, duration_seconds)
+
     if failed_count == 0:
         return
 
