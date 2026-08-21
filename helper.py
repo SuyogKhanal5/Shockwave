@@ -6914,8 +6914,8 @@ class helpers():
     # ---------------- /my-teams ----------------
 
     # One team per "page" rather than a batch of rows like /leaderboard -
-    # /my-teams is for flipping through each of YOUR teams' full stats
-    # cards one at a time, not scanning a ranked list.
+    # /my-teams is for flipping through each of a player's teams' full
+    # stats cards one at a time, not scanning a ranked list.
     def _myTeamsPageCount(self, teams):
         return max(1, len(teams))
 
@@ -6941,13 +6941,17 @@ class helpers():
             return min(total_pages - 1, page + 1)
         return total_pages - 1
 
-    async def myTeamsHelper(self, ctx):
+    async def myTeamsHelper(self, ctx, member=None):
+        target = member if member is not None else ctx.user
         guild_id = ctx.guild.id
-        user_id = ctx.user.id
+        user_id = target.id
 
         teams = self.getTeamsForPlayer(guild_id, user_id)
         if not teams:
-            await ctx.response.send_message("You're not on any teams in this server.")
+            if member is None:
+                await ctx.response.send_message("You're not on any teams in this server.")
+            else:
+                await ctx.response.send_message(f"{target.display_name} isn't on any teams in this server.")
             return
 
         embed, file = self._renderMyTeamsEmbed(teams, page=0)
@@ -6967,14 +6971,15 @@ class helpers():
 
     # MyTeamsPagingView's button callback - no-ops (with a plain ephemeral
     # note) unless the interaction's message still matches an active
-    # /my-teams page view. Only the caller who posted it "owns" the paged
-    # team list, but the button itself is clickable by anyone - checked
-    # implicitly, since this looks the view up by messageId and re-derives
-    # the team list from the stored userId regardless of who actually
-    # clicked, so anyone else's click still moves the same shared view.
-    # That matches how /leaderboard's own paging already behaves (any
-    # clicker can page a guild-wide view) - a personal view being paged by
-    # someone else just steps through the OWNER's teams, not the clicker's.
+    # /my-teams page view. The stored userId is whoever the list is ABOUT
+    # (the looked-up member, /my-teams' own optional `member` param -
+    # defaulting to whoever ran the command), not whoever clicks the
+    # button - the button itself is clickable by anyone, and re-derives the
+    # team list from that stored userId regardless of who actually clicked,
+    # so anyone else's click still moves the same shared view. That matches
+    # how /leaderboard's own paging already behaves (any clicker can page a
+    # guild-wide view) - a personal view being paged by someone else just
+    # steps through the looked-up player's teams, not the clicker's.
     async def _handleMyTeamsPageClick(self, interaction, direction):
         guild_id = interaction.guild_id
         if guild_id is None:
@@ -8530,6 +8535,19 @@ class helpers():
         embed.add_field(name="Balance", value=f"{balance} gold", inline=True)
         embed.add_field(name="Net Gold Won/Lost", value=f"{net_gold:+d} gold", inline=True)
         embed.add_field(name="Gold Wagered", value=str(gold_wagered), inline=True)
+
+        # Role preferences (see /setup) - not part of the 3-wide inline grid
+        # above, since it's two lines of names rather than one short value,
+        # and gets its own full-width row rather than being squeezed inline.
+        liked, disliked = self.getRolePreferences(guild_id, user_id)
+        embed.add_field(
+            name="Role Preferences",
+            value=(
+                f"Liked: {', '.join(liked) if liked else 'none set'}\n"
+                f"Disliked: {', '.join(disliked) if disliked else 'none set'}"
+            ),
+            inline=False,
+        )
 
         return embed
 

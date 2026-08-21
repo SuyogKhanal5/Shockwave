@@ -1519,7 +1519,7 @@ round that never got a row as resolved once play has moved past it.
 | `tournament_wagers` | active simultaneous-tournament-match bets (one per match/player) | cleared out once that specific match resolves |
 | `duels` | active `/wager-against` challenges | one row per challenge, several can be open at once |
 | `leaderboards` | posted `/leaderboard` messages | which filter/order/page each message is currently showing |
-| `my_team_views` | posted `/my-teams` messages | which page (and which caller's team list) each message is currently showing |
+| `my_team_views` | posted `/my-teams` messages | which page (and whose team list) each message is currently showing |
 | `team_list_views` | posted `/team-list` messages | which filter/sort/page each message is currently showing |
 | `last_result` | one row per guild | a snapshot of the most recently resolved game, for `/report-correct-winner` |
 | `teams` | persistent named teams | one row per team: captain, roster, target size, voice channel, `logo_path` |

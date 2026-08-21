@@ -1549,10 +1549,11 @@ async def teamStats(ctx, team: str):
 
 @tree.command(
     name="my-teams",
-    description="List the teams you're on and flip through their stats"
+    description="List the teams you (or another player) belong to and flip through their stats"
 )
-async def myTeams(ctx):
-    await helperObj.myTeamsHelper(ctx)
+@app_commands.describe(member="Whose teams to look up - defaults to you")
+async def myTeams(ctx, member: discord.Member = None):
+    await helperObj.myTeamsHelper(ctx, member)
 
 
 @tree.command(

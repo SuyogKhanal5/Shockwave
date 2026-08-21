@@ -3467,6 +3467,32 @@ class MyTeamsHelperTests(_FakeLogoDirTestCase):
         await self.helperObj.myTeamsHelper(ctx)
         ctx.response.send_message.assert_awaited_once_with("You're not on any teams in this server.")
 
+    async def test_no_teams_for_another_member_names_them_instead_of_you(self):
+        other = FakeMember("Bob", id=902)
+        ctx = self._ctx()  # caller is Alice (901)
+        await self.helperObj.myTeamsHelper(ctx, other)
+        ctx.response.send_message.assert_awaited_once_with("Bob isn't on any teams in this server.")
+
+    async def test_looks_up_another_members_teams(self):
+        other = FakeMember("Bob", id=902)
+        await self.helperObj.createTeamHelper(self._ctx(902, "Bob"), "Red", 5)
+
+        ctx = self._ctx()  # caller is Alice (901), who is on no teams
+        posted = FakeMessage(id=5252)
+        ctx.original_response.return_value = posted
+        await self.helperObj.myTeamsHelper(ctx, other)
+
+        kwargs = ctx.response.send_message.call_args.kwargs
+        embed = kwargs["embed"]
+        self.assertEqual(embed.title, "Red Stats")
+
+        self.cursor.execute(
+            "SELECT guildId, channelId, userId, page FROM my_team_views WHERE messageId=5252"
+        )
+        self.assertEqual(self.cursor.fetchone(), (GUILD_ID, ctx.channel.id, 902, 0))
+        if "file" in kwargs:
+            kwargs["file"].close()
+
     async def test_posts_the_first_team_reacts_and_tracks_the_view(self):
         await self.helperObj.createTeamHelper(self._ctx(), "Red", 5)
         await self.helperObj.createTeamHelper(self._ctx(), "Blue", 5)
@@ -7818,7 +7844,10 @@ class StatsHelperTests(HelperTestCase):
         embed = ctx.response.send_message.call_args.kwargs["embed"]
         names = [f.name for f in embed.fields]
 
-        self.assertTrue(all(f.inline for f in embed.fields))
+        # The first 9 fields are the 3-wide inline stat grid; Role
+        # Preferences (see below) is the one non-inline field after it.
+        self.assertTrue(all(f.inline for f in embed.fields[:9]))
+        self.assertFalse(embed.fields[9].inline)
 
         # Row 1 (ranked, exactly 3 wide).
         self.assertEqual(names[0:3], ["Elo", "Ranked Wins", "Ranked Win Rate"])
@@ -7828,6 +7857,34 @@ class StatsHelperTests(HelperTestCase):
 
         # Row 3 (gold, exactly 3 wide).
         self.assertEqual(names[6:9], ["Balance", "Net Gold Won/Lost", "Gold Wagered"])
+
+    async def test_role_preferences_default_to_none_set(self):
+        ctx = self._ctx()
+        await self.helperObj.statsHelper(ctx)
+        embed = ctx.response.send_message.call_args.kwargs["embed"]
+        values = {f.name: f.value for f in embed.fields}
+        self.assertEqual(values["Role Preferences"], "Liked: none set\nDisliked: none set")
+
+    async def test_role_preferences_reflect_setup(self):
+        self.helperObj._applySetupRolePreferences(GUILD_ID, 901, ["Top", "Jungle"], ["Support"])
+
+        ctx = self._ctx()
+        await self.helperObj.statsHelper(ctx)
+        embed = ctx.response.send_message.call_args.kwargs["embed"]
+        values = {f.name: f.value for f in embed.fields}
+        liked_line, disliked_line = values["Role Preferences"].split("\n")
+        self.assertEqual(set(liked_line.removeprefix("Liked: ").split(", ")), {"Top", "Jungle"})
+        self.assertEqual(disliked_line, "Disliked: Support")
+
+    async def test_role_preferences_follow_the_looked_up_member_not_the_caller(self):
+        other = FakeMember("Bob", id=902)
+        self.helperObj._applySetupRolePreferences(GUILD_ID, 902, ["Mid"], [])
+
+        ctx = self._ctx()  # caller is Alice (901), with no preferences set
+        await self.helperObj.statsHelper(ctx, other)
+        embed = ctx.response.send_message.call_args.kwargs["embed"]
+        values = {f.name: f.value for f in embed.fields}
+        self.assertEqual(values["Role Preferences"], "Liked: Mid\nDisliked: none set")
 
     async def test_looks_up_another_members_stats(self):
         other = FakeMember("Bob", id=902)
@@ -13609,6 +13666,23 @@ class StatsCommandTests(BotModuleTestCase):
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "statsHelper", mock):
             await self._command("stats").callback(ctx, member=target)
+        mock.assert_awaited_once_with(ctx, target)
+
+
+class MyTeamsCommandTests(BotModuleTestCase):
+    async def test_defaults_to_the_caller(self):
+        ctx = self._ctx()
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "myTeamsHelper", mock):
+            await self._command("my-teams").callback(ctx, member=None)
+        mock.assert_awaited_once_with(ctx, None)
+
+    async def test_looks_up_another_member(self):
+        ctx = self._ctx()
+        target = FakeMember("Target")
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "myTeamsHelper", mock):
+            await self._command("my-teams").callback(ctx, member=target)
         mock.assert_awaited_once_with(ctx, target)
 
 
