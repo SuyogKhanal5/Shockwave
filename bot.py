@@ -127,26 +127,6 @@ def _truncateForLog(text):
 
 _MUTATING_SQL_PREFIXES = ("INSERT", "UPDATE", "DELETE")
 
-# Parked directly on the shared "shockwave" logger, not a plain bot.py
-# module global - _runStartupSelfTests below runs tests.py, whose own
-# _import_bot_module() re-executes this entire file under a fresh set of
-# module globals for every nested test it imports, so a bare module-level
-# flag here wouldn't be visible to a _logDatabaseStatement call made from
-# one of THOSE re-imported copies. logging.getLogger(name) always returns
-# the exact same singleton object process-wide regardless of which
-# reimport asks for it, so an attribute on that shared object is what
-# actually reaches every nested test's own DB writes too, muting the
-# thousands of test-fixture inserts/updates/deletes a self-test run
-# produces against its own in-memory databases - noise nobody deploying
-# this bot needs to see, unlike the real mutations this trace callback
-# exists for. Only initialized if missing (never unconditionally reset to
-# False) - this line itself runs again on every one of those nested
-# reimports, and unconditionally resetting it here would silently clobber
-# _runStartupSelfTests' own True right back to False the moment the very
-# first nested test reimports this file.
-if not hasattr(logger, "_suppress_db_logging"):
-    logger._suppress_db_logging = False
-
 
 # discord.py's own internal logging (View.on_error for a button callback,
 # Loop._error for a background task) and on_app_command_error below already
@@ -161,8 +141,6 @@ if not hasattr(logger, "_suppress_db_logging"):
 def _logDatabaseStatement(sql):
     statement = sql.strip()
     if not statement.upper().startswith(_MUTATING_SQL_PREFIXES):
-        return
-    if logger._suppress_db_logging:
         return
     logger.info("DB: %s", _truncateForLog(statement))
 
@@ -1681,55 +1659,74 @@ async def roll(ctx, *, num: int):
 
 # Runs the full test suite before connecting to Discord, so a broken
 # deploy shows up in the log immediately instead of only being noticed
-# once something breaks in production. `import tests` is lazy (only
-# reached from the __main__ guard below, i.e. only when this file is run
-# directly) rather than a top-level import, since tests.py's own
-# _import_bot_module() re-imports this file under the name "bot" - a
-# top-level `import tests` here would make that circular. tests.py's own
-# bot.py tests use that same re-import (with sqlite3.connect/open patched
-# away from the real database/token) precisely so running the suite here
-# never touches the real main.db or Discord. A failing suite is logged as
-# a warning (naming exactly which tests failed) rather than aborting
-# startup - a real deploy should still come up and serve players even if,
-# say, a test itself is stale, rather than a self-test regression taking
-# the whole bot down.
+# once something breaks in production. Shelled out to `pytest -n auto` in
+# its own subprocess rather than run in-process with stdlib unittest the
+# way this used to work, for two reasons: pytest-xdist splits the ~900
+# tests across every CPU core instead of running them one at a time, and
+# a genuinely separate process means tests.py is that process's own real
+# entry point - its first nested `_import_bot_module()` call gets the
+# same inert, open()-mocked root log handler an ordinary `pytest tests.py`
+# run from a terminal always has (see readme.md), so none of the
+# thousands of test-fixture DB/asyncio-debug log lines a full run
+# produces can leak into this file's own real log the way they could
+# when the suite ran in-process here directly. That used to need
+# logger._suppress_db_logging plus temporarily raising the "asyncio"/
+# "discord" logger levels around the run - both gone now, since there's
+# nothing left in this process for them to protect against.
+# `--junitxml` gives back pytest-xdist's own already-stitched-across-
+# workers summary (total/failed counts plus one <testcase> per test) as
+# structured XML, rather than scraping worker-interleaved terminal
+# output. `cwd=BASE_DIR` and `sys.executable` keep this correct
+# regardless of the process's own working directory or which Python
+# environment is actually running the bot. A failing suite - or pytest
+# itself failing to launch or produce a report at all, e.g. a stale
+# install missing pytest-xdist - is logged as a warning rather than
+# aborting startup: a real deploy should still come up and serve players
+# even if, say, a test itself is stale, rather than a self-test
+# regression taking the whole bot down.
 def _runStartupSelfTests():
-    import io
-    import unittest
+    import subprocess
+    import sys
+    import tempfile
+    import xml.etree.ElementTree as ET
 
-    suite = unittest.TestLoader().loadTestsFromName("tests")
-    output = io.StringIO()
-    logger._suppress_db_logging = True
-    # IsolatedAsyncioTestCase (Python 3.11+) always runs its event loop with
-    # debug=True, which logs a WARNING through the "asyncio" logger for
-    # every callback slower than 100ms - meaningless test-fixture timing
-    # noise (a slow CI machine, not a real bug), not something a deploy's
-    # actual log needs to carry. "discord" throws in its own startup noise
-    # (e.g. "PyNaCl is not installed") on every one of tests.py's nested
-    # bot.py reimports. Both loggers propagate to the same root handlers
-    # this file's own logging.basicConfig call configured, same as
-    # "shockwave" itself, so without this they'd land straight in this
-    # file's own log. Raised for the suite's duration only and restored
-    # after, same try/finally shape as _suppress_db_logging above.
-    noisy_loggers = [logging.getLogger("asyncio"), logging.getLogger("discord")]
-    prior_levels = [lg.level for lg in noisy_loggers]
-    for noisy_logger in noisy_loggers:
-        noisy_logger.setLevel(logging.ERROR)
-    try:
-        result = unittest.TextTestRunner(stream=output, verbosity=2).run(suite)
-    finally:
-        logger._suppress_db_logging = False
-        for noisy_logger, level in zip(noisy_loggers, prior_levels):
-            noisy_logger.setLevel(level)
+    with tempfile.TemporaryDirectory() as tmp:
+        report_path = os.path.join(tmp, "results.xml")
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-m", "pytest", "tests.py", "-n", "auto", "-q", f"--junitxml={report_path}"],
+                cwd=BASE_DIR, capture_output=True, text=True,
+            )
+        except Exception:
+            logger.warning("Startup self-test: failed to launch pytest - starting the bot anyway.", exc_info=True)
+            return
 
-    if result.wasSuccessful():
+        try:
+            suite = ET.parse(report_path).getroot()
+        except (FileNotFoundError, ET.ParseError):
+            logger.warning(
+                "Startup self-test: pytest produced no readable report (exit code %d) - starting the bot "
+                "anyway. Output:\n%s",
+                proc.returncode, _truncateForLog(proc.stdout + proc.stderr),
+            )
+            return
+
+    if suite.tag != "testsuite":
+        suite = suite.find("testsuite")
+
+    total = int(suite.get("tests", 0))
+    failed_count = int(suite.get("failures", 0)) + int(suite.get("errors", 0))
+    if failed_count == 0:
         return
 
-    logger.debug("Startup self-test output:\n%s", output.getvalue())
-    failed = [str(test) for test, _ in (result.failures + result.errors)]
+    logger.debug("Startup self-test output:\n%s", proc.stdout + proc.stderr)
+    failed = [
+        f"{testcase.get('classname')}.{testcase.get('name')}" for testcase in suite.iter("testcase")
+        if testcase.find("failure") is not None or testcase.find("error") is not None
+    ]
     logger.warning(
         "Startup self-test: %d/%d tests failed - starting the bot anyway. Failed: %s",
-        len(failed), result.testsRun, _truncateForLog("; ".join(failed)),
+        failed_count, total, _truncateForLog("; ".join(failed)),
     )
 
 

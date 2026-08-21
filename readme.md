@@ -134,19 +134,12 @@ receives the text of every statement actually executed on the connection,
 with bound parameters already expanded inline rather than left as raw `?`
 placeholders. It filters to just `INSERT`/`UPDATE`/`DELETE` - a `SELECT`, or
 the trace callback's own `"BEGIN "` for an implicit transaction, isn't a
-mutation worth a permanent record. `logger._suppress_db_logging` mutes it
-during `_runStartupSelfTests` below, so the thousands of test-fixture writes
-a full suite run produces against its own in-memory databases don't flood the
-real log - parked on the shared `"shockwave"` logger object rather than a
-plain module global specifically because `_import_bot_module()` (see below)
-re-executes this whole file, under a fresh set of module globals, for every
-nested test it imports; `logging.getLogger(name)` returns the same singleton
-regardless of which reimport asks for it, so that's the one piece of state
-guaranteed to still be visible from inside those reimports. The line that
-initializes the flag guards itself with `hasattr` rather than unconditionally
-setting it to `False`, since that same line runs again on every nested
-reimport and would otherwise clobber `_runStartupSelfTests`' own `True` back
-to `False` the moment the very first nested test reimports the file.
+mutation worth a permanent record. It logs unconditionally: `tests.py`'s own
+`BotModuleTestCase`-based tests exercise this same trace callback against
+their own in-memory databases thousands of times over a full run, but
+`_import_bot_module()` (see below) reaches it through a root logger whose
+file handler was itself constructed with `open()` mocked out, so none of
+that ever reaches a real file.
 
 `LoggingCommandTree` (`bot.py`'s `tree`, subclassing `app_commands.CommandTree`)
 overrides `interaction_check` - a single global hook discord.py's own
@@ -169,14 +162,12 @@ swallowing rather than letting anything through. `interaction.command`/
 `.namespace` run discord.py's real option-resolution machinery - nothing a
 `FakeInteraction`-based test can faithfully exercise - and
 `CommandTree._from_interaction`'s own wrapper only catches `AppCommandError`
-around the whole dispatch, so anything else raised here previously escaped
-uncaught: the interaction died silently, Discord showed "This interaction
-failed", and neither `on_app_command_error` nor this file's own log ever
-saw it. This bit in production (a real `/team-create` call failing with
-nothing logged anywhere) before the `try`/`except` was added - a
-logging-only hook, with no business reason to ever fail, needs to be
-structurally unable to take down the feature it's just supposed to be
-watching.
+around the whole dispatch, so anything else raised here would otherwise
+escape uncaught: the interaction dies silently, Discord shows "This
+interaction failed", and neither `on_app_command_error` nor this file's own
+log sees it. A logging-only hook, with no business reason to ever fail,
+needs to be structurally unable to take down the feature it's just supposed
+to be watching.
 
 A successful completion is logged separately, from `on_app_command_completion`
 - an event discord.py dispatches itself only once a command has actually run
@@ -186,33 +177,37 @@ through `on_app_command_error` instead) or one `interaction_check` rejected
 before it ran.
 
 `_runStartupSelfTests` runs the full `tests.py` suite before `client.run(token)`
-in the `if __name__ == "__main__":` guard. A passing run stays silent - only a
-failure is worth a log entry - so a broken deploy shows up in the log
-immediately rather than only being noticed once something breaks in
-production, without a "tests passed" line cluttering every single normal
-startup. A failing suite is logged as a warning naming exactly which tests
-failed (plus the full verbose output at debug level) rather than aborting
-startup: a real deploy should still come up and serve players even if, say, a
-test itself is stale, rather than a self-test regression taking the whole bot
-down. The `import
-tests` inside it is deliberately lazy (only reached when this file is run
-directly) rather than a top-level import, since `tests.py`'s own
-`_import_bot_module()` re-imports this file under the name `"bot"` for its
-own `BotModuleTestCase` tests - a top-level `import tests` here would make
-that circular. That same re-import (with `sqlite3.connect`/`open` patched
-away from the real database/token) is also what keeps running the suite from
-here safe: it never touches the real `main.db` or Discord, no matter how
-deep the self-test run's own nested re-imports go.
+in the `if __name__ == "__main__":` guard, so a broken deploy shows up in the
+log immediately rather than only being noticed once something breaks in
+production. It shells out to `pytest -n auto tests.py` in its own subprocess
+(`subprocess.run([sys.executable, "-m", "pytest", ...], cwd=BASE_DIR, ...)`):
+pytest-xdist splits the suite's ~900 tests across every CPU core instead of
+running them one at a time, and a genuinely separate process means
+`tests.py` is *that* process's own real entry point, so its first nested
+`_import_bot_module()` call gets the same inert, `open()`-mocked root log
+handler an ordinary `pytest tests.py` run from a terminal always has
+(`_import_bot_module()` patches `builtins.open` for the duration of `import
+bot`, so `MaxLinesFileHandler`'s very first `_open()` call - the one
+`logging.basicConfig` latches onto for the rest of that process's life -
+returns a harmless mock stream, not a real file handle). None of the
+thousands of test-fixture DB-statement/asyncio-debug log lines a full run
+produces can leak into this file's own real log, because there's no shared
+process for them to leak into in the first place.
 
-`_runStartupSelfTests` also raises the `"asyncio"` and `"discord"` loggers to
-`ERROR` for the run's duration, restoring their prior levels after (same
-try/finally shape as `logger._suppress_db_logging` above). `IsolatedAsyncioTestCase`
-(every async test in the suite) always runs its event loop with `debug=True`,
-which logs a `WARNING` through the `"asyncio"` logger for any callback slower
-than 100ms - meaningless test-fixture timing noise, not a real bug, but both
-loggers propagate to the same root handlers this file's own `logging.basicConfig`
-call configured, same as `"shockwave"` itself, so without this they'd land
-straight in this file's own log every time the suite runs.
+Results come back via `--junitxml=<path>`, pytest-xdist's own
+already-stitched-across-workers summary - one `<testsuite tests=... failures=...
+errors=...>` with a `<testcase>` per test, `<failure>`/`<error>` children on
+whichever ones didn't pass - parsed with `xml.etree.ElementTree` rather than
+scraping worker-interleaved terminal output. A passing run stays silent - only
+a failure is worth a log entry - so a normal startup never gets a "tests
+passed" line cluttering it. A failing suite logs a warning naming exactly
+which tests failed (`classname.name`, read straight off the XML) plus the
+full subprocess output at debug level, rather than aborting startup: a real
+deploy should still come up and serve players even if, say, a test itself is
+stale, rather than a self-test regression taking the whole bot down. The same
+reasoning covers pytest itself failing to launch, or running but never
+producing a report at all (e.g. a stale install missing `pytest-xdist`) - both
+are caught and logged as a warning rather than raised.
 
 ### Team formation
 
