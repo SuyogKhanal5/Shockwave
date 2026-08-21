@@ -7,6 +7,12 @@ Runs with the stdlib test runner only (no pytest/pip install required):
     python tests.py -v
     python -m unittest tests -v
 
+Or, faster (splits the suite across every CPU core via pytest-xdist - see
+_runStartupSelfTests in bot.py, which runs the suite this same way on every
+bot startup):
+
+    python -m pytest tests.py -n auto
+
 Layout:
   - Fakes: lightweight stand-ins for discord.py objects (real attributes,
     not auto-magic Mocks, so a wrong attribute access fails loudly).
@@ -11528,21 +11534,8 @@ class BotModuleTestCase(unittest.IsolatedAsyncioTestCase):
         self._real_backupDatabase = self.bot._backupDatabase
         self._backup_patch = patch.object(self.bot, "_backupDatabase", MagicMock())
         self._backup_patch.start()
-        # Every mutating statement any test in this class runs (through
-        # helperObj, command callbacks, on_guild_join, ...) would otherwise
-        # log through _logDatabaseStatement - mainDB.set_trace_callback is
-        # already registered by the time _import_bot_module() returns, and
-        # this flag lives on the shared "shockwave" logger singleton (see
-        # bot.py), not anything _import_bot_module() itself resets. Pure
-        # test-fixture noise nobody deploying this bot needs to see, unlike
-        # the real mutations that logging exists for - only worth knowing
-        # about if a test actually fails, not on every passing run.
-        # LogDatabaseStatementTests flips this back off for its own body,
-        # since it specifically exercises the active-logging behavior.
-        self.bot.logger._suppress_db_logging = True
 
     def tearDown(self):
-        self.bot.logger._suppress_db_logging = False
         self._sync_patch.stop()
         self._backup_patch.stop()
         self.bot.mainDB.close()
@@ -12061,14 +12054,6 @@ class AppCommandCompletionTests(BotModuleTestCase):
 
 
 class LogDatabaseStatementTests(BotModuleTestCase):
-    def setUp(self):
-        super().setUp()
-        # This class exercises _logDatabaseStatement's own active-logging
-        # behavior directly, unlike every other BotModuleTestCase test (all
-        # of which suppress it by default in the parent setUp - pure
-        # test-fixture noise nobody deploying this bot needs to see).
-        self.bot.logger._suppress_db_logging = False
-
     async def test_logs_insert_update_and_delete(self):
         for sql in ("INSERT INTO x VALUES (1)", "UPDATE x SET y=1", "DELETE FROM x WHERE y=1"):
             with self.assertLogs(self.bot.logger, level="INFO") as cm:
@@ -12088,11 +12073,6 @@ class LogDatabaseStatementTests(BotModuleTestCase):
         logged = cm.output[0]
         self.assertIn("... (truncated)", logged)
         self.assertLess(len(logged), len(long_sql))
-
-    async def test_respects_the_suppression_flag(self):
-        self.bot.logger._suppress_db_logging = True
-        with self.assertNoLogs(self.bot.logger, level="INFO"):
-            self.bot._logDatabaseStatement("INSERT INTO x VALUES (1)")
 
     async def test_a_real_mutation_reaches_the_log_via_the_trace_callback(self):
         # End-to-end: an actual cursor.execute against mainDB (which has
@@ -12177,108 +12157,101 @@ class BackupDatabaseTests(BotModuleTestCase):
 
 
 class RunStartupSelfTestsTests(BotModuleTestCase):
-    def _patch_loader(self, testcase_cls):
-        return patch.object(
-            unittest.TestLoader, "loadTestsFromName",
-            lambda self, name: unittest.TestLoader().loadTestsFromTestCase(testcase_cls),
+    # _runStartupSelfTests now shells out to a real `pytest -n auto`
+    # subprocess rather than running the suite in-process - these tests
+    # fake that subprocess entirely (never actually spawning the real
+    # ~900-test suite as a subprocess of itself, which would be both slow
+    # and a little too recursive for comfort), by patching subprocess.run
+    # to write a hand-built junitxml report to whatever path the real
+    # `--junitxml=<path>` argument names and return a fake CompletedProcess.
+    # This exercises _runStartupSelfTests' own parsing/logging logic
+    # exactly as it runs against a genuine pytest-produced report.
+    def _mock_subprocess(self, xml_body=None, returncode=0, stdout="", stderr=""):
+        def fake_run(argv, **kwargs):
+            if xml_body is not None:
+                report_arg = next(a for a in argv if a.startswith("--junitxml="))
+                report_path = report_arg.split("=", 1)[1]
+                with open(report_path, "w", encoding="utf-8") as f:
+                    f.write(xml_body)
+            return SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
+
+        return patch("subprocess.run", side_effect=fake_run)
+
+    @staticmethod
+    def _junit_xml(tests, failures, errors, testcases=""):
+        return (
+            '<?xml version="1.0" encoding="utf-8"?>'
+            f'<testsuites><testsuite tests="{tests}" failures="{failures}" errors="{errors}" skipped="0">'
+            f"{testcases}</testsuite></testsuites>"
         )
 
     def test_a_passing_suite_logs_nothing(self):
-        class _AllPass(unittest.TestCase):
-            def test_a(self):
-                pass
-
-        with self._patch_loader(_AllPass), self.assertNoLogs(self.bot.logger):
+        xml = self._junit_xml(tests=3, failures=0, errors=0, testcases=(
+            '<testcase classname="tests.A" name="test_a" />'
+            '<testcase classname="tests.A" name="test_b" />'
+            '<testcase classname="tests.A" name="test_c" />'
+        ))
+        with self._mock_subprocess(xml_body=xml), self.assertNoLogs(self.bot.logger):
             self.bot._runStartupSelfTests()
 
     def test_a_failing_suite_logs_a_warning_naming_the_failures(self):
-        class _SomeFail(unittest.TestCase):
-            def test_fails(self):
-                self.fail("boom")
-
-            def test_errors(self):
-                raise ValueError("boom")
-
-            def test_passes(self):
-                pass
-
-        with self._patch_loader(_SomeFail):
+        xml = self._junit_xml(tests=3, failures=1, errors=1, testcases=(
+            '<testcase classname="tests.A" name="test_fails"><failure message="boom">boom</failure></testcase>'
+            '<testcase classname="tests.A" name="test_errors"><error message="boom">boom</error></testcase>'
+            '<testcase classname="tests.A" name="test_passes" />'
+        ))
+        with self._mock_subprocess(xml_body=xml):
             with self.assertLogs(self.bot.logger, level="WARNING") as cm:
                 self.bot._runStartupSelfTests()
 
         self.assertEqual(len(cm.output), 1)
         self.assertIn("2/3 tests failed", cm.output[0])
-        self.assertIn("test_fails", cm.output[0])
-        self.assertIn("test_errors", cm.output[0])
+        self.assertIn("tests.A.test_fails", cm.output[0])
+        self.assertIn("tests.A.test_errors", cm.output[0])
         self.assertNotIn("test_passes", cm.output[0])
 
-    def test_suppresses_db_logging_during_the_run_and_restores_it_after(self):
-        bot_module = self.bot
-        seen_during_run = []
-
-        class _ChecksSuppression(unittest.TestCase):
-            def test_records_suppression_state(self):
-                seen_during_run.append(bot_module.logger._suppress_db_logging)
-
-        bot_module.logger._suppress_db_logging = False
-        with self._patch_loader(_ChecksSuppression):
-            bot_module._runStartupSelfTests()
-
-        self.assertEqual(seen_during_run, [True])
-        self.assertFalse(bot_module.logger._suppress_db_logging)
-
-    def test_restores_suppression_state_even_if_the_run_itself_raises(self):
-        self.bot.logger._suppress_db_logging = False
-        with patch.object(unittest.TextTestRunner, "run", side_effect=RuntimeError("boom")):
-            with self.assertRaises(RuntimeError):
+    def test_a_failing_suite_also_logs_the_full_output_at_debug(self):
+        xml = self._junit_xml(tests=1, failures=1, errors=0, testcases=(
+            '<testcase classname="tests.A" name="test_fails"><failure message="boom">boom</failure></testcase>'
+        ))
+        with self._mock_subprocess(xml_body=xml, stdout="FAILED tests.py::A::test_fails"):
+            with self.assertLogs(self.bot.logger, level="DEBUG") as cm:
                 self.bot._runStartupSelfTests()
-        self.assertFalse(self.bot.logger._suppress_db_logging)
 
-    def test_raises_asyncio_and_discord_logger_levels_during_the_run_and_restores_them_after(self):
-        # IsolatedAsyncioTestCase always runs its loop with debug=True,
-        # which logs slow-callback WARNINGs through the "asyncio" logger -
-        # harmless test-fixture timing noise that would otherwise land in
-        # this file's own log (see _runStartupSelfTests). Confirms the
-        # level is actually raised for the run's duration, not just reset
-        # to some hardcoded default afterward regardless of what it was.
-        bot_module = self.bot
-        asyncio_logger = logging.getLogger("asyncio")
-        discord_logger = logging.getLogger("discord")
-        asyncio_logger.setLevel(logging.DEBUG)
-        discord_logger.setLevel(logging.WARNING)
-        seen_during_run = []
+        self.assertTrue(any("FAILED tests.py::A::test_fails" in line for line in cm.output))
 
-        class _ChecksLevels(unittest.TestCase):
-            def test_records_levels(self):
-                seen_during_run.append((asyncio_logger.level, discord_logger.level))
+    def test_invokes_pytest_with_xdist_auto_workers_from_the_project_root(self):
+        xml = self._junit_xml(tests=1, failures=0, errors=0)
+        with self._mock_subprocess(xml_body=xml) as mock_run:
+            self.bot._runStartupSelfTests()
 
-        try:
-            with self._patch_loader(_ChecksLevels):
-                bot_module._runStartupSelfTests()
+        argv, kwargs = mock_run.call_args
+        argv = argv[0]
+        self.assertEqual(argv[0], sys.executable)
+        self.assertIn("pytest", argv)
+        self.assertIn("tests.py", argv)
+        self.assertIn("-n", argv)
+        self.assertIn("auto", argv)
+        self.assertEqual(kwargs["cwd"], self.bot.BASE_DIR)
 
-            self.assertEqual(seen_during_run, [(logging.ERROR, logging.ERROR)])
-            self.assertEqual(asyncio_logger.level, logging.DEBUG)
-            self.assertEqual(discord_logger.level, logging.WARNING)
-        finally:
-            asyncio_logger.setLevel(logging.NOTSET)
-            discord_logger.setLevel(logging.NOTSET)
+    def test_missing_report_logs_a_warning_without_crashing(self):
+        # pytest ran (or tried to) but never wrote a report at all - e.g. a
+        # collection error, or pytest-xdist missing from a stale install.
+        with self._mock_subprocess(
+            xml_body=None, returncode=2, stderr="usage error: unrecognized arguments: -n"
+        ):
+            with self.assertLogs(self.bot.logger, level="WARNING") as cm:
+                self.bot._runStartupSelfTests()
 
-    def test_restores_noisy_logger_levels_even_if_the_run_itself_raises(self):
-        asyncio_logger = logging.getLogger("asyncio")
-        discord_logger = logging.getLogger("discord")
-        asyncio_logger.setLevel(logging.DEBUG)
-        discord_logger.setLevel(logging.WARNING)
+        self.assertIn("no readable report", cm.output[0])
+        self.assertIn("unrecognized arguments", cm.output[0])
 
-        try:
-            with patch.object(unittest.TextTestRunner, "run", side_effect=RuntimeError("boom")):
-                with self.assertRaises(RuntimeError):
-                    self.bot._runStartupSelfTests()
+    def test_pytest_failing_to_launch_logs_a_warning_without_crashing(self):
+        with patch("subprocess.run", side_effect=FileNotFoundError("no such file")):
+            with self.assertLogs(self.bot.logger, level="WARNING") as cm:
+                self.bot._runStartupSelfTests()
 
-            self.assertEqual(asyncio_logger.level, logging.DEBUG)
-            self.assertEqual(discord_logger.level, logging.WARNING)
-        finally:
-            asyncio_logger.setLevel(logging.NOTSET)
-            discord_logger.setLevel(logging.NOTSET)
+        self.assertIn("failed to launch pytest", cm.output[0])
 
 
 class MaxLinesFileHandlerTests(BotModuleTestCase):
