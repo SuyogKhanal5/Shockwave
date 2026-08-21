@@ -326,9 +326,9 @@ ensure_column("stats_views", "cardAvatarGlobal", "INTEGER", "0")
 # _renderTradingCardImage) - one row per (guild, player), created with
 # Shockwave's own defaults the first time it's needed. Colors are stored as
 # "#RRGGBB" hex, font_style is a named preset _cardFontPaths knows how to
-# resolve (only "default" - Shockwave's own Chakra Petch/IBM Plex Sans
-# pairing - exists today, but the column exists so more presets can be
-# added later without a schema change). `customized` (see ensureCardSettings)
+# resolve - "Default" (Shockwave's own Chakra Petch/IBM Plex Sans pairing,
+# always available) or any of CARD_SHOP_FONT_STYLES' unlockable ones.
+# `customized` (see ensureCardSettings)
 # tracks whether a row still just reflects Shockwave's own defaults (0) or
 # was explicitly changed by something other than that self-healing insert
 # (1) - there's no /card-customize command yet, so today every row is
@@ -986,7 +986,7 @@ async def leaderboard(
     await helperObj.leaderboardHelper(ctx, stat, sort_order)
 
 
-SITE_COMMANDS_URL = "https://shockwave.netlify.app/commands.html"
+SITE_COMMANDS_URL = "https://addshockwave.com/commands.html"
 
 # Short descriptions for /help <command>. Kept separate from each command's
 # `description=` (which is what Discord's own command picker shows) since
@@ -1014,6 +1014,7 @@ COMMAND_HELP = {
     "team-set": "Sets a persistent team's voice channel and/or logo, any combination in one call. new_voice_channel creates a fresh one named after the team. The team's captain, or anyone with Manage Server, can do this.",
     "team-rename": "Renames a persistent team. The new name can't already belong to another team in this server. The team's captain, or anyone with Manage Server, can do this.",
     "team-delete": "Deletes a persistent team - its roster, record, and any pending invites go with it. The team's captain, or anyone with Manage Server, can do this; confirmation required. Doesn't affect a tournament it's already registered in.",
+    "team-transfer": "Hands off a persistent team's captaincy to another player already on its roster. The team's captain, or anyone with Manage Server, can do this.",
     "team-invite": "Invites one or more members (up to 5 per call) to a team. Each invitee must accept before joining. The team's captain, or anyone with Manage Server, can do this. force (Manage Server only) skips the invitee's confirmation and adds them straight to the roster.",
     "team-leave": "Removes you from a persistent team's roster. Anyone rostered can do this to themselves, no permission needed - except the team's captain, who has to use /team-delete instead since there's no one to hand the captaincy to.",
     "my-teams": "Lists the teams you're a rostered player on in this server, with paging to flip through each one's full stats card.",
@@ -1027,7 +1028,7 @@ COMMAND_HELP = {
     "tournament-print-bracket": "Prints the current bracket.",
     "tournament-start": "Starts playing the current round of the bracket. mode is Sequential (one match at a time) or Simultaneous (all at once, no betting).",
     "roll": "Rolls a random number between 1 and num.",
-    "setup": "Introduces Shockwave, creates your personal solo team, and walks you through picking which roles you like/dislike playing (press a role to toggle it, then press Confirm) for future role-aware team balancing. solo_team_name is only required the first time. Run it any time afterward to update either. Unlocks the Onboarded achievement the first time.",
+    "setup": "Introduces Shockwave, creates your personal solo team, and walks you through picking which roles you like/dislike playing (press a role to toggle it, then press Confirm) for future role-aware team balancing. solo_team_name is always optional - omit it the first time and your solo team is named after your current server display name. Run it any time afterward to update either. Unlocks the Onboarded achievement the first time.",
     "help": "Shows this message, or details on one command.",
 }
 
@@ -1037,7 +1038,7 @@ COMMAND_HELP = {
     description="Get started with Shockwave: your solo team and role preferences"
 )
 @app_commands.describe(
-    solo_team_name="Name for your personal solo team - required the first time, optional after",
+    solo_team_name="Name for your personal solo team - always optional, defaults to your display name",
 )
 async def setup(ctx, solo_team_name: str = None):
     await helperObj.setupHelper(ctx, solo_team_name)
@@ -1535,6 +1536,19 @@ async def renameTeam(ctx, team: str, new_name: str):
 @app_commands.autocomplete(team=myCaptainedTeamAutocomplete)
 async def deleteTeam(ctx, team: str):
     await helperObj.teamDeleteHelper(ctx, team)
+
+
+@tree.command(
+    name="team-transfer",
+    description="Hand off captaincy of a persistent team you captain to another player on its roster"
+)
+@app_commands.describe(
+    team="Name of the team to transfer",
+    member="Who to make the new captain - must already be on the team's roster",
+)
+@app_commands.autocomplete(team=myCaptainedTeamAutocomplete)
+async def transferTeam(ctx, team: str, member: discord.Member):
+    await helperObj.teamTransferHelper(ctx, team, member)
 
 
 @tree.command(

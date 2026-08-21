@@ -338,7 +338,7 @@ CARD_DEFAULT_ACCENT_COLOR = "#EDC643"      # --gold, same as BRACKET_TITLE_COLOR
 # distinct background rather than just "dark".
 CARD_DEFAULT_BACKGROUND_COLOR = "#251A5B"
 CARD_DEFAULT_TEXT_COLOR = "#F3EFFA"        # --text, same as BRACKET_TEXT_COLOR
-CARD_DEFAULT_FONT_STYLE = "default"        # Chakra Petch + IBM Plex Sans - see _cardFontPaths
+CARD_DEFAULT_FONT_STYLE = "Default"        # Chakra Petch + IBM Plex Sans - see _cardFontPaths
 # /card-set's name for reverting to the palette above - always offered
 # (see getAvailableCardColorSchemes) the same way CARD_DEFAULT_TITLE always
 # is, since it needs no unlocking either.
@@ -6161,14 +6161,14 @@ class helpers():
 
     # /team-leave: the self-service counterpart to /team-invite - no
     # captain/admin gate at all, since removing *yourself* needs nobody
-    # else's permission. The captain can't use this one, though: unlike
-    # every other team command, there's no "who's in charge now" answer to
-    # fall back to (no transfer-captaincy command exists yet), so leaving a
-    # non-empty team captain-less would break isTeamCaptain everywhere else
-    # it's checked (rename/set/invite/delete) down to just "whoever has
-    # Manage Server." /team-delete is the captain's own way out instead -
-    # it already has to answer "what happens to this team" regardless of
-    # roster size.
+    # else's permission. The captain can't use this one directly, though:
+    # unlike every other team command, there's no "who's in charge now"
+    # answer to fall back to, so leaving a non-empty team captain-less
+    # would break isTeamCaptain everywhere else it's checked (rename/set/
+    # invite/delete) down to just "whoever has Manage Server." A captain
+    # who wants out has to answer that question explicitly first, either
+    # /team-transfer to someone else already on the roster, or /team-delete
+    # if the team shouldn't exist at all anymore.
     async def teamLeaveHelper(self, ctx, team_name):
         guild_id = ctx.guild.id
 
@@ -6180,8 +6180,8 @@ class helpers():
 
         if self.isTeamCaptain(team, ctx.user.id):
             await ctx.response.send_message(
-                f"You're **{team_name}**'s captain - use /team-delete instead if you want to leave it, "
-                "since there's nobody else to hand the captaincy to yet."
+                f"You're **{team_name}**'s captain - use /team-transfer to hand off the captaincy first, "
+                "or /team-delete if you want the team gone entirely."
             )
             return
 
@@ -6231,13 +6231,17 @@ class helpers():
     # with a button rather than typing role names. Safe to re-run any time
     # afterward to update either.
     #
-    # solo_team_name is only required the first time - if the caller
-    # already captains a size-1 team (found structurally, same lookup
-    # /team-invite's solo-team logic never needed until now: captained by
-    # this player, team_size exactly 1, no separate soloTeamId column to
-    # keep in sync), omitting it just keeps that team as-is, and giving a
-    # new name renames it through the same case-insensitive collision
-    # check /team-rename uses.
+    # solo_team_name is always optional - if the caller already captains a
+    # size-1 team (found structurally, same lookup /team-invite's
+    # solo-team logic never needed until now: captained by this player,
+    # team_size exactly 1, no separate soloTeamId column to keep in sync),
+    # omitting it just keeps that team as-is, and giving a new name
+    # renames it through the same case-insensitive collision check
+    # /team-rename uses. Omitting it with no solo team yet names the new
+    # one after the caller's current server display name instead - a
+    # collision there (someone else's persistent team already has that
+    # name) is the one case that still asks for an explicit name, same as
+    # any other naming collision below.
     async def setupHelper(self, ctx, solo_team_name=None):
         guild_id = ctx.guild.id
         user_id = ctx.user.id
@@ -6248,17 +6252,20 @@ class helpers():
         )
 
         if solo_team is None:
-            if solo_team_name is None:
-                await ctx.response.send_message(
-                    "Give solo_team_name to create your personal solo team - you don't have one in "
-                    "this server yet."
-                )
-                return
+            auto_named = solo_team_name is None
+            if auto_named:
+                solo_team_name = ctx.user.display_name
             if self.getTeamRow(guild_id, solo_team_name) is not None:
-                await ctx.response.send_message(
-                    f"A team named **{solo_team_name}** already exists in this server - pick another "
-                    "name for your solo team."
-                )
+                if auto_named:
+                    await ctx.response.send_message(
+                        f"Your display name, **{solo_team_name}**, is already taken by another team in "
+                        "this server - run /setup again with solo_team_name set to something else."
+                    )
+                else:
+                    await ctx.response.send_message(
+                        f"A team named **{solo_team_name}** already exists in this server - pick another "
+                        "name for your solo team."
+                    )
                 return
             solo_team = Team()
             solo_team.set_name(solo_team_name)
@@ -6515,6 +6522,50 @@ class helpers():
         self._renameTeam(team_id, team)
 
         await ctx.response.send_message(f"**{current_name}** has been renamed to **{new_name}**.")
+
+    # /team-transfer: hands off a persistent team's captaincy to another
+    # player already on its roster - the team's own captain, or any member
+    # with the Manage Server permission, same "check manage_guild by hand"
+    # gate /team-rename and /team-delete both use. set_captain() itself
+    # enforces "captain must be a roster player" (see TourneyClasses.Team),
+    # so the new captain has to already be rostered - inviting them first
+    # is on the caller, not something this quietly does for them. This is
+    # what /team-leave's own "you're the captain, there's nobody to hand it
+    # to" block needed to exist before a captain could ever use it.
+    async def teamTransferHelper(self, ctx, team_name, new_captain):
+        guild_id = ctx.guild.id
+
+        result = self.getTeamRow(guild_id, team_name)
+        if result is None:
+            await ctx.response.send_message(f"No team named **{team_name}** in this server.")
+            return
+        team_id, team = result
+
+        if not self.isTeamCaptain(team, ctx.user.id) and not ctx.user.guild_permissions.manage_guild:
+            await ctx.response.send_message(
+                f"Only **{team_name}**'s captain or a member with the Manage Server permission can "
+                "transfer it."
+            )
+            return
+
+        if self.isTeamCaptain(team, new_captain.id):
+            await ctx.response.send_message(f"{new_captain.mention} is already **{team_name}**'s captain.")
+            return
+
+        player = next((p for p in team.get_players() if p.get_id() == new_captain.id), None)
+        if player is None:
+            await ctx.response.send_message(
+                f"{new_captain.mention} isn't on **{team_name}**'s roster - invite them with "
+                "/team-invite first."
+            )
+            return
+
+        team.set_captain(player)
+        self.updateTeamData(team_id, team)
+
+        await ctx.response.send_message(
+            f"**{team_name}**'s captaincy has been transferred to {new_captain.mention}."
+        )
 
     # Deletes a team's row and any pending /team-invite for it (a stale
     # invite would otherwise just silently no-op the moment someone
@@ -8654,9 +8705,9 @@ class helpers():
     # font" for the smaller text still means a different weight of it
     # rather than a whole second body typeface.
     #
-    # Anything unrecognized (including the "default" key itself) falls
-    # back to Shockwave's own pairing, the same "unknown preset degrades
-    # to the default" approach _hexToRgb takes for a bad color.
+    # Anything unrecognized (including CARD_DEFAULT_FONT_STYLE itself)
+    # falls back to Shockwave's own pairing, the same "unknown preset
+    # degrades to the default" approach _hexToRgb takes for a bad color.
     def _cardFontPaths(self, font_style):
         if font_style == "Bold":
             return {
@@ -9367,11 +9418,10 @@ class helpers():
         for i, font_style in enumerate(font_styles):
             paths = self._cardFontPaths(font_style)
             sample_font = self._loadFont(paths["name_font"], sample_size, paths["name_variation"])
-            display_key = "Default" if font_style == CARD_DEFAULT_FONT_STYLE else font_style
             row_y = header_height + i * row_height + row_height / 2
-            draw.text((PREVIEW_MARGIN, row_y), display_key, font=sample_font, fill=text_color, anchor="lm")
+            draw.text((PREVIEW_MARGIN, row_y), font_style, font=sample_font, fill=text_color, anchor="lm")
             draw.text(
-                (width - PREVIEW_MARGIN, row_y), f"({display_key})", font=key_font, fill=accent_color,
+                (width - PREVIEW_MARGIN, row_y), f"({font_style})", font=key_font, fill=accent_color,
                 anchor="rm"
             )
 

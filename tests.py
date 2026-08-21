@@ -1625,6 +1625,79 @@ class DefaultEloForGuildTests(HelperTestCase):
         self.assertEqual(lookup[901], 1200)
 
 
+class ConfirmDestructiveClearHelperTests(HelperTestCase):
+    def _ctx(self, user_id=901, name="Alice"):
+        return FakeInteraction(self.guild, FakeMember(name, id=user_id))
+
+    async def test_posts_a_followup_confirmation_not_an_immediate_reset(self):
+        self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.cursor.execute("UPDATE economy SET elo=1400 WHERE guildId=? AND userId=?", (GUILD_ID, 901))
+        self.db.commit()
+        ctx = self._ctx()
+        posted = FakeMessage(id=7001)
+        ctx.followup.send.return_value = posted
+
+        await self.helperObj.confirmDestructiveClearHelper(ctx, False, True, False, False, None)
+
+        ctx.followup.send.assert_awaited_once()
+        self.assertIn("reset elo back to", ctx.followup.send.call_args.args[0])
+        view = ctx.followup.send.call_args.kwargs["view"]
+        self.assertIsInstance(view, helper_module.ConfirmResetView)
+        self.assertIs(view.message, posted)
+        # not actually reset yet - only queued behind confirmation
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "elo"), 1400)
+
+    async def test_confirming_applies_the_reset(self):
+        self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.cursor.execute("UPDATE economy SET elo=1400 WHERE guildId=? AND userId=?", (GUILD_ID, 901))
+        self.db.commit()
+        ctx = self._ctx()
+        await self.helperObj.confirmDestructiveClearHelper(ctx, False, True, False, False, None)
+        view = ctx.followup.send.call_args.kwargs["view"]
+
+        click = self._ctx()
+        await view.confirm.callback(click)
+
+        self.assertEqual(
+            self.helperObj.getEconomy(GUILD_ID, 901, "elo"), self.helperObj._defaultEloForGuild(GUILD_ID)
+        )
+        click.response.edit_message.assert_awaited_once()
+
+    async def test_cancelling_leaves_data_untouched(self):
+        self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.cursor.execute("UPDATE economy SET elo=1400 WHERE guildId=? AND userId=?", (GUILD_ID, 901))
+        self.db.commit()
+        ctx = self._ctx()
+        await self.helperObj.confirmDestructiveClearHelper(ctx, False, True, False, False, None)
+        view = ctx.followup.send.call_args.kwargs["view"]
+
+        click = self._ctx()
+        await view.cancel.callback(click)
+
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "elo"), 1400)
+        click.response.edit_message.assert_awaited_once()
+
+    async def test_confirmation_rejects_a_click_from_someone_other_than_whoever_ran_clear(self):
+        # discord.py's real button dispatch runs View.interaction_check
+        # before ever calling a button's own callback - a click from
+        # anyone but the /clear invoker must be rejected here, not just
+        # left to the callback to somehow notice.
+        self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.cursor.execute("UPDATE economy SET elo=1400 WHERE guildId=? AND userId=?", (GUILD_ID, 901))
+        self.db.commit()
+        ctx = self._ctx()
+        await self.helperObj.confirmDestructiveClearHelper(ctx, False, True, False, False, None)
+        view = ctx.followup.send.call_args.kwargs["view"]
+
+        stranger = self._ctx(user_id=902, name="Bob")
+        allowed = await view.interaction_check(stranger)
+
+        self.assertFalse(allowed)
+        stranger.response.send_message.assert_awaited_once()
+        self.assertTrue(stranger.response.send_message.call_args.kwargs.get("ephemeral"))
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "elo"), 1400)
+
+
 class SaveGetTournamentTests(HelperTestCase):
     def test_get_tournament_returns_none_when_unset(self):
         self.assertIsNone(self.helperObj.getTournament(GUILD_ID))
@@ -1954,6 +2027,95 @@ class TeamRenameHelperTests(HelperTestCase):
         self.assertEqual(team_id, before_id)
         self.assertEqual(after.get_id(), before_id)
         self.assertEqual([p.get_id() for p in after.get_players()], [901])
+
+
+class TeamTransferHelperTests(HelperTestCase):
+    def _ctx(self, user_id=901, name="Alice", manage_guild=True):
+        return FakeInteraction(self.guild, FakeMember(name, id=user_id, manage_guild=manage_guild))
+
+    async def _make_team(self, name, captain_id=901, captain_name="Alice", team_size=5):
+        await self.helperObj.createTeamHelper(self._ctx(captain_id, captain_name), name, team_size)
+
+    def _add_to_roster(self, team_name, user_id, name):
+        team_id, team = self.helperObj.getTeamRow(GUILD_ID, team_name)
+        team.add_player(Player(user_id, name))
+        self.helperObj.updateTeamData(team_id, team)
+
+    async def test_rejects_unknown_team(self):
+        ctx = self._ctx()
+        await self.helperObj.teamTransferHelper(ctx, "Ghosts", FakeMember("Bob", id=902))
+        ctx.response.send_message.assert_awaited_once_with("No team named **Ghosts** in this server.")
+
+    async def test_rejects_non_captain_non_admin(self):
+        await self._make_team("Red")
+        self._add_to_roster("Red", 902, "Bob")
+        ctx = self._ctx(user_id=903, name="Charlie", manage_guild=False)
+        await self.helperObj.teamTransferHelper(ctx, "Red", FakeMember("Bob", id=902))
+        ctx.response.send_message.assert_awaited_once_with(
+            "Only **Red**'s captain or a member with the Manage Server permission can transfer it."
+        )
+        _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        self.assertTrue(self.helperObj.isTeamCaptain(team, 901))
+
+    async def test_rejects_a_target_not_on_the_roster(self):
+        await self._make_team("Red")
+        target = FakeMember("Bob", id=902)
+        ctx = self._ctx()
+        await self.helperObj.teamTransferHelper(ctx, "Red", target)
+        ctx.response.send_message.assert_awaited_once_with(
+            f"{target.mention} isn't on **Red**'s roster - invite them with /team-invite first."
+        )
+        _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        self.assertTrue(self.helperObj.isTeamCaptain(team, 901))
+
+    async def test_rejects_transferring_to_the_current_captain(self):
+        await self._make_team("Red")
+        target = FakeMember("Alice", id=901)
+        ctx = self._ctx()
+        await self.helperObj.teamTransferHelper(ctx, "Red", target)
+        ctx.response.send_message.assert_awaited_once_with(f"{target.mention} is already **Red**'s captain.")
+
+    async def test_captain_transfers_to_a_rostered_teammate(self):
+        await self._make_team("Red")
+        self._add_to_roster("Red", 902, "Bob")
+        target = FakeMember("Bob", id=902)
+        ctx = self._ctx()
+
+        await self.helperObj.teamTransferHelper(ctx, "Red", target)
+
+        ctx.response.send_message.assert_awaited_once_with(
+            f"**Red**'s captaincy has been transferred to {target.mention}."
+        )
+        _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        self.assertTrue(self.helperObj.isTeamCaptain(team, 902))
+        self.assertFalse(self.helperObj.isTeamCaptain(team, 901))
+        # roster itself is untouched - both are still on the team
+        self.assertEqual({p.get_id() for p in team.get_players()}, {901, 902})
+
+    async def test_non_captain_admin_can_also_transfer(self):
+        await self._make_team("Red")
+        self._add_to_roster("Red", 902, "Bob")
+        ctx = self._ctx(user_id=903, name="Charlie", manage_guild=True)
+
+        await self.helperObj.teamTransferHelper(ctx, "Red", FakeMember("Bob", id=902))
+
+        _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        self.assertTrue(self.helperObj.isTeamCaptain(team, 902))
+
+    async def test_transferred_captain_can_then_use_team_delete(self):
+        # regression: /team-leave used to be a captain's only dead end
+        # ("nobody to hand it to yet") - confirms the old captain, no
+        # longer captain after a transfer, isn't stuck on that team either.
+        await self._make_team("Red")
+        self._add_to_roster("Red", 902, "Bob")
+        await self.helperObj.teamTransferHelper(self._ctx(), "Red", FakeMember("Bob", id=902))
+
+        leave_ctx = self._ctx()  # Alice, no longer captain
+        await self.helperObj.teamLeaveHelper(leave_ctx, "Red")
+
+        leave_ctx.response.send_message.assert_awaited_once_with("You've left **Red**.")
+        _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        self.assertEqual({p.get_id() for p in team.get_players()}, {902})
 
 
 class TeamDeleteHelperTests(HelperTestCase):
@@ -2655,8 +2817,8 @@ class TeamLeaveHelperTests(HelperTestCase):
         ctx = self._ctx()  # Alice, the captain
         await self.helperObj.teamLeaveHelper(ctx, "Red")
         ctx.response.send_message.assert_awaited_once_with(
-            "You're **Red**'s captain - use /team-delete instead if you want to leave it, "
-            "since there's nobody else to hand the captaincy to yet."
+            "You're **Red**'s captain - use /team-transfer to hand off the captaincy first, "
+            "or /team-delete if you want the team gone entirely."
         )
         _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
         self.assertEqual([p.get_id() for p in team.get_players()], [901])
@@ -2699,12 +2861,30 @@ class SetupHelperTests(HelperTestCase):
     def _ctx(self, user_id=901, name="Alice", channel=None, message=None):
         return FakeInteraction(self.guild, FakeMember(name, id=user_id), channel=channel, message=message)
 
-    async def test_requires_solo_team_name_when_the_caller_has_no_solo_team(self):
+    async def test_omitting_the_name_creates_a_solo_team_named_after_the_display_name(self):
         ctx = self._ctx()
+        ctx.user.display_name = "Al The Great"  # distinct from .name ("Alice") - a server nickname
         await self.helperObj.setupHelper(ctx)
+
+        result = self.helperObj.getTeamRow(GUILD_ID, "Al The Great")
+        self.assertIsNotNone(result)
+        _, team = result
+        self.assertEqual(team.get_team_size(), 1)
+        self.assertEqual([p.get_id() for p in team.get_players()], [901])
+
+        text = ctx.response.send_message.call_args.args[0]
+        self.assertIn("Created your solo team **Al The Great**", text)
+        self.cursor.execute("SELECT COUNT(*) FROM setup_role_sessions")
+        self.assertEqual(self.cursor.fetchone()[0], 1)
+
+    async def test_omitting_the_name_when_it_collides_asks_for_an_explicit_one(self):
+        await self.helperObj.createTeamHelper(self._ctx(902, "Bob"), "Alice", 5)
+        ctx = self._ctx()  # display_name defaults to "Alice", same as .name here
+        await self.helperObj.setupHelper(ctx)
+
         ctx.response.send_message.assert_awaited_once_with(
-            "Give solo_team_name to create your personal solo team - you don't have one in this "
-            "server yet."
+            "Your display name, **Alice**, is already taken by another team in this server - run "
+            "/setup again with solo_team_name set to something else."
         )
         self.cursor.execute("SELECT COUNT(*) FROM setup_role_sessions")
         self.assertEqual(self.cursor.fetchone()[0], 0)
@@ -9584,7 +9764,7 @@ class RenderTradingCardImageTests(HelperTestCase):
     def test_grows_taller_to_fit_teams(self):
         settings = {
             "title": "X", "accent_color": "#EDC643", "background_color": "#150B22",
-            "text_color": "#F3EFFA", "font_style": "default",
+            "text_color": "#F3EFFA", "font_style": helper_module.CARD_DEFAULT_FONT_STYLE,
         }
         avatar = Image.new("RGBA", (64, 64), (255, 0, 0, 255))
         teams = [self._team("Red Dragons"), self._team("Blue Phoenixes"), self._team("Green Giants")]
@@ -9598,7 +9778,7 @@ class RenderTradingCardImageTests(HelperTestCase):
     def test_caps_team_rows_and_shows_a_remainder_count(self):
         settings = {
             "title": "X", "accent_color": "#EDC643", "background_color": "#150B22",
-            "text_color": "#F3EFFA", "font_style": "default",
+            "text_color": "#F3EFFA", "font_style": helper_module.CARD_DEFAULT_FONT_STYLE,
         }
         avatar = Image.new("RGBA", (64, 64), (255, 0, 0, 255))
         teams = [self._team(f"Team {i}") for i in range(helper_module.CARD_MAX_TEAM_ROWS + 3)]
@@ -9617,7 +9797,7 @@ class RenderTradingCardImageTests(HelperTestCase):
         # reached the renderer instead of silently falling back to default.
         settings = {
             "title": "X", "accent_color": "#00FF00", "background_color": "#000000",
-            "text_color": "#FFFFFF", "font_style": "default",
+            "text_color": "#FFFFFF", "font_style": helper_module.CARD_DEFAULT_FONT_STYLE,
         }
         avatar = Image.new("RGBA", (64, 64), (255, 0, 0, 255))
 
@@ -9629,7 +9809,7 @@ class RenderTradingCardImageTests(HelperTestCase):
     def test_username_renders_in_the_top_right_when_provided(self):
         settings = {
             "title": "X", "accent_color": "#00FF00", "background_color": "#000000",
-            "text_color": "#FFFFFF", "font_style": "default",
+            "text_color": "#FFFFFF", "font_style": helper_module.CARD_DEFAULT_FONT_STYLE,
         }
         avatar = Image.new("RGBA", (64, 64), (255, 0, 0, 255))
         # the header's top-right quadrant - where a username is drawn,
@@ -9656,7 +9836,7 @@ class RenderTradingCardImageTests(HelperTestCase):
         # blank "@" or other placeholder in the corner.
         settings = {
             "title": "X", "accent_color": "#EDC643", "background_color": "#150B22",
-            "text_color": "#F3EFFA", "font_style": "default",
+            "text_color": "#F3EFFA", "font_style": helper_module.CARD_DEFAULT_FONT_STYLE,
         }
         avatar = Image.new("RGBA", (64, 64), (255, 0, 0, 255))
         without_arg = self.helperObj._renderTradingCardImage("Guild", "Alice", avatar, settings, self._stats(), [])
@@ -9703,9 +9883,9 @@ class RenderTradingCardImageTests(HelperTestCase):
             self.assertNotEqual(self.helperObj._cardFontPaths(font_style)["name_font"], default_name_font)
 
     def test_every_font_style_uses_its_own_distinct_font_file(self):
-        # Not just distinct from "default" - distinct from every OTHER shop
-        # style too, so two styles can't accidentally end up pointing at
-        # the same bundled file.
+        # Not just distinct from the default style - distinct from every
+        # OTHER shop style too, so two styles can't accidentally end up
+        # pointing at the same bundled file.
         paths = {
             font_style: self.helperObj._cardFontPaths(font_style)["name_font"]
             for font_style in (helper_module.CARD_DEFAULT_FONT_STYLE, *helper_module.CARD_SHOP_FONT_STYLES)
@@ -11631,7 +11811,7 @@ class CommandRegistrationTests(BotModuleTestCase):
             "leaderboard", "help", "make-teams", "report-correct-winner",
             "captains", "choose", "clear", "notify",
             "roll", "tournament-create", "team-create", "team-set",
-            "team-rename", "team-delete",
+            "team-rename", "team-delete", "team-transfer",
             "team-invite", "team-stats", "team-list", "my-teams",
             "tournament-register", "tournament-create-bracket",
             "tournament-print-bracket", "tournament-start", "team-use", "reuse", "preview", "team-leave",
@@ -11843,7 +12023,8 @@ class CardFontAutocompleteTests(BotModuleTestCase):
     async def test_filters_by_current_input_case_insensitively(self):
         ctx = self._ctx()
         with patch.object(
-            self.bot.helperObj, "getAvailableCardFontStyles", return_value=["default", "Bold", "Elegant"]
+            self.bot.helperObj, "getAvailableCardFontStyles",
+            return_value=[helper_module.CARD_DEFAULT_FONT_STYLE, "Bold", "Elegant"]
         ):
             choices = await self.bot.cardFontAutocomplete(ctx, "BOL")
         self.assertEqual([c.value for c in choices], ["Bold"])
@@ -11851,10 +12032,11 @@ class CardFontAutocompleteTests(BotModuleTestCase):
     async def test_empty_input_returns_every_available_font(self):
         ctx = self._ctx()
         with patch.object(
-            self.bot.helperObj, "getAvailableCardFontStyles", return_value=["default", "Bold"]
+            self.bot.helperObj, "getAvailableCardFontStyles",
+            return_value=[helper_module.CARD_DEFAULT_FONT_STYLE, "Bold"]
         ):
             choices = await self.bot.cardFontAutocomplete(ctx, "")
-        self.assertEqual(sorted(c.value for c in choices), ["Bold", "default"])
+        self.assertEqual(sorted(c.value for c in choices), ["Bold", helper_module.CARD_DEFAULT_FONT_STYLE])
 
     async def test_caps_results_at_25(self):
         ctx = self._ctx()
@@ -12604,6 +12786,14 @@ class CommandDelegationTests(BotModuleTestCase):
             await self._command("team-delete").callback(ctx, "Red")
         mock.assert_awaited_once_with(ctx, "Red")
 
+    async def test_team_transfer_delegates(self):
+        ctx = self._ctx()
+        target = FakeMember("Bob", id=902)
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "teamTransferHelper", mock):
+            await self._command("team-transfer").callback(ctx, "Red", target)
+        mock.assert_awaited_once_with(ctx, "Red", target)
+
     async def test_team_invite_delegates(self):
         ctx = self._ctx()
         target = FakeMember("Bob", id=902)
@@ -12720,7 +12910,7 @@ class HelpCommandTests(BotModuleTestCase):
         ctx = self._ctx()
         await self._command("help").callback(ctx, command=None)
         message = ctx.response.send_message.call_args.args[0]
-        self.assertIn("shockwave.netlify.app", message)
+        self.assertIn("addshockwave.com", message)
 
     async def test_known_command_describes_it_with_usage(self):
         ctx = self._ctx()
@@ -12748,7 +12938,7 @@ class HelpCommandTests(BotModuleTestCase):
         await self._command("help").callback(ctx, command="not-a-real-command")
         message = ctx.response.send_message.call_args.args[0]
         self.assertIn("not-a-real-command", message)
-        self.assertIn("shockwave.netlify.app", message)
+        self.assertIn("addshockwave.com", message)
 
     def test_every_registered_command_has_an_entry(self):
         names = {c.name for c in self.bot.tree.get_commands()}

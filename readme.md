@@ -13,7 +13,7 @@ It's built around League of Legends' 5v5 format, but nothing about team
 formation, betting, or tournaments is League-specific. It uses the Discord API
 to pull server/client data.
 
-Full list of commands on shockwave.netlify.app
+Full list of commands on addshockwave.com
 
 ## Installing dependencies
 
@@ -26,7 +26,7 @@ pip install -r requirements.txt
 ## How it works
 
 This section is about why the code is shaped the way it is, not how to run the
-commands. For that, see shockwave.netlify.app.
+commands. For that, see addshockwave.com.
 
 ### Architecture
 
@@ -119,7 +119,7 @@ the current live `main.db` into `data/guildData/backups/` as
 `main-before-restore-<timestamp>.db`, so restoring the wrong backup, or
 restoring at all, is itself undoable the same way. The step-by-step version
 of this, aimed at whoever's actually hosting a copy of the bot rather than
-reading this file, lives on shockwave.netlify.app's self-hosting guide.
+reading this file, lives on addshockwave.com's self-hosting guide.
 
 `LOG_LINE_MAX_LENGTH` (500) caps any single log line - a serialized team
 roster or a command's own object-repr params can run long, and one oversized
