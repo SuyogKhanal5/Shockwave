@@ -2069,7 +2069,7 @@ class TeamTransferHelperTests(HelperTestCase):
         ctx = self._ctx()
         await self.helperObj.teamTransferHelper(ctx, "Red", target)
         ctx.response.send_message.assert_awaited_once_with(
-            f"{target.mention} isn't on **Red**'s roster - invite them with /team-invite first."
+            f"{target.mention} isn't on **Red**'s roster; invite them with /team invite first."
         )
         _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
         self.assertTrue(self.helperObj.isTeamCaptain(team, 901))
@@ -2467,7 +2467,7 @@ class TeamSetHelperTests(_FakeLogoDirTestCase):
         ctx = self._ctx()
         await self.helperObj.teamSetHelper(ctx, "Red", None, False, "NotALogo")
         ctx.response.send_message.assert_awaited_once_with(
-            "No logo named **NotALogo** - pick one from the autocomplete list."
+            "No logo named **NotALogo**; pick one from the autocomplete list."
         )
 
     async def test_sets_the_logo_case_insensitively_and_attaches_the_file(self):
@@ -2668,7 +2668,7 @@ class TeamInviteHelperTests(HelperTestCase):
         target = FakeMember("Bob", id=902)
         await self.helperObj.teamInviteHelper(ctx, "Red", [target], force=True)
         ctx.response.send_message.assert_awaited_once_with(
-            "Only a member with the Manage Server permission can force-add players - "
+            "Only a member with the Manage Server permission can force-add players; "
             "everyone else still needs the invitee's own confirmation."
         )
         _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
@@ -2823,8 +2823,8 @@ class TeamLeaveHelperTests(HelperTestCase):
         ctx = self._ctx()  # Alice, the captain
         await self.helperObj.teamLeaveHelper(ctx, "Red")
         ctx.response.send_message.assert_awaited_once_with(
-            "You're **Red**'s captain - use /team-transfer to hand off the captaincy first, "
-            "or /team-delete if you want the team gone entirely."
+            "You're **Red**'s captain; use /team transfer to hand off the captaincy first, "
+            "or /team delete if you want the team gone entirely."
         )
         _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
         self.assertEqual([p.get_id() for p in team.get_players()], [901])
@@ -2889,7 +2889,7 @@ class SetupHelperTests(HelperTestCase):
         await self.helperObj.setupHelper(ctx)
 
         ctx.response.send_message.assert_awaited_once_with(
-            "Your display name, **Alice**, is already taken by another team in this server - run "
+            "Your display name, **Alice**, is already taken by another team in this server. Run "
             "/setup again with solo_team_name set to something else."
         )
         self.cursor.execute("SELECT COUNT(*) FROM setup_role_sessions")
@@ -2916,7 +2916,7 @@ class SetupHelperTests(HelperTestCase):
         ctx = self._ctx()
         await self.helperObj.setupHelper(ctx, "Taken")
         ctx.response.send_message.assert_awaited_once_with(
-            "A team named **Taken** already exists in this server - pick another name for your solo team."
+            "A team named **Taken** already exists in this server; pick another name for your solo team."
         )
 
     async def test_solo_team_name_is_optional_once_one_already_exists(self):
@@ -2956,7 +2956,7 @@ class SetupHelperTests(HelperTestCase):
         ctx = self._ctx()
         await self.helperObj.setupHelper(ctx, "Taken")
         ctx.response.send_message.assert_awaited_once_with(
-            "A team named **Taken** already exists in this server - pick another name for your solo team."
+            "A team named **Taken** already exists in this server; pick another name for your solo team."
         )
         # the original solo team is untouched
         self.assertIsNotNone(self.helperObj.getTeamRow(GUILD_ID, "Alice's Team"))
@@ -3175,7 +3175,7 @@ class ConfirmSetupRoleStepTests(HelperTestCase):
         click = self._ctx(message=posted)
         await view.confirm.callback(click)
         click.response.send_message.assert_awaited_once_with(
-            "This role selection has expired - run /setup again.", ephemeral=True
+            "This role selection has expired. Run /setup again.", ephemeral=True
         )
 
 
@@ -4213,7 +4213,8 @@ class ReuseTeamsHelperTests(HelperTestCase):
         ctx = self._ctx()
         await self.helperObj.reuseTeamsHelper(ctx)
         ctx.response.send_message.assert_awaited_once_with(
-            "No previous teams to reuse - make some first with /make-teams, /captains, or /team-use."
+            "No previous teams to reuse. Make some first with /make-teams random, /make-teams draft, or "
+            "/make-teams saved."
         )
 
     async def test_reposts_the_exact_same_roster(self):
@@ -4373,7 +4374,7 @@ class RegisterTeamHelperTests(HelperTestCase):
         ctx = self._ctx()
         await self.helperObj.registerTeamHelper(ctx, "Red")
         ctx.response.send_message.assert_awaited_once_with(
-            "No tournament set up for this server - use /tournament-create first."
+            "No tournament set up for this server. Use /tournament create first."
         )
 
     async def test_rejects_unknown_team(self):
@@ -4544,7 +4545,7 @@ class CreateBracketHelperTests(HelperTestCase):
         ctx = self._ctx()
         await self.helperObj.createBracketHelper(ctx, False)
         ctx.response.send_message.assert_awaited_once_with(
-            "No tournament set up for this server - use /tournament-create first."
+            "No tournament set up for this server. Use /tournament create first."
         )
 
     async def test_rejects_fewer_than_two_registered_teams(self):
@@ -5010,7 +5011,7 @@ class PrintBracketHelperTests(HelperTestCase):
         ctx = self._ctx()
         await self.helperObj.printBracketHelper(ctx)
         ctx.response.send_message.assert_awaited_once_with(
-            "No tournament set up for this server - use /tournament-create first."
+            "No tournament set up for this server. Use /tournament create first."
         )
 
     async def test_prints_the_bracket(self):
@@ -5191,7 +5192,7 @@ class StartTournamentHelperTests(HelperTestCase):
         ctx = self._ctx()
         await self.helperObj.startTournamentHelper(ctx, "sequential")
         ctx.response.send_message.assert_awaited_once_with(
-            "No tournament set up for this server - use /tournament-create first."
+            "No tournament set up for this server. Use /tournament create first."
         )
 
     async def test_rejects_when_no_bracket_exists(self):
@@ -5199,7 +5200,7 @@ class StartTournamentHelperTests(HelperTestCase):
         ctx = self._ctx()
         await self.helperObj.startTournamentHelper(ctx, "sequential")
         ctx.response.send_message.assert_awaited_once_with(
-            "No bracket has been created yet - use /tournament-create-bracket first."
+            "No bracket has been created yet. Use /tournament create-bracket first."
         )
 
     async def test_rejects_when_already_finished(self):
@@ -5213,7 +5214,7 @@ class StartTournamentHelperTests(HelperTestCase):
         ctx = self._ctx()
         await self.helperObj.startTournamentHelper(ctx, "sequential")
         ctx.response.send_message.assert_awaited_once_with(
-            "**Cup** is already finished - **Red** is the champion!"
+            "**Cup** is already finished; **Red** is the champion!"
         )
 
     async def test_rejects_when_round_already_in_progress(self):
@@ -5861,7 +5862,7 @@ class CorrectTournamentMatchHelperTests(HelperTestCase):
         ctx = self._ctx()
         await self.helperObj.reportCorrectWinnerHelper(ctx, 2, match_id=match_id)
         ctx.response.send_message.assert_awaited_once_with(
-            f"Can't correct Match #{match_id} - the next round has already started."
+            f"Can't correct Match #{match_id}; the next round has already started."
         )
 
     async def test_successful_correction_flips_bracket_and_winner(self):
@@ -5962,7 +5963,7 @@ class CorrectTournamentMatchHelperTests(HelperTestCase):
         ctx = self._ctx()
         await self.helperObj.reportCorrectWinnerHelper(ctx, 2, match_id=match_id)
         ctx.response.send_message.assert_awaited_once_with(
-            f"Match #{match_id} is a losers bracket match - correcting those isn't supported yet."
+            f"Match #{match_id} is a losers bracket match. Correcting those isn't supported yet."
         )
 
     async def test_rejects_correcting_a_grand_finals_match(self):
@@ -5979,7 +5980,7 @@ class CorrectTournamentMatchHelperTests(HelperTestCase):
         ctx = self._ctx()
         await self.helperObj.reportCorrectWinnerHelper(ctx, 2, match_id=match_id)
         ctx.response.send_message.assert_awaited_once_with(
-            f"Match #{match_id} is a Grand Finals match - correcting those isn't supported yet."
+            f"Match #{match_id} is a Grand Finals match. Correcting those isn't supported yet."
         )
 
 
@@ -8088,7 +8089,7 @@ class ReportCorrectWinnerHelperTests(HelperTestCase):
         await self.helperObj.reportCorrectWinnerHelper(ctx, 1)
 
         ctx.response.send_message.assert_awaited_once_with(
-            "**Team 1** is already the recorded winner - nothing to correct."
+            "**Team 1** is already the recorded winner; nothing to correct."
         )
 
     async def test_corrects_bettor_payouts_when_winner_flips(self):
@@ -8212,7 +8213,7 @@ class ReportCorrectWinnerHelperTests(HelperTestCase):
         ctx = FakeInteraction(self.guild, FakeMember("Admin"))
         await self.helperObj.reportCorrectWinnerHelper(ctx, None, match_id=1, invalidate=True)
         ctx.response.send_message.assert_awaited_once_with(
-            "Invalidating isn't supported for a specific tournament match yet - correct it "
+            "Invalidating isn't supported for a specific tournament match yet; correct it "
             "to the other team instead."
         )
 
@@ -12414,11 +12415,21 @@ class BotModuleTestCase(unittest.IsolatedAsyncioTestCase):
         self.bot.mainDB.close()
         sys.modules.pop("bot", None)
 
+    # `name` is either a bare top-level command ("daily") or a
+    # "group subcommand" pair ("make-teams random") for a command that's
+    # been folded into an app_commands.Group; Group.commands holds its own
+    # registered subcommands the same way the tree holds top-level ones.
     def _command(self, name):
-        for c in self.bot.tree.get_commands():
-            if c.name == name:
-                return c
-        raise AssertionError(f"command {name!r} is not registered")
+        top_name, _, sub_name = name.partition(" ")
+        top = discord.utils.get(self.bot.tree.get_commands(), name=top_name)
+        if top is None:
+            raise AssertionError(f"command {name!r} is not registered")
+        if not sub_name:
+            return top
+        sub = discord.utils.get(top.commands, name=sub_name)
+        if sub is None:
+            raise AssertionError(f"command {name!r} is not registered")
+        return sub
 
     def _ctx(self, guild_id=GUILD_ID, channel=None, manage_guild=True):
         guild = FakeGuild(id=guild_id)
@@ -12445,15 +12456,33 @@ class CommandRegistrationTests(BotModuleTestCase):
             "stats", "card-set", "shop", "shop-buy",
             "achievements",
             "leaderboard", "help", "make-teams", "report-correct-winner",
-            "captains", "choose", "clear", "notify",
-            "roll", "tournament-create", "team-create", "team-set",
-            "team-rename", "team-delete", "team-transfer",
-            "team-invite", "team-stats", "team-list", "my-teams",
-            "tournament-register", "tournament-create-bracket",
-            "tournament-print-bracket", "tournament-start", "team-use", "reuse", "preview", "team-leave",
+            "choose", "clear", "notify",
+            "roll", "team", "tournament", "preview",
             "setup",
         }
         self.assertEqual(names, expected)
+
+    def test_make_teams_group_has_the_expected_subcommands(self):
+        names = {c.name for c in self._command("make-teams").commands}
+        self.assertEqual(names, {"random", "draft", "saved", "repeat"})
+
+    def test_team_group_has_the_expected_subcommands(self):
+        names = {c.name for c in self._command("team").commands}
+        self.assertEqual(names, {
+            "create", "invite", "leave", "set", "rename", "delete", "transfer", "stats", "mine", "list",
+        })
+
+    def test_tournament_group_has_the_expected_subcommands(self):
+        names = {c.name for c in self._command("tournament").commands}
+        self.assertEqual(names, {"create", "register", "create-bracket", "print-bracket", "start"})
+
+    def test_set_group_has_the_expected_subcommands(self):
+        names = {c.name for c in self._command("set").commands}
+        self.assertEqual(names, {"channels", "team-size", "betting-timer", "wager-channel", "elo", "default-elo"})
+
+    def test_clear_group_has_the_expected_subcommands(self):
+        names = {c.name for c in self._command("clear").commands}
+        self.assertEqual(names, {"teams", "channels", "tournament", "elo", "economy", "achievements", "card-unlocks"})
 
     def test_move_is_not_a_registered_command_name(self):
         names = {c.name for c in self.bot.tree.get_commands()}
@@ -13333,21 +13362,21 @@ class CommandDelegationTests(BotModuleTestCase):
         ctx = self._ctx()
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "createTournamentHelper", mock):
-            await self._command("tournament-create").callback(ctx, "Spring Cup", 5, 8)
+            await self._command("tournament create").callback(ctx, "Spring Cup", 5, 8)
         mock.assert_awaited_once_with(ctx, "Spring Cup", 5, 8, False)
 
     async def test_create_tournament_passes_double_elim_flag(self):
         ctx = self._ctx()
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "createTournamentHelper", mock):
-            await self._command("tournament-create").callback(ctx, "Spring Cup", 5, 8, double_elim=True)
+            await self._command("tournament create").callback(ctx, "Spring Cup", 5, 8, double_elim=True)
         mock.assert_awaited_once_with(ctx, "Spring Cup", 5, 8, True)
 
     async def test_register_team_delegates(self):
         ctx = self._ctx()
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "registerTeamHelper", mock):
-            await self._command("tournament-register").callback(ctx, "Red")
+            await self._command("tournament register").callback(ctx, "Red")
         mock.assert_awaited_once_with(ctx, "Red")
 
     async def test_create_bracket_passes_resolved_elimination_type(self):
@@ -13355,7 +13384,7 @@ class CommandDelegationTests(BotModuleTestCase):
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "createBracketHelper", mock):
             choice = app_commands.Choice(name="Double elimination", value="double")
-            await self._command("tournament-create-bracket").callback(ctx, elimination_type=choice)
+            await self._command("tournament create-bracket").callback(ctx, elimination_type=choice)
         mock.assert_awaited_once_with(ctx, True, "after_winners")
 
     async def test_create_bracket_single_elimination_resolves_to_false(self):
@@ -13363,14 +13392,14 @@ class CommandDelegationTests(BotModuleTestCase):
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "createBracketHelper", mock):
             choice = app_commands.Choice(name="Single elimination", value="single")
-            await self._command("tournament-create-bracket").callback(ctx, elimination_type=choice)
+            await self._command("tournament create-bracket").callback(ctx, elimination_type=choice)
         mock.assert_awaited_once_with(ctx, False, "after_winners")
 
     async def test_print_bracket_delegates(self):
         ctx = self._ctx()
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "printBracketHelper", mock):
-            await self._command("tournament-print-bracket").callback(ctx)
+            await self._command("tournament print-bracket").callback(ctx)
         mock.assert_awaited_once_with(ctx)
 
     async def test_start_tournament_passes_resolved_mode(self):
@@ -13378,7 +13407,7 @@ class CommandDelegationTests(BotModuleTestCase):
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "startTournamentHelper", mock):
             choice = app_commands.Choice(name="Sequential", value="sequential")
-            await self._command("tournament-start").callback(ctx, mode=choice)
+            await self._command("tournament start").callback(ctx, mode=choice)
         mock.assert_awaited_once_with(ctx, "sequential")
 
     async def test_start_tournament_simultaneous_mode(self):
@@ -13386,14 +13415,14 @@ class CommandDelegationTests(BotModuleTestCase):
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "startTournamentHelper", mock):
             choice = app_commands.Choice(name="Simultaneous", value="simultaneous")
-            await self._command("tournament-start").callback(ctx, mode=choice)
+            await self._command("tournament start").callback(ctx, mode=choice)
         mock.assert_awaited_once_with(ctx, "simultaneous")
 
     async def test_create_team_delegates(self):
         ctx = self._ctx()
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "createTeamHelper", mock):
-            await self._command("team-create").callback(ctx, "Red", 5)
+            await self._command("team create").callback(ctx, "Red", 5)
         mock.assert_awaited_once_with(ctx, "Red", 5, None)
 
     async def test_create_team_delegates_with_captain(self):
@@ -13401,14 +13430,14 @@ class CommandDelegationTests(BotModuleTestCase):
         captain = FakeMember("Bob", id=902)
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "createTeamHelper", mock):
-            await self._command("team-create").callback(ctx, "Red", 5, captain)
+            await self._command("team create").callback(ctx, "Red", 5, captain)
         mock.assert_awaited_once_with(ctx, "Red", 5, captain)
 
     async def test_team_set_defaults_to_nothing_given(self):
         ctx = self._ctx()
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "teamSetHelper", mock):
-            await self._command("team-set").callback(ctx, "Red")
+            await self._command("team set").callback(ctx, "Red")
         mock.assert_awaited_once_with(ctx, "Red", None, False, None)
 
     async def test_team_set_passes_voice_channel_new_voice_channel_and_logo(self):
@@ -13416,7 +13445,7 @@ class CommandDelegationTests(BotModuleTestCase):
         mock = AsyncMock()
         channel = FakeChannel("Arena")
         with patch.object(self.bot.helperObj, "teamSetHelper", mock):
-            await self._command("team-set").callback(
+            await self._command("team set").callback(
                 ctx, "Red", voice_channel=channel, new_voice_channel=True, logo="Demacia"
             )
         mock.assert_awaited_once_with(ctx, "Red", channel, True, "Demacia")
@@ -13425,14 +13454,14 @@ class CommandDelegationTests(BotModuleTestCase):
         ctx = self._ctx()
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "teamRenameHelper", mock):
-            await self._command("team-rename").callback(ctx, "Red", "Crimson")
+            await self._command("team rename").callback(ctx, "Red", "Crimson")
         mock.assert_awaited_once_with(ctx, "Red", "Crimson")
 
     async def test_team_delete_delegates(self):
         ctx = self._ctx()
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "teamDeleteHelper", mock):
-            await self._command("team-delete").callback(ctx, "Red")
+            await self._command("team delete").callback(ctx, "Red")
         mock.assert_awaited_once_with(ctx, "Red")
 
     async def test_team_transfer_delegates(self):
@@ -13440,7 +13469,7 @@ class CommandDelegationTests(BotModuleTestCase):
         target = FakeMember("Bob", id=902)
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "teamTransferHelper", mock):
-            await self._command("team-transfer").callback(ctx, "Red", target)
+            await self._command("team transfer").callback(ctx, "Red", target)
         mock.assert_awaited_once_with(ctx, "Red", target)
 
     async def test_team_invite_delegates(self):
@@ -13448,7 +13477,7 @@ class CommandDelegationTests(BotModuleTestCase):
         target = FakeMember("Bob", id=902)
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "teamInviteHelper", mock):
-            await self._command("team-invite").callback(ctx, "Red", target)
+            await self._command("team invite").callback(ctx, "Red", target)
         mock.assert_awaited_once_with(ctx, "Red", [target], False)
 
     async def test_team_invite_delegates_multiple_members_and_drops_unset_slots(self):
@@ -13457,7 +13486,7 @@ class CommandDelegationTests(BotModuleTestCase):
         cleo = FakeMember("Cleo", id=903)
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "teamInviteHelper", mock):
-            await self._command("team-invite").callback(
+            await self._command("team invite").callback(
                 ctx, "Red", member_1=bob, member_2=cleo, member_3=None, member_4=None, member_5=None
             )
         mock.assert_awaited_once_with(ctx, "Red", [bob, cleo], False)
@@ -13467,42 +13496,42 @@ class CommandDelegationTests(BotModuleTestCase):
         target = FakeMember("Bob", id=902)
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "teamInviteHelper", mock):
-            await self._command("team-invite").callback(ctx, "Red", target, force=True)
+            await self._command("team invite").callback(ctx, "Red", target, force=True)
         mock.assert_awaited_once_with(ctx, "Red", [target], True)
 
     async def test_team_leave_delegates(self):
         ctx = self._ctx()
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "teamLeaveHelper", mock):
-            await self._command("team-leave").callback(ctx, "Red")
+            await self._command("team leave").callback(ctx, "Red")
         mock.assert_awaited_once_with(ctx, "Red")
 
     async def test_team_stats_delegates(self):
         ctx = self._ctx()
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "teamStatsHelper", mock):
-            await self._command("team-stats").callback(ctx, "Red")
+            await self._command("team stats").callback(ctx, "Red")
         mock.assert_awaited_once_with(ctx, "Red")
 
     async def test_use_teams_defaults_ranked_to_false(self):
         ctx = self._ctx()
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "useTeamsHelper", mock):
-            await self._command("team-use").callback(ctx, "Red", "Blue")
+            await self._command("make-teams saved").callback(ctx, "Red", "Blue")
         mock.assert_awaited_once_with(ctx, "Red", "Blue", False)
 
     async def test_use_teams_passes_ranked_flag(self):
         ctx = self._ctx()
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "useTeamsHelper", mock):
-            await self._command("team-use").callback(ctx, "Red", "Blue", ranked=True)
+            await self._command("make-teams saved").callback(ctx, "Red", "Blue", ranked=True)
         mock.assert_awaited_once_with(ctx, "Red", "Blue", True)
 
     async def test_reuse_delegates(self):
         ctx = self._ctx()
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "reuseTeamsHelper", mock):
-            await self._command("reuse").callback(ctx)
+            await self._command("make-teams repeat").callback(ctx)
         mock.assert_awaited_once_with(ctx)
 
     async def test_preview_delegates_with_resolved_type_value(self):
@@ -13590,7 +13619,17 @@ class HelpCommandTests(BotModuleTestCase):
         self.assertIn("addshockwave.com", message)
 
     def test_every_registered_command_has_an_entry(self):
-        names = {c.name for c in self.bot.tree.get_commands()}
+        # Groups (e.g. /make-teams) aren't directly callable, so this walks
+        # one level into each one's subcommands rather than comparing
+        # against tree.get_commands() directly, collecting each leaf's
+        # qualified_name (the same "group sub" shape COMMAND_HELP is keyed
+        # by, e.g. "make-teams random").
+        names = set()
+        for c in self.bot.tree.get_commands():
+            if hasattr(c, "commands"):
+                names.update(sub.qualified_name for sub in c.commands)
+            else:
+                names.add(c.qualified_name)
         self.assertEqual(names, set(self.bot.COMMAND_HELP.keys()))
 
 
@@ -13615,61 +13654,86 @@ class HelpCommandAutocompleteTests(BotModuleTestCase):
 
 
 class AdminSetCommandTests(BotModuleTestCase):
-    def test_requires_manage_guild_permission(self):
-        cmd = self._command("set")
+    SET_SUBCOMMANDS = ["channels", "team-size", "betting-timer", "wager-channel", "elo", "default-elo"]
+
+    def test_every_subcommand_requires_manage_guild_permission(self):
         denied = SimpleNamespace(permissions=discord.Permissions.none())
+        for name in self.SET_SUBCOMMANDS:
+            cmd = self._command(f"set {name}")
+            with self.assertRaises(app_commands.MissingPermissions):
+                for check in cmd.checks:
+                    check(denied)
 
-        with self.assertRaises(app_commands.MissingPermissions):
-            for check in cmd.checks:
-                check(denied)
-
-    def test_manage_guild_permission_is_sufficient(self):
-        cmd = self._command("set")
+    def test_manage_guild_permission_is_sufficient_for_every_subcommand(self):
         allowed = SimpleNamespace(permissions=discord.Permissions(manage_guild=True))
+        for name in self.SET_SUBCOMMANDS:
+            cmd = self._command(f"set {name}")
+            for check in cmd.checks:
+                self.assertTrue(check(allowed))
 
-        for check in cmd.checks:
-            self.assertTrue(check(allowed))
-
-    async def test_error_handler_gives_a_friendly_denial_message(self):
-        cmd = self._command("set")
+    async def test_error_handler_gives_a_friendly_denial_message_for_every_subcommand(self):
         ctx = self._ctx()
-
-        await cmd.on_error(ctx, app_commands.MissingPermissions(["manage_guild"]))
-
-        ctx.response.send_message.assert_awaited_once()
-        self.assertIn("Manage Server", ctx.response.send_message.call_args.args[0])
+        for name in self.SET_SUBCOMMANDS:
+            cmd = self._command(f"set {name}")
+            await cmd.on_error(ctx, app_commands.MissingPermissions(["manage_guild"]))
+            self.assertIn("Manage Server", ctx.response.send_message.call_args.args[0])
 
     async def test_error_handler_reraises_unrelated_errors(self):
-        cmd = self._command("set")
+        cmd = self._command("set channels")
         ctx = self._ctx()
 
         with self.assertRaises(ValueError):
             await cmd.on_error(ctx, ValueError("boom"))
 
-    async def test_delegates_every_field_to_the_helper(self):
+    async def test_channels_delegates_team1_and_team2_only(self):
+        ctx = self._ctx()
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "adminSetHelper", mock):
+            await self._command("set channels").callback(ctx, team1="Red", team2="Blue")
+        mock.assert_awaited_once_with(ctx, "Red", "Blue", None, None, None, None, None, None)
+
+    async def test_team_size_delegates_size_only(self):
+        ctx = self._ctx()
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "adminSetHelper", mock):
+            await self._command("set team-size").callback(ctx, size=4)
+        mock.assert_awaited_once_with(ctx, None, None, 4, None, None, None, None, None)
+
+    async def test_betting_timer_delegates_seconds_only(self):
+        ctx = self._ctx()
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "adminSetHelper", mock):
+            await self._command("set betting-timer").callback(ctx, seconds=30)
+        mock.assert_awaited_once_with(ctx, None, None, None, 30, None, None, None, None)
+
+    async def test_wager_channel_delegates_channel_only(self):
+        ctx = self._ctx()
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "adminSetHelper", mock):
+            await self._command("set wager-channel").callback(ctx, channel="bets")
+        mock.assert_awaited_once_with(ctx, None, None, None, None, "bets", None, None, None)
+
+    async def test_elo_delegates_member_and_elo_only(self):
         ctx = self._ctx()
         member = FakeMember("Target", id=555)
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "adminSetHelper", mock):
-            await self._command("set").callback(
-                ctx, team1="Red", team2="Blue", size=4, betting_timer=30,
-                wager_channel="bets", member=member, elo=1500, default_elo=1200,
-            )
-        mock.assert_awaited_once_with(ctx, "Red", "Blue", 4, 30, "bets", member, 1500, 1200)
+            await self._command("set elo").callback(ctx, member=member, elo=1500)
+        mock.assert_awaited_once_with(ctx, None, None, None, None, None, member, 1500, None)
 
-    async def test_omitted_fields_default_to_none(self):
+    async def test_default_elo_delegates_elo_only(self):
         ctx = self._ctx()
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "adminSetHelper", mock):
-            await self._command("set").callback(ctx)
-        mock.assert_awaited_once_with(ctx, None, None, None, None, None, None, None, None)
+            await self._command("set default-elo").callback(ctx, elo=1200)
+        mock.assert_awaited_once_with(ctx, None, None, None, None, None, None, None, 1200)
 
-    async def test_updates_team_size_and_confirms_end_to_end(self):
+    async def test_team_size_updates_and_confirms_end_to_end(self):
         guild_id = 903
         await self._insert_guild_row(guild_id)
         ctx = self._ctx(guild_id=guild_id)
 
-        await self._command("set").callback(ctx, team1="Red", team2="Blue", size=4)
+        await self._command("set team-size").callback(ctx, size=4)
 
         self.assertEqual(self.bot.helperObj.get(guild_id, "team_size"), 4)
         message = ctx.response.send_message.call_args.args[0]
@@ -13694,44 +13758,40 @@ class RollCommandTests(BotModuleTestCase):
 
 
 class ClearCommandTests(BotModuleTestCase):
-    def test_requires_manage_guild_permission(self):
-        cmd = self._command("clear")
+    CLEAR_SUBCOMMANDS = ["teams", "channels", "tournament", "elo", "economy", "achievements", "card-unlocks"]
+
+    def test_every_subcommand_requires_manage_guild_permission(self):
         denied = SimpleNamespace(permissions=discord.Permissions.none())
+        for name in self.CLEAR_SUBCOMMANDS:
+            cmd = self._command(f"clear {name}")
+            with self.assertRaises(app_commands.MissingPermissions):
+                for check in cmd.checks:
+                    check(denied)
 
-        with self.assertRaises(app_commands.MissingPermissions):
-            for check in cmd.checks:
-                check(denied)
-
-    def test_manage_guild_permission_is_sufficient(self):
-        cmd = self._command("clear")
+    def test_manage_guild_permission_is_sufficient_for_every_subcommand(self):
         allowed = SimpleNamespace(permissions=discord.Permissions(manage_guild=True))
-
-        for check in cmd.checks:
-            self.assertTrue(check(allowed))
+        for name in self.CLEAR_SUBCOMMANDS:
+            cmd = self._command(f"clear {name}")
+            for check in cmd.checks:
+                self.assertTrue(check(allowed))
 
     async def test_error_handler_reports_missing_permission(self):
         ctx = self._ctx()
         error = app_commands.MissingPermissions(["manage_guild"])
-        await self.bot.clearAll_error(ctx, error)
+        await self.bot._clearPermissionError(ctx, error)
         ctx.response.send_message.assert_awaited_once_with(
             "You need the Manage Server permission to use /clear."
         )
 
-    async def test_clears_optional_fields_when_requested(self):
+    async def test_clear_channels_wipes_the_saved_channel_names(self):
         guild_id = 903
         await self._insert_guild_row(guild_id)
         self.bot.helperObj.update(guild_id, "channel1", "Red")
-        self.bot.helperObj.saveTournament(guild_id, Tournament("Spring Cup", 2, 4))
         ctx = self._ctx(guild_id=guild_id)
 
-        await self._command("clear").callback(
-            ctx, clear_channels=True, clear_tournament=True, clear_elo=True
-        )
+        await self._command("clear channels").callback(ctx)
 
         self.assertEqual(self.bot.helperObj.get(guild_id, "channel1"), "")
-        # regression: clear_tournament used to write to a dead servers.tournament
-        # column and never actually touch a real /tournament-create tournament.
-        self.assertIsNone(self.bot.helperObj.getTournament(guild_id))
         ctx.response.send_message.assert_awaited_once_with("Cleared!")
 
     async def test_clear_tournament_also_wipes_its_match_history(self):
@@ -13747,21 +13807,23 @@ class ClearCommandTests(BotModuleTestCase):
         self.bot.mainDB.commit()
         ctx = self._ctx(guild_id=guild_id)
 
-        await self._command("clear").callback(ctx, clear_tournament=True)
+        await self._command("clear tournament").callback(ctx)
 
+        # regression: clear_tournament used to write to a dead servers.tournament
+        # column and never actually touch a real /tournament-create tournament.
         self.assertIsNone(self.bot.helperObj.getTournament(guild_id))
         self.bot.cursor.execute(
             "SELECT COUNT(*) FROM tournament_matches WHERE guildId=?", (guild_id,)
         )
         self.assertEqual(self.bot.cursor.fetchone()[0], 0)
 
-    async def test_leaves_optional_fields_alone_by_default(self):
+    async def test_clear_teams_leaves_other_data_alone(self):
         guild_id = 9031
         await self._insert_guild_row(guild_id)
         self.bot.helperObj.update(guild_id, "channel1", "Red")
         ctx = self._ctx(guild_id=guild_id)
 
-        await self._command("clear").callback(ctx)
+        await self._command("clear teams").callback(ctx)
 
         self.assertEqual(self.bot.helperObj.get(guild_id, "channel1"), "Red")
 
@@ -13775,9 +13837,9 @@ class ClearCommandTests(BotModuleTestCase):
         self.bot.mainDB.commit()
         ctx = self._ctx(guild_id=guild_id)
 
-        await self._command("clear").callback(ctx, clear_economy=True)
+        await self._command("clear economy").callback(ctx)
 
-        # "Cleared!" goes out immediately for the non-destructive parts...
+        # "Cleared!" goes out immediately for the non-destructive team wipe...
         ctx.response.send_message.assert_awaited_once_with("Cleared!")
         # ...but the guild-wide economy wipe waits on the confirmation view.
         self.bot.cursor.execute("SELECT COUNT(*) FROM economy WHERE guildId=?", (guild_id,))
@@ -13796,7 +13858,7 @@ class ClearCommandTests(BotModuleTestCase):
         self.bot.mainDB.commit()
         ctx = self._ctx(guild_id=guild_id)
 
-        await self._command("clear").callback(ctx, clear_economy=True)
+        await self._command("clear economy").callback(ctx)
         view = ctx.followup.send.call_args.kwargs["view"]
 
         click = self._ctx(guild_id=guild_id)
@@ -13817,7 +13879,7 @@ class ClearCommandTests(BotModuleTestCase):
         self.bot.mainDB.commit()
         ctx = self._ctx(guild_id=guild_id)
 
-        await self._command("clear").callback(ctx, clear_elo=True)
+        await self._command("clear elo").callback(ctx)
 
         # real per-player elo doesn't change until the reset is confirmed.
         self.assertEqual(self.bot.helperObj.getEconomy(guild_id, 901, "elo"), 1500)
@@ -13829,7 +13891,7 @@ class ClearCommandTests(BotModuleTestCase):
         self.assertEqual(
             self.bot.helperObj.getEconomy(guild_id, 901, "elo"), helper_module.DEFAULT_ELO
         )
-        # balance is untouched; clear_elo only resets elo
+        # balance is untouched; clear elo only resets elo
         self.assertEqual(self.bot.helperObj.getEconomy(guild_id, 901, "balance"), 250)
 
     async def test_cancelling_clear_confirmation_leaves_data_untouched(self):
@@ -13842,7 +13904,7 @@ class ClearCommandTests(BotModuleTestCase):
         self.bot.mainDB.commit()
         ctx = self._ctx(guild_id=guild_id)
 
-        await self._command("clear").callback(ctx, clear_elo=True)
+        await self._command("clear elo").callback(ctx)
         view = ctx.followup.send.call_args.kwargs["view"]
 
         click = self._ctx(guild_id=guild_id)
@@ -13850,7 +13912,7 @@ class ClearCommandTests(BotModuleTestCase):
 
         self.assertEqual(self.bot.helperObj.getEconomy(guild_id, 901, "elo"), 1500)
         click.response.edit_message.assert_awaited_once_with(
-            content="Cancelled - nothing was reset.", view=view
+            content="Cancelled. Nothing was reset.", view=view
         )
 
     async def test_clear_confirmation_view_rejects_non_invoker(self):
@@ -13858,7 +13920,7 @@ class ClearCommandTests(BotModuleTestCase):
         await self._insert_guild_row(guild_id)
         ctx = self._ctx(guild_id=guild_id)
 
-        await self._command("clear").callback(ctx, clear_elo=True)
+        await self._command("clear elo").callback(ctx)
         view = ctx.followup.send.call_args.kwargs["view"]
 
         stranger = FakeInteraction(FakeGuild(id=guild_id), FakeMember("Stranger", id=999))
@@ -13877,7 +13939,7 @@ class ClearCommandTests(BotModuleTestCase):
         self.bot.helperObj._unlockAchievement(guild_id, 901, "veteran")
         ctx = self._ctx(guild_id=guild_id)
 
-        await self._command("clear").callback(ctx, clear_achievements=True)
+        await self._command("clear achievements").callback(ctx)
 
         # real per-player unlocks don't change until the reset is confirmed.
         unlocked = self.bot.helperObj.getUnlockedCardTitles(guild_id, 901)
@@ -13895,31 +13957,6 @@ class ClearCommandTests(BotModuleTestCase):
         self.assertIn("Developer", unlocked)
         self.assertIn("Every earned achievement", click.response.edit_message.call_args.kwargs["content"])
 
-    async def test_clear_achievements_can_combine_with_clear_elo(self):
-        guild_id = 9039
-        await self._insert_guild_row(guild_id)
-        self.bot.helperObj.ensureEconomyRow(guild_id, 901, "Alice")
-        self.bot.cursor.execute(
-            "UPDATE economy SET elo=1500 WHERE guildId=? AND userId=?", (guild_id, 901)
-        )
-        self.bot.mainDB.commit()
-        self.bot.helperObj._unlockAchievement(guild_id, 901, "first_blood")
-        ctx = self._ctx(guild_id=guild_id)
-
-        await self._command("clear").callback(ctx, clear_elo=True, clear_achievements=True)
-        view = ctx.followup.send.call_args.kwargs["view"]
-        click = self._ctx(guild_id=guild_id)
-        await view.confirm.callback(click)
-
-        self.assertEqual(self.bot.helperObj.getEconomy(guild_id, 901, "elo"), helper_module.DEFAULT_ELO)
-        self.assertNotIn(
-            helper_module.CARD_ACHIEVEMENT_TITLES["first_blood"],
-            self.bot.helperObj.getUnlockedCardTitles(guild_id, 901)
-        )
-        content = click.response.edit_message.call_args.kwargs["content"]
-        self.assertIn("Elo has been reset", content)
-        self.assertIn("Every earned achievement", content)
-
     async def test_clear_achievements_with_a_user_only_resets_that_players_achievements(self):
         guild_id = 9040
         await self._insert_guild_row(guild_id)
@@ -13930,7 +13967,7 @@ class ClearCommandTests(BotModuleTestCase):
         target = FakeMember("Alice", id=901)
         ctx = self._ctx(guild_id=guild_id)
 
-        await self._command("clear").callback(ctx, clear_achievements=True, user=target)
+        await self._command("clear achievements").callback(ctx, user=target)
 
         # warning names the specific player, not "every player".
         warning = ctx.followup.send.call_args.args[0]
@@ -13952,51 +13989,6 @@ class ClearCommandTests(BotModuleTestCase):
         )
         self.assertIn(target.mention, click.response.edit_message.call_args.kwargs["content"])
 
-    async def test_user_without_clear_achievements_is_rejected(self):
-        guild_id = 9041
-        await self._insert_guild_row(guild_id)
-        target = FakeMember("Alice", id=901)
-        ctx = self._ctx(guild_id=guild_id)
-
-        await self._command("clear").callback(ctx, user=target)
-
-        ctx.response.send_message.assert_awaited_once()
-        self.assertIn("clear_achievements", ctx.response.send_message.call_args.args[0])
-        # Nothing else ran either, not even the non-destructive team wipe.
-        ctx.followup.send.assert_not_awaited()
-
-    async def test_clear_achievements_for_a_user_can_combine_with_whole_server_clear_elo(self):
-        guild_id = 9042
-        await self._insert_guild_row(guild_id)
-        self.bot.helperObj.ensureEconomyRow(guild_id, 901, "Alice")
-        self.bot.helperObj.ensureEconomyRow(guild_id, 902, "Bob")
-        self.bot.cursor.execute(
-            "UPDATE economy SET elo=1500 WHERE guildId=?", (guild_id,)
-        )
-        self.bot.mainDB.commit()
-        self.bot.helperObj._unlockAchievement(guild_id, 901, "first_blood")
-        self.bot.helperObj._unlockAchievement(guild_id, 902, "first_blood")
-        target = FakeMember("Alice", id=901)
-        ctx = self._ctx(guild_id=guild_id)
-
-        await self._command("clear").callback(ctx, clear_elo=True, clear_achievements=True, user=target)
-        view = ctx.followup.send.call_args.kwargs["view"]
-        click = self._ctx(guild_id=guild_id)
-        await view.confirm.callback(click)
-
-        # elo reset for EVERYONE...
-        self.assertEqual(self.bot.helperObj.getEconomy(guild_id, 901, "elo"), helper_module.DEFAULT_ELO)
-        self.assertEqual(self.bot.helperObj.getEconomy(guild_id, 902, "elo"), helper_module.DEFAULT_ELO)
-        # ...but achievements only reset for the targeted user.
-        self.assertNotIn(
-            helper_module.CARD_ACHIEVEMENT_TITLES["first_blood"],
-            self.bot.helperObj.getUnlockedCardTitles(guild_id, 901)
-        )
-        self.assertIn(
-            helper_module.CARD_ACHIEVEMENT_TITLES["first_blood"],
-            self.bot.helperObj.getUnlockedCardTitles(guild_id, 902)
-        )
-
     async def test_clear_card_unlocks_resets_only_unlocks_after_confirmation(self):
         guild_id = 9043
         await self._insert_guild_row(guild_id)
@@ -14004,7 +13996,7 @@ class ClearCommandTests(BotModuleTestCase):
         self.bot.helperObj._checkTierRewardUnlocks(guild_id, 901, helper_module.ELO_TIER_THRESHOLDS["Diamond"])
         ctx = self._ctx(guild_id=guild_id)
 
-        await self._command("clear").callback(ctx, clear_card_unlocks=True)
+        await self._command("clear card-unlocks").callback(ctx)
 
         # real per-player unlocks don't change until the reset is confirmed.
         self.assertTrue(self.bot.helperObj.getUnlockedCardTitles(guild_id, 901))
@@ -14024,7 +14016,7 @@ class ClearCommandTests(BotModuleTestCase):
         target = FakeMember("Alice", id=901)
         ctx = self._ctx(guild_id=guild_id)
 
-        await self._command("clear").callback(ctx, clear_card_unlocks=True, user=target)
+        await self._command("clear card-unlocks").callback(ctx, user=target)
         view = ctx.followup.send.call_args.kwargs["view"]
         click = self._ctx(guild_id=guild_id)
         await view.confirm.callback(click)
@@ -14033,35 +14025,6 @@ class ClearCommandTests(BotModuleTestCase):
         # Bob's own unlocks survive untouched.
         self.assertTrue(self.bot.helperObj.getUnlockedCardTitles(guild_id, 902))
         self.assertIn(target.mention, click.response.edit_message.call_args.kwargs["content"])
-
-    async def test_clear_card_unlocks_can_combine_with_clear_achievements(self):
-        guild_id = 9045
-        await self._insert_guild_row(guild_id)
-        self.bot.helperObj._checkTierRewardUnlocks(guild_id, 901, helper_module.ELO_TIER_THRESHOLDS["Diamond"])
-        self.bot.helperObj._unlockAchievement(guild_id, 901, "first_blood")
-        ctx = self._ctx(guild_id=guild_id)
-
-        await self._command("clear").callback(ctx, clear_achievements=True, clear_card_unlocks=True)
-        view = ctx.followup.send.call_args.kwargs["view"]
-        click = self._ctx(guild_id=guild_id)
-        await view.confirm.callback(click)
-
-        self.assertEqual(self.bot.helperObj.getUnlockedCardTitles(guild_id, 901), [])
-        content = click.response.edit_message.call_args.kwargs["content"]
-        self.assertIn("Every earned achievement", content)
-        self.assertIn("trading-card unlock", content)
-
-    async def test_user_without_clear_card_unlocks_or_clear_achievements_is_rejected(self):
-        guild_id = 9046
-        await self._insert_guild_row(guild_id)
-        target = FakeMember("Alice", id=901)
-        ctx = self._ctx(guild_id=guild_id)
-
-        await self._command("clear").callback(ctx, user=target)
-
-        ctx.response.send_message.assert_awaited_once()
-        self.assertIn("clear_card_unlocks", ctx.response.send_message.call_args.args[0])
-        ctx.followup.send.assert_not_awaited()
 
     async def test_clear_economy_leaves_player_stats_alone_by_default(self):
         guild_id = 9033
@@ -14073,7 +14036,7 @@ class ClearCommandTests(BotModuleTestCase):
         self.bot.mainDB.commit()
         ctx = self._ctx(guild_id=guild_id)
 
-        await self._command("clear").callback(ctx)
+        await self._command("clear teams").callback(ctx)
 
         self.assertEqual(self.bot.helperObj.getEconomy(guild_id, 901, "balance"), 1000)
 
@@ -14157,7 +14120,7 @@ class NotifyCommandTests(BotModuleTestCase):
 
         mock.assert_not_awaited()
         ctx.response.send_message.assert_awaited_once_with(
-            "You need to be in a voice channel to invite someone to it - join one and try again."
+            "You need to be in a voice channel to invite someone to it. Join one and try again."
         )
 
     async def test_notify_rejects_when_voice_state_has_no_channel(self):
@@ -14173,7 +14136,7 @@ class NotifyCommandTests(BotModuleTestCase):
 
         mock.assert_not_awaited()
         ctx.response.send_message.assert_awaited_once_with(
-            "You need to be in a voice channel to invite someone to it - join one and try again."
+            "You need to be in a voice channel to invite someone to it. Join one and try again."
         )
 
 
@@ -14197,7 +14160,7 @@ class MakeTeamsCommandTests(BotModuleTestCase):
                  self.bot.helperObj, "printEmbed", AsyncMock(return_value=(FakeMessage(), FakeMessage()))
              ) as embed_mock, \
              patch.object(self.bot.helperObj, "_finalizeRoster", AsyncMock()) as finalize_mock:
-            await self._command("make-teams").callback(ctx, use_roles=False)
+            await self._command("make-teams random").callback(ctx, use_roles=False)
 
         randomize_mock.assert_awaited_once_with(ctx)
         embed_mock.assert_awaited_once()
@@ -14216,10 +14179,10 @@ class MakeTeamsCommandTests(BotModuleTestCase):
         ctx = self._ctx()  # ctx.user.voice is None by default
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "randomizeTeamHelper", mock):
-            await self._command("make-teams").callback(ctx, use_roles=False)
+            await self._command("make-teams random").callback(ctx, use_roles=False)
         mock.assert_not_awaited()
         ctx.response.send_message.assert_awaited_once_with(
-            "You need to be in a voice channel to form teams from it - join one and try again."
+            "You need to be in a voice channel to form teams from it. Join one and try again."
         )
 
     async def test_rejects_when_voice_state_has_no_channel(self):
@@ -14227,10 +14190,10 @@ class MakeTeamsCommandTests(BotModuleTestCase):
         ctx.user.voice = FakeVoiceState(None)
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "randomizeTeamHelper", mock):
-            await self._command("make-teams").callback(ctx, use_roles=False)
+            await self._command("make-teams random").callback(ctx, use_roles=False)
         mock.assert_not_awaited()
         ctx.response.send_message.assert_awaited_once_with(
-            "You need to be in a voice channel to form teams from it - join one and try again."
+            "You need to be in a voice channel to form teams from it. Join one and try again."
         )
 
     async def test_use_roles_forwards_the_flag_to_print_embed_and_finalize(self):
@@ -14243,7 +14206,7 @@ class MakeTeamsCommandTests(BotModuleTestCase):
                  self.bot.helperObj, "printEmbed", AsyncMock(return_value=(FakeMessage(), FakeMessage()))
              ) as embed_mock, \
              patch.object(self.bot.helperObj, "_finalizeRoster", AsyncMock()) as finalize_mock:
-            await self._command("make-teams").callback(ctx, use_roles=True)
+            await self._command("make-teams random").callback(ctx, use_roles=True)
 
         randomize_mock.assert_awaited_once_with(ctx)
         # regression test: /make-teams use_roles:True used to never forward
@@ -14266,7 +14229,7 @@ class MakeTeamsCommandTests(BotModuleTestCase):
                  self.bot.helperObj, "printEmbed", AsyncMock(return_value=(FakeMessage(), FakeMessage()))
              ) as embed_mock, \
              patch.object(self.bot.helperObj, "_finalizeRoster", AsyncMock()):
-            await self._command("make-teams").callback(ctx, use_roles=True)
+            await self._command("make-teams random").callback(ctx, use_roles=True)
 
         embed_mock.assert_awaited_once()  # teams still get announced normally
         # explanation, then the trailing ready reminder
@@ -14293,7 +14256,7 @@ class MakeTeamsCommandTests(BotModuleTestCase):
                  self.bot.helperObj, "printEmbed", AsyncMock(return_value=(FakeMessage(), FakeMessage()))
              ), \
              patch.object(self.bot.helperObj, "_finalizeRoster", AsyncMock()):
-            await self._command("make-teams").callback(ctx, use_roles=True)
+            await self._command("make-teams random").callback(ctx, use_roles=True)
 
         # only the trailing ready reminder, no role explanation needed
         ctx.channel.send.assert_awaited_once()
@@ -14311,7 +14274,7 @@ class MakeTeamsCommandTests(BotModuleTestCase):
         with patch.object(
             self.bot.helperObj, "hasCompletedSetup", side_effect=lambda gid, uid: uid == 950
         ), patch.object(self.bot.helperObj, "randomizeTeamHelper", AsyncMock()) as randomize_mock:
-            await self._command("make-teams").callback(ctx, use_roles=True)
+            await self._command("make-teams random").callback(ctx, use_roles=True)
 
         randomize_mock.assert_not_awaited()
         ctx.response.send_message.assert_awaited_once()
@@ -14332,7 +14295,7 @@ class MakeTeamsCommandTests(BotModuleTestCase):
                  self.bot.helperObj, "printEmbed", AsyncMock(return_value=(FakeMessage(), FakeMessage()))
              ), \
              patch.object(self.bot.helperObj, "_finalizeRoster", AsyncMock()):
-            await self._command("make-teams").callback(ctx, use_roles=True)
+            await self._command("make-teams random").callback(ctx, use_roles=True)
 
         randomize_mock.assert_awaited_once()
 
@@ -14348,7 +14311,7 @@ class MakeTeamsCommandTests(BotModuleTestCase):
                  self.bot.helperObj, "printEmbed", AsyncMock(return_value=(FakeMessage(), FakeMessage()))
              ), \
              patch.object(self.bot.helperObj, "_finalizeRoster", AsyncMock()):
-            await self._command("make-teams").callback(ctx, use_roles=True)
+            await self._command("make-teams random").callback(ctx, use_roles=True)
 
         randomize_mock.assert_awaited_once()
 
@@ -14364,7 +14327,7 @@ class MakeTeamsCommandTests(BotModuleTestCase):
                  self.bot.helperObj, "printEmbed", AsyncMock(return_value=(FakeMessage(), FakeMessage()))
              ), \
              patch.object(self.bot.helperObj, "_finalizeRoster", AsyncMock()):
-            await self._command("make-teams").callback(ctx, use_roles=False)
+            await self._command("make-teams random").callback(ctx, use_roles=False)
 
         setup_mock.assert_not_called()
 
@@ -14374,7 +14337,7 @@ class RankedCommandTests(BotModuleTestCase):
         ctx = self._ctx_in_voice()
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "rankedTeamHelper", mock):
-            await self._command("make-teams").callback(ctx, use_roles=False, ranked=True)
+            await self._command("make-teams random").callback(ctx, use_roles=False, ranked=True)
         mock.assert_awaited_once_with(ctx, False)
 
     async def test_make_teams_ranked_passes_use_roles_through(self):
@@ -14385,7 +14348,7 @@ class RankedCommandTests(BotModuleTestCase):
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "rankedTeamHelper", mock), \
              patch.object(self.bot.helperObj, "randomizeTeamHelper", AsyncMock()) as random_mock:
-            await self._command("make-teams").callback(ctx, use_roles=True, ranked=True)
+            await self._command("make-teams random").callback(ctx, use_roles=True, ranked=True)
         random_mock.assert_not_awaited()
         mock.assert_awaited_once_with(ctx, True)
 
@@ -14398,7 +14361,7 @@ class RankedCommandTests(BotModuleTestCase):
 
         with patch.object(self.bot.helperObj, "hasCompletedSetup", return_value=False), \
              patch.object(self.bot.helperObj, "rankedTeamHelper", AsyncMock()) as ranked_mock:
-            await self._command("make-teams").callback(ctx, use_roles=True, ranked=True)
+            await self._command("make-teams random").callback(ctx, use_roles=True, ranked=True)
 
         ranked_mock.assert_not_awaited()
         text = ctx.response.send_message.call_args.args[0]
@@ -14411,31 +14374,31 @@ class CaptainsCommandTests(BotModuleTestCase):
         ctx = self._ctx()
         ctx.user.voice = None
 
-        await self._command("captains").callback(
+        await self._command("make-teams draft").callback(
             ctx, captain_1=None, captain_2=None, use_random=False
         )
 
         ctx.response.send_message.assert_awaited_once_with(
-            "You need to be in a voice channel to start a captains draft - join one and try again."
+            "You need to be in a voice channel to start a captains draft. Join one and try again."
         )
 
     async def test_rejects_when_voice_state_has_no_channel(self):
         ctx = self._ctx()
         ctx.user.voice = FakeVoiceState(None)
 
-        await self._command("captains").callback(
+        await self._command("make-teams draft").callback(
             ctx, captain_1=None, captain_2=None, use_random=False
         )
 
         ctx.response.send_message.assert_awaited_once_with(
-            "You need to be in a voice channel to start a captains draft - join one and try again."
+            "You need to be in a voice channel to start a captains draft. Join one and try again."
         )
 
     async def test_requires_at_least_two_in_voice_channel(self):
         ctx = self._ctx()
         ctx.user.voice = FakeVoiceState(FakeChannel("Lobby", members=[FakeMember("Solo")]))
 
-        await self._command("captains").callback(
+        await self._command("make-teams draft").callback(
             ctx, captain_1=None, captain_2=None, use_random=False
         )
 
@@ -14455,7 +14418,7 @@ class CaptainsCommandTests(BotModuleTestCase):
 
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "captainsHelper", mock):
-            await self._command("captains").callback(
+            await self._command("make-teams draft").callback(
                 ctx, captain_1=cap1, captain_2=cap2, use_random=False
             )
 
@@ -14473,7 +14436,7 @@ class CaptainsCommandTests(BotModuleTestCase):
 
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "captainsHelper", mock):
-            await self._command("captains").callback(
+            await self._command("make-teams draft").callback(
                 ctx, captain_1=cap1, captain_2=cap2, use_random=False, ranked=True
             )
 
@@ -14500,7 +14463,7 @@ class CaptainsCommandTests(BotModuleTestCase):
             captured["captain2"] = captain2
 
         with patch.object(self.bot.helperObj, "captainsHelper", AsyncMock(side_effect=fake_captains_helper)):
-            await self._command("captains").callback(
+            await self._command("make-teams draft").callback(
                 ctx, captain_1=None, captain_2=None, use_random=True
             )
 
@@ -14533,7 +14496,7 @@ class MyTeamsCommandTests(BotModuleTestCase):
         ctx = self._ctx()
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "myTeamsHelper", mock):
-            await self._command("my-teams").callback(ctx, member=None)
+            await self._command("team mine").callback(ctx, member=None)
         mock.assert_awaited_once_with(ctx, None)
 
     async def test_looks_up_another_member(self):
@@ -14541,7 +14504,7 @@ class MyTeamsCommandTests(BotModuleTestCase):
         target = FakeMember("Target")
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "myTeamsHelper", mock):
-            await self._command("my-teams").callback(ctx, member=target)
+            await self._command("team mine").callback(ctx, member=target)
         mock.assert_awaited_once_with(ctx, target)
 
 
@@ -14550,14 +14513,14 @@ class TeamListCommandTests(BotModuleTestCase):
         ctx = self._ctx()
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "teamListHelper", mock):
-            await self._command("team-list").callback(ctx)
+            await self._command("team list").callback(ctx)
         mock.assert_awaited_once_with(ctx, None, False, "name", "asc", False, [])
 
     async def test_forwards_cards_true(self):
         ctx = self._ctx()
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "teamListHelper", mock):
-            await self._command("team-list").callback(ctx, cards=True)
+            await self._command("team list").callback(ctx, cards=True)
         mock.assert_awaited_once_with(ctx, None, False, "name", "asc", True, [])
 
     async def test_collects_given_members_and_skips_unset_slots(self):
@@ -14566,7 +14529,7 @@ class TeamListCommandTests(BotModuleTestCase):
         bob = FakeMember("Bob", id=902)
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "teamListHelper", mock):
-            await self._command("team-list").callback(ctx, member_1=alice, member_3=bob)
+            await self._command("team list").callback(ctx, member_1=alice, member_3=bob)
         mock.assert_awaited_once_with(ctx, None, False, "name", "asc", False, [alice, bob])
 
 

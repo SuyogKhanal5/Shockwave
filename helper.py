@@ -54,7 +54,7 @@ BRACKET_LINE_WIDTH = 2 * BRACKET_SUPERSAMPLE
 BRACKET_RULE_WIDTH = 1 * BRACKET_SUPERSAMPLE
 BRACKET_LOGO_PATH = os.path.join(os.path.dirname(__file__), "shockwave-site", "assets", "img", "logo-mark.png")
 # Built-in Clash faction/region logos a team can pick from (see
-# /team-set and _ensureLogo), one file per available logo, named after
+# /team set and _ensureLogo), one file per available logo, named after
 # it (e.g. "Demacia.png"), no subfolders.
 TEAM_LOGO_DIR = os.path.join(os.path.dirname(__file__), "assets", "clash-logos")
 
@@ -247,9 +247,9 @@ ROLE_BALANCE_DISLIKED_ROLE_WIN_ELO_MULTIPLIER = 1.5
 # How long the /clear confirmation buttons stay clickable before the
 # reset is abandoned on its own.
 CLEAR_CONFIRM_TIMEOUT_SECONDS = 30
-# Same idea for /tournament-create's overwrite confirmation.
+# Same idea for /tournament create's overwrite confirmation.
 TOURNAMENT_CONFIRM_TIMEOUT_SECONDS = 30
-# ...and for /team-set's already-in-use voice channel confirmation.
+# ...and for /team set's already-in-use voice channel confirmation.
 TEAM_CONFIRM_TIMEOUT_SECONDS = 30
 # ...and for confirming a reported game winner (see ConfirmWinnerReportView)
 # before it's actually recorded.
@@ -344,7 +344,7 @@ CARD_DEFAULT_FONT_STYLE = "Default"        # Chakra Petch + IBM Plex Sans - see 
 # is, since it needs no unlocking either.
 CARD_DEFAULT_SCHEME_NAME = "Default"
 
-# /team-stats: press to swap the embed for a team card (see
+# /team stats: press to swap the embed for a team card (see
 # _renderTeamCardImage), the team's own counterpart to /stats' trading
 # card, same one-card-view-with-a-way-back shape as STATS_CARD_EMOJI/
 # STATS_RETURN_EMOJI, tracked in its own team_stats_views table rather than
@@ -369,8 +369,8 @@ TEAM_START_EMOJI = "▶️"  # ▶️
 TEAM_START_NO_MOVE_EMOJI = "⚡"  # ⚡
 # Fallback voice channel names ▶️ self-heals onto a guild's `channel1`/
 # `channel2` (see _ensureDefaultTeamChannels) if a game is started before
-# /set's team1/team2 have ever been given, created on demand the same way
-# /set itself creates a missing channel.
+# /set channels' team1/team2 have ever been given, created on demand the same way
+# /set channels itself creates a missing channel.
 DEFAULT_TEAM_CHANNEL_NAMES = ("Team-1", "Team-2")
 
 # Team-card layout (see _renderTeamCardImage), same card shape/width as
@@ -421,8 +421,8 @@ CARD_MIN_ACCENT_CONTRAST = 45
 
 # League-style rank tiers for /stats. Each tier spans 250 elo, with
 # DEFAULT_ELO (1000) landing every new player in the middle at Platinum,
-# a global fallback; a guild can override its own starting elo via /set's
-# default_elo (see _defaultEloForGuild) without changing this ladder.
+# a global fallback; a guild can override its own starting elo via
+# /set default-elo (see _defaultEloForGuild) without changing this ladder.
 # ascending order, (elo threshold, tier name, emoji, badge color). The
 # trading card (_drawEloBadge) pastes the tier's own real emoji artwork
 # (see ELO_BADGE_DIR) instead of the literal character; PIL's bundled TTF
@@ -701,14 +701,14 @@ CARD_BACKGROUND_DARKEN_RATIO = 0.28
 # re-running the command; clicking one edits the existing message
 # instead of posting a new one. Also decorate MyTeamsPagingView/
 # TeamListPagingView's own button labels, the same First/Prev/Next/Last
-# shape reused for /my-teams and /team-list.
+# shape reused for /team mine and /team list.
 LEADERBOARD_PAGE_SIZE = 10
 LEADERBOARD_FIRST_EMOJI = "⏮️"  # ⏮️ jump to the first page
 LEADERBOARD_PREV_EMOJI = "◀️"   # ◀️ previous page
 LEADERBOARD_NEXT_EMOJI = "▶️"   # ▶️ next page
 LEADERBOARD_LAST_EMOJI = "⏭️"   # ⏭️ jump to the last page
 
-# /team-list: what it can sort by, and its display label, same paging
+# /team list: what it can sort by, and its display label, same paging
 # shape and page size as /leaderboard, just over teams instead of players.
 TEAM_LIST_SORT_LABELS = {
     "name": "Name",
@@ -782,11 +782,11 @@ SETUP_ROLE_NAMES = ["Top", "Jungle", "Mid", "Bottom", "Support"]
 SETUP_ROLE_TIMEOUT_SECONDS = 120
 
 
-# Confirm/cancel buttons for /clear's clear_elo, clear_economy,
-# clear_achievements, and clear_card_unlocks flags. clear_elo/clear_economy
-# always reset state for every player in the server; clear_achievements and
-# clear_card_unlocks normally do too, but both share the same optional
-# `target` member instead (see /clear's own `user` parameter); none of the
+# Confirm/cancel buttons for /clear elo, /clear economy,
+# /clear achievements, and /clear card-unlocks. /clear elo//clear economy
+# always reset state for every player in the server; /clear achievements and
+# /clear card-unlocks normally do too, but both share the same optional
+# `target` member instead (see their own `user` parameter); none of the
 # four actually run until whoever ran the command clicks "Confirm reset" on
 # this view.
 class ConfirmResetView(discord.ui.View):
@@ -862,7 +862,7 @@ class ConfirmResetView(discord.ui.View):
     async def cancel(self, interaction, button):
         self._disable_buttons()
         self.stop()
-        await interaction.response.edit_message(content="Cancelled - nothing was reset.", view=self)
+        await interaction.response.edit_message(content="Cancelled. Nothing was reset.", view=self)
 
     async def on_timeout(self):
         self._disable_buttons()
@@ -870,7 +870,7 @@ class ConfirmResetView(discord.ui.View):
             await self.message.edit(view=self)
 
 
-# Confirm/cancel buttons for /tournament-create when a tournament already
+# Confirm/cancel buttons for /tournament create when a tournament already
 # exists for the server; creating one is destructive (it replaces the
 # only tournament a server can have), so it doesn't happen until whoever
 # ran the command clicks "Overwrite tournament" here.
@@ -889,7 +889,7 @@ class ConfirmTournamentOverwriteView(discord.ui.View):
     async def interaction_check(self, interaction):
         if interaction.user.id != self.invoker_id:
             await interaction.response.send_message(
-                "Only the person who ran /tournament-create can confirm this.", ephemeral=True
+                "Only the person who ran /tournament create can confirm this.", ephemeral=True
             )
             return False
         return True
@@ -913,7 +913,7 @@ class ConfirmTournamentOverwriteView(discord.ui.View):
         self._disable_buttons()
         self.stop()
         await interaction.response.edit_message(
-            content="Cancelled - the existing tournament was kept.", view=self
+            content="Cancelled. The existing tournament was kept.", view=self
         )
 
     async def on_timeout(self):
@@ -922,7 +922,7 @@ class ConfirmTournamentOverwriteView(discord.ui.View):
             await self.message.edit(view=self)
 
 
-# Confirm/cancel buttons for /team-set when the requested voice channel is
+# Confirm/cancel buttons for /team set when the requested voice channel is
 # already another team's. "Yes" assigns it to this team anyway
 # (the other team's own assignment is left alone; this doesn't enforce
 # exclusivity, just warns); "No" leaves everything as it was and tells the
@@ -941,7 +941,7 @@ class ConfirmVoiceChannelOverwriteView(discord.ui.View):
     async def interaction_check(self, interaction):
         if interaction.user.id != self.invoker_id:
             await interaction.response.send_message(
-                "Only the person who ran /team-set can confirm this.", ephemeral=True
+                "Only the person who ran /team set can confirm this.", ephemeral=True
             )
             return False
         return True
@@ -966,7 +966,7 @@ class ConfirmVoiceChannelOverwriteView(discord.ui.View):
         self._disable_buttons()
         self.stop()
         await interaction.response.edit_message(
-            content="Cancelled - run `/team-set` again with a different channel.", view=self
+            content="Cancelled. Run `/team set` again with a different channel.", view=self
         )
 
     async def on_timeout(self):
@@ -975,9 +975,9 @@ class ConfirmVoiceChannelOverwriteView(discord.ui.View):
             await self.message.edit(view=self)
 
 
-# Confirm/cancel buttons for /team-delete; deleting a persistent team is
+# Confirm/cancel buttons for /team delete; deleting a persistent team is
 # destructive (its roster/record/logo are gone, and any pending
-# /team-invite for it becomes unacceptable), so it doesn't happen until the
+# /team invite for it becomes unacceptable), so it doesn't happen until the
 # captain who ran the command clicks "Delete team" here, same pattern
 # ConfirmResetView established for /clear. Doesn't touch a tournament this
 # team may already be registered in; register_team snapshots a copy of
@@ -997,7 +997,7 @@ class ConfirmTeamDeleteView(discord.ui.View):
     async def interaction_check(self, interaction):
         if interaction.user.id != self.invoker_id:
             await interaction.response.send_message(
-                "Only the person who ran /team-delete can confirm this.", ephemeral=True
+                "Only the person who ran /team delete can confirm this.", ephemeral=True
             )
             return False
         return True
@@ -1020,7 +1020,7 @@ class ConfirmTeamDeleteView(discord.ui.View):
         self._disable_buttons()
         self.stop()
         await interaction.response.edit_message(
-            content=f"Cancelled - **{self.team_name}** was kept.", view=self
+            content=f"Cancelled. **{self.team_name}** was kept.", view=self
         )
 
     async def on_timeout(self):
@@ -1088,7 +1088,7 @@ class SetupRoleSelectionView(discord.ui.View):
             item.disabled = True
         try:
             await self.message.edit(
-                content="Role selection timed out - run /setup again if you'd like to set your roles.",
+                content="Role selection timed out. Run /setup again if you'd like to set your roles.",
                 view=self,
             )
         except discord.HTTPException:
@@ -1096,7 +1096,7 @@ class SetupRoleSelectionView(discord.ui.View):
 
 
 # Discord caps a button's label at 80 characters; a team name is free
-# text (/team-create, /team-rename) with no length limit of its own, so
+# text (/team create, /team rename) with no length limit of its own, so
 # this truncates rather than risking an edit/send outright failing on an
 # unusually long name.
 def _teamButtonLabel(team_name, team_number):
@@ -1188,7 +1188,7 @@ class ConfirmWinnerReportView(discord.ui.View):
         self._disable_buttons()
         self.stop()
         await interaction.response.edit_message(
-            content="Winner confirmed - recording the result...", view=self
+            content="Winner confirmed, recording the result...", view=self
         )
         await self.helperObj.recordResult(
             self.guild_id, self.winning_team, interaction.channel, interaction.guild
@@ -1201,7 +1201,7 @@ class ConfirmWinnerReportView(discord.ui.View):
         self.stop()
         self.helperObj._restoreWinnerReportMessage(self.guild_id, self.report_message_id)
         await interaction.response.edit_message(
-            content="Report cancelled - use the buttons on the original message to report the correct winner.",
+            content="Report cancelled. Use the buttons on the original message to report the correct winner.",
             view=self,
         )
 
@@ -1212,7 +1212,7 @@ class ConfirmWinnerReportView(discord.ui.View):
             try:
                 await self.message.edit(
                     content=(
-                        "Confirmation timed out - use the buttons on the original message to report "
+                        "Confirmation timed out. Use the buttons on the original message to report "
                         "the winner."
                     ),
                     view=self,
@@ -1247,7 +1247,7 @@ class ConfirmCancelGameView(discord.ui.View):
         self._disable_buttons()
         self.stop()
         await interaction.response.edit_message(
-            content="Cancellation confirmed - cancelling the game...", view=self
+            content="Cancellation confirmed, cancelling the game...", view=self
         )
         await self.helperObj._finishGameCancel(
             self.guild_id, interaction.channel, interaction.guild, self.report_message
@@ -1259,7 +1259,7 @@ class ConfirmCancelGameView(discord.ui.View):
         self.stop()
         self.helperObj._restoreWinnerReportMessage(self.guild_id, self.report_message_id)
         await interaction.response.edit_message(
-            content="Game kept - use the buttons on the original message to report the winner or cancel again.",
+            content="Game kept. Use the buttons on the original message to report the winner or cancel again.",
             view=self,
         )
 
@@ -1270,7 +1270,7 @@ class ConfirmCancelGameView(discord.ui.View):
             try:
                 await self.message.edit(
                     content=(
-                        "Cancellation confirmation timed out - use the buttons on the original message."
+                        "Cancellation confirmation timed out. Use the buttons on the original message."
                     ),
                     view=self,
                 )
@@ -1309,7 +1309,7 @@ class ConfirmTournamentMatchReportView(discord.ui.View):
         self._disable_buttons()
         self.stop()
         await interaction.response.edit_message(
-            content="Winner confirmed - recording the result...", view=self
+            content="Winner confirmed, recording the result...", view=self
         )
         await self.helperObj._resolveTournamentMatch(
             self.guild_id, self.match_id, self.winning_team, self.channel_id
@@ -1323,7 +1323,7 @@ class ConfirmTournamentMatchReportView(discord.ui.View):
         self.helperObj._restoreTournamentMatchAwaitingResult(self.match_id)
         await interaction.response.edit_message(
             content=(
-                "Report cancelled - use the buttons on the original match message to report the "
+                "Report cancelled. Use the buttons on the original match message to report the "
                 "correct winner."
             ),
             view=self,
@@ -1336,7 +1336,7 @@ class ConfirmTournamentMatchReportView(discord.ui.View):
             try:
                 await self.message.edit(
                     content=(
-                        "Confirmation timed out - use the buttons on the original match message to "
+                        "Confirmation timed out. Use the buttons on the original match message to "
                         "report the winner."
                     ),
                     view=self,
@@ -1442,7 +1442,7 @@ class RosterActionView(discord.ui.View):
         await self.helperObj._handleRosterStartClick(interaction, move=False)
 
 
-# /team-invite's own posted message, persistent (custom_id, timeout=None,
+# /team invite's own posted message, persistent (custom_id, timeout=None,
 # registered once via client.add_view) since an invite can sit unanswered
 # indefinitely, same reasoning as WinnerReportView. One shared Accept
 # button covers every invitee on the message (see
@@ -1496,7 +1496,7 @@ class StatsView(discord.ui.View):
         await self.helperObj._handleStatsReturnClick(interaction)
 
 
-# /team-stats' own posted message, same persistent, state-dependent-
+# /team stats' own posted message, same persistent, state-dependent-
 # button-set shape as StatsView, just for a team (no avatar toggle, since
 # a team card has no per-player avatar to flip).
 class TeamStatsView(discord.ui.View):
@@ -1522,7 +1522,7 @@ class TeamStatsView(discord.ui.View):
         await self.helperObj._handleTeamStatsReturnClick(interaction)
 
 
-# /leaderboard, /my-teams, and /team-list all page the exact same way,
+# /leaderboard, /team mine, and /team list all page the exact same way,
 # First/Prev/Next/Last, one shared view per guild/caller/search rather
 # than re-running the command, so all three views below are the same
 # four-button shape, just wired to a different helper.py handler and
@@ -1571,7 +1571,7 @@ class LeaderboardPagingView(discord.ui.View):
     async def descending(self, interaction, button):
         await self.helperObj._handleLeaderboardOrderClick(interaction, "desc")
 
-    # /team-list's own Card/Back toggle (see TeamListPagingView), carried
+    # /team list's own Card/Back toggle (see TeamListPagingView), carried
     # over here; cards mode swaps the summary list for one player's full
     # /stats embed per page, and this additionally lets that flip over to
     # their actual trading card. Never shown at all outside cards mode.
@@ -1588,7 +1588,7 @@ class LeaderboardPagingView(discord.ui.View):
         await self.helperObj._handleLeaderboardReturnClick(interaction)
 
 
-# See LeaderboardPagingView, same shape, /my-teams' own table/handler.
+# See LeaderboardPagingView, same shape, /team mine' own table/handler.
 class MyTeamsPagingView(discord.ui.View):
     def __init__(self, helperObj):
         super().__init__(timeout=None)
@@ -1611,8 +1611,8 @@ class MyTeamsPagingView(discord.ui.View):
         await self.helperObj._handleMyTeamsPageClick(interaction, "last")
 
 
-# See LeaderboardPagingView for the paging buttons, /team-list's own
-# table/handler. `cards` (only ever True for a /team-list cards:true
+# See LeaderboardPagingView for the paging buttons, /team list's own
+# table/handler. `cards` (only ever True for a /team list cards:true
 # message) additionally offers TeamStatsView's own Card/Back toggle, so
 # the currently-paged team's plain stats card can be swapped for its
 # actual trading card; `card_shown` picks which of the two is attached to
@@ -1800,7 +1800,7 @@ class ConfirmDuelResultView(discord.ui.View):
         self._disable_buttons()
         self.stop()
         await interaction.response.edit_message(
-            content="Result confirmed - paying out the wager...", view=self
+            content="Result confirmed, paying out the wager...", view=self
         )
         await self.helperObj._finishDuelResolution(self.duel_id, self.winner_is_challenger)
         await self.helperObj._clearMessageButtons(self.report_message)
@@ -1811,7 +1811,7 @@ class ConfirmDuelResultView(discord.ui.View):
         self.stop()
         self.helperObj._restoreDuelAwaitingResult(self.duel_id)
         await interaction.response.edit_message(
-            content="Report cancelled - use the buttons on the original message to report the correct result.",
+            content="Report cancelled. Use the buttons on the original message to report the correct result.",
             view=self,
         )
 
@@ -1822,7 +1822,7 @@ class ConfirmDuelResultView(discord.ui.View):
             try:
                 await self.message.edit(
                     content=(
-                        "Confirmation timed out - use the buttons on the original message to report "
+                        "Confirmation timed out. Use the buttons on the original message to report "
                         "the result."
                     ),
                     view=self,
@@ -1857,12 +1857,12 @@ class helpers():
                     "=? WHERE guildId=?", (value, guild_id))
         self.db.commit()
 
-    # Team objects formed by /make-teams, /captains, etc. use these as their
+    # Team objects formed by /make-teams random, /make-teams draft, etc. use these as their
     # .name, read by printEmbed (the roster embed titles) and
     # _renderMatchupImage (the matchup graphic), and later handed to
     # computeGameDeltas/formatResultMessage so the win/elo-change summary
     # says the same names too. An admin-configured channel1/channel2 name
-    # (see /set's team1/team2 params) reads a lot better than a bare
+    # (see /set channels' team1/team2 params) reads a lot better than a bare
     # "Team 1"/"Team 2"; falls back to that for a guild that's never named
     # its channels.
     def _rosterTeamNames(self, guild_id):
@@ -2069,7 +2069,7 @@ class helpers():
         return self._splitRoleBalancedTeams(refined)
 
     # What a brand new player's elo starts at in this guild, DEFAULT_ELO
-    # (1000) unless an admin has overridden it with /set's default_elo
+    # (1000) unless an admin has overridden it with /set default-elo's
     # param (see adminSetHelper), in which case that value wins instead.
     # The one place every other elo-defaulting call site in this file goes
     # through, so a guild's configured default never has to be re-looked-up
@@ -2217,7 +2217,7 @@ class helpers():
         if use_roles and role_split is None:
             message += (
                 "Roles need exactly 10 players (5 a side) to assign, so no roles were assigned this "
-                "time - showing the roster as normal instead. "
+                "time. Showing the roster as normal instead. "
             )
         message += (
             "Press Start on the roster below when you're ready to move everyone and open betting, or "
@@ -2282,7 +2282,7 @@ class helpers():
     # direct elo correction), so tweaking one doesn't mean hunting down a
     # handful of different commands. Every given field is validated before
     # ANY of them is applied, same validate-then-apply-all pattern
-    # /card-set and /team-set use, so a bad value in one field can't leave
+    # /card-set and /team set use, so a bad value in one field can't leave
     # another, genuinely valid field half-applied. team1/team2 and
     # member/elo are each pairs (either both given or neither); size,
     # betting_timer, and wager_channel each stand alone.
@@ -2477,7 +2477,7 @@ class helpers():
 
     # Finds (or creates) DEFAULT_TEAM_CHANNEL_NAMES and points this guild's
     # channel1/channel2 at them, the self-heal ▶️ falls back to instead of
-    # refusing to start a game just because /set's team1/team2 were never given.
+    # refusing to start a game just because /set channels' team1/team2 were never given.
     async def _ensureDefaultTeamChannels(self, guild):
         name1, name2 = DEFAULT_TEAM_CHANNEL_NAMES
 
@@ -2568,7 +2568,7 @@ class helpers():
             channel1 = discord.utils.get(guild.channels, name=channel1name)
             channel2 = discord.utils.get(guild.channels, name=channel2name)
             if channel1 is None or channel2 is None:
-                # /set's team1/team2 were never given (or the named channels
+                # /set channels' team1/team2 were never given (or the named channels
                 # got deleted), rather than refuse to start the game, fall
                 # back to DEFAULT_TEAM_CHANNEL_NAMES, creating them if they
                 # don't already exist, and remember them as this guild's own
@@ -2621,7 +2621,7 @@ class helpers():
         # Checked before clearTeamsHelper and before building
         # Player(captain_1.id, ...) from either captain, since either would
         # crash with AttributeError on a None captain instead of showing
-        # the message below. bot.py's /captains command happens to reject
+        # the message below. bot.py's /make-teams draft command happens to reject
         # None captains before calling in here today, which is the only
         # reason this guard isn't hit in practice; checking first here
         # keeps it meaningful if that ever changes.
@@ -2851,7 +2851,7 @@ class helpers():
 
     # clears all current teams
     #
-    # Every team-formation command (/make-teams, /captains, /team-use) and
+    # Every team-formation command (/make-teams random, /make-teams draft, /make-teams saved) and
     # /clear itself all funnel through here; an in-progress game
     # (betting_state OPEN/CLOSED) is cancelled cleanly first (the same
     # refund + move-back + "Game cancelled" notice Cancel Game triggers),
@@ -2875,7 +2875,7 @@ class helpers():
         # Goes stale the moment team1/team2 do (see rankedTeamHelper); a
         # fresh roster's own players earned no disliked-role bonus yet.
         self.update(guild_id, "disliked_role_user_ids", "")
-        # Every team-formation path (/make-teams, /captains, either with or
+        # Every team-formation path (/make-teams random, /make-teams draft, either with or
         # without ranked:true) runs through here first; resetting is_ranked
         # to 0 by default means only the ranked-specific helpers, which
         # explicitly set it back to 1 afterward, cause elo to be touched
@@ -2969,8 +2969,8 @@ class helpers():
     # computed from (game_wins, current_win_streak, ...) untouched.
     # `user_id=None` (the default) resets every player in the guild, the
     # /clear counterpart to resetEconomyHelper/resetEloHelper above; a real
-    # `user_id` narrows it to just that one player instead, for /clear's
-    # own optional `user` parameter. Unlike resetCardUnlocksHelper below
+    # `user_id` narrows it to just that one player instead, for /clear achievements'/
+    # /clear card-unlocks' own optional `user` parameter. Unlike resetCardUnlocksHelper below
     # (which wipes EVERYTHING a player's unlocked), both modes here are
     # achievements-only.
     def resetAchievementsHelper(self, guild_id, user_id=None):
@@ -3023,8 +3023,8 @@ class helpers():
             )
         self.db.commit()
 
-    # Posts the confirm/cancel view for /clear's clear_elo, clear_economy,
-    # clear_achievements, and clear_card_unlocks flags; none of them
+    # Posts the confirm/cancel view for /clear elo, /clear economy,
+    # /clear achievements, and /clear card-unlocks; none of them
     # actually touch player data until the invoker clicks "Confirm reset"
     # on the message this sends. clear_economy takes priority over
     # clear_elo when both are set (the whole-row wipe already resets elo
@@ -3184,7 +3184,7 @@ class helpers():
             )
             await ctx.response.send_message(
                 f"Tournament **{existing.get_name()}** is already set up for this server. "
-                f"Creating **{name}** will overwrite it - are you sure?",
+                f"Creating **{name}** will overwrite it. Are you sure?",
                 view=view
             )
             view.message = await ctx.original_response()
@@ -3208,7 +3208,7 @@ class helpers():
         tournament = self.getTournament(guild_id)
         if tournament is None:
             await ctx.response.send_message(
-                "No tournament set up for this server - use /tournament-create first."
+                "No tournament set up for this server. Use /tournament create first."
             )
             return
 
@@ -3441,13 +3441,13 @@ class helpers():
                 self.cursor.execute("DELETE FROM sqlite_sequence WHERE name='tournament_matches'")
         self.db.commit()
 
-    # Deletes this guild's tournament entirely (see /tournament-create),
-    # /clear's clear_tournament flag. Leaves the persistent `teams` rows
+    # Deletes this guild's tournament entirely (see /tournament create),
+    # /clear tournament's own action. Leaves the persistent `teams` rows
     # themselves untouched, since those exist independently of any one
     # tournament and can just be registered into a new one; this only
     # clears the tournament shell/bracket/registration state and its match
     # history (_clearTournamentMatchesForGuild), same as starting over with
-    # a fresh /tournament-create.
+    # a fresh /tournament create.
     def deleteTournamentHelper(self, guild_id):
         self.cursor.execute("DELETE FROM tournaments WHERE guildId=?", (guild_id,))
         self.db.commit()
@@ -3459,7 +3459,7 @@ class helpers():
         tournament = self.getTournament(guild_id)
         if tournament is None:
             await ctx.response.send_message(
-                "No tournament set up for this server - use /tournament-create first."
+                "No tournament set up for this server. Use /tournament create first."
             )
             return
 
@@ -3502,7 +3502,7 @@ class helpers():
         )
         await self._sendBracketText(ctx.channel, tournament, guild_id)
 
-    # ---------------- Tournament matches (/tournament-start) ----------------
+    # ---------------- Tournament matches (/tournament start) ----------------
 
     # Splits a flat bracket node list (leaves first, as buildBracket returns
     # it) back into per-round lists. Round sizes are always size, size/2,
@@ -4453,8 +4453,8 @@ class helpers():
     # roster with the captain marked with a star (on top of _orderedRoster
     # already having put them first). A persistent team always has a logo
     # of its own by now (see _ensureLogo, called on every load); a team
-    # with none here is really one of the ad-hoc rosters /make-teams,
-    # /captains, etc. build on the fly, which never go through that. Rather
+    # with none here is really one of the ad-hoc rosters /make-teams random,
+    # /make-teams draft, etc. build on the fly, which never go through that. Rather
     # than draw a bare ring for those, pick a random built-in logo just for
     # this image; not persisted anywhere (there's no stable row to persist
     # it against), so a rerender can land on a different one, but that's
@@ -4609,8 +4609,8 @@ class helpers():
         image = await asyncio.to_thread(self._renderMatchupImage, None, team1, team2, label, None, guild_name)
         await channel.send(file=self._imageToFile(image, "matchup.png"))
 
-    # Maps the "mode" stored per-guild (set by /make-teams, /captains,
-    # /team-use) to the matchup image's headline, used by /start, which
+    # Maps the "mode" stored per-guild (set by /make-teams random, /make-teams draft,
+    # /make-teams saved) to the matchup image's headline, used by /start, which
     # posts the image from whatever's currently loaded rather than knowing
     # for itself how those teams were formed.
     def _matchupLabelForMode(self, mode):
@@ -4727,7 +4727,7 @@ class helpers():
         tournament = self.getTournament(ctx.guild.id)
         if tournament is None:
             await ctx.response.send_message(
-                "No tournament set up for this server - use /tournament-create first."
+                "No tournament set up for this server. Use /tournament create first."
             )
             return
         bracket_files = await asyncio.to_thread(self.renderBracketImages, tournament, ctx.guild.name)
@@ -4950,7 +4950,7 @@ class helpers():
     # tournament moves on to the losers bracket instead of ending outright.
     # --- Interleaved losers-bracket scheduling ------------------------------
     # Only consulted when tournament.get_losers_bracket_timing() ==
-    # "interleaved" (see /tournament-create-bracket); the default
+    # "interleaved" (see /tournament create-bracket); the default
     # "after_winners" timing never calls any of this, and _startRound/
     # _startLosersRound just walk their own round list start to finish
     # exactly as they always have.
@@ -5280,7 +5280,7 @@ class helpers():
         # played, the query above would have returned that row (roundIndex
         # 1) instead of this one.
         # Compared by name rather than id: team names are guaranteed unique
-        # per guild (enforced by /team-create), whereas .get_id() is only
+        # per guild (enforced by /team create), whereas .get_id() is only
         # ever set once a team's been persisted through _saveNewTeam, a
         # guarantee this comparison shouldn't have to lean on.
         wb_rounds = self._bracketRounds(tournament.get_bracket())
@@ -5302,19 +5302,19 @@ class helpers():
         tournament = self.getTournament(guild_id)
         if tournament is None:
             await ctx.response.send_message(
-                "No tournament set up for this server - use /tournament-create first."
+                "No tournament set up for this server. Use /tournament create first."
             )
             return
 
         bracket = tournament.get_bracket()
         if not bracket:
-            await ctx.response.send_message("No bracket has been created yet - use /tournament-create-bracket first.")
+            await ctx.response.send_message("No bracket has been created yet. Use /tournament create-bracket first.")
             return
 
         champion_name = self._tournamentChampionName(guild_id, tournament)
         if champion_name is not None:
             await ctx.response.send_message(
-                f"**{tournament.get_name()}** is already finished - **{champion_name}** is the champion!"
+                f"**{tournament.get_name()}** is already finished; **{champion_name}** is the champion!"
             )
             return
 
@@ -5326,7 +5326,7 @@ class helpers():
             return
 
         await ctx.response.send_message(
-            f"Starting **{tournament.get_name()}** - {mode} mode."
+            f"Starting **{tournament.get_name()}**: {mode} mode."
         )
         await self._startRound(guild_id, tournament, 0, mode, ctx.channel)
 
@@ -5444,7 +5444,7 @@ class helpers():
             self, guild_id, match_id, winning_team, interaction.channel_id, report_message=interaction.message
         )
         await interaction.response.send_message(
-            f"**{name}** reported as the winner of Match #{match_id} - Confirm to finalize it, or "
+            f"**{name}** reported as the winner of Match #{match_id}. Confirm to finalize it, or "
             "Cancel to report again.",
             view=view,
         )
@@ -5667,7 +5667,7 @@ class helpers():
         if bracket_type != "winners":
             await ctx.response.send_message(
                 f"Match #{match_id} is a {'losers bracket' if bracket_type == 'losers' else 'Grand Finals'} "
-                f"match - correcting those isn't supported yet."
+                f"match. Correcting those isn't supported yet."
             )
             return
 
@@ -5685,7 +5685,7 @@ class helpers():
         )
         if self.cursor.fetchone()[0] > 0:
             await ctx.response.send_message(
-                f"Can't correct Match #{match_id} - the next round has already started."
+                f"Can't correct Match #{match_id}; the next round has already started."
             )
             return
 
@@ -5763,7 +5763,7 @@ class helpers():
         return teams
 
     # Every team in the guild `user_id` is a rostered player on (captain or
-    # not), what /my-teams pages through. Sorted by team_id so paging
+    # not), what /team mine pages through. Sorted by team_id so paging
     # stays stable across clicks even though this is recomputed fresh
     # from the DB on every page flip (see _handleMyTeamsPageClick), the same
     # way getLeaderboardEntries is recomputed fresh rather than snapshotted.
@@ -5778,8 +5778,8 @@ class helpers():
     # Narrower than getTeamsForPlayer above, only teams `user_id` actually
     # captains, not just any team they're rostered on. Backs the
     # autocomplete on team-name params for commands that require being
-    # that team's captain (/team-set, /team-rename, /team-delete,
-    # /team-invite, /tournament-register), same "only suggest what's
+    # that team's captain (/team set, /team rename, /team delete,
+    # /team invite, /tournament register), same "only suggest what's
     # actually usable" idea cardTitleAutocomplete's own comment describes,
     # just scoped to captaincy instead of unlocks. Sorted by team_id for
     # the same stability reason getTeamsForPlayer is.
@@ -5790,11 +5790,11 @@ class helpers():
         ]
         return sorted(captained, key=lambda entry: entry[0])
 
-    # ---------------- /team-list ----------------
+    # ---------------- /team list ----------------
 
-    # Every team in the guild, filtered/sorted for /team-list. `search` is a
+    # Every team in the guild, filtered/sorted for /team list. `search` is a
     # case-insensitive substring match on the team's name; `recruiting_only`
-    # keeps only teams that HAVE a target size (set via /team-create) and
+    # keeps only teams that HAVE a target size (set via /team create) and
     # haven't reached it yet; a team with no target size is an ephemeral
     # game-formation roster, never "recruiting" in the sense this filter
     # means. `member_ids` (a set, possibly empty/None) keeps only teams
@@ -5882,10 +5882,10 @@ class helpers():
     # as leaderboardHelper/myTeamsHelper; clicking a button
     # (_handleTeamListPageClick) edits this same message. `cards` switches
     # to the exact same one-team-full-stats-card-per-page rendering
-    # /my-teams uses (_renderMyTeamsEmbed/_myTeamsPageCount take a plain
+    # /team mine uses (_renderMyTeamsEmbed/_myTeamsPageCount take a plain
     # list of (team_id, team) tuples and don't care where it came from),
     # just sourced from every team matching search/recruiting_only/sort/
-    # order/members instead of one player's own teams, /my-teams for the
+    # order/members instead of one player's own teams, /team mine for the
     # whole server, in effect. `members` (a list of up to 5 discord.Member,
     # possibly empty) is stored as two parallel CSV columns rather than
     # re-derived on every page flip: memberIds is what _filterAndSortTeams
@@ -5953,7 +5953,7 @@ class helpers():
 
     # TeamListPagingView's button callback, no-ops (with a plain
     # ephemeral note) unless the interaction's message still matches an
-    # active /team-list page view. cardShown (only meaningful in cards
+    # active /team list page view. cardShown (only meaningful in cards
     # mode) carries across the flip, so paging while looking at a team's
     # trading card keeps showing trading cards, and paging on the plain
     # stats card keeps showing stats.
@@ -6024,7 +6024,7 @@ class helpers():
     # the currently-paged team's plain stats card for its actual trading
     # card. Re-derives which team is "current" from the view's own stored
     # filter/sort/page rather than trusting a fixed team_id, since /team-
-    # list cards:true pages through many teams (unlike /team-stats' own
+    # list cards:true pages through many teams (unlike /team stats' own
     # Card button, which only ever has the one team it was posted for).
     async def _handleTeamListShowCardClick(self, interaction):
         guild_id = interaction.guild_id
@@ -6097,7 +6097,7 @@ class helpers():
         self.db.commit()
 
     # Every built-in logo's name (filename minus extension), e.g. "Demacia"
-    # for assets/clash-logos/Demacia.png, what /team-set's logo autocomplete
+    # for assets/clash-logos/Demacia.png, what /team set's logo autocomplete
     # offers and validates against. Empty if the folder isn't there at all
     # (e.g. a dev checkout that never fetched it) rather than raising.
     def listAvailableLogos(self):
@@ -6141,7 +6141,7 @@ class helpers():
         self.db.commit()
 
     # Records one played tournament match against each side's PERSISTENT
-    # team record (the one /team-list, /my-teams, and /team-stats actually
+    # team record (the one /team list, /team mine, and /team stats actually
     # read), called from every match-resolution path (winners bracket,
     # losers bracket, Grand Finals). Looked up by name rather than trusting
     # the bracket node's own embedded Team object: that's just a snapshot
@@ -6187,8 +6187,8 @@ class helpers():
 
     # Creates a new persistent team with the caller as its captain. Unlike
     # the ephemeral team1/team2 a game gets, this one sticks around across
-    # sessions and is what /tournament-create's roster registration and
-    # /team-invite work against.
+    # sessions and is what /tournament create's roster registration and
+    # /team invite work against.
     async def createTeamHelper(self, ctx, name, team_size, captain_member=None):
         guild_id = ctx.guild.id
 
@@ -6212,7 +6212,7 @@ class helpers():
         self._saveNewTeam(guild_id, team)
 
         await ctx.response.send_message(
-            f"Team **{name}** created! {captain_user.mention} is the captain - looking for {team_size} player"
+            f"Team **{name}** created! {captain_user.mention} is the captain, looking for {team_size} player"
             f"{'s' if team_size != 1 else ''} total."
         )
 
@@ -6224,7 +6224,7 @@ class helpers():
                 return team
         return None
 
-    # /team-set: sets any combination of a persistent team's voice channel
+    # /team set: sets any combination of a persistent team's voice channel
     # and/or logo in one call, captain-only. `new_voice_channel` creates a
     # fresh channel named after the team (mutually exclusive with passing
     # an existing `voice_channel`); passing an existing channel that's
@@ -6266,7 +6266,7 @@ class helpers():
             logo_path = self._resolveLogoPath(logo)
             if logo_path is None:
                 await ctx.response.send_message(
-                    f"No logo named **{logo}** - pick one from the autocomplete list."
+                    f"No logo named **{logo}**; pick one from the autocomplete list."
                 )
                 return
 
@@ -6347,7 +6347,7 @@ class helpers():
 
         if force and not ctx.user.guild_permissions.manage_guild:
             await ctx.response.send_message(
-                "Only a member with the Manage Server permission can force-add players - "
+                "Only a member with the Manage Server permission can force-add players; "
                 "everyone else still needs the invitee's own confirmation."
             )
             return
@@ -6379,7 +6379,7 @@ class helpers():
                     await ctx.response.send_message(f"{member.display_name} is already on **{team_name}**.")
                 return
             reasons = "; ".join(f"{member.display_name} ({reason})" for member, reason in skipped)
-            await ctx.response.send_message(f"Nobody to invite - {reasons}.")
+            await ctx.response.send_message(f"Nobody to invite: {reasons}.")
             return
 
         if force:
@@ -6388,7 +6388,7 @@ class helpers():
             self.updateTeamData(team_id, team)
 
             mentions = ", ".join(member.mention for member in valid)
-            message = f"{mentions} added to **{team_name}** by {ctx.user.mention} - no confirmation needed."
+            message = f"{mentions} added to **{team_name}** by {ctx.user.mention}; no confirmation needed."
             if skipped:
                 reasons = "; ".join(f"{member.display_name} ({reason})" for member, reason in skipped)
                 message += f"\n(Not added: {reasons}.)"
@@ -6416,7 +6416,7 @@ class helpers():
             )
         self.db.commit()
 
-    # /team-leave: the self-service counterpart to /team-invite, no
+    # /team leave: the self-service counterpart to /team invite, no
     # captain/admin gate at all, since removing *yourself* needs nobody
     # else's permission. The captain can't use this one directly, though:
     # unlike every other team command, there's no "who's in charge now"
@@ -6424,7 +6424,7 @@ class helpers():
     # would break isTeamCaptain everywhere else it's checked (rename/set/
     # invite/delete) down to just "whoever has Manage Server." A captain
     # who wants out has to answer that question explicitly first, either
-    # /team-transfer to someone else already on the roster, or /team-delete
+    # /team transfer to someone else already on the roster, or /team delete
     # if the team shouldn't exist at all anymore.
     async def teamLeaveHelper(self, ctx, team_name):
         guild_id = ctx.guild.id
@@ -6437,8 +6437,8 @@ class helpers():
 
         if self.isTeamCaptain(team, ctx.user.id):
             await ctx.response.send_message(
-                f"You're **{team_name}**'s captain - use /team-transfer to hand off the captaincy first, "
-                "or /team-delete if you want the team gone entirely."
+                f"You're **{team_name}**'s captain; use /team transfer to hand off the captaincy first, "
+                "or /team delete if you want the team gone entirely."
             )
             return
 
@@ -6489,12 +6489,12 @@ class helpers():
     # afterward to update either.
     #
     # solo_team_name is always optional; if the caller already captains a
-    # size-1 team (found structurally, same lookup /team-invite's
+    # size-1 team (found structurally, same lookup /team invite's
     # solo-team logic never needed until now: captained by this player,
     # team_size exactly 1, no separate soloTeamId column to keep in sync),
     # omitting it just keeps that team as-is, and giving a new name
     # renames it through the same case-insensitive collision check
-    # /team-rename uses. Omitting it with no solo team yet names the new
+    # /team rename uses. Omitting it with no solo team yet names the new
     # one after the caller's current server display name instead; a
     # collision there (someone else's persistent team already has that
     # name) is the one case that still asks for an explicit name, same as
@@ -6516,11 +6516,11 @@ class helpers():
                 if auto_named:
                     await ctx.response.send_message(
                         f"Your display name, **{solo_team_name}**, is already taken by another team in "
-                        "this server - run /setup again with solo_team_name set to something else."
+                        "this server. Run /setup again with solo_team_name set to something else."
                     )
                 else:
                     await ctx.response.send_message(
-                        f"A team named **{solo_team_name}** already exists in this server - pick another "
+                        f"A team named **{solo_team_name}** already exists in this server; pick another "
                         "name for your solo team."
                     )
                 return
@@ -6537,7 +6537,7 @@ class helpers():
         elif solo_team_name.lower() != solo_team.get_name().lower():
             if self.getTeamRow(guild_id, solo_team_name) is not None:
                 await ctx.response.send_message(
-                    f"A team named **{solo_team_name}** already exists in this server - pick another "
+                    f"A team named **{solo_team_name}** already exists in this server; pick another "
                     "name for your solo team."
                 )
                 return
@@ -6631,7 +6631,7 @@ class helpers():
         row = self.cursor.fetchone()
         if row is None:
             await interaction.response.send_message(
-                "This role selection has expired - run /setup again.", ephemeral=True
+                "This role selection has expired. Run /setup again.", ephemeral=True
             )
             return
         step, selected_csv, liked_csv = row
@@ -6706,7 +6706,7 @@ class helpers():
         row = self.cursor.fetchone()
         if row is None:
             await interaction.response.send_message(
-                "This role selection has expired - run /setup again.", ephemeral=True
+                "This role selection has expired. Run /setup again.", ephemeral=True
             )
             return
 
@@ -6737,7 +6737,7 @@ class helpers():
         )
         self.db.commit()
 
-    # /team-rename: captain-only, same "must not collide with an existing
+    # /team rename: captain-only, same "must not collide with an existing
     # team name in this guild" rule createTeamHelper enforces on creation,
     # case-insensitively, same as getTeamRow's own lookup, so "red" is
     # rejected as taken if "Red" already exists. The one exception is a
@@ -6746,7 +6746,7 @@ class helpers():
     # below would just find this same team (case-insensitively) and wrongly
     # call it already taken. Doesn't touch anything else about the team
     # (voice channel, logo, roster, record); those are independent of the
-    # name once set, same as /team-set already treats them.
+    # name once set, same as /team set already treats them.
     async def teamRenameHelper(self, ctx, team_name, new_name):
         guild_id = ctx.guild.id
 
@@ -6780,14 +6780,14 @@ class helpers():
 
         await ctx.response.send_message(f"**{current_name}** has been renamed to **{new_name}**.")
 
-    # /team-transfer: hands off a persistent team's captaincy to another
+    # /team transfer: hands off a persistent team's captaincy to another
     # player already on its roster, the team's own captain, or any member
     # with the Manage Server permission, same "check manage_guild by hand"
-    # gate /team-rename and /team-delete both use. set_captain() itself
+    # gate /team rename and /team delete both use. set_captain() itself
     # enforces "captain must be a roster player" (see TourneyClasses.Team),
     # so the new captain has to already be rostered; inviting them first
     # is on the caller, not something this quietly does for them. This is
-    # what /team-leave's own "you're the captain, there's nobody to hand it
+    # what /team leave's own "you're the captain, there's nobody to hand it
     # to" block needed to exist before a captain could ever use it.
     async def teamTransferHelper(self, ctx, team_name, new_captain):
         guild_id = ctx.guild.id
@@ -6812,8 +6812,8 @@ class helpers():
         player = next((p for p in team.get_players() if p.get_id() == new_captain.id), None)
         if player is None:
             await ctx.response.send_message(
-                f"{new_captain.mention} isn't on **{team_name}**'s roster - invite them with "
-                "/team-invite first."
+                f"{new_captain.mention} isn't on **{team_name}**'s roster; invite them with "
+                "/team invite first."
             )
             return
 
@@ -6824,7 +6824,7 @@ class helpers():
             f"**{team_name}**'s captaincy has been transferred to {new_captain.mention}."
         )
 
-    # Deletes a team's row and any pending /team-invite for it (a stale
+    # Deletes a team's row and any pending /team invite for it (a stale
     # invite would otherwise just silently no-op the moment someone
     # accepted it, see _handleTeamInviteAcceptClick's own team-lookup
     # guard, rather than telling them it's gone). Doesn't touch a tournament this
@@ -6835,7 +6835,7 @@ class helpers():
         self.cursor.execute("DELETE FROM team_invites WHERE guildId=? AND teamId=?", (guild_id, team_id))
         self.db.commit()
 
-    # /team-delete: the team's own captain, or any member with the Manage
+    # /team delete: the team's own captain, or any member with the Manage
     # Server permission (so a team whose captain has left, gone inactive,
     # or is being abusive isn't stuck undeletable), either way,
     # confirmation-gated (see ConfirmTeamDeleteView) since it can't be
@@ -6861,7 +6861,7 @@ class helpers():
 
         view = ConfirmTeamDeleteView(self, guild_id, ctx.user.id, team_id, team_name)
         await ctx.response.send_message(
-            f"Delete **{team_name}**? This can't be undone - its roster, record, and any pending "
+            f"Delete **{team_name}**? This can't be undone: its roster, record, and any pending "
             "invites will all be gone.",
             view=view,
         )
@@ -6905,7 +6905,7 @@ class helpers():
 
         await interaction.response.send_message(f"**{target_name}** has joined **{team_name}**!")
 
-    # Builds a team's stats embed, shared by /team-stats and /my-teams's
+    # Builds a team's stats embed, shared by /team stats and /team mine's
     # paging, so both stay in sync automatically. Returns (embed, file):
     # file is None whenever there's no logo to attach (the built-in set was
     # unavailable when _ensureLogo ran, or the file's since been removed
@@ -7134,7 +7134,7 @@ class helpers():
 
     # The card half of TeamStatsView's toggle (see _handleTeamStatsShowCardClick),
     # re-fetches the team fresh (getTeamById) rather than trusting whatever
-    # was true when /team-stats first posted, same "always current"
+    # was true when /team stats first posted, same "always current"
     # approach _swapStatsForTradingCard takes for a player's live stats.
     # `view`, when given, is included in the same edit call that swaps the
     # image in, passing view=None here (the default) omits the kwarg
@@ -7155,7 +7155,7 @@ class helpers():
             edit_kwargs["view"] = view
         await message.edit(**edit_kwargs)
 
-    # The reverse: rebuilds the plain /team-stats embed
+    # The reverse: rebuilds the plain /team stats embed
     # (_renderTeamStatsEmbed, the same one teamStatsHelper itself posts) in
     # place of the card image. See _swapTeamStatsForCard on `view`.
     async def _swapTeamCardForStats(self, message, guild_id, team_id, view=None):
@@ -7219,15 +7219,15 @@ class helpers():
         )
         self.db.commit()
 
-    # ---------------- /my-teams ----------------
+    # ---------------- /team mine ----------------
 
     # One team per "page" rather than a batch of rows like /leaderboard;
-    # /my-teams is for flipping through each of a player's teams' full
+    # /team mine is for flipping through each of a player's teams' full
     # stats cards one at a time, not scanning a ranked list.
     def _myTeamsPageCount(self, teams):
         return max(1, len(teams))
 
-    # Same embed /team-stats uses, plus a "Team X/N" footer so paging has
+    # Same embed /team stats uses, plus a "Team X/N" footer so paging has
     # something to orient by (team-stats itself doesn't need one; there's
     # only ever the one team on screen there).
     def _renderMyTeamsEmbed(self, teams, page):
@@ -7279,8 +7279,8 @@ class helpers():
 
     # MyTeamsPagingView's button callback, no-ops (with a plain ephemeral
     # note) unless the interaction's message still matches an active
-    # /my-teams page view. The stored userId is whoever the list is ABOUT
-    # (the looked-up member, /my-teams' own optional `member` param,
+    # /team mine page view. The stored userId is whoever the list is ABOUT
+    # (the looked-up member, /team mine' own optional `member` param,
     # defaulting to whoever ran the command), not whoever clicks the
     # button; the button itself is clickable by anyone, and re-derives the
     # team list from that stored userId regardless of who actually clicked,
@@ -7361,7 +7361,7 @@ class helpers():
     # The "tournament just finished" results embed, every team REGISTERED
     # FOR THIS TOURNAMENT, ranked by its record IN THIS TOURNAMENT (see
     # _tournamentTeamRecords). Deliberately distinct from
-    # _renderTeamListEmbed (/team-list), which is server-wide
+    # _renderTeamListEmbed (/team list), which is server-wide
     # and all-time on purpose; this one exists specifically so a team that
     # played in a dozen past tournaments doesn't show up here with its
     # entire history, and a team that wasn't even in this one doesn't show
@@ -7449,9 +7449,9 @@ class helpers():
         if ranked:
             self.update(guild_id, "is_ranked", 1)
 
-        ranked_note = " (ranked - elo will update when the winner is reported)" if ranked else ""
+        ranked_note = " (ranked, elo will update when the winner is reported)" if ranked else ""
         # escape_markdown on the actual resolved names (not the raw args)
-        # so this reflects what /team-create stored even if the caller
+        # so this reflects what /team create stored even if the caller
         # typed different casing, and so a stray underscore/asterisk in
         # either name can't bleed italics/bold into the rest of the line.
         await ctx.response.send_message(
@@ -7463,8 +7463,8 @@ class helpers():
         team1_message, team2_message = await self.printEmbed(ctx, team1, team2)
         await self._finalizeRoster(guild_id, team1_message, team2_message, team1, team2, use_roles=False)
 
-    # /reuse: re-posts whichever two rosters /make-teams, /captains, or
-    # /team-use most recently produced, instead of drawing a fresh random
+    # /make-teams repeat: re-posts whichever two rosters /make-teams random, /make-teams draft, or
+    # /make-teams saved most recently produced, instead of drawing a fresh random
     # split, elo-balanced split, or captains draft. team1/team2 already
     # hold that exact roster until the next team-forming command
     # overwrites them (nothing clears them just because a game resolved,
@@ -7473,7 +7473,7 @@ class helpers():
     # roster_use_roles are read but never written here, so a reused ranked
     # game stays ranked, a casual one stays casual, and a roles-eligible
     # roster keeps showing role labels, "ranked behavior stays" the same
-    # as whatever the original game was, not whatever /reuse defaults to.
+    # as whatever the original game was, not whatever /make-teams repeat defaults to.
     async def reuseTeamsHelper(self, ctx):
         guild_id = ctx.guild.id
 
@@ -7481,8 +7481,8 @@ class helpers():
         team2_data = self.get(guild_id, "team2")
         if not team1_data or not team2_data:
             await ctx.response.send_message(
-                "No previous teams to reuse - make some first with /make-teams, /captains, or "
-                "/team-use."
+                "No previous teams to reuse. Make some first with /make-teams random, /make-teams draft, or "
+                "/make-teams saved."
             )
             return
 
@@ -7504,7 +7504,7 @@ class helpers():
 
         self.update(guild_id, "original_channel", "")
 
-        ranked_note = " (ranked - elo will update when the winner is reported)" if is_ranked else ""
+        ranked_note = " (ranked, elo will update when the winner is reported)" if is_ranked else ""
         await ctx.response.send_message(
             f"Reusing **{discord.utils.escape_markdown(team1.get_name())}** vs "
             f"**{discord.utils.escape_markdown(team2.get_name())}**{ranked_note}. "
@@ -7593,7 +7593,7 @@ class helpers():
             # markdown to them), so escaping here would show a stray
             # backslash instead of protecting anything.
             return name
-        # Team names are free text (/team-create, /team-rename). Escaped
+        # Team names are free text (/team create, /team rename). Escaped
         # here rather than at creation so the stored name stays exact;
         # an unescaped underscore/asterisk from one team's name can pair
         # up across the whole message with a marker from unrelated text
@@ -7732,7 +7732,7 @@ class helpers():
         await ctx.response.send_message(f"You wagered {amount} gold on Team {team} for match #{match_id}!")
 
 
-    # This guild's own configured betting-window length (/set's betting_timer
+    # This guild's own configured betting-window length (/set betting-timer's
     # param), or BETTING_DURATION_SECONDS for a guild that's never set one. Doesn't
     # go through self.get(); that crashes outright if there's no `servers`
     # row for this guild at all, which a real guild always has by the time
@@ -7746,7 +7746,7 @@ class helpers():
         return int(row[0])
 
     # Core of the above, taking guild_id/channel directly rather than a
-    # full Interaction; /tournament-start's sequential mode calls this
+    # full Interaction; /tournament start's sequential mode calls this
     # too, from a reaction handler that has no ctx to hand it. Cancels/
     # refunds any previous unresolved game first so re-opening never
     # leaves an orphaned timer or stranded bets behind.
@@ -7761,7 +7761,7 @@ class helpers():
     # betting_state is OPEN or CLOSED, so a fast game can be reported
     # before the window even closes.
     async def _openBetting(self, guild_id, channel):
-        # /set's wager_channel param redirects the whole cycle (open/closed/
+        # /set wager-channel's param redirects the whole cycle (open/closed/
         # report) there instead of wherever the roster's ▶️ reaction (or a
         # tournament match) ran;
         # once betting_channel_id below points at it, everything
@@ -7972,7 +7972,7 @@ class helpers():
             self, guild_id, winning_team, interaction.message.id, report_message=interaction.message
         )
         await interaction.response.send_message(
-            f"**{name}** reported as the winner - Confirm to finalize it (records elo and pays out "
+            f"**{name}** reported as the winner. Confirm to finalize it (records elo and pays out "
             "bets), or Cancel to report again.",
             view=view,
         )
@@ -8009,7 +8009,7 @@ class helpers():
         view = ConfirmCancelGameView(self, guild_id, interaction.message.id, report_message=interaction.message)
         await interaction.response.send_message(
             "Cancel this game? Any open bets get refunded and everyone moves back to the original "
-            "channel - Confirm to cancel, or Cancel to keep playing.",
+            "channel. Confirm to cancel, or Cancel to keep playing.",
             view=view,
         )
         view.message = await interaction.original_response()
@@ -8080,7 +8080,7 @@ class helpers():
         if guild is not None and await self.moveMembersToOriginalChannel(guild):
             await channel.send("Moved everyone back to the original channel!")
 
-        # /tournament-start (sequential mode) routes its matches through
+        # /tournament start (sequential mode) routes its matches through
         # this exact same betting/report cycle by temporarily setting
         # team1/team2 to the match's two teams; active_tournament_match_id
         # is how this function knows the game it just resolved was one of
@@ -8209,7 +8209,7 @@ class helpers():
         winner_name = challenger_name if winner_is_challenger else target_name
         view = ConfirmDuelResultView(self, duel_id, winner_is_challenger, report_message=interaction.message)
         await interaction.response.send_message(
-            f"**{winner_name}** reported as the winner - Confirm to pay out the wager, or Cancel to "
+            f"**{winner_name}** reported as the winner. Confirm to pay out the wager, or Cancel to "
             "report again.",
             view=view,
         )
@@ -8267,7 +8267,7 @@ class helpers():
             self.cursor.execute("DELETE FROM duels WHERE id=?", (duel_id,))
             self.db.commit()
             await channel.send(
-                f"Wager cancelled - one of you no longer has {amount} gold to cover it."
+                f"Wager cancelled: one of you no longer has {amount} gold to cover it."
             )
             return
 
@@ -8392,7 +8392,7 @@ class helpers():
         # Game record (game_wins/game_losses) is tracked for every reported
         # game regardless of ranked status. Elo is not; it's exclusive to
         # games started with ranked:true (is_ranked=True),
-        # so a casual /make-teams or /captains game never moves anyone's
+        # so a casual /make-teams random or /make-teams draft game never moves anyone's
         # rating. GAME_WIN_GOLD/GAME_LOSS_GOLD follow game_wins/game_losses'
         # lead here too; every rostered player gets one or the other, win
         # or lose, ranked or casual, entirely independent of anything they
@@ -8559,7 +8559,7 @@ class helpers():
         if summary["no_bets"]:
             lines.append("No bets were placed on this game.")
         elif summary["no_winning_bets"]:
-            lines.append("Nobody bet on the winning team - all bets were lost.")
+            lines.append("Nobody bet on the winning team; all bets were lost.")
         else:
             lines.append("Paying out bets...")
             for username, payout, amount in summary["winning_bettors"]:
@@ -8679,7 +8679,7 @@ class helpers():
         if match_id is not None:
             if invalidate:
                 await ctx.response.send_message(
-                    "Invalidating isn't supported for a specific tournament match yet - correct it "
+                    "Invalidating isn't supported for a specific tournament match yet; correct it "
                     "to the other team instead."
                 )
                 return
@@ -8711,7 +8711,7 @@ class helpers():
         if invalidate:
             self._invalidateLastResult(guild_id, last)
             await ctx.response.send_message(
-                f"**{team1_name}** vs **{team2_name}** has been invalidated - bets refunded and "
+                f"**{team1_name}** vs **{team2_name}** has been invalidated; bets refunded and "
                 "elo/records/gold undone, as if the game never happened."
             )
             return
@@ -8720,7 +8720,7 @@ class helpers():
 
         if last["winning_team"] == correct_team:
             await ctx.response.send_message(
-                f"**{correct_name}** is already the recorded winner - nothing to correct."
+                f"**{correct_name}** is already the recorded winner; nothing to correct."
             )
             return
 
@@ -9624,7 +9624,7 @@ class helpers():
         image.paste(logo, (x + (size - logo.width) // 2, y + (size - logo.height) // 2), logo)
 
     # Every logo in TEAM_LOGO_DIR, gridded with its own name underneath,
-    # the exact string /team-set's logo param (and its autocomplete) takes,
+    # the exact string /team set's logo param (and its autocomplete) takes,
     # so this doubles as a lookup table for "what do I actually type" as
     # well as a gallery.
     def _renderLogoPreviewImages(self):
@@ -9922,7 +9922,7 @@ class helpers():
             # own bolded names underneath it.
             embed.add_field(name=f"__{label}__", value="\n".join(lines), inline=False)
 
-        footer = "/shop-buy to purchase - equip with /card-set"
+        footer = "/shop-buy to purchase; equip with /card-set"
         if sort_key is not None:
             sort_label = "price" if sort_key == "price" else "owned status"
             direction = "descending" if descending else "ascending"
@@ -10602,7 +10602,7 @@ class helpers():
     # button (_handleLeaderboardPageClick) edits this same message rather than
     # posting a new one, so the current view is tracked by messageId here.
     # `cards` switches to _renderLeaderboardEntryStatsEmbed's one-player-
-    # per-page rendering instead, /my-teams-style, with its own Card/Back
+    # per-page rendering instead, /team mine-style, with its own Card/Back
     # toggle over to that player's actual trading card (see
     # LeaderboardPagingView), the whole leaderboard, /stats-card by
     # /stats-card, in whatever order was asked for.
@@ -10798,7 +10798,7 @@ class helpers():
     # trading card. Re-derives which player is "current" from the view's
     # own stored filter/order/page rather than trusting a fixed user_id,
     # same reasoning _handleTeamListShowCardClick already established for
-    # /team-list cards:true.
+    # /team list cards:true.
     async def _handleLeaderboardShowCardClick(self, interaction):
         guild_id = interaction.guild_id
         message = interaction.message
