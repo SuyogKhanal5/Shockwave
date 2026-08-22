@@ -11524,6 +11524,49 @@ class LeaderboardHelperTests(HelperTestCase):
         self.assertEqual(desc[-1]["user_id"], 903)
         self.assertEqual(asc[-1]["user_id"], 903)
 
+    def test_filter_drops_the_0w_0l_player_from_the_relevant_game_and_bet_views(self):
+        self._seed_players()
+        entries = self.helperObj.getLeaderboardEntries(GUILD_ID)
+        for stat in (None, "elo", "game_wins", "game_win_rate", "bet_wins", "bet_win_rate"):
+            filtered = self.helperObj._filterLeaderboardEntries(entries, stat)
+            self.assertNotIn(903, [e["user_id"] for e in filtered], f"stat={stat!r}")
+            self.assertEqual(len(filtered), 2, f"stat={stat!r}")
+
+    def test_filter_drops_everyone_from_a_ranked_view_when_nobody_has_played_ranked(self):
+        # _seed_players deliberately gives nobody a ranked-tagged game (see
+        # test_get_leaderboard_entries_computes_rates_and_none_for_no_games),
+        # so a ranked-scoped view should read as 0W-0L across the board.
+        self._seed_players()
+        entries = self.helperObj.getLeaderboardEntries(GUILD_ID)
+        filtered = self.helperObj._filterLeaderboardEntries(entries, "ranked_wins")
+        self.assertEqual(filtered, [])
+
+    def test_filter_keeps_everyone_for_stats_with_no_wins_losses_concept(self):
+        self._seed_players()
+        entries = self.helperObj.getLeaderboardEntries(GUILD_ID)
+        for stat in ("balance", "net_gold", "gold_wagered"):
+            filtered = self.helperObj._filterLeaderboardEntries(entries, stat)
+            self.assertIn(903, [e["user_id"] for e in filtered], f"stat={stat!r}")
+            self.assertEqual(len(filtered), 3, f"stat={stat!r}")
+
+    async def test_zero_record_player_is_left_off_the_posted_overview(self):
+        self._seed_players()
+        ctx = self._ctx()
+
+        await self.helperObj.leaderboardHelper(ctx, None, "desc")
+
+        embed = ctx.response.send_message.call_args.kwargs["embed"]
+        self.assertNotIn("Cleo", embed.description)
+
+    async def test_zero_record_player_still_shows_up_on_a_gold_view(self):
+        self._seed_players()
+        ctx = self._ctx()
+
+        await self.helperObj.leaderboardHelper(ctx, "balance", "asc")
+
+        embed = ctx.response.send_message.call_args.kwargs["embed"]
+        self.assertIn("Cleo", embed.description)
+
     async def test_successful_call_posts_embed_reacts_and_stores_page_state(self):
         self._seed_players()
         channel = FakeChannel("leaderboard-chat")
@@ -11596,10 +11639,12 @@ class LeaderboardCardsModeTests(HelperTestCase):
         self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
         self.helperObj.ensureEconomyRow(GUILD_ID, 902, "Bob")
         self.cursor.execute(
-            "UPDATE economy SET elo=1300 WHERE guildId=? AND userId=901", (GUILD_ID,)
+            "UPDATE economy SET elo=1300, game_wins=3, game_losses=1 "
+            "WHERE guildId=? AND userId=901", (GUILD_ID,)
         )
         self.cursor.execute(
-            "UPDATE economy SET elo=900 WHERE guildId=? AND userId=902", (GUILD_ID,)
+            "UPDATE economy SET elo=900, game_wins=1, game_losses=3 "
+            "WHERE guildId=? AND userId=902", (GUILD_ID,)
         )
         self.db.commit()
 
@@ -11681,7 +11726,8 @@ class LeaderboardPagingViewCardsModeTests(HelperTestCase):
         for user_id, name, elo in ((901, "Alice", 1300), (902, "Bob", 1200), (903, "Charlie", 1100)):
             self.helperObj.ensureEconomyRow(GUILD_ID, user_id, name)
             self.cursor.execute(
-                "UPDATE economy SET elo=? WHERE guildId=? AND userId=?", (elo, GUILD_ID, user_id)
+                "UPDATE economy SET elo=?, game_wins=1, game_losses=1 WHERE guildId=? AND userId=?",
+                (elo, GUILD_ID, user_id)
             )
         self.db.commit()
 
@@ -12020,7 +12066,7 @@ class LeaderboardPagingViewTests(HelperTestCase):
             user_id = 1000 + i
             self.helperObj.ensureEconomyRow(GUILD_ID, user_id, f"Player{i:02d}")
             self.cursor.execute(
-                "UPDATE economy SET elo=? WHERE guildId=? AND userId=?",
+                "UPDATE economy SET elo=?, game_wins=1, game_losses=1 WHERE guildId=? AND userId=?",
                 (1000 + i, GUILD_ID, user_id)
             )
         self.db.commit()

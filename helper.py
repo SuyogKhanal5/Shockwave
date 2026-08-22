@@ -739,6 +739,35 @@ LEADERBOARD_STAT_LABELS = {
     "gold_wagered": "Gold Wagered",
 }
 
+# Which (wins, losses) entry keys define a 0W-0L "hasn't done anything in
+# this category yet" player for a given /leaderboard stat, so that view can
+# drop them instead of listing them alongside people with an actual record.
+# None (the Overview default) and "elo" both use the combined game record
+# rather than the narrower ranked one, since a casual-only player still has
+# a meaningful elo/overview entry to show (their ranked record legitimately
+# reads 0W-0L); only someone who's never played a game at all, ranked or
+# casual, gets dropped here. Stats with no wins/losses concept (balance,
+# net_gold, gold_wagered) map to None and never filter anyone out.
+LEADERBOARD_RECORD_KEYS = {
+    None: ("game_wins", "game_losses"),
+    "elo": ("game_wins", "game_losses"),
+    "balance": None,
+    "game_wins": ("game_wins", "game_losses"),
+    "game_losses": ("game_wins", "game_losses"),
+    "game_win_rate": ("game_wins", "game_losses"),
+    "ranked_wins": ("ranked_wins", "ranked_losses"),
+    "ranked_losses": ("ranked_wins", "ranked_losses"),
+    "ranked_win_rate": ("ranked_wins", "ranked_losses"),
+    "casual_wins": ("casual_wins", "casual_losses"),
+    "casual_losses": ("casual_wins", "casual_losses"),
+    "casual_win_rate": ("casual_wins", "casual_losses"),
+    "bet_wins": ("bet_wins", "bet_losses"),
+    "bet_losses": ("bet_wins", "bet_losses"),
+    "bet_win_rate": ("bet_wins", "bet_losses"),
+    "net_gold": None,
+    "gold_wagered": None,
+}
+
 roles = {
     0: "Top - ",
     1: "Jungle - ",
@@ -10470,6 +10499,16 @@ class helpers():
             })
         return entries
 
+    # Drops 0W-0L entries for whichever record LEADERBOARD_RECORD_KEYS says
+    # `stat` is about (a player who's never done anything in that category),
+    # leaving every entry untouched for stats with no wins/losses concept.
+    def _filterLeaderboardEntries(self, entries, stat):
+        keys = LEADERBOARD_RECORD_KEYS.get(stat)
+        if keys is None:
+            return entries
+        wins_key, losses_key = keys
+        return [entry for entry in entries if entry[wins_key] or entry[losses_key]]
+
     # Sorts by entry[stat] (highest first for order="desc", lowest first
     # for order="asc") with entries missing that stat (None, e.g. a win
     # rate with no games played yet) always sinking to the bottom
@@ -10570,7 +10609,7 @@ class helpers():
     async def leaderboardHelper(self, ctx, stat, order, cards=False):
         guild_id = ctx.guild.id
 
-        entries = self.getLeaderboardEntries(guild_id)
+        entries = self._filterLeaderboardEntries(self.getLeaderboardEntries(guild_id), stat)
         if not entries:
             await ctx.response.send_message("Nobody has any stats to show yet in this server!")
             return
@@ -10616,7 +10655,7 @@ class helpers():
         cards = bool(cards)
         card_shown = bool(card_shown)
 
-        entries = self.getLeaderboardEntries(guild_id)
+        entries = self._filterLeaderboardEntries(self.getLeaderboardEntries(guild_id), stat)
         entries_sorted = self._sortLeaderboardEntries(entries, stat if stat is not None else "elo", order)
         if cards and not entries_sorted:
             # Everyone who ever had an economy row got cleared out from
@@ -10682,7 +10721,7 @@ class helpers():
             await interaction.response.defer()
             return
 
-        entries = self.getLeaderboardEntries(guild_id)
+        entries = self._filterLeaderboardEntries(self.getLeaderboardEntries(guild_id), stat)
         entries_sorted = self._sortLeaderboardEntries(entries, stat if stat is not None else "elo", order)
         guild_name = interaction.guild.name if interaction.guild is not None else ""
 
@@ -10775,7 +10814,7 @@ class helpers():
             return
         stat, order, page = row
 
-        entries = self.getLeaderboardEntries(guild_id)
+        entries = self._filterLeaderboardEntries(self.getLeaderboardEntries(guild_id), stat)
         entries_sorted = self._sortLeaderboardEntries(entries, stat if stat is not None else "elo", order)
         if not entries_sorted:
             await interaction.response.send_message("This leaderboard is no longer live.", ephemeral=True)
@@ -10812,7 +10851,7 @@ class helpers():
             return
         stat, order, page = row
 
-        entries = self.getLeaderboardEntries(guild_id)
+        entries = self._filterLeaderboardEntries(self.getLeaderboardEntries(guild_id), stat)
         entries_sorted = self._sortLeaderboardEntries(entries, stat if stat is not None else "elo", order)
         if not entries_sorted:
             await interaction.response.send_message("This leaderboard is no longer live.", ephemeral=True)

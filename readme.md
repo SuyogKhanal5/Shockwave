@@ -610,7 +610,13 @@ buttons, matching `ConfirmWinnerReportView`. Both `DuelAcceptView` and
 ### Leaderboard paging
 
 `/leaderboard` builds the full sorted/filtered player list once, up front, then
-only ever sends one message. `LeaderboardPagingView`'s First/Prev/Next/Last
+only ever sends one message. `getLeaderboardEntries` returns every player with
+an economy row; `_filterLeaderboardEntries` then drops anyone with a 0W-0L
+record in whichever category the selected stat is about (`LEADERBOARD_RECORD_KEYS`
+maps each stat to its relevant wins/losses pair, e.g. bet wins/losses for a bet
+stat, the combined game record for the elo-sorted overview), leaving stats with
+no wins/losses concept (balance, net gold, gold wagered) showing everyone.
+`LeaderboardPagingView`'s First/Prev/Next/Last
 buttons don't post anything new. `_handleLeaderboardPageClick` looks up the
 stored filter/order/page for that message id in the `leaderboards` table,
 recomputes the requested page, and edits the original message via
