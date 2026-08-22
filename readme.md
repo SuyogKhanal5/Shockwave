@@ -61,7 +61,7 @@ commands. For that, see addshockwave.com.
 ### Logging and database backups
 
 `BASE_DIR` (`os.path.dirname(os.path.abspath(__file__))`) anchors every path
-`bot.py` touches - the log file, `main.db`, the backups folder, `token.txt` -
+`bot.py` touches (the log file, `main.db`, the backups folder, `token.txt`)
 to this file's own directory rather than the process's current working
 directory, matching how `helper.py`'s own asset paths already work (see
 `TEAM_LOGO_DIR`/`FONTS_DIR`/etc.). A relative path resolves against whatever
@@ -70,7 +70,7 @@ machine (always `cd`-ing into the project folder first) and easy to get wrong
 under a service manager that doesn't set `WorkingDirectory` the same way.
 `token.txt` is also opened with `encoding="utf-8"` explicitly rather than
 whatever the platform's default text encoding happens to be (Windows' ANSI
-codepage vs. Linux's near-universal UTF-8) - harmless for a plain-ASCII token
+codepage vs. Linux's near-universal UTF-8), harmless for a plain-ASCII token
 today, but not left to chance either.
 
 `bot.py` configures the root logger at import time: a custom
@@ -82,7 +82,7 @@ just a `shockwave`-named one means discord.py's own internal logging
 reasoning as `main.db` itself.
 
 `MaxLinesFileHandler` caps the file at `LOG_FILE_MAX_LINES` (10,000) lines,
-dropping the oldest ones once it grows past that - a single,
+dropping the oldest ones once it grows past that, a single,
 chronologically-ordered file instead of `logging.handlers.RotatingFileHandler`'s
 size-based rotation into separate `shockwave.log`/`.1`/`.2`/`.3` files. It
 seeds its own in-memory line count from whatever's already on disk once, at
@@ -90,7 +90,7 @@ construction (a previous run's leftover log), rather than assuming an empty
 file, so a trim that's already overdue happens on the very first line this
 run emits rather than only once the file grows past the cap all over again.
 Trimming itself (`_trim`) closes the handler's own stream, rewrites the file
-with just the last `max_lines` lines kept, and reopens it - no locking of its
+with just the last `max_lines` lines kept, and reopens it; no locking of its
 own, since `logging.Handler.handle()` already wraps every `emit()` call (and
 so this, reached from inside one) in `self.acquire()`/`release()`.
 
@@ -98,8 +98,8 @@ so this, reached from inside one) in `self.acquire()`/`release()`.
 `on_ready` the same way `rotateStatus` is, and guarded against double-starting
 on a reconnect the same way) snapshots `main.db` into
 `data/guildData/backups/` once a day, then deletes any backup older than
-`BACKUP_RETENTION_DAYS` (7). It uses `mainDB.backup(backup_conn)` - sqlite3's
-own point-in-time backup API - rather than a plain file copy, since `main.db`
+`BACKUP_RETENTION_DAYS` (7). It uses `mainDB.backup(backup_conn)` (sqlite3's
+own point-in-time backup API) rather than a plain file copy, since `main.db`
 is a live connection other code can be reading/writing between event loop
 ticks and copying the raw file risks capturing it mid-write. It runs directly
 on the event loop rather than via `asyncio.to_thread`: `mainDB` was opened
@@ -109,19 +109,19 @@ well within the time a trading-card render already blocks the loop for.
 `data/guildData/backups/` is gitignored, same reasoning as `main.db`.
 
 `restore_backup.py`, run standalone (`python restore_backup.py`) with the bot
-stopped, is how a host reverts to one of those snapshots - no in-Discord
+stopped, is how a host reverts to one of those snapshots; no in-Discord
 command for it, since `main.db` is one shared database across every guild
 the bot serves, and a live restore triggered by one server's admin would
 silently roll back every other server's data too. It lists backups
 newest-first with their timestamp and size, restores whichever one is
-picked (by number or filename), and - before overwriting anything - copies
+picked (by number or filename), and, before overwriting anything, copies
 the current live `main.db` into `data/guildData/backups/` as
 `main-before-restore-<timestamp>.db`, so restoring the wrong backup, or
 restoring at all, is itself undoable the same way. The step-by-step version
 of this, aimed at whoever's actually hosting a copy of the bot rather than
 reading this file, lives on addshockwave.com's self-hosting guide.
 
-`LOG_LINE_MAX_LENGTH` (500) caps any single log line - a serialized team
+`LOG_LINE_MAX_LENGTH` (500) caps any single log line. A serialized team
 roster or a command's own object-repr params can run long, and one oversized
 line shouldn't be able to dominate the file. `_truncateForLog` is the shared
 helper that enforces it, used by the database, command, and completion
@@ -132,7 +132,7 @@ the file's many individual `cursor.execute()` calls: `_logDatabaseStatement`
 is registered via `mainDB.set_trace_callback`, sqlite3's own hook that
 receives the text of every statement actually executed on the connection,
 with bound parameters already expanded inline rather than left as raw `?`
-placeholders. It filters to just `INSERT`/`UPDATE`/`DELETE` - a `SELECT`, or
+placeholders. It filters to just `INSERT`/`UPDATE`/`DELETE`. A `SELECT`, or
 the trace callback's own `"BEGIN "` for an implicit transaction, isn't a
 mutation worth a permanent record. It logs unconditionally: `tests.py`'s own
 `BotModuleTestCase`-based tests exercise this same trace callback against
@@ -142,16 +142,16 @@ file handler was itself constructed with `open()` mocked out, so none of
 that ever reaches a real file.
 
 `LoggingCommandTree` (`bot.py`'s `tree`, subclassing `app_commands.CommandTree`)
-overrides `interaction_check` - a single global hook discord.py's own
+overrides `interaction_check` (a single global hook discord.py's own
 `CommandTree._call` runs before dispatching *any* application command in the
-tree - to log every real command invocation (name, params, calling user,
+tree) to log every real command invocation (name, params, calling user,
 guild) in one place, instead of instrumenting each of the ~40
 `@tree.command` functions individually. `interaction.command`/`.namespace`
 are independently-resolved cached properties on `Interaction`, so both are
 already available at this point even though the tree hasn't actually invoked
 the command yet. `interaction_check` also fires for autocomplete
 interactions (typing into a field with `@app_commands.autocomplete`), which
-would turn every keystroke into a logged "command called" - filtered out by
+would turn every keystroke into a logged "command called"; filtered out by
 checking `interaction.type is discord.InteractionType.application_command`.
 The override always returns `True` (matching the default implementation's
 behavior), so it never blocks anything; per-command checks like `/clear`'s
@@ -159,8 +159,8 @@ behavior), so it never blocks anything; per-command checks like `/clear`'s
 
 The whole body is wrapped in its own `try`/`except Exception`, logging and
 swallowing rather than letting anything through. `interaction.command`/
-`.namespace` run discord.py's real option-resolution machinery - nothing a
-`FakeInteraction`-based test can faithfully exercise - and
+`.namespace` run discord.py's real option-resolution machinery (nothing a
+`FakeInteraction`-based test can faithfully exercise), and
 `CommandTree._from_interaction`'s own wrapper only catches `AppCommandError`
 around the whole dispatch, so anything else raised here would otherwise
 escape uncaught: the interaction dies silently, Discord shows "This
@@ -187,17 +187,17 @@ running them one at a time, and a genuinely separate process means
 `_import_bot_module()` call gets the same inert, `open()`-mocked root log
 handler an ordinary `pytest tests.py` run from a terminal always has
 (`_import_bot_module()` patches `builtins.open` for the duration of `import
-bot`, so `MaxLinesFileHandler`'s very first `_open()` call - the one
-`logging.basicConfig` latches onto for the rest of that process's life -
+bot`, so `MaxLinesFileHandler`'s very first `_open()` call, the one
+`logging.basicConfig` latches onto for the rest of that process's life,
 returns a harmless mock stream, not a real file handle). None of the
 thousands of test-fixture DB-statement/asyncio-debug log lines a full run
 produces can leak into this file's own real log, because there's no shared
 process for them to leak into in the first place.
 
 Results come back via `--junitxml=<path>`, pytest-xdist's own
-already-stitched-across-workers summary - one `<testsuite tests=... failures=...
+already-stitched-across-workers summary (one `<testsuite tests=... failures=...
 errors=... time=...>` with a `<testcase>` per test, `<failure>`/`<error>`
-children on whichever ones didn't pass - parsed with `xml.etree.ElementTree`
+children on whichever ones didn't pass), parsed with `xml.etree.ElementTree`
 rather than scraping worker-interleaved terminal output. Every run logs one
 info-level line off that summary (`967/967 passed in 24.1s.`), pass or fail.
 A failing suite additionally logs a warning naming exactly which tests
@@ -206,7 +206,7 @@ full subprocess output at debug level, rather than aborting startup: a real
 deploy should still come up and serve players even if, say, a test itself is
 stale, rather than a self-test regression taking the whole bot down. The same
 reasoning covers pytest itself failing to launch, or running but never
-producing a report at all (e.g. a stale install missing `pytest-xdist`) - both
+producing a report at all (e.g. a stale install missing `pytest-xdist`), both
 are caught and logged as a warning rather than raised.
 
 ### Team formation
@@ -257,7 +257,7 @@ someone neutral on it, and only forcing in someone who marked it disliked if
 nobody else is left. A player playing a role they didn't like knocks 100 elo
 off their *effective* elo for balancing purposes only
 (`ROLE_BALANCE_OFF_ROLE_PENALTY`); a role they explicitly disliked knocks off
-200 (`ROLE_BALANCE_DISLIKED_ROLE_PENALTY`) - neither touches their real elo.
+200 (`ROLE_BALANCE_DISLIKED_ROLE_PENALTY`). Neither touches their real elo.
 `_refineRoleBalance` then hill-climbs on top of that first pass, trying
 pairwise role swaps between players and keeping any swap that lets
 `_splitRoleBalancedTeams` (a brute force over which of each role's two players
@@ -267,10 +267,10 @@ before, stopping once a full pass turns up no further improvement.
 Unlike those two, `ROLE_BALANCE_DISLIKED_ROLE_WIN_ELO_MULTIPLIER` (1.5) *does*
 touch real elo: `rankedTeamHelper` records every user_id who ended up on a
 disliked role in that particular split (`servers.disliked_role_user_ids`, a
-plain comma-separated list - set alongside `team1`/`team2`, so it lives and
+plain comma-separated list, set alongside `team1`/`team2`, so it lives and
 clears with them the same way, including surviving a `/reuse`), and
 `computeGameDeltas` multiplies up a winning player's own elo delta if their
-id is in that set for the game just resolved. Only a win earns it - a loss on
+id is in that set for the game just resolved. Only a win earns it. A loss on
 a disliked role gets no such break, just the plain team-average delta every
 teammate gets. It's a reward for actually pulling off a win on a less-wanted
 assignment, on top of whatever the normal team-average swing already gave
@@ -374,7 +374,7 @@ bot keeps responding to other commands, so the countdown runs as its own
 `self.bettingTasks` so Cancel Game or a fresh Start/Start (no move) click can
 cancel it instead of leaving it to fire later against a game that no longer
 exists. `_openBetting` also stamps `betting_opened_at` (unix seconds) on the
-`servers` row - `self.bettingTasks` is only ever in-memory, lost on a genuine
+`servers` row. `self.bettingTasks` is only ever in-memory, lost on a genuine
 process restart (though not a mere gateway reconnect, where it's untouched).
 Without that timestamp, a guild that had `betting_state=OPEN` at the moment of
 a restart would stay `OPEN` forever, since nobody would ever flip it to
@@ -393,7 +393,7 @@ A Reroll button sits alongside Start/Start (no move) on that same message, but
 only when the roster actually qualifies: `use_roles` was set and both teams
 landed at exactly 5. Since `RosterActionView` is one shared persistent
 instance, it can't conditionally omit a button per message the way adding a
-reaction conditionally once could - instead, `_finalizeRoster` builds the view
+reaction conditionally once could. Instead, `_finalizeRoster` builds the view
 with `include_reroll=roles_eligible`, which genuinely removes the item from
 that specific message (a persistent view's registration only governs custom_id
 routing, not which buttons any one message actually shows). Clicking Reroll
@@ -408,7 +408,7 @@ Betting state for a guild is a finite state machine stored in the
 doesn't wait for betting to close. `_openBetting` posts it immediately, in the
 same message as "betting is open," with a `WinnerReportView` (Team 1/Team 2/
 Cancel Game buttons) attached right from the start, and stores that message's
-id before returning. Team 1/Team 2 aren't fixed labels - `_openBetting` reads
+id before returning. Team 1/Team 2 aren't fixed labels. `_openBetting` reads
 the roster's own name back with `getRosterName(..., escape=False)` (the
 `escape=False` skips the markdown-escaping the same call does for message
 text, since a button label renders as plain text and would otherwise show a
@@ -445,7 +445,7 @@ live: `_handleWinnerReportPick` posts `ConfirmWinnerReportView`
 (Confirm/Cancel), `_handleWinnerReportCancelClick` posts
 `ConfirmCancelGameView` (Confirm/Cancel). Neither a real elo/payout/
 game-record change nor a refund-and-move-everyone-back should hinge on one
-accidental click - only Start/Start (no move)/Reroll stay single-click,
+accidental click. Only Start/Start (no move)/Reroll stay single-click,
 since a fresh roster or `/clear` cleanly undoes those, while a recorded
 result only has the heavier `/report-correct-winner` as its way back, and a
 cancelled game (refunded bets, everyone moved) has no undo at all.
@@ -453,9 +453,9 @@ cancelled game (refunded bets, everyone moved) has no undo at all.
 Confirm on the winner-report side calls `recordResult` with the
 channel/guild from the button-click interaction itself. Confirm on the
 cancel side calls `_finishGameCancel`, which is just `cancelGameHelper` (the
-refund via `cancelBettingHelper` - also clearing `active_tournament_match_id`,
+refund via `cancelBettingHelper`, also clearing `active_tournament_match_id`,
 so an abandoned tournament match's bracket-advance hook can't fire against
-whatever unrelated game starts next - plus the move back to the original
+whatever unrelated game starts next, plus the move back to the original
 channel) followed by stripping the original report message's own buttons.
 Both Confirm paths finish by calling `_clearMessageButtons` on the original
 report message (`view=None`), so a resolved or cancelled game stops showing
@@ -599,7 +599,7 @@ players' gold is only locked once the target presses Accept
 `_clearMessageButtons` right after `_acceptDuel` runs, at which point a second
 message goes out with a `DuelResultView` (Challenger Won/Target Won buttons).
 Picking a result posts a `ConfirmDuelResultView` rather than paying out
-immediately - the same two-step confirm shape the team-game winner report
+immediately, the same two-step confirm shape the team-game winner report
 uses, for the same reason (a real gold transfer shouldn't hinge on one
 accidental click). Confirming there also strips the result message's own
 buttons, matching `ConfirmWinnerReportView`. Both `DuelAcceptView` and
@@ -616,7 +616,7 @@ stored filter/order/page for that message id in the `leaderboards` table,
 recomputes the requested page, and edits the original message via
 `interaction.response.edit_message()`. `/my-teams` and `/team-list` page the
 exact same way, through their own `MyTeamsPagingView`/`TeamListPagingView` and
-`my_team_views`/`team_list_views` tables - all three share a single
+`my_team_views`/`team_list_views` tables; all three share a single
 `_computeNewPage(direction, page, total_pages)` helper for the First/Prev/
 Next/Last arithmetic itself, so that part can't drift out of sync between
 them. All three paging views are persistent too, for the same "shouldn't die
@@ -811,7 +811,7 @@ yet) and inserts a `setup_role_sessions` row keyed by that message's id.
 Each `SetupRoleToggleButton` shows `primary` (highlighted) when its role is
 currently selected, `secondary` otherwise, so the live selection is visible at
 a glance. There's no separate "un-click" the way a reaction's remove event
-was - pressing an already-selected role's button toggles it off the exact same
+was; pressing an already-selected role's button toggles it off the exact same
 way pressing an unselected one toggles it on. `_handleSetupRoleToggleClick`
 flips that one role in the session's `selectedRoles` column (a plain
 `symmetric_difference_update`) and rebuilds a fresh `SetupRoleSelectionView`
@@ -827,7 +827,7 @@ liked set, flips the session to the disliked step, and edits the message in
 with a brand new `SetupRoleSelectionView` (`selected_roles=()`) for the second
 round, rather than reusing the same view instance the way
 `ConfirmResetView`/`ConfirmTeamDeleteView` reuse `self` in their own button
-callbacks - the disliked round has to start every button back at unselected,
+callbacks; the disliked round has to start every button back at unselected,
 which a fresh instance gives for free. Which step is live is still read fresh
 from `setup_role_sessions` on every click either way, not tracked on the view
 itself.
@@ -851,7 +851,7 @@ deleting the session row and editing the message to say so, the same
 
 `/make-teams`'s `use_roles` param reads `hasCompletedSetup`: before forming
 role-based teams (casual or, combined with `ranked:true`, elo-balanced ones
-too - see Team formation), `bot.py` checks every non-bot member currently in
+too, see Team formation), `bot.py` checks every non-bot member currently in
 the caller's voice channel, and if anyone hasn't run `/setup` to completion
 yet, it stops and mentions who's still missing instead of forming plain
 (role-less) teams or failing partway through.
@@ -921,13 +921,13 @@ scale, so the drawing code itself never has to think about the scale factor.
 Every top-level render call (`renderBracketImages`, `_buildGrandFinalsImage`,
 `_renderMatchupImage`, `_renderTeamCardImage`, `_renderTradingCardImage`,
 `_renderPreviewImages`) is invoked via `asyncio.to_thread` from its own async
-caller, not called directly - Pillow's actual drawing work (many draw/text/
+caller, not called directly. Pillow's actual drawing work (many draw/text/
 paste calls per image) would otherwise block the event loop, and so every
 other guild's commands, for the whole time one image takes to render.
 `_imageToFile`'s own downscale is left on the main thread, a comparatively
 small cost next to the drawing itself. `_renderGrandFinalsImage` is the one
 render function that also reads from the database (which stage of Grand
-Finals has actually been played) - genuinely unsafe to run from a different
+Finals has actually been played), genuinely unsafe to run from a different
 thread, since `self.cursor` was opened with sqlite3's default
 `check_same_thread=True`. It's split into `_grandFinalsRenderInputs` (the DB
 read, run on the calling thread) and `_buildGrandFinalsImage` (the pure
@@ -1087,7 +1087,7 @@ back to the ring only if the built-in set itself is unavailable.
 
 `/stats` posts a `StatsView` alongside the embed: Avatar, Card, and (once the
 card is up) Back buttons. `StatsView` is persistent, same reasoning as
-`WinnerReportView` - nothing ever expires a `/stats` view on its own. Avatar
+`WinnerReportView`; nothing ever expires a `/stats` view on its own. Avatar
 toggles the thumbnail between this server's own profile picture for that
 player and their regular, account-wide one. `_resolveMemberAvatarUrl` handles
 the server half (`member.display_avatar`, which already resolves a per-server
@@ -1120,7 +1120,7 @@ might need; which ones a given message actually shows is decided per-render,
 the same way `RosterActionView`'s own Reroll button is included or omitted).
 Pressing Back rebuilds the plain `/stats` embed (`_buildStatsEmbed`) via
 `_swapTradingCardForStats`, sets `stats_views.cardShown` back to 0, and swaps
-Back back out for Card - a real back-and-forth toggle.
+Back back out for Card, a real back-and-forth toggle.
 
 Avatar isn't touched by either swap, since it applies on both sides of the
 embed/card divide. `_handleStatsAvatarToggleClick` branches on `cardShown`,
@@ -1391,7 +1391,7 @@ in a shared `__Other__` field.
 
 `/team-stats` gets the same card treatment as `/stats`, via its own
 `TeamStatsView` (Card/Back buttons, same persistent shape as `StatsView` minus
-the avatar toggle - a team card has no per-player avatar to flip): Card throws
+the avatar toggle, a team card has no per-player avatar to flip): Card throws
 the embed away for a portrait card (`_renderTeamCardImage`) built around the
 team's own logo as the focal point.
 
