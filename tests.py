@@ -71,7 +71,7 @@ SERVERS_SCHEMA = (
     "active_tournament_match_id, wager_channel, betting_timer_seconds, "
     "roster_team1_message_id, roster_team2_message_id, roster_channel_id, "
     "roster_use_roles DEFAULT 0, default_elo, betting_opened_at, disliked_role_user_ids, "
-    "draft_pick_page DEFAULT 0, draft_players_message_id)"
+    "draft_pick_page DEFAULT 0, draft_players_message_id, draft_snake DEFAULT 0)"
 )
 ECONOMY_SCHEMA = (
     "CREATE TABLE economy(guildId, userId, username, balance, wins, losses, "
@@ -175,7 +175,7 @@ def insert_guild_row(cursor, db, guild_id=GUILD_ID, name="Test Guild"):
     cursor.execute(
         "INSERT INTO servers VALUES(?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, "
         "NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'NONE', NULL, NULL, 0, NULL, NULL, ?, "
-        "NULL, NULL, NULL, 0, NULL, NULL, NULL, 0, NULL)",
+        "NULL, NULL, NULL, 0, NULL, NULL, NULL, 0, NULL, 0)",
         (guild_id, name, helper_module.BETTING_DURATION_SECONDS),
     )
     db.commit()
@@ -1554,6 +1554,58 @@ class CaptainsHelperTests(HelperTestCase):
 
         ctx.response.send_message.assert_awaited_once_with("Mention two team captains!")
 
+    async def test_snake_flag_defaults_off(self):
+        captain1 = FakeMember("Cap1", id=301)
+        captain2 = FakeMember("Cap2", id=302)
+        ctx = self._ctx(captain1, captain2, [])
+
+        await self.helperObj.captainsHelper(ctx, captain1, captain2)
+
+        self.assertEqual(self.helperObj.get(GUILD_ID, "draft_snake"), 0)
+        ctx.response.send_message.assert_awaited_with("Captains selected!")
+
+    async def test_snake_true_persists_the_flag_and_notes_it_in_the_message(self):
+        captain1 = FakeMember("Cap1", id=301)
+        captain2 = FakeMember("Cap2", id=302)
+        ctx = self._ctx(captain1, captain2, [])
+
+        await self.helperObj.captainsHelper(ctx, captain1, captain2, snake=True)
+
+        self.assertEqual(self.helperObj.get(GUILD_ID, "draft_snake"), 1)
+        message = ctx.response.send_message.call_args.args[0]
+        self.assertIn("Snake draft", message)
+
+
+class NextDraftTurnTests(HelperTestCase):
+    def _team(self, size):
+        team = Team()
+        for i in range(size):
+            team.add_player(Player(i, f"P{i}"))
+        return team
+
+    def test_straight_alternation_when_snake_flag_is_off(self):
+        self.helperObj.update(GUILD_ID, "draft_snake", 0)
+        team1, team2 = self._team(2), self._team(1)
+
+        self.assertEqual(self.helperObj._nextDraftTurn(GUILD_ID, 1, team1, team2), 2)
+        self.assertEqual(self.helperObj._nextDraftTurn(GUILD_ID, 2, team1, team2), 1)
+
+    # Classic 2-side snake pattern: whoever picks pick N (1-indexed) is
+    # 1,2,2,1,1,2,2,1,... Each (team1_size, team2_size) pair here is the
+    # POST-pick roster state _applyDraftPick would have after pick N (one
+    # captain each to start, so team sizes 2/1 is "after pick 1"), and the
+    # expected value is who picks pick N+1.
+    def test_snake_sequence_across_first_eight_picks(self):
+        self.helperObj.update(GUILD_ID, "draft_snake", 1)
+        sizes_after_each_pick = [(2, 1), (2, 2), (2, 3), (3, 3), (4, 3), (4, 4), (4, 5), (5, 5)]
+        expected_next_picker = [2, 2, 1, 1, 2, 2, 1, 1]
+
+        for (team1_size, team2_size), expected in zip(sizes_after_each_pick, expected_next_picker):
+            team1, team2 = self._team(team1_size), self._team(team2_size)
+            # `turn` (who just picked) is irrelevant to the snake formula,
+            # only the pool index derived from team1/team2's sizes is.
+            self.assertEqual(self.helperObj._nextDraftTurn(GUILD_ID, 1, team1, team2), expected)
+
 
 class CaptainsDraftPickTests(HelperTestCase):
     def setUp(self):
@@ -1566,12 +1618,12 @@ class CaptainsDraftPickTests(HelperTestCase):
         # fetch_message(id) to resolve anything.
         self.channel = FakeChannel("draft-chat")
 
-    async def _draft_setup(self, pool_ids_names):
+    async def _draft_setup(self, pool_ids_names, snake=False):
         captain1 = FakeMember("Cap1", id=401)
         captain2 = FakeMember("Cap2", id=402)
         pool = [FakeMember(name, id=pid) for pid, name in pool_ids_names]
         ctx = self._ctx(captain1, captain2, pool)
-        await self.helperObj.captainsHelper(ctx, captain1, captain2)
+        await self.helperObj.captainsHelper(ctx, captain1, captain2, snake=snake)
         return captain1, captain2, pool, ctx
 
     def _ctx(self, captain1, captain2, pool_members, user=None):
@@ -1675,6 +1727,22 @@ class CaptainsDraftPickTests(HelperTestCase):
         content = pick_ctx.response.edit_message.call_args.kwargs["content"]
         self.assertIn(f"<@{captain2.id}>", content)
 
+    async def test_snake_draft_reverses_pick_order_every_two_picks(self):
+        pool_entries = [(600 + i, f"Pool{i}") for i in range(6)]
+        captain1, captain2, pool, ctx = await self._draft_setup(pool_entries, snake=True)
+
+        # Classic 2-side snake pattern: 1,2,2,1,1,2,... instead of strictly
+        # alternating every single pick.
+        expected_pickers = [1, 2, 2, 1, 1, 2]
+        actual_pickers = []
+        for _ in expected_pickers:
+            turn = self.helperObj.get(GUILD_ID, "turn")
+            actual_pickers.append(turn)
+            picker = captain1 if turn == 1 else captain2
+            await self.helperObj._handleDraftPickSlotClick(self._pick_ctx(picker), 0)
+
+        self.assertEqual(actual_pickers, expected_pickers)
+
     async def test_slot_click_out_of_range_is_rejected(self):
         captain1, captain2, pool, ctx = await self._draft_setup([(501, "Pool1")])
         pick_ctx = self._pick_ctx(captain1)
@@ -1714,6 +1782,25 @@ class CaptainsDraftPickTests(HelperTestCase):
         self.assertEqual(players_message.edit.await_count, 1)
         self.assertIn("Pool1", team1_message.edit.call_args.kwargs["embed"].description)
         self.assertNotIn("Pool1", players_message.edit.call_args.kwargs["embed"].description)
+
+    # Regression test: a caught HTTPException on any one of the three
+    # embed edits used to be swallowed with a bare `pass`, silent even in
+    # shockwave.log; a player who actually got drafted could stay shown in
+    # PLAYERS indefinitely with zero trace of why. Now it's logged, and the
+    # other two edits still go through regardless of which one failed.
+    async def test_a_failed_players_embed_edit_is_logged_and_does_not_block_the_others(self):
+        captain1, captain2, pool, ctx = await self._draft_setup([(501, "Pool1"), (502, "Pool2")])
+        team1_message = await self.channel.fetch_message(self.helperObj.get(GUILD_ID, "roster_team1_message_id"))
+        players_message = await self.channel.fetch_message(self.helperObj.get(GUILD_ID, "draft_players_message_id"))
+        players_message.edit.side_effect = discord.HTTPException(
+            SimpleNamespace(status=429, reason="Too Many Requests"), "rate limited"
+        )
+
+        with self.assertLogs("shockwave", level="ERROR") as cm:
+            await self.helperObj._handleDraftPickSlotClick(self._pick_ctx(captain1), 0)
+
+        self.assertTrue(any("PLAYERS" in message for message in cm.output))
+        self.assertEqual(team1_message.edit.await_count, 1)
 
     async def test_multiple_picks_keep_editing_the_same_messages(self):
         captain1, captain2, pool, ctx = await self._draft_setup(
@@ -1880,6 +1967,16 @@ class TestDraftHelperTests(HelperTestCase):
         captain2.deserializePlayer(self.helperObj.get(GUILD_ID, "captain2"))
         self.assertEqual(captain1.get_id(), 901)
         self.assertEqual(captain2.get_id(), 901)
+
+    async def test_always_runs_as_a_snake_draft(self):
+        others = [FakeMember(f"P{i}", id=1000 + i) for i in range(10)]
+        ctx = self._ctx(members=others)
+
+        await self.helperObj.testDraftHelper(ctx)
+
+        self.assertEqual(self.helperObj.get(GUILD_ID, "draft_snake"), 1)
+        message = ctx.response.send_message.call_args.args[0]
+        self.assertIn("snake draft", message)
 
     async def test_caller_can_pick_for_both_turns(self):
         others = [FakeMember(f"P{i}", id=1000 + i) for i in range(10)]
@@ -8414,7 +8511,7 @@ class ComputeGameDeltasTests(HelperTestCase):
         self.assertEqual(summary["loser_gold_count"], 0)
 
     def test_applying_then_reversing_deltas_is_a_no_op(self):
-        # this is exactly what /report-correct-winner relies on: reversing
+        # this is exactly what /set correct-winner relies on: reversing
         # a previously-applied result must land back on the exact starting
         # values, not an approximation.
         wagers = [(901, "Alice", 1, 100), (902, "Bob", 2, 300)]
@@ -13034,7 +13131,7 @@ class CommandRegistrationTests(BotModuleTestCase):
             "set", "wager", "daily",
             "stats", "card-set", "shop",
             "achievements",
-            "leaderboard", "help", "make-teams", "report-correct-winner",
+            "leaderboard", "help", "make-teams",
             "clear", "notify",
             "roll", "team", "tournament",
             "setup", "test-draft",
@@ -13065,7 +13162,10 @@ class CommandRegistrationTests(BotModuleTestCase):
 
     def test_set_group_has_the_expected_subcommands(self):
         names = {c.name for c in self._command("set").commands}
-        self.assertEqual(names, {"channels", "team-size", "betting-timer", "wager-channel", "elo", "default-elo"})
+        self.assertEqual(
+            names,
+            {"channels", "team-size", "betting-timer", "wager-channel", "elo", "default-elo", "correct-winner"},
+        )
 
     def test_clear_group_has_the_expected_subcommands(self):
         names = {c.name for c in self._command("clear").commands}
@@ -15000,7 +15100,25 @@ class CaptainsCommandTests(BotModuleTestCase):
                 ctx, captain_1=cap1, captain_2=cap2, use_random=False
             )
 
-        mock.assert_awaited_once_with(ctx, cap1, cap2, ranked=False)
+        mock.assert_awaited_once_with(ctx, cap1, cap2, ranked=False, snake=False)
+
+    async def test_snake_captains_delegates_with_snake_flag(self):
+        guild_id = 9092
+        await self._insert_guild_row(guild_id)
+        cap1 = FakeMember("Cap1", id=1)
+        cap2 = FakeMember("Cap2", id=2)
+        voice_channel = FakeChannel("Lobby", members=[cap1, cap2])
+        user = FakeMember("Caller", id=3)
+        user.voice = FakeVoiceState(voice_channel)
+        ctx = FakeInteraction(FakeGuild(id=guild_id), user)
+
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "captainsHelper", mock):
+            await self._command("make-teams draft").callback(
+                ctx, captain_1=cap1, captain_2=cap2, use_random=False, snake=True
+            )
+
+        mock.assert_awaited_once_with(ctx, cap1, cap2, ranked=False, snake=True)
 
     async def test_ranked_captains_delegates_with_ranked_flag(self):
         guild_id = 9091
@@ -15018,7 +15136,7 @@ class CaptainsCommandTests(BotModuleTestCase):
                 ctx, captain_1=cap1, captain_2=cap2, use_random=False, ranked=True
             )
 
-        mock.assert_awaited_once_with(ctx, cap1, cap2, ranked=True)
+        mock.assert_awaited_once_with(ctx, cap1, cap2, ranked=True, snake=False)
 
     async def test_use_random_picks_two_distinct_captains_from_voice_channel(self):
         # Regression test: this path used to store a plain Python list as
@@ -15036,7 +15154,7 @@ class CaptainsCommandTests(BotModuleTestCase):
 
         captured = {}
 
-        async def fake_captains_helper(c, captain1, captain2, ranked=False):
+        async def fake_captains_helper(c, captain1, captain2, ranked=False, snake=False):
             captured["captain1"] = captain1
             captured["captain2"] = captain2
 
@@ -15111,13 +15229,13 @@ class TeamListCommandTests(BotModuleTestCase):
         mock.assert_awaited_once_with(ctx, None, False, "name", "asc", False, [alice, bob])
 
 
-class ReportCorrectWinnerCommandTests(BotModuleTestCase):
+class SetCorrectWinnerCommandTests(BotModuleTestCase):
     async def test_delegates_with_resolved_team_value(self):
         ctx = self._ctx()
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "reportCorrectWinnerHelper", mock):
             choice = app_commands.Choice(name="Team 2", value=2)
-            await self._command("report-correct-winner").callback(ctx, choice)
+            await self._command("set correct-winner").callback(ctx, choice)
         mock.assert_awaited_once_with(ctx, 2, None, False)
 
     async def test_delegates_with_match_id(self):
@@ -15125,18 +15243,18 @@ class ReportCorrectWinnerCommandTests(BotModuleTestCase):
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "reportCorrectWinnerHelper", mock):
             choice = app_commands.Choice(name="Team 2", value=2)
-            await self._command("report-correct-winner").callback(ctx, choice, match_id=42)
+            await self._command("set correct-winner").callback(ctx, choice, match_id=42)
         mock.assert_awaited_once_with(ctx, 2, 42, False)
 
     async def test_delegates_with_invalidate_and_no_team(self):
         ctx = self._ctx()
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "reportCorrectWinnerHelper", mock):
-            await self._command("report-correct-winner").callback(ctx, invalidate=True)
+            await self._command("set correct-winner").callback(ctx, invalidate=True)
         mock.assert_awaited_once_with(ctx, None, None, True)
 
     def test_requires_manage_guild_permission(self):
-        cmd = self._command("report-correct-winner")
+        cmd = self._command("set correct-winner")
         denied = SimpleNamespace(permissions=discord.Permissions.none())
 
         with self.assertRaises(app_commands.MissingPermissions):
@@ -15144,14 +15262,14 @@ class ReportCorrectWinnerCommandTests(BotModuleTestCase):
                 check(denied)
 
     def test_manage_guild_permission_is_sufficient(self):
-        cmd = self._command("report-correct-winner")
+        cmd = self._command("set correct-winner")
         allowed = SimpleNamespace(permissions=discord.Permissions(manage_guild=True))
 
         for check in cmd.checks:
             self.assertTrue(check(allowed))
 
     async def test_error_handler_gives_a_friendly_denial_message(self):
-        cmd = self._command("report-correct-winner")
+        cmd = self._command("set correct-winner")
         ctx = self._ctx()
 
         await cmd.on_error(ctx, app_commands.MissingPermissions(["manage_guild"]))
@@ -15160,7 +15278,7 @@ class ReportCorrectWinnerCommandTests(BotModuleTestCase):
         self.assertIn("Manage Server", ctx.response.send_message.call_args.args[0])
 
     async def test_error_handler_reraises_unrelated_errors(self):
-        cmd = self._command("report-correct-winner")
+        cmd = self._command("set correct-winner")
         ctx = self._ctx()
 
         with self.assertRaises(RuntimeError):

@@ -177,7 +177,7 @@ if not db_already_existed:
         "active_tournament_match_id, wager_channel, betting_timer_seconds, "
         "roster_team1_message_id, roster_team2_message_id, roster_channel_id, roster_use_roles, "
         "default_elo, betting_opened_at, disliked_role_user_ids, draft_pick_page, "
-        "draft_players_message_id)"
+        "draft_players_message_id, draft_snake)"
     )
     mainDB.commit()
 else:
@@ -249,6 +249,12 @@ else:
     # roster_team1_message_id/roster_team2_message_id already are, instead
     # of _applyDraftPick reposting all three embeds from scratch each time.
     ensure_column("servers", "draft_players_message_id", "INTEGER")
+    # Whether the CURRENT captain draft (/make-teams draft snake:true, or
+    # /test-draft, which always runs one) reverses pick order every 2 picks
+    # instead of alternating every single pick; see _nextDraftTurn. Lives
+    # and clears alongside team1/team2 (see clearTeamsHelper), the same
+    # shape disliked_role_user_ids already uses.
+    ensure_column("servers", "draft_snake", "INTEGER", "0")
 
 # Per-member currency: gold balance plus win/loss and wagering stats, one
 # row per (guild, user).
@@ -284,7 +290,7 @@ cursor.execute(
     "PRIMARY KEY(guildId, userId))"
 )
 # Snapshot of the most recently resolved game per guild (wagers, rosters,
-# and the exact deltas applied), lets /report-correct-winner undo a
+# and the exact deltas applied), lets /set correct-winner undo a
 # misreported result precisely instead of guessing at what to reverse.
 cursor.execute(
     "CREATE TABLE IF NOT EXISTS last_result(guildId PRIMARY KEY, data)"
@@ -446,7 +452,7 @@ cursor.execute(
 )
 # One row per tournament match ever played; /tournament start creates a
 # batch of these per round (sequential: one at a time; simultaneous: all
-# at once), each keyed by its own id so /report-correct-winner can target
+# at once), each keyed by its own id so /set correct-winner can target
 # a specific match. nodeIndex is the index into the tournament's bracket
 # list of one of the two paired nodes for this match (the other is that
 # node's .opponent); that's how a resolved match knows which bracket
@@ -468,7 +474,7 @@ ensure_column("tournament_matches", "bracketType", "TEXT", "'winners'")
 ensure_column("tournament_matches", "bettingClosed", "INTEGER", "0")
 # JSON snapshot of exactly which wagers _settleMatchWagers paid out for this
 # match (userId/username/team/amount); tournament_wagers rows themselves
-# get deleted once settled, so without this a later /report-correct-winner
+# get deleted once settled, so without this a later /set correct-winner
 # match_id correction would have no way to know who to reverse/repay.
 # NULL for a match nobody bet on, or one settled before this existed.
 ensure_column("tournament_matches", "settledWagers", "TEXT")
@@ -699,7 +705,7 @@ def ensure_guild_row(guild_id, guild_name):
     cursor.execute(
         "INSERT INTO servers VALUES(?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, "
         "NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'NONE', NULL, NULL, 0, NULL, NULL, ?, "
-        "NULL, NULL, NULL, 0, NULL, NULL, NULL, 0, NULL)",
+        "NULL, NULL, NULL, 0, NULL, NULL, NULL, 0, NULL, 0)",
         (guild_id, guild_name, helper.BETTING_DURATION_SECONDS)
     )
     mainDB.commit()
@@ -917,6 +923,29 @@ async def setDefaultElo(ctx, elo: int):
     await helperObj.adminSetHelper(ctx, None, None, None, None, None, None, None, elo)
 
 setDefaultElo.error(_setAdminPermissionError)
+
+
+@setGroup.command(
+    name="correct-winner",
+    description="Admin: fix a misreported winner, or invalidate the last game entirely"
+)
+@app_commands.describe(
+    team="The team that actually won; omit if invalidating instead",
+    match_id="Optional: correct a specific tournament match instead of the last game",
+    invalidate="Undo the last game entirely instead of picking a winner: refunds bets, undoes elo/records/gold",
+)
+@app_commands.choices(team=[
+    app_commands.Choice(name="Team 1", value=1),
+    app_commands.Choice(name="Team 2", value=2),
+])
+@app_commands.checks.has_permissions(manage_guild=True)
+async def setCorrectWinner(
+    ctx, team: app_commands.Choice[int] = None, match_id: int = None, invalidate: bool = False
+):
+    team_value = team.value if team is not None else None
+    await helperObj.reportCorrectWinnerHelper(ctx, team_value, match_id, invalidate)
+
+setCorrectWinner.error(_setAdminPermissionError)
 
 
 tree.add_command(setGroup)
@@ -1137,6 +1166,7 @@ COMMAND_HELP = {
     "set wager-channel": "Redirects every betting posting to one specific text channel (created if it doesn't exist). Requires the Manage Server permission.",
     "set elo": "Sets a player's elo directly to an exact value (still credits any Diamond+ tier reward the new elo qualifies for). Requires the Manage Server permission.",
     "set default-elo": "Sets what a brand new player in this server starts at (1000 by default); doesn't touch anyone's existing elo, use /clear elo to reset current players to it. Requires the Manage Server permission.",
+    "set correct-winner": "Fixes a misreported winner: undoes and reapplies the payouts, records, and elo. invalidate undoes the last game entirely instead (bets refunded, nothing reapplied), as if it never happened. Requires Manage Server.",
     "clear teams": "Wipes the current teams/draft so you can start a fresh session. Requires the Manage Server permission.",
     "clear channels": "Wipes the current teams/draft, and also forgets the saved team channel names. Requires the Manage Server permission.",
     "clear tournament": "Wipes the current teams/draft, and deletes this server's tournament entirely: bracket, registrations, match history. Can't be undone. Requires the Manage Server permission.",
@@ -1145,10 +1175,10 @@ COMMAND_HELP = {
     "clear achievements": "Wipes the current teams/draft, and resets earned achievements for every player, or just one player if user is set. Confirmation required. Requires the Manage Server permission.",
     "clear card-unlocks": "Wipes the current teams/draft, and resets trading-card unlocks for every player, or just one player if user is set. Confirmation required. Requires the Manage Server permission.",
     "make-teams random": "Randomly splits everyone in your voice channel into two even teams and posts the roster, with a Start button on it to move everyone and open betting when you're ready (Start (no move) to open betting without moving anyone). If both teams land at exactly 5 players, Random Roles and Balanced Roles buttons also appear: Random Roles shuffles who's shown in which of Top/Jungle/Mid/Bottom/Support, while Balanced Roles assigns them by elo + each player's liked roles from /setup, the same logic ranked roles uses, without moving anyone between teams. ranked:true forms roughly elo-balanced teams instead, and tracks elo once a winner is reported. Combine ranked:true with use_roles:true (10 players only) to have the roster already show Top/Jungle/Mid/Bottom/Support the moment it posts, nudging the split toward whichever side is more balanced once roles are considered.",
-    "make-teams draft": "Starts a live captain draft. Name two captains, or use_random to pick two automatically; everyone else lands in a pool the captains draft from using the buttons on the posted picker (blue for Team 1's turn, red for Team 2's, plus a Random pick and paging once the pool is too big for one page). Once both teams are set, press Start on the roster to move everyone and open betting, or Start (no move) to open betting without moving anyone. ranked:true tracks elo for the resulting game.",
+    "make-teams draft": "Starts a live captain draft. Name two captains, or use_random to pick two automatically; everyone else lands in a pool the captains draft from using the buttons on the posted picker (blue for Team 1's turn, red for Team 2's, plus a Random pick and paging once the pool is too big for one page). Once both teams are set, press Start on the roster to move everyone and open betting, or Start (no move) to open betting without moving anyone. ranked:true tracks elo for the resulting game. snake:true reverses pick order every 2 picks (1,2,2,1,1,2,...) instead of alternating every single pick, so neither captain always drafts right after seeing the other's pick.",
     "make-teams saved": "Loads two persistent teams straight into a casual or ranked game, skipping the random-split-or-draft step. Posts a roster with the same Start/Start (no move) buttons as /make-teams random to start it.",
     "make-teams repeat": "Re-posts the exact same two teams from whichever of /make-teams random, /make-teams draft, or /make-teams saved ran last, instead of drawing a fresh random split or captains draft. Stays ranked if the last game was ranked, casual if it was casual. Cancels an actively in-progress game from those same teams first (refund + move back) if there is one.",
-    "test-draft": "Admin/dev tool: starts a draft with you as both captains and 10 random non-bot members as the pool, so you can solo-test the button picker. Requires the Manage Server permission.",
+    "test-draft": "Admin/dev tool: starts a snake draft with you as both captains and 10 random non-bot members as the pool, so you can solo-test the button picker. Requires the Manage Server permission.",
     "notify": "DMs a one-time invite link to your voice channel, to one member, or to everyone holding a given role. message optionally replaces the default invite text; either way it's signed \"Sent by\" you. You must be sitting in a voice channel yourself to run this.",
     "wager team": "Bets gold on one team winning the current game, or on a specific tournament match if you give a match id. Only while betting is open, one bet per player per game/match.",
     "wager against": "Challenges another player to a heads-up gold wager, separate from team-game betting, no active game required.",
@@ -1160,7 +1190,6 @@ COMMAND_HELP = {
     "achievements": "Browse every gameplay achievement, what it takes to earn it, and whether you already have. Earning one unlocks its title for /card-set and posts a one-time announcement in the channel.",
     "shop buy": "Purchases a trading-card cosmetic with gold, permanently unlocking it for /card-set. Refuses if you already own it or can't afford it.",
     "leaderboard": "Ranks the server by a stat, including ranked-only and casual-only wins/losses/win rate. Omit filter for an elo-sorted overview. Players with a 0W-0L record in the selected stat's category (or who've never played a game at all, for the overview and elo views) are left off, so a currency-based stat like balance still shows everyone. Buttons page through the results, and Ascending/Descending buttons flip the sort direction without re-running the command. cards:true flips through each player's full stats card one at a time instead, same as /team lookup but ranked; a Card button on that view swaps the current player's stats card for their actual trading card, and stays selected as you keep paging.",
-    "report-correct-winner": "Fixes a misreported winner: undoes and reapplies the payouts, records, and elo. invalidate undoes the last game entirely instead (bets refunded, nothing reapplied), as if it never happened. Requires Manage Server.",
     "team create": "Creates a persistent team with you as its captain, or captain as its captain if given.",
     "team save": "Saves Team 1 or Team 2 from the last game in this server as a new persistent team, with you as its captain. You must have actually been rostered on that side to save it, and the new name can't already belong to another team here.",
     "team set": "Sets a persistent team's voice channel and/or logo, any combination in one call. new_voice_channel creates a fresh one named after the team. The team's captain, or anyone with Manage Server, can do this.",
@@ -1175,7 +1204,7 @@ COMMAND_HELP = {
     "tournament create": "Creates an empty tournament shell for this server: name, team size, and bracket size. One tournament per server.",
     "tournament register": "Registers one of your teams for the server's tournament. The team's captain, or anyone with Manage Server, can do this.",
     "tournament create-bracket": "Builds the tournament bracket from whichever teams are currently registered, seeded randomly. Rerunning it rerolls the bracket. For double elimination, losers_bracket_timing picks whether the losers bracket waits for the whole winners bracket to finish, or interleaves as each round unlocks.",
-    "tournament print-bracket": "Prints the current bracket, with each match's id for use with /wager team and /report-correct-winner.",
+    "tournament print-bracket": "Prints the current bracket, with each match's id for use with /wager team and /set correct-winner.",
     "tournament start": "Starts playing the current round of the bracket. mode is Sequential (one match at a time) or Simultaneous (all at once, no betting).",
     "roll": "Rolls a random number between 1 and num.",
     "setup": "Introduces Shockwave, creates your personal solo team, and walks you through picking which roles you like/dislike playing (press a role to toggle it, then press Confirm) for future role-aware team balancing. solo_team_name is always optional; omit it the first time and your solo team is named after your current server display name. Run it any time afterward to update either. Unlocks the Onboarded achievement the first time.",
@@ -1350,37 +1379,6 @@ async def makeTeamsRandom(ctx, use_roles: bool = False, ranked: bool = False):
     )
 
 
-@tree.command(
-    name="report-correct-winner",
-    description="Admin: fix a misreported winner, or invalidate the last game entirely"
-)
-@app_commands.describe(
-    team="The team that actually won; omit if invalidating instead",
-    match_id="Optional: correct a specific tournament match instead of the last game",
-    invalidate="Undo the last game entirely instead of picking a winner: refunds bets, undoes elo/records/gold",
-)
-@app_commands.choices(team=[
-    app_commands.Choice(name="Team 1", value=1),
-    app_commands.Choice(name="Team 2", value=2),
-])
-@app_commands.checks.has_permissions(manage_guild=True)
-async def reportCorrectWinner(
-    ctx, team: app_commands.Choice[int] = None, match_id: int = None, invalidate: bool = False
-):
-    team_value = team.value if team is not None else None
-    await helperObj.reportCorrectWinnerHelper(ctx, team_value, match_id, invalidate)
-
-
-@reportCorrectWinner.error
-async def reportCorrectWinner_error(ctx, error):
-    if isinstance(error, app_commands.MissingPermissions):
-        await ctx.response.send_message(
-            "You need the Manage Server permission to correct a game result."
-        )
-    else:
-        raise error
-
-
 @makeTeamsGroup.command(
     name="draft",
     description="Start a live captain draft"
@@ -1390,19 +1388,20 @@ async def reportCorrectWinner_error(ctx, error):
     captain_2="Second captain; required unless use_random is set",
     use_random="Pick two captains at random from the voice channel instead",
     ranked="Track elo for this game; defaults to casual",
+    snake="Snake draft: reverse pick order every 2 picks (1,2,2,1,1,2,...) instead of alternating every pick",
 )
 async def makeTeamsDraft(
     ctx, captain_1: discord.Member = None, captain_2: discord.Member = None,
-    use_random: bool = False, ranked: bool = False,
+    use_random: bool = False, ranked: bool = False, snake: bool = False,
 ):
-    await startCaptainsDraft(ctx, captain_1, captain_2, use_random, ranked=ranked)
+    await startCaptainsDraft(ctx, captain_1, captain_2, use_random, ranked=ranked, snake=snake)
 
 
 # Shared by /make-teams draft regardless of its ranked flag, identical draft flow,
 # the only difference is whether the resulting game is marked ranked
 # (captainsHelper sets is_ranked accordingly, which gates whether recordResult later
 # touches anyone's elo).
-async def startCaptainsDraft(ctx, captain_1, captain_2, use_random, ranked):
+async def startCaptainsDraft(ctx, captain_1, captain_2, use_random, ranked, snake=False):
     # Named `use_random`, not `random`; that would shadow the `random`
     # module imported at the top of this file.
     if ctx.user.voice is None or ctx.user.voice.channel is None:
@@ -1443,7 +1442,7 @@ async def startCaptainsDraft(ctx, captain_1, captain_2, use_random, ranked):
         await ctx.response.send_message("Mention two team captains!")
         return
 
-    await helperObj.captainsHelper(ctx, captain1, captain2, ranked=ranked)
+    await helperObj.captainsHelper(ctx, captain1, captain2, ranked=ranked, snake=snake)
 
 
 # One subcommand per independent reset instead of a single command with 6
@@ -1451,7 +1450,7 @@ async def startCaptainsDraft(ctx, captain_1, captain_2, use_random, ranked):
 # require a confirm click), so a single /clear call can't end up doing part
 # of its job immediately and leaving the rest pending on a button. Every
 # subcommand still clears the current in-progress teams/draft first, the
-# same "start a fresh session" base behavior a bare /clear used to always do;
+# same "start a fresh session" base behavior every reset needs;
 # /clear teams is that base behavior on its own, with nothing else attached.
 clearGroup = app_commands.Group(
     name="clear",
@@ -1656,7 +1655,7 @@ async def tournamentCreateBracket(
 
 @tournamentGroup.command(
     name="print-bracket",
-    description="Print the bracket, with each match's id for use with /wager team and /report-correct-winner"
+    description="Print the bracket, with each match's id for use with /wager team and /set correct-winner"
 )
 async def tournamentPrintBracket(ctx):
     await helperObj.printBracketHelper(ctx)

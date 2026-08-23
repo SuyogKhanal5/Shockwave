@@ -277,7 +277,7 @@ assignment, on top of whatever the normal team-average swing already gave
 that player; `formatResultMessage` lists who earned it and how much as its
 own "Disliked-role win bonus" line whenever `summary["disliked_role_bonus_players"]`
 isn't empty. The bonus is snapshotted into `last_result` too (see
-`saveLastResult`/`getLastResult`), so `/report-correct-winner` recomputes it
+`saveLastResult`/`getLastResult`), so `/set correct-winner` recomputes it
 correctly for whoever the real winner turns out to be, no matter how much
 later the correction happens or what `team1`/`team2` have moved on to since.
 
@@ -473,7 +473,7 @@ live: `_handleWinnerReportPick` posts `ConfirmWinnerReportView`
 game-record change nor a refund-and-move-everyone-back should hinge on one
 accidental click. Only Start/Start (no move)/Reroll stay single-click,
 since a fresh roster or `/clear` cleanly undoes those, while a recorded
-result only has the heavier `/report-correct-winner` as its way back, and a
+result only has the heavier `/set correct-winner` as its way back, and a
 cancelled game (refunded bets, everyone moved) has no undo at all.
 
 Confirm on the winner-report side calls `recordResult` with the
@@ -525,7 +525,7 @@ favorite.
 a plain dict of `{user_id: {balance, wins, losses, ...}}` deltas without
 touching the database at all. `recordResult` is what actually calls
 `applyGameDeltas` to write them. Keeping the math and the writing separate is
-what makes `/report-correct-winner` possible.
+what makes `/set correct-winner` possible.
 
 `rakedLosingPool` isn't just `losingPool`. `_imbalanceRakeFraction(winning_pool,
 losing_pool)` takes a cut that scales with how lopsided the pool was: 0% at an
@@ -575,7 +575,7 @@ never anyone's already-tracked rating.
 
 ### Correcting a misreported winner
 
-`/report-correct-winner` can't just recompute the game from scratch, because by
+`/set correct-winner` can't just recompute the game from scratch, because by
 the time someone notices a misreport, elo ratings have already moved.
 Recomputing against current (already-wrong) ratings would give the wrong
 correction.
@@ -675,7 +675,7 @@ redirecting at that one entry point is enough to redirect the whole thing.
 ### Admin resets and permissions
 
 `/clear` requires the Manage Server permission outright
-(`app_commands.checks.has_permissions`, same as `/report-correct-winner`).
+(`app_commands.checks.has_permissions`, same as `/set correct-winner`).
 
 Within it, `clear_elo`, `clear_economy`, `clear_achievements`, and
 `clear_card_unlocks` act on every player in the server, so none of them run the
@@ -1197,7 +1197,7 @@ as a placeholder title, and Chakra Petch/IBM Plex Sans as the font pairing.
 hardcoding anything, so a changed row shows up on the next card rendered with no
 code changes needed.
 
-`/report-correct-winner` fixes a specific tournament match via its optional
+`/set correct-winner` fixes a specific tournament match via its optional
 `match_id`, a narrower, separate path from the economy correction above. It
 flips the match's recorded winner and re-propagates the bracket node, but
 refuses if the next round has already started. It only supports winners-bracket
@@ -1577,7 +1577,7 @@ round that never got a row as resolved once play has moved past it.
 | `leaderboards` | posted `/leaderboard` messages | which filter/order/page each message is currently showing, plus `cards`/`cardShown` for cards:true mode |
 | `my_team_views` | posted `/team lookup` messages | which page (and whose team list) each message is currently showing |
 | `team_list_views` | posted `/team list` messages | which filter/sort/page each message is currently showing (`memberIds`/`memberNames` for the member filter), plus `cards`/`cardShown` for cards:true mode |
-| `last_result` | one row per guild | a snapshot of the most recently resolved game, for `/report-correct-winner` |
+| `last_result` | one row per guild | a snapshot of the most recently resolved game, for `/set correct-winner` |
 | `teams` | persistent named teams | one row per team: captain, roster, target size, voice channel, `logo_path` |
 | `tournaments` | one row per guild | name, team/bracket size, elimination type, registered teams, the winners bracket, and (double elimination only) the losers bracket |
 | `team_invites` | pending `/team invite`s | one row per invitee per invite. Several invitees from one `/team invite` call share a `messageId`, each accepting independently |

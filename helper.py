@@ -9,11 +9,19 @@ import datetime
 import io
 import itertools
 import json
+import logging
 import math
 import os
 import time
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
+
+# Same logger bot.py configures with its own file/console handlers
+# (logging.basicConfig there attaches to the root logger, so anything
+# logged here under this same name lands in shockwave.log too); used
+# sparingly, only where a caught exception would otherwise vanish
+# silently (see _updateDraftEmbeds/_editRosterTeamEmbeds).
+logger = logging.getLogger("shockwave")
 
 # Every bracket/matchup image is actually drawn at BRACKET_SUPERSAMPLE times
 # its final size, then downscaled with LANCZOS resampling in _imageToFile -
@@ -1177,7 +1185,7 @@ class WinnerReportView(discord.ui.View):
 # payouts, game record) shouldn't hinge on a single accidental click the
 # way the roster start/reroll buttons reasonably can, since a fresh
 # roster or /clear cleanly undoes those, while a recorded result only has
-# the heavier /report-correct-winner as its way back. Open to anyone to
+# the heavier /set correct-winner as its way back. Open to anyone to
 # click, same as the winner-report buttons themselves; there's no single
 # "invoker" to restrict this to the way a slash-command-triggered
 # ConfirmXView has ctx.user, since reporting a winner has always been
@@ -2493,18 +2501,22 @@ class helpers():
         # Previously an unhandled exception here (e.g. failing only on the
         # PLAYERS edit) would propagate out and leave that embed stuck
         # showing the just-drafted player forever on the final pick, since
-        # nothing else ever re-edits it once the draft is over.
+        # nothing else ever re-edits it once the draft is over. Logged (not
+        # silently swallowed) since the DB write underneath is always
+        # correct regardless: a failure here only ever means the embed on
+        # screen fell behind, and that's otherwise invisible, with nothing
+        # else surfacing it to the user or to shockwave.log.
         team1_message = await channel.fetch_message(int(team1_msg_id))
         try:
             await team1_message.edit(embed=team1_embed)
         except discord.HTTPException:
-            pass
+            logger.exception("_updateDraftEmbeds: team1 embed edit failed (guild %s)", guild_id)
 
         team2_message = await channel.fetch_message(int(team2_msg_id))
         try:
             await team2_message.edit(embed=team2_embed)
         except discord.HTTPException:
-            pass
+            logger.exception("_updateDraftEmbeds: team2 embed edit failed (guild %s)", guild_id)
 
         if players_msg_id is not None:
             players_embed = self._buildPlayersEmbed(players) or discord.Embed(
@@ -2514,7 +2526,7 @@ class helpers():
                 players_message = await channel.fetch_message(int(players_msg_id))
                 await players_message.edit(embed=players_embed)
             except discord.HTTPException:
-                pass
+                logger.exception("_updateDraftEmbeds: PLAYERS embed edit failed (guild %s)", guild_id)
 
         return team1_message, team2_message
 
@@ -2703,12 +2715,12 @@ class helpers():
             team1_message = await channel.fetch_message(int(team1_msg_id))
             await team1_message.edit(embed=team1_embed)
         except discord.HTTPException:
-            pass
+            logger.exception("_editRosterTeamEmbeds: team1 embed edit failed (guild %s)", guild_id)
         try:
             team2_message = await channel.fetch_message(int(team2_msg_id))
             await team2_message.edit(embed=team2_embed)
         except discord.HTTPException:
-            pass
+            logger.exception("_editRosterTeamEmbeds: team2 embed edit failed (guild %s)", guild_id)
 
     # Random Roles' whole implementation, genuinely shuffles both teams'
     # player order (unlike the old randomRoleHelper this replaces, which
@@ -2944,7 +2956,7 @@ class helpers():
         except discord.HTTPException:
             pass
 
-    async def captainsHelper(self, ctx, captain_1, captain_2, ranked=False):
+    async def captainsHelper(self, ctx, captain_1, captain_2, ranked=False, snake=False):
         # Checked before clearTeamsHelper and before building
         # Player(captain_1.id, ...) from either captain, since either would
         # crash with AttributeError on a None captain instead of showing
@@ -2969,6 +2981,7 @@ class helpers():
         self.update(ctx.guild.id, "mode", "Ranked Captains" if ranked else "Captains")
         if ranked:
             self.update(ctx.guild.id, "is_ranked", 1)
+        self.update(ctx.guild.id, "draft_snake", 1 if snake else 0)
 
         original_channel = ctx.user.voice.channel
         self.update(ctx.guild.id, "original_channel", str(original_channel))
@@ -2991,10 +3004,16 @@ class helpers():
 
         self.update(ctx.guild.id, "players", players.serializeTeam())
 
-        await ctx.response.send_message(
+        message = (
             "Ranked captains selected! Elo will be updated when the winner is reported."
             if ranked else "Captains selected!"
         )
+        if snake:
+            message += (
+                " Snake draft: pick order reverses every 2 picks (1,2,2,1,1,2,...) instead of "
+                "alternating every pick."
+            )
+        await ctx.response.send_message(message)
         team1_message, team2_message, players_message = await self.printEmbed(ctx, team1, team2, players)
         self.update(ctx.guild.id, "roster_team1_message_id", team1_message.id)
         self.update(ctx.guild.id, "roster_team2_message_id", team2_message.id)
@@ -3013,7 +3032,10 @@ class helpers():
     # through every pick themselves. The pool is 10 real (non-bot) guild
     # members chosen at random, same shape captainsHelper's own
     # voice-channel pool takes, just sourced from the whole server instead
-    # of one voice channel since there's no real draft happening.
+    # of one voice channel since there's no real draft happening. Always
+    # runs as a snake draft (see _nextDraftTurn) rather than taking a param
+    # for it, so solo-testing exercises the same pick-order logic a real
+    # /make-teams draft snake:true would.
     async def testDraftHelper(self, ctx):
         candidates = [m for m in ctx.guild.members if not m.bot and m.id != ctx.user.id]
         if len(candidates) < 10:
@@ -3028,6 +3050,7 @@ class helpers():
         self.update(ctx.guild.id, "captain2", Player(ctx.user.id, ctx.user.name).serializePlayer())
         self.update(ctx.guild.id, "mode", "Captains (Test)")
         self.update(ctx.guild.id, "original_channel", "")
+        self.update(ctx.guild.id, "draft_snake", 1)
 
         team1 = Team()
         team2 = Team()
@@ -3043,8 +3066,8 @@ class helpers():
         self.update(ctx.guild.id, "players", players.serializeTeam())
 
         await ctx.response.send_message(
-            f"Test draft started! {ctx.user.mention} is drafting for both teams against a pool of "
-            "10 random members."
+            f"Test draft started (snake draft)! {ctx.user.mention} is drafting for both teams against "
+            "a pool of 10 random members."
         )
         team1_message, team2_message, players_message = await self.printEmbed(ctx, team1, team2, players)
         self.update(ctx.guild.id, "roster_team1_message_id", team1_message.id)
@@ -3173,6 +3196,22 @@ class helpers():
         content, view = self._renderDraftPickView(guild_id)
         await interaction.response.edit_message(content=content, view=view)
 
+    # Whoever picks next: straight alternation (1,2,1,2,...) normally, or
+    # the classic 2-side snake pattern (1,2,2,1,1,2,2,1,...) when this
+    # draft's draft_snake flag is set, so neither captain always drafts
+    # immediately after seeing the other's pick. team1/team2 are the
+    # POST-pick rosters (this pick has already been added to one of them),
+    # so their combined size minus the two starting captains is the
+    # 0-based index of the pick about to happen next.
+    def _nextDraftTurn(self, guild_id, turn, team1, team2):
+        if not self.get(guild_id, "draft_snake"):
+            return 2 if turn == 1 else 1
+
+        next_pick_index = len(team1.get_players()) + len(team2.get_players()) - 2
+        round_index = next_pick_index // 2
+        order = (1, 2) if round_index % 2 == 0 else (2, 1)
+        return order[next_pick_index % 2]
+
     # The actual pick: adds `member` to whichever team `turn` is drafting
     # for, removes them from the pool, and either wraps up the draft
     # (pool empty or both teams hit team_size, see the same regression
@@ -3239,7 +3278,7 @@ class helpers():
             )
             return
 
-        new_turn = 2 if turn == 1 else 1
+        new_turn = self._nextDraftTurn(guild_id, turn, team1, team2)
         self.update(guild_id, "turn", new_turn)
         content, view = self._renderDraftPickView(guild_id)
         await interaction.response.edit_message(
@@ -3273,6 +3312,10 @@ class helpers():
         # Goes stale the moment team1/team2 do (see rankedTeamHelper); a
         # fresh roster's own players earned no disliked-role bonus yet.
         self.update(guild_id, "disliked_role_user_ids", "")
+        # A prior draft's snake flag has nothing to do with whatever
+        # team-formation command runs next; captainsHelper/testDraftHelper
+        # set this back to 1 themselves when the new draft actually wants it.
+        self.update(guild_id, "draft_snake", 0)
         # Every team-formation path (/make-teams random, /make-teams draft, either with or
         # without ranked:true) runs through here first; resetting is_ranked
         # to 0 by default means only the ranked-specific helpers, which
@@ -5305,7 +5348,7 @@ class helpers():
         return deltas
 
     # Real-money settlement for one tournament match's wagers, via the same
-    # deltas/applyGameDeltas machinery /report-correct-winner's casual-game
+    # deltas/applyGameDeltas machinery /set correct-winner's casual-game
     # path uses. Scoped to exactly this match_id's rows, so settling one
     # concurrent match never touches another's still-open bets.
     async def _settleMatchWagers(self, guild_id, match_id, winning_team, channel):
@@ -6037,7 +6080,7 @@ class helpers():
         await self._postTournamentLeaderboard(channel, guild_id, tournament)
         await self._announceAchievements(channel, self._grantTournamentChampionAchievement(guild_id, winner))
 
-    # /report-correct-winner's match_id path: fixes a specific tournament
+    # /set correct-winner's match_id path: fixes a specific tournament
     # match's recorded winner, re-propagates the bracket, and (if anyone
     # had money on it) reverses the payouts _settleMatchWagers already made
     # against the wrong winner and reapplies them against the right one
