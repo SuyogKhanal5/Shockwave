@@ -58,11 +58,11 @@ BRACKET_LOGO_PATH = os.path.join(os.path.dirname(__file__), "shockwave-site", "a
 # it (e.g. "Demacia.png"), no subfolders.
 TEAM_LOGO_DIR = os.path.join(os.path.dirname(__file__), "assets", "clash-logos")
 
-# /preview's cache; logos/color-schemes/fonts/titles never change without
+# /shop preview's cache; logos/color-schemes/fonts/titles never change without
 # a code change, so each type is rendered once and reused from disk on
 # every later call instead of re-running Pillow on every single request
 # (see previewHelper/_cachedPreviewFiles). Deleting a file here (or the
-# whole folder) just makes the next /preview for that type regenerate it,
+# whole folder) just makes the next /shop preview for that type regenerate it,
 # same "no source of truth but the assets folder itself" idea TEAM_LOGO_DIR
 # already relies on.
 PREVIEW_DIR = os.path.join(os.path.dirname(__file__), "assets", "previews")
@@ -254,7 +254,7 @@ TEAM_CONFIRM_TIMEOUT_SECONDS = 30
 # ...and for confirming a reported game winner (see ConfirmWinnerReportView)
 # before it's actually recorded.
 WINNER_REPORT_CONFIRM_TIMEOUT_SECONDS = 30
-# How long /shop's own sort buttons (see ShopSortView) stay clickable
+# How long /shop browse's own sort buttons (see ShopSortView) stay clickable
 # before they freeze in place, longer than the confirm/cancel views above
 # since this isn't gating anything destructive, just a display preference
 # someone might sit on while comparing prices.
@@ -357,10 +357,16 @@ TEAM_CARD_RETURN_EMOJI = "↩️"  # ↩️ decorates TeamStatsView's Back butto
 # only (see printEmbed/_finalizeRoster) once a roster is actually final
 # (not mid-draft), tracked via roster_team1_message_id/
 # roster_team2_message_id on `servers` so a stale click on an earlier
-# roster can't act on whatever team1/team2 happen to be loaded now. The
-# Reroll button only gets included when the roster is role-eligible (see
-# _finalizeRoster).
+# roster can't act on whatever team1/team2 happen to be loaded now. Both
+# role-assignment buttons (Random Roles, Balanced Roles) only get
+# included when the roster is exactly 5v5 (see _finalizeRoster); which
+# roles a ranked-with-roles roster was posted showing is tracked
+# separately via roster_use_roles.
 TEAM_ROLES_REROLL_EMOJI = "\U0001f504"  # 🔄
+# Balanced Roles' own button, the same elo+preference logic /make-teams
+# ranked use_roles:true uses (see _assignRolesForFixedTeams), just
+# applied after the fact to whatever roster is already posted.
+TEAM_ROLES_BALANCE_EMOJI = "⚖️"  # ⚖️
 TEAM_START_EMOJI = "▶️"  # ▶️
 # Same as TEAM_START_EMOJI (posts the matchup image, opens betting) but
 # skips moving anyone into team channels, for a group that's already
@@ -488,12 +494,12 @@ CARD_TIER_REWARD_TITLES = {
 CARD_SPECIAL_TITLES = {
     "Developer": "Developer",
 }
-# /shop: trading-card cosmetics purchasable with gold (economy.balance)
+# /shop browse: trading-card cosmetics purchasable with gold (economy.balance)
 # rather than earned by rank, same card_unlocks table, same itemType/
 # itemKey shape as a tier reward or a special grant, just a different
 # unlock path (see shopBuyHelper). Names are kept distinct across all
 # three catalogs below (and distinct from every ELO_TIERS/CARD_SPECIAL_
-# TITLES name too) so /shop-buy's own `item` parameter can look one up by
+# TITLES name too) so /shop buy's own `item` parameter can look one up by
 # name alone without needing to know its category ahead of time.
 CARD_SHOP_TITLES = {
     "Legend": 5000,
@@ -576,7 +582,7 @@ CARD_TITLE_CATALOG = {
     **CARD_TIER_REWARD_TITLES, **CARD_SPECIAL_TITLES, **{name: name for name in CARD_SHOP_TITLES},
 }
 
-# /preview's grid layout (Logos, Color Schemes), cell footprint plus the
+# /shop preview's grid layout (Logos, Color Schemes), cell footprint plus the
 # label under it, gapped and margined the same way _renderTeamCardImage's
 # own BRACKET_* spacing constants shape everything else this file renders.
 # Titles/Fonts don't use a grid at all (see _renderCardTitlePreviewImage/
@@ -669,7 +675,7 @@ CARD_ACHIEVEMENT_DESCRIPTIONS = {
     "underdog": "Win a ranked game as a significant underdog (a big single-match elo swing).",
     "team_player": f"Be rostered on {CARD_ACHIEVEMENT_TEAM_PLAYER_TEAMS}+ persistent teams at once.",
     "captain": "Be the captain of a persistent team.",
-    "big_spender": f"Own {CARD_ACHIEVEMENT_BIG_SPENDER_ITEMS}+ items purchased from /shop.",
+    "big_spender": f"Own {CARD_ACHIEVEMENT_BIG_SPENDER_ITEMS}+ items purchased from /shop buy.",
     "gambler": f"Place {CARD_ACHIEVEMENT_GAMBLER_BETS}+ total bets.",
     "iron_will": f"Rack up {CARD_ACHIEVEMENT_IRON_WILL_LOSSES}+ game losses without giving up.",
     "tournament_champion": "Win a tournament.",
@@ -690,7 +696,7 @@ SHOCKWAVE_DEVELOPER_ID = 217743368959164416
 # every other card's does.
 CARD_BACKGROUND_DARKEN_RATIO = 0.28
 
-# /wager-against: a heads-up gold wager between two specific players,
+# /wager against: a heads-up gold wager between two specific players,
 # independent of the team-game betting above. The challenged player
 # accepts with a button (DuelAcceptView); once accepted, anyone can press
 # a button to report who actually won (DuelResultView), then confirm it
@@ -701,12 +707,22 @@ CARD_BACKGROUND_DARKEN_RATIO = 0.28
 # re-running the command; clicking one edits the existing message
 # instead of posting a new one. Also decorate MyTeamsPagingView/
 # TeamListPagingView's own button labels, the same First/Prev/Next/Last
-# shape reused for /team mine and /team list.
+# shape reused for /team lookup and /team list.
 LEADERBOARD_PAGE_SIZE = 10
 LEADERBOARD_FIRST_EMOJI = "⏮️"  # ⏮️ jump to the first page
 LEADERBOARD_PREV_EMOJI = "◀️"   # ◀️ previous page
 LEADERBOARD_NEXT_EMOJI = "▶️"   # ▶️ next page
 LEADERBOARD_LAST_EMOJI = "⏭️"   # ⏭️ jump to the last page
+
+# /make-teams draft's button-based picker (CaptainsDraftPickView). A
+# message tops out at 5 rows of 5 buttons (25 total); one slot is always
+# reserved for Random, so a pool of DRAFT_PICK_MAX_UNPAGINATED (24) or
+# fewer fits on a single page with no First/Prev/Next/Last row at all.
+# Past that, pagination kicks in at DRAFT_PICK_PAGE_SIZE (20) players per
+# page, freeing up row 4 entirely for First/Prev/Next/Last/Random.
+DRAFT_PICK_MAX_UNPAGINATED = 24
+DRAFT_PICK_PAGE_SIZE = 20
+DRAFT_PICK_RANDOM_EMOJI = "🎲"
 
 # /team list: what it can sort by, and its display label, same paging
 # shape and page size as /leaderboard, just over teams instead of players.
@@ -1400,32 +1416,27 @@ class TournamentMatchReportView(discord.ui.View):
 # The posted roster's own buttons (team2_message only, see
 # _finalizeRoster), persistent (custom_id, timeout=None, registered once
 # via client.add_view) since a roster can sit un-started indefinitely,
-# same reasoning as WinnerReportView. Reroll always shows (a single shared
-# instance can't conditionally omit a button per-message the way adding a
-# reaction conditionally once could); its own callback checks
-# roster_use_roles and politely no-ops if this particular roster was
-# never role-eligible, the same guard the old reaction handler already
-# had for "a prankster reacts 🔄 on a message that never earned it".
+# same reasoning as WinnerReportView. Random Roles/Balanced Roles always
+# show together (a single shared instance can't conditionally omit a
+# button per-message the way adding a reaction conditionally once could);
+# their own callbacks re-check the roster's actual team sizes and
+# politely no-op/reject if it isn't exactly 5v5, the same guard the old
+# reaction handler already had for "a prankster reacts 🔄 on a message
+# that never earned it".
 class RosterActionView(discord.ui.View):
-    # include_reroll=False (a roster that isn't role-eligible) omits the
-    # button from THIS message entirely, matching the reaction it replaces
-    # (which was only ever added when _finalizeRoster's own roles_eligible
-    # check passed); the generic instance registered once at startup
-    # still has all three, since persistent-view registration is only
-    # about routing a custom_id's clicks, not about which buttons any one
-    # message actually shows.
-    def __init__(self, helperObj, include_reroll=True):
+    # include_role_buttons=False (a roster that isn't exactly 5v5) omits
+    # both buttons from THIS message entirely, matching the reaction they
+    # replace (which was only ever added when _finalizeRoster's own
+    # size-eligibility check passed); the generic instance registered once
+    # at startup still has all four, since persistent-view registration is
+    # only about routing a custom_id's clicks, not about which buttons any
+    # one message actually shows.
+    def __init__(self, helperObj, include_role_buttons=True):
         super().__init__(timeout=None)
         self.helperObj = helperObj
-        if not include_reroll:
+        if not include_role_buttons:
             self.remove_item(self.reroll)
-
-    @discord.ui.button(
-        label=f"Reroll {TEAM_ROLES_REROLL_EMOJI}", style=discord.ButtonStyle.secondary,
-        custom_id="shockwave:roster:reroll",
-    )
-    async def reroll(self, interaction, button):
-        await self.helperObj._handleRosterRerollClick(interaction)
+            self.remove_item(self.balanceRoles)
 
     @discord.ui.button(
         label=f"Start {TEAM_START_EMOJI}", style=discord.ButtonStyle.success,
@@ -1440,6 +1451,23 @@ class RosterActionView(discord.ui.View):
     )
     async def startNoMove(self, interaction, button):
         await self.helperObj._handleRosterStartClick(interaction, move=False)
+
+    # Also doubles as the very first role assignment, not just a re-shuffle
+    # of an already role-labelled roster; a plain (non-ranked) 5v5 make-teams
+    # split never had roles shown at all until this is clicked once.
+    @discord.ui.button(
+        label=f"Random Roles {TEAM_ROLES_REROLL_EMOJI}", style=discord.ButtonStyle.secondary,
+        custom_id="shockwave:roster:reroll",
+    )
+    async def reroll(self, interaction, button):
+        await self.helperObj._handleRosterRerollClick(interaction)
+
+    @discord.ui.button(
+        label=f"Balanced Roles {TEAM_ROLES_BALANCE_EMOJI}", style=discord.ButtonStyle.secondary,
+        custom_id="shockwave:roster:balance_roles",
+    )
+    async def balanceRoles(self, interaction, button):
+        await self.helperObj._handleRosterBalanceRolesClick(interaction)
 
 
 # /team invite's own posted message, persistent (custom_id, timeout=None,
@@ -1522,7 +1550,7 @@ class TeamStatsView(discord.ui.View):
         await self.helperObj._handleTeamStatsReturnClick(interaction)
 
 
-# /leaderboard, /team mine, and /team list all page the exact same way,
+# /leaderboard, /team lookup, and /team list all page the exact same way,
 # First/Prev/Next/Last, one shared view per guild/caller/search rather
 # than re-running the command, so all three views below are the same
 # four-button shape, just wired to a different helper.py handler and
@@ -1588,7 +1616,7 @@ class LeaderboardPagingView(discord.ui.View):
         await self.helperObj._handleLeaderboardReturnClick(interaction)
 
 
-# See LeaderboardPagingView, same shape, /team mine' own table/handler.
+# See LeaderboardPagingView, same shape, /team lookup' own table/handler.
 class MyTeamsPagingView(discord.ui.View):
     def __init__(self, helperObj):
         super().__init__(timeout=None)
@@ -1660,7 +1688,7 @@ class TeamListPagingView(discord.ui.View):
         await self.helperObj._handleTeamListReturnClick(interaction)
 
 
-# Lets whoever ran /shop re-sort the listing by price or by owned status,
+# Lets whoever ran /shop browse re-sort the listing by price or by owned status,
 # either direction, without re-running the command, four independent
 # toggle buttons (not a single cycling one) so the current sort is always
 # visible at a glance from which two are "pressed". Purely a display
@@ -1686,7 +1714,7 @@ class ShopSortView(discord.ui.View):
     async def interaction_check(self, interaction):
         if interaction.user.id != self.user_id:
             await interaction.response.send_message(
-                "Only the person who ran /shop can sort this.", ephemeral=True
+                "Only the person who ran /shop browse can sort this.", ephemeral=True
             )
             return False
         return True
@@ -1730,7 +1758,7 @@ class ShopSortView(discord.ui.View):
                 pass
 
 
-# /wager-against's challenge message's own button, persistent (custom_id,
+# /wager against's challenge message's own button, persistent (custom_id,
 # timeout=None, registered once via client.add_view) since a challenge can
 # sit unanswered indefinitely, same reasoning as WinnerReportView. A single
 # shared instance covers every pending challenge in every guild, so the
@@ -1829,6 +1857,95 @@ class ConfirmDuelResultView(discord.ui.View):
                 )
             except discord.HTTPException:
                 pass
+
+
+# One remaining draft-pool player's own button on CaptainsDraftPickView.
+# DynamicItem (not a plain discord.ui.Button) since the pool is a variable-
+# length, per-guild list; a fixed custom_id per possible player, the way
+# WinnerReportView's team1/team2 buttons work, can't cover "however many
+# people happen to be drafting this time" without pre-registering far more
+# distinct custom_ids than a single View can ever hold (25). The template
+# below encodes only a slot POSITION (0-23, this page's index into the
+# pool), never a player id; _handleDraftPickSlotClick re-resolves that
+# position against the guild's current pool fresh at click time, the same
+# "trust nothing stored on the object" discipline WinnerReportView already
+# uses. label/style come straight off the reconstructed `item` Discord
+# already parsed from the raw component (from_custom_id), so a restart
+# never needs a DB round-trip just to redraw a button that's about to be
+# replaced by a fresh render the moment it's clicked anyway.
+class _DraftPickSlotButton(discord.ui.DynamicItem[discord.ui.Button], template=r"shockwave:draft_pick:slot:(?P<index>[0-9]+)"):
+    def __init__(self, index, label, style, row):
+        super().__init__(
+            discord.ui.Button(
+                label=label[:80], style=style, row=row,
+                custom_id=f"shockwave:draft_pick:slot:{index}",
+            )
+        )
+        self.index = index
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match, /):
+        return cls(int(match["index"]), item.label, item.style, item.row)
+
+    async def interaction_check(self, interaction):
+        return await interaction.client.helperObj._isDraftPickTurn(interaction)
+
+    async def callback(self, interaction):
+        await interaction.client.helperObj._handleDraftPickSlotClick(interaction, self.index)
+
+
+# The draft picker's own posted message: one _DraftPickSlotButton per
+# player on the current page (blue while Team 1 is picking, red for Team
+# 2, recomputed fresh every render, never toggled in place), a Random
+# button that's always present, and First/Prev/Next/Last only once the
+# pool no longer fits on one page (see DRAFT_PICK_MAX_UNPAGINATED). No
+# on_timeout at all; timeout=None like WinnerReportView, since a draft
+# waiting on a captain shouldn't quietly lock up mid-pick the way a
+# confirm dialog reasonably can.
+class CaptainsDraftPickView(discord.ui.View):
+    def __init__(self, helperObj, pool_page=(), turn=1, paginated=False):
+        super().__init__(timeout=None)
+        self.helperObj = helperObj
+        # Random/First/Prev/Next/Last already exist as children the moment
+        # super().__init__() runs (decorator-registered buttons are added
+        # by the base View before this body even starts), so the unwanted
+        # nav buttons have to come out BEFORE the slot buttons go in, or a
+        # full 24-slot non-paginated page plus all 5 fixed buttons would
+        # overflow the 25-child cap.
+        if not paginated:
+            self.remove_item(self.first)
+            self.remove_item(self.prev)
+            self.remove_item(self.next)
+            self.remove_item(self.last)
+        style = discord.ButtonStyle.primary if turn == 1 else discord.ButtonStyle.danger
+        for i, player in enumerate(pool_page):
+            self.add_item(_DraftPickSlotButton(i, player.get_name(), style, i // 5))
+
+    async def interaction_check(self, interaction):
+        return await self.helperObj._isDraftPickTurn(interaction)
+
+    @discord.ui.button(
+        label=f"Random {DRAFT_PICK_RANDOM_EMOJI}", style=discord.ButtonStyle.success, row=4,
+        custom_id="shockwave:draft_pick:random",
+    )
+    async def random(self, interaction, button):
+        await self.helperObj._handleDraftPickRandomClick(interaction)
+
+    @discord.ui.button(label=LEADERBOARD_FIRST_EMOJI, style=discord.ButtonStyle.secondary, row=4, custom_id="shockwave:draft_pick:first")
+    async def first(self, interaction, button):
+        await self.helperObj._handleDraftPickPageClick(interaction, "first")
+
+    @discord.ui.button(label=LEADERBOARD_PREV_EMOJI, style=discord.ButtonStyle.secondary, row=4, custom_id="shockwave:draft_pick:prev")
+    async def prev(self, interaction, button):
+        await self.helperObj._handleDraftPickPageClick(interaction, "prev")
+
+    @discord.ui.button(label=LEADERBOARD_NEXT_EMOJI, style=discord.ButtonStyle.secondary, row=4, custom_id="shockwave:draft_pick:next")
+    async def next(self, interaction, button):
+        await self.helperObj._handleDraftPickPageClick(interaction, "next")
+
+    @discord.ui.button(label=LEADERBOARD_LAST_EMOJI, style=discord.ButtonStyle.secondary, row=4, custom_id="shockwave:draft_pick:last")
+    async def last(self, interaction, button):
+        await self.helperObj._handleDraftPickPageClick(interaction, "last")
 
 
 class helpers():
@@ -1966,7 +2083,11 @@ class helpers():
     # in ROLE_BALANCE_FILL_ORDER order, not SETUP_ROLE_NAMES' on-screen
     # order; callers that need Top/Jungle/Mid/Bottom/Support order (i.e.
     # _splitRoleBalancedTeams) reorder for themselves.
-    def _assignRolesForBalance(self, guild_id, members_with_elo):
+    # per_role=2 is the ranked 10-player shape (two players per role, one
+    # per eventual side); _assignRolesForFixedTeams reuses this same fill
+    # with per_role=1 to place a single already-fixed 5-player team's own
+    # five members across the five roles.
+    def _assignRolesForBalance(self, guild_id, members_with_elo, per_role=2):
         elo_by_id = {member.id: elo for member, elo in members_with_elo}
         preferences = {
             member.id: self.getRolePreferences(guild_id, member.id) for member, _elo in members_with_elo
@@ -1981,7 +2102,7 @@ class helpers():
                 tier = self._roleTier(liked, disliked, role)
                 (liking if tier == "liked" else disliking if tier == "disliked" else neutral).append(member)
 
-            for member in (liking + neutral + disliking)[:2]:
+            for member in (liking + neutral + disliking)[:per_role]:
                 remaining.remove(member)
                 assigned.append(self._reassignRole(guild_id, member, elo_by_id[member.id], role))
 
@@ -2067,6 +2188,61 @@ class helpers():
         assigned = self._assignRolesForBalance(guild_id, members_with_elo)
         refined = self._refineRoleBalance(guild_id, assigned)
         return self._splitRoleBalancedTeams(refined)
+
+    # Hill-climbs the same way _refineRoleBalance does, just constrained to
+    # swaps within one already-fixed team at a time (own/other pairs cover
+    # both directions each pass): membership can't move between sides here,
+    # the way it can for ranked's own from-scratch split, so a role swap
+    # can only change the team it's made within. Still able to shrink the
+    # gap between the two teams' effective-elo totals though, since each
+    # team's own total shifts with how many liked/neutral/disliked
+    # penalties its particular fill landed it with.
+    def _refineFixedTeamRoleBalance(self, guild_id, team1_assigned, team2_assigned):
+        team1_assigned, team2_assigned = list(team1_assigned), list(team2_assigned)
+        for _pass in range(ROLE_BALANCE_MAX_REFINE_PASSES):
+            improved = False
+            for own, other in ((team1_assigned, team2_assigned), (team2_assigned, team1_assigned)):
+                other_sum = sum(e[4] for e in other)
+                best_diff = abs(sum(e[4] for e in own) - other_sum)
+                for i, j in itertools.combinations(range(len(own)), 2):
+                    member_i, elo_i, role_i, _tier_i, _eff_i = own[i]
+                    member_j, elo_j, role_j, _tier_j, _eff_j = own[j]
+                    if role_i == role_j:
+                        continue
+
+                    candidate = list(own)
+                    candidate[i] = self._reassignRole(guild_id, member_i, elo_i, role_j)
+                    candidate[j] = self._reassignRole(guild_id, member_j, elo_j, role_i)
+
+                    diff = abs(sum(e[4] for e in candidate) - other_sum)
+                    if diff < best_diff:
+                        own[:] = candidate
+                        best_diff, improved = diff, True
+                        break
+            if not improved:
+                break
+
+        return team1_assigned, team2_assigned
+
+    # Entry point for the roster's own Balanced Roles button: same
+    # preference-first fill and elo-diff-minimizing refinement ranked roles
+    # uses, just run independently against two ALREADY-fixed 5-player
+    # rosters (any /make-teams split, a captains draft, ...) instead of
+    # building the team split itself. Callers must already have checked
+    # both lists have exactly 5 entries (the only shape roles apply to).
+    # Returns (team1_entries, team2_entries), each 5 (member, elo, role,
+    # tier, effective_elo) tuples in SETUP_ROLE_NAMES order, matching
+    # formRoleBalancedTeams' own per-side shape so callers build Team
+    # objects from either the same way.
+    def _assignRolesForFixedTeams(self, guild_id, team1_members_with_elo, team2_members_with_elo):
+        team1_assigned = self._assignRolesForBalance(guild_id, team1_members_with_elo, per_role=1)
+        team2_assigned = self._assignRolesForBalance(guild_id, team2_members_with_elo, per_role=1)
+        team1_assigned, team2_assigned = self._refineFixedTeamRoleBalance(guild_id, team1_assigned, team2_assigned)
+
+        role_order = {role: i for i, role in enumerate(SETUP_ROLE_NAMES)}
+        team1_assigned.sort(key=lambda entry: role_order[entry[2]])
+        team2_assigned.sort(key=lambda entry: role_order[entry[2]])
+        return team1_assigned, team2_assigned
 
     # What a brand new player's elo starts at in this guild, DEFAULT_ELO
     # (1000) unless an admin has overridden it with /set default-elo's
@@ -2224,7 +2400,7 @@ class helpers():
             "Start (no move) to open betting without moving anyone."
         )
         await ctx.response.send_message(message)
-        team1_message, team2_message = await self.printEmbed(ctx, team1, team2, useRoles=role_split is not None)
+        team1_message, team2_message, _ = await self.printEmbed(ctx, team1, team2, useRoles=role_split is not None)
         await self._finalizeRoster(
             ctx.guild.id, team1_message, team2_message, team1, team2, use_roles=role_split is not None
         )
@@ -2232,12 +2408,15 @@ class helpers():
     def makeEmbedString(self, team: Team, useRoles=False):
         teamString = ""
 
+        # Usernames can contain markdown characters (_, *, ~, `, etc.);
+        # escape them so e.g. "under_score" doesn't get parsed as italics
+        # once dropped into an embed description alongside every other name.
         if useRoles and len(team.players) == 5:
             for i in range(5):
-                teamString += roles.get(i) + team.players[i].name + "\n"
+                teamString += roles.get(i) + discord.utils.escape_markdown(team.players[i].name) + "\n"
         else:
             for player in team.players:
-                teamString += player.name + "\n"
+                teamString += discord.utils.escape_markdown(player.name) + "\n"
 
         return teamString
 
@@ -2248,31 +2427,94 @@ class helpers():
     # to _finalizeRoster to turn the second one into a live reroll/start
     # control. Callers that don't care (a draft's own in-progress reposts)
     # just discard the return value.
-    async def printEmbed(self, ctx, team1: Team, team2: Team, playersTeam=None, useRoles=False):
-        team1_embedString = self.makeEmbedString(team1, useRoles)
-        team2_embedString = self.makeEmbedString(team2, useRoles)
-
+    # Shared by printEmbed's own initial post and _updateDraftEmbeds' later
+    # in-place edits, so a picked player disappearing from PLAYERS (or the
+    # roster gaining one) always renders identically regardless of which
+    # of the two ever built it.
+    def _buildTeamEmbeds(self, team1: Team, team2: Team, useRoles=False):
         team1_embed = discord.Embed(
-            title=team1.get_name(), description=team1_embedString, color=discord.Color.blue()
+            title=team1.get_name(), description=self.makeEmbedString(team1, useRoles), color=discord.Color.blue()
         )
         team2_embed = discord.Embed(
-            title=team2.get_name(), description=team2_embedString, color=discord.Color.red()
+            title=team2.get_name(), description=self.makeEmbedString(team2, useRoles), color=discord.Color.red()
+        )
+        return team1_embed, team2_embed
+
+    # None when there's nothing left to show at all (playersTeam wasn't
+    # given, or the pool was never non-empty to begin with); a live draft's
+    # pool hitting zero mid-picking is handled by the caller instead (see
+    # _updateDraftEmbeds), since that's "everyone's been drafted", a real
+    # state worth still showing, not "there was never a pool here".
+    def _buildPlayersEmbed(self, playersTeam):
+        if playersTeam is None or len(playersTeam.get_players()) == 0:
+            return None
+        return discord.Embed(
+            title="PLAYERS", description=self.makeEmbedString(playersTeam), color=discord.Color.purple()
         )
 
+    async def printEmbed(self, ctx, team1: Team, team2: Team, playersTeam=None, useRoles=False):
+        team1_embed, team2_embed = self._buildTeamEmbeds(team1, team2, useRoles)
+
         # ctx.response.send_message can only be called once per interaction,
-        # and printEmbed is sometimes called from a place (chooseHelper)
-        # where the interaction was already responded to earlier in the
-        # flow; channel.send for both embeds here lets the caller decide
-        # if/when to do the initial interaction response.
+        # and printEmbed is sometimes called from a place (captainsHelper/
+        # testDraftHelper) where the interaction was already responded to
+        # earlier in the flow; channel.send for both embeds here lets the
+        # caller decide if/when to do the initial interaction response.
         team1_message = await ctx.channel.send(embed=team1_embed)
         team2_message = await ctx.channel.send(embed=team2_embed)
 
-        if playersTeam is not None and len(playersTeam.get_players()) > 0:
-            playerString = self.makeEmbedString(playersTeam)
-            player_embed = discord.Embed(
-                title="PLAYERS", description=playerString, color=discord.Color.purple()
+        players_embed = self._buildPlayersEmbed(playersTeam)
+        players_message = await ctx.channel.send(embed=players_embed) if players_embed is not None else None
+
+        return team1_message, team2_message, players_message
+
+    # A live captain draft's own team1/team2/PLAYERS embeds, edited in
+    # place for every pick instead of _applyDraftPick reposting all three
+    # via printEmbed each time; captainsHelper/testDraftHelper's own
+    # initial printEmbed call is what actually posts them, storing their
+    # ids on roster_team1_message_id/roster_team2_message_id (the same
+    # fields _finalizeRoster reuses once the draft finishes) and
+    # draft_players_message_id. Same "fetch by stored id, rebuild, edit"
+    # shape _rerollRoster already uses for the equivalent post-draft Reroll
+    # click. draft_players_message_id can be None if the pool was already
+    # empty the moment the draft started (nothing was ever posted to edit);
+    # everything else is guaranteed set by the time a pick can happen at
+    # all, so no None-guard needed for team1_msg_id/team2_msg_id here.
+    async def _updateDraftEmbeds(self, guild_id, channel, team1, team2, players):
+        team1_msg_id = self.get(guild_id, "roster_team1_message_id")
+        team2_msg_id = self.get(guild_id, "roster_team2_message_id")
+        players_msg_id = self.get(guild_id, "draft_players_message_id")
+
+        team1_embed, team2_embed = self._buildTeamEmbeds(team1, team2)
+
+        # Each edit is independent: a transient HTTPException on one message
+        # (rate limit, brief API hiccup) must not skip the others or abort
+        # the caller before it reaches _finalizeRoster on the last pick.
+        # Previously an unhandled exception here (e.g. failing only on the
+        # PLAYERS edit) would propagate out and leave that embed stuck
+        # showing the just-drafted player forever on the final pick, since
+        # nothing else ever re-edits it once the draft is over.
+        team1_message = await channel.fetch_message(int(team1_msg_id))
+        try:
+            await team1_message.edit(embed=team1_embed)
+        except discord.HTTPException:
+            pass
+
+        team2_message = await channel.fetch_message(int(team2_msg_id))
+        try:
+            await team2_message.edit(embed=team2_embed)
+        except discord.HTTPException:
+            pass
+
+        if players_msg_id is not None:
+            players_embed = self._buildPlayersEmbed(players) or discord.Embed(
+                title="PLAYERS", description="Everyone has been drafted!", color=discord.Color.purple()
             )
-            await ctx.channel.send(embed=player_embed)
+            try:
+                players_message = await channel.fetch_message(int(players_msg_id))
+                await players_message.edit(embed=players_embed)
+            except discord.HTTPException:
+                pass
 
         return team1_message, team2_message
 
@@ -2400,27 +2642,35 @@ class helpers():
         await ctx.response.send_message(message)
 
     # Turns a just-posted, actually-final roster (not a captains draft still
-    # mid-pick) into a live control: Reroll to reroll roles (only if the
-    # roster actually qualifies, see below), Start to move everyone and
-    # open betting, and Start (no move) to open betting without moving
-    # anyone; Start and Reroll replace the old standalone
-    # /randomize-roles and /start commands respectively. The RosterActionView
-    # lives on `team2_message` only (team1's own message stays a plain
-    # embed), see RosterActionView's own callbacks for why one message is
-    # enough to drive both teams' state. `roster_team1_message_id`/
-    # `roster_team2_message_id` on `servers` is what makes a click on an OLD
-    # roster message inert once a newer one has been posted: each new call
-    # here overwrites them, so a stale message's buttons simply fail the id
-    # check and no-op.
+    # mid-pick) into a live control: Random Roles/Balanced Roles to assign
+    # or reassign roles (only if the roster is exactly 5v5, see below),
+    # Start to move everyone and open betting, and Start (no move) to open
+    # betting without moving anyone; Start and Random Roles replace the old
+    # standalone /randomize-roles and /start commands respectively. The
+    # RosterActionView lives on `team2_message` only (team1's own message
+    # stays a plain embed), see RosterActionView's own callbacks for why
+    # one message is enough to drive both teams' state.
+    # `roster_team1_message_id`/`roster_team2_message_id` on `servers` is
+    # what makes a click on an OLD roster message inert once a newer one
+    # has been posted: each new call here overwrites them, so a stale
+    # message's buttons simply fail the id check and no-op.
+    #
+    # size_eligible (exactly 5 a side) gates the role BUTTONS themselves,
+    # so any 5v5 roster can assign roles after the fact regardless of how
+    # it was formed (ranked or not); `use_roles` only controls whether the
+    # embeds are already SHOWING role labels the moment this posts (true
+    # for /make-teams ranked use_roles:true, false otherwise until Random
+    # Roles/Balanced Roles is actually clicked).
     async def _finalizeRoster(self, guild_id, team1_message, team2_message, team1, team2, use_roles):
-        roles_eligible = use_roles and len(team1.get_players()) == 5 and len(team2.get_players()) == 5
+        size_eligible = len(team1.get_players()) == 5 and len(team2.get_players()) == 5
+        roles_shown = use_roles and size_eligible
 
         self.update(guild_id, "roster_team1_message_id", team1_message.id)
         self.update(guild_id, "roster_team2_message_id", team2_message.id)
         self.update(guild_id, "roster_channel_id", team2_message.channel.id)
-        self.update(guild_id, "roster_use_roles", 1 if roles_eligible else 0)
+        self.update(guild_id, "roster_use_roles", 1 if roles_shown else 0)
 
-        await team2_message.edit(view=RosterActionView(self, include_reroll=roles_eligible))
+        await team2_message.edit(view=RosterActionView(self, include_role_buttons=size_eligible))
 
     # The voice channel to send everyone back to once the game ends (see
     # moveMembersToOriginalChannel); the old /start command took this from
@@ -2435,14 +2685,41 @@ class helpers():
                 return member.voice.channel
         return None
 
-    # 🔄's whole implementation, genuinely shuffles both teams' player
-    # order (unlike the old randomRoleHelper this replaces, which computed
-    # a shuffled result1/result2 text pair that nothing displayed and never
-    # wrote the shuffle back to team1/team2 at all; /make-teams' own
-    # embeds silently kept showing the un-shuffled split order no matter
-    # how many times /randomize-roles ran). This one persists the shuffle
-    # to team1/team2 and edits both live embeds in place, so what's on
-    # screen is always what a /start-equivalent click would actually use.
+    # Shared by _rerollRoster and _applyBalancedRolesToRoster: both mutate
+    # team1/team2's role-labelled order and then need the exact same
+    # "fetch the roster's two live messages by their stored id, rebuild the
+    # embeds with roles showing, edit in place" finish. A no-op if either
+    # message id isn't tracked (nothing posted yet, or a stale/cleared
+    # roster); each edit is independent so one message's transient
+    # HTTPException doesn't stop the other from updating.
+    async def _editRosterTeamEmbeds(self, guild_id, channel, team1, team2):
+        team1_msg_id = self.get(guild_id, "roster_team1_message_id")
+        team2_msg_id = self.get(guild_id, "roster_team2_message_id")
+        if team1_msg_id is None or team2_msg_id is None:
+            return
+
+        team1_embed, team2_embed = self._buildTeamEmbeds(team1, team2, useRoles=True)
+        try:
+            team1_message = await channel.fetch_message(int(team1_msg_id))
+            await team1_message.edit(embed=team1_embed)
+        except discord.HTTPException:
+            pass
+        try:
+            team2_message = await channel.fetch_message(int(team2_msg_id))
+            await team2_message.edit(embed=team2_embed)
+        except discord.HTTPException:
+            pass
+
+    # Random Roles' whole implementation, genuinely shuffles both teams'
+    # player order (unlike the old randomRoleHelper this replaces, which
+    # computed a shuffled result1/result2 text pair that nothing displayed
+    # and never wrote the shuffle back to team1/team2 at all; /make-teams'
+    # own embeds silently kept showing the un-shuffled split order no
+    # matter how many times /randomize-roles ran). This one persists the
+    # shuffle to team1/team2 and edits both live embeds in place, so
+    # what's on screen is always what a /start-equivalent click would
+    # actually use. Also what turns roles on in the first place for a 5v5
+    # roster that was never posted with use_roles to begin with.
     async def _rerollRoster(self, guild_id, channel):
         team1_msg_id = self.get(guild_id, "roster_team1_message_id")
         team2_msg_id = self.get(guild_id, "roster_team2_message_id")
@@ -2459,21 +2736,52 @@ class helpers():
 
         self.update(guild_id, "team1", team1.serializeTeam())
         self.update(guild_id, "team2", team2.serializeTeam())
+        self.update(guild_id, "roster_use_roles", 1)
+        # A pure shuffle makes no preference claim about who landed where,
+        # so any earlier disliked-role win-elo bonus flag (see
+        # ROLE_BALANCE_DISLIKED_ROLE_WIN_ELO_MULTIPLIER) no longer means
+        # anything once positions have been reshuffled at random.
+        self.update(guild_id, "disliked_role_user_ids", "")
 
-        team1_embed = discord.Embed(
-            title=team1.get_name(), description=self.makeEmbedString(team1, True), color=discord.Color.blue()
-        )
-        team2_embed = discord.Embed(
-            title=team2.get_name(), description=self.makeEmbedString(team2, True), color=discord.Color.red()
+        await self._editRosterTeamEmbeds(guild_id, channel, team1, team2)
+
+    # Balanced Roles' whole implementation: elo+preference role assignment
+    # (see _assignRolesForFixedTeams) applied to whichever two teams are
+    # already posted, without moving any player between them. Callers
+    # (_handleRosterBalanceRolesClick) already checked both teams have
+    # exactly 5 players.
+    async def _applyBalancedRolesToRoster(self, guild_id, channel, team1, team2):
+        default_elo = self._defaultEloForGuild(guild_id)
+
+        def _withElo(players):
+            entries = []
+            for player in players:
+                self.ensureEconomyRow(guild_id, player.get_id(), player.get_name())
+                elo = self.getEconomy(guild_id, player.get_id(), "elo")
+                entries.append((player, elo if elo is not None else default_elo))
+            return entries
+
+        team1_assigned, team2_assigned = self._assignRolesForFixedTeams(
+            guild_id, _withElo(team1.get_players()), _withElo(team2.get_players())
         )
 
-        try:
-            team1_message = await channel.fetch_message(int(team1_msg_id))
-            await team1_message.edit(embed=team1_embed)
-        except discord.HTTPException:
-            pass
-        team2_message = await channel.fetch_message(int(team2_msg_id))
-        await team2_message.edit(embed=team2_embed)
+        new_team1 = Team()
+        new_team1.name = team1.get_name()
+        new_team2 = Team()
+        new_team2.name = team2.get_name()
+        disliked_role_ids = []
+        for target, assigned in ((new_team1, team1_assigned), (new_team2, team2_assigned)):
+            for player, _elo, _role, tier, _eff in assigned:
+                target.add_player(Player(player.get_id(), player.get_name()))
+                if tier == "disliked":
+                    disliked_role_ids.append(player.get_id())
+
+        self.update(guild_id, "team1", new_team1.serializeTeam())
+        self.update(guild_id, "team2", new_team2.serializeTeam())
+        self.update(guild_id, "disliked_role_user_ids", ",".join(str(i) for i in disliked_role_ids))
+        self.update(guild_id, "roster_use_roles", 1)
+
+        await self._editRosterTeamEmbeds(guild_id, channel, new_team1, new_team2)
 
     # Finds (or creates) DEFAULT_TEAM_CHANNEL_NAMES and points this guild's
     # channel1/channel2 at them, the self-heal ▶️ falls back to instead of
@@ -2503,7 +2811,7 @@ class helpers():
     # nobody has to be in a voice channel at all to click it, and there's
     # no "original channel" to send anyone back to once the game ends
     # (moveMembersToOriginalChannel simply no-ops for a game started this way).
-    # RosterActionView's Reroll button callback.
+    # RosterActionView's Random Roles button callback.
     async def _handleRosterRerollClick(self, interaction):
         guild_id = interaction.guild_id
         if guild_id is None:
@@ -2514,17 +2822,36 @@ class helpers():
             await interaction.response.send_message("This roster is no longer live.", ephemeral=True)
             return
 
-        # include_reroll=False already keeps this button off a non-
-        # eligible roster's own message (see _finalizeRoster); this is
-        # just defense in depth against a mismatched/stale message.
-        if not self.get(guild_id, "roster_use_roles"):
+        await interaction.response.defer()
+        await self._rerollRoster(guild_id, interaction.channel)
+
+    # RosterActionView's Balanced Roles button callback. include_role_buttons
+    # =False already keeps this button off a non-5v5 roster's own message
+    # (see _finalizeRoster); the explicit size check here is just defense
+    # in depth against a mismatched/stale message the way Start's own
+    # voice-channel check works.
+    async def _handleRosterBalanceRolesClick(self, interaction):
+        guild_id = interaction.guild_id
+        if guild_id is None:
+            return
+
+        stored_message_id = self.get(guild_id, "roster_team2_message_id")
+        if stored_message_id is None or int(stored_message_id) != interaction.message.id:
+            await interaction.response.send_message("This roster is no longer live.", ephemeral=True)
+            return
+
+        team1 = Team()
+        team1.deserializeTeam(self.get(guild_id, "team1") or "")
+        team2 = Team()
+        team2.deserializeTeam(self.get(guild_id, "team2") or "")
+        if len(team1.get_players()) != 5 or len(team2.get_players()) != 5:
             await interaction.response.send_message(
-                "This roster doesn't have roles assigned, so there's nothing to reroll.", ephemeral=True
+                "Balanced roles need exactly 5 players on each team.", ephemeral=True
             )
             return
 
         await interaction.response.defer()
-        await self._rerollRoster(guild_id, interaction.channel)
+        await self._applyBalancedRolesToRoster(guild_id, interaction.channel, team1, team2)
 
     # RosterActionView's Start/Start (no move) button callback, ▶️/⚡'s old
     # reaction-based whole implementation (everything the old /start
@@ -2668,64 +2995,65 @@ class helpers():
             "Ranked captains selected! Elo will be updated when the winner is reported."
             if ranked else "Captains selected!"
         )
-        await self.printEmbed(ctx, team1, team2, players)
+        team1_message, team2_message, players_message = await self.printEmbed(ctx, team1, team2, players)
+        self.update(ctx.guild.id, "roster_team1_message_id", team1_message.id)
+        self.update(ctx.guild.id, "roster_team2_message_id", team2_message.id)
+        self.update(ctx.guild.id, "roster_channel_id", team2_message.channel.id)
+        self.update(ctx.guild.id, "draft_players_message_id", players_message.id if players_message else None)
 
-        await ctx.channel.send(
-            captain_1.mention
-            + ', use "/choose  @_____" to pick a player for your team'
-        )
+        content, view = self._renderDraftPickView(ctx.guild.id)
+        await ctx.channel.send(content, view=view)
 
-    # function for captain to choose a specific team member
-    async def chooseFunc(self, ctx, member):
-        # /choose can be called with no `member` and `use_random` left False
-        # (its default), catch that here with a clear message rather than
-        # passing member=None down into chooseHelper -> Player(member.id, ...).
-        if member is None:
+    # /test-draft: lets a single admin solo-test the button draft picker
+    # without needing 9 other real people sitting in a voice channel.
+    # captain1 and captain2 both get set to the caller's own Player, not
+    # two different members the way captainsHelper requires, so
+    # _isDraftPickTurn's "does this click's user match the current
+    # captain" check passes for both sides and the same person can click
+    # through every pick themselves. The pool is 10 real (non-bot) guild
+    # members chosen at random, same shape captainsHelper's own
+    # voice-channel pool takes, just sourced from the whole server instead
+    # of one voice channel since there's no real draft happening.
+    async def testDraftHelper(self, ctx):
+        candidates = [m for m in ctx.guild.members if not m.bot and m.id != ctx.user.id]
+        if len(candidates) < 10:
             await ctx.response.send_message(
-                'Please mention a player to choose, e.g. "/choose member:@Name", '
-                'or use "/choose use_random:True" to pick one at random.'
+                f"Need at least 10 other non-bot members in this server to test with; found {len(candidates)}."
             )
             return
 
-        captain1Ser = self.get(ctx.guild.id, "captain1")
-        captain2Ser = self.get(ctx.guild.id, "captain2")
+        await self.clearTeamsHelper(ctx)
 
-        captain1 = Player()
-        captain1.deserializePlayer(captain1Ser)
-        captain2 = Player()
-        captain2.deserializePlayer(captain2Ser)
+        self.update(ctx.guild.id, "captain1", Player(ctx.user.id, ctx.user.name).serializePlayer())
+        self.update(ctx.guild.id, "captain2", Player(ctx.user.id, ctx.user.name).serializePlayer())
+        self.update(ctx.guild.id, "mode", "Captains (Test)")
+        self.update(ctx.guild.id, "original_channel", "")
 
-        playersSer = self.get(ctx.guild.id, "players")
+        team1 = Team()
+        team2 = Team()
+        team1.add_player(Player(ctx.user.id, ctx.user.name))
+        team2.add_player(Player(ctx.user.id, ctx.user.name))
+        team1.name, team2.name = self._rosterTeamNames(ctx.guild.id)
+        self.update(ctx.guild.id, "team1", team1.serializeTeam())
+        self.update(ctx.guild.id, "team2", team2.serializeTeam())
+
         players = Team()
-        players.deserializeTeam(playersSer)
+        for member in random.sample(candidates, 10):
+            players.add_player(Player(member.id, member.name))
+        self.update(ctx.guild.id, "players", players.serializeTeam())
 
-        turn = int(self.get(ctx.guild.id, "turn"))
+        await ctx.response.send_message(
+            f"Test draft started! {ctx.user.mention} is drafting for both teams against a pool of "
+            "10 random members."
+        )
+        team1_message, team2_message, players_message = await self.printEmbed(ctx, team1, team2, players)
+        self.update(ctx.guild.id, "roster_team1_message_id", team1_message.id)
+        self.update(ctx.guild.id, "roster_team2_message_id", team2_message.id)
+        self.update(ctx.guild.id, "roster_channel_id", team2_message.channel.id)
+        self.update(ctx.guild.id, "draft_players_message_id", players_message.id if players_message else None)
 
-        if players.get_players() != []:
-            if turn == 1 and ctx.user.id == captain1.id:
-                await self.chooseHelper(ctx, member, 1)
-            elif turn == 2 and ctx.user.id == captain2.id:
-                await self.chooseHelper(ctx, member, 2)
-            else:
-                if (turn == 1 and ctx.user.id == captain2.id) or (
-                    turn == 2 and ctx.user.id == captain1.id
-                ):
-                    await ctx.response.send_message("Not Your Turn!")
-                elif (
-                    ctx.user.id != captain1.id
-                    and ctx.user.id != captain2.id
-                ):
-                    await ctx.response.send_message("Only team captains can use this command!")
-        else:
-            await ctx.response.send_message("There are no players left to choose from!")
-
-    # choose random player from all remaining players
-    async def chooseRandomMember(self, ctx):
-        randomMember = await self.getRandomMember(ctx)
-        if randomMember is None:
-            await ctx.response.send_message("There are no players left to choose from!")
-            return
-        await self.chooseFunc(ctx, randomMember)
+        content, view = self._renderDraftPickView(ctx.guild.id)
+        await ctx.channel.send(content, view=view)
 
     async def getRandomMember(self, ctx):
         playersSer = self.get(ctx.guild.id, "players")
@@ -2745,109 +3073,179 @@ class helpers():
         member = discord.utils.get(ctx.guild.members, id=m[0].get_id())
         return member
 
-    # helper fn for choosing team members from players that haven't been chosen
-    async def chooseHelper(self, ctx, member, turn):
-        captain1Ser = self.get(ctx.guild.id, "captain1")
-        captain2Ser = self.get(ctx.guild.id, "captain2")
-        playersSer = self.get(ctx.guild.id, "players")
-        team1Ser = self.get(ctx.guild.id, "team1")
-        team2Ser = self.get(ctx.guild.id, "team2")
-
-        captain1 = Player()
-        captain1.deserializePlayer(captain1Ser)
-        captain2 = Player()
-        captain2.deserializePlayer(captain2Ser)
-
+    # Builds the draft picker's (content, view) pair for whatever the
+    # guild's draft state currently is: one _DraftPickSlotButton per pool
+    # member on the current page, colored for whichever captain's turn it
+    # is, Random always present, First/Prev/Next/Last only once the pool
+    # is too big for one page. Called fresh on every post/re-render
+    # (initial captainsHelper send, every pick, every page click) rather
+    # than mutating an existing view in place, the same "always rebuild"
+    # discipline SetupRoleSelectionView already uses.
+    def _renderDraftPickView(self, guild_id):
         players = Team()
-        players.deserializeTeam(playersSer)
+        players.deserializeTeam(self.get(guild_id, "players") or "")
+        pool = players.get_players()
+        turn = int(self.get(guild_id, "turn") or 1)
+
+        paginated = len(pool) > DRAFT_PICK_MAX_UNPAGINATED
+        if paginated:
+            total_pages = max(1, -(-len(pool) // DRAFT_PICK_PAGE_SIZE))
+            page = min(int(self.get(guild_id, "draft_pick_page") or 0), total_pages - 1)
+            pool_page = pool[page * DRAFT_PICK_PAGE_SIZE:(page + 1) * DRAFT_PICK_PAGE_SIZE]
+        else:
+            pool_page = pool[:DRAFT_PICK_MAX_UNPAGINATED]
+
+        view = CaptainsDraftPickView(self, pool_page, turn, paginated)
+
+        captain = Player()
+        captain.deserializePlayer(self.get(guild_id, f"captain{turn}"))
+        content = f"<@{captain.get_id()}>, pick a player for your team!"
+        return content, view
+
+    # Shared by CaptainsDraftPickView's interaction_check and
+    # _DraftPickSlotButton's own (a DynamicItem reconstructed after a
+    # restart isn't necessarily attached to a live View instance, so it
+    # needs this check itself rather than relying on the containing
+    # View's). Re-derives whose turn it is from `servers` fresh every
+    # time; there's no per-instance state to trust on a persistent view.
+    async def _isDraftPickTurn(self, interaction):
+        guild_id = interaction.guild_id
+        if guild_id is None:
+            return False
+        turn = int(self.get(guild_id, "turn") or 1)
+        captain = Player()
+        captain.deserializePlayer(self.get(guild_id, f"captain{turn}"))
+        if interaction.user.id != captain.get_id():
+            await interaction.response.send_message("Not your turn to pick.", ephemeral=True)
+            return False
+        return True
+
+    # A slot button click: re-resolves `index` (a position on the
+    # currently-shown page, never a player id) against the guild's actual
+    # current pool/page, then applies the pick exactly like a random pick
+    # or (previously) a manual /choose would.
+    async def _handleDraftPickSlotClick(self, interaction, index):
+        guild_id = interaction.guild_id
+        players = Team()
+        players.deserializeTeam(self.get(guild_id, "players") or "")
+        pool = players.get_players()
+
+        paginated = len(pool) > DRAFT_PICK_MAX_UNPAGINATED
+        page = int(self.get(guild_id, "draft_pick_page") or 0) if paginated else 0
+        page_size = DRAFT_PICK_PAGE_SIZE if paginated else DRAFT_PICK_MAX_UNPAGINATED
+        absolute_index = page * page_size + index
+
+        if absolute_index >= len(pool):
+            await interaction.response.send_message("That player is no longer available.", ephemeral=True)
+            return
+
+        member = discord.utils.get(interaction.guild.members, id=pool[absolute_index].get_id())
+        if member is None:
+            await interaction.response.send_message("That player is no longer in the server.", ephemeral=True)
+            return
+
+        turn = int(self.get(guild_id, "turn") or 1)
+        await self._applyDraftPick(interaction, member, turn)
+
+    async def _handleDraftPickRandomClick(self, interaction):
+        member = await self.getRandomMember(interaction)
+        if member is None:
+            await interaction.response.send_message("There are no players left to choose from!", ephemeral=True)
+            return
+        turn = int(self.get(interaction.guild_id, "turn") or 1)
+        await self._applyDraftPick(interaction, member, turn)
+
+    async def _handleDraftPickPageClick(self, interaction, direction):
+        guild_id = interaction.guild_id
+        players = Team()
+        players.deserializeTeam(self.get(guild_id, "players") or "")
+        pool = players.get_players()
+
+        total_pages = max(1, -(-len(pool) // DRAFT_PICK_PAGE_SIZE))
+        page = min(int(self.get(guild_id, "draft_pick_page") or 0), total_pages - 1)
+        new_page = self._computeNewPage(direction, page, total_pages)
+
+        if new_page == page:
+            await interaction.response.defer()
+            return
+
+        self.update(guild_id, "draft_pick_page", new_page)
+        content, view = self._renderDraftPickView(guild_id)
+        await interaction.response.edit_message(content=content, view=view)
+
+    # The actual pick: adds `member` to whichever team `turn` is drafting
+    # for, removes them from the pool, and either wraps up the draft
+    # (pool empty or both teams hit team_size, see the same regression
+    # note the old chooseHelper had about spectators) or flips the turn
+    # and re-renders the picker for whoever's up next. Shared by every
+    # pick path (slot click, Random) so there's exactly one place this
+    # logic lives, now that /choose itself is gone.
+    async def _applyDraftPick(self, interaction, member, turn):
+        guild_id = interaction.guild_id
+        players = Team()
+        players.deserializeTeam(self.get(guild_id, "players") or "")
         team1 = Team()
-        team1.deserializeTeam(team1Ser)
+        team1.deserializeTeam(self.get(guild_id, "team1") or "")
         team2 = Team()
-        team2.deserializeTeam(team2Ser)
+        team2.deserializeTeam(self.get(guild_id, "team2") or "")
 
-        switch = True
         player = Player(member.id, member.name)
-        team1_message = team2_message = None
-
         team1ids = [p.get_id() for p in team1.get_players()]
         team2ids = [p.get_id() for p in team2.get_players()]
         playersids = [p.get_id() for p in players.get_players()]
 
-        if (
-            member.id not in team1ids
-            and member.id not in team2ids
-            and member.id in playersids
-        ):
-            if turn == 1:
-                team1.add_player(player)
-                self.update(ctx.guild.id, "team1", team1.serializeTeam())
-            else:
-                team2.add_player(player)
-                self.update(ctx.guild.id, "team2", team2.serializeTeam())
-
-            # remove_player() relies on __eq__/identity match; find the
-            # equivalent player object already inside `players` by id
-            # rather than trying to remove the freshly-constructed `player`.
-            toRemove = next((p for p in players.get_players() if p.get_id() == member.id), None)
-            if toRemove is not None:
-                players.remove_player(toRemove)
-
-            self.update(ctx.guild.id, "players", players.serializeTeam())
-
-            await ctx.response.send_message(f"{member.name} added to team {turn}!")
-            team1_message, team2_message = await self.printEmbed(ctx, team1, team2, players)
-        else:
-            switch = False
-            await ctx.response.send_message(
-                "Player has already been selected or does not exist in the player list."
+        if member.id in team1ids or member.id in team2ids or member.id not in playersids:
+            await interaction.response.send_message(
+                "Player has already been selected or does not exist in the player list.", ephemeral=True
             )
+            return
 
-        # `players` is a Team object, never equal to the list literal `[]`,
-        # check the underlying player list instead.
-        #
-        # Also prompt once both teams reach team_size, even if the pool
+        if turn == 1:
+            team1.add_player(player)
+            self.update(guild_id, "team1", team1.serializeTeam())
+        else:
+            team2.add_player(player)
+            self.update(guild_id, "team2", team2.serializeTeam())
+
+        # remove_player() relies on __eq__/identity match; find the
+        # equivalent player object already inside `players` by id rather
+        # than trying to remove the freshly-constructed `player`.
+        toRemove = next((p for p in players.get_players() if p.get_id() == member.id), None)
+        if toRemove is not None:
+            players.remove_player(toRemove)
+        self.update(guild_id, "players", players.serializeTeam())
+        self.update(guild_id, "draft_pick_page", 0)
+
+        # Also wrap up once both teams reach team_size, even if the pool
         # still has people left in it; a voice channel with more people
         # than team_size * 2 is expected to leave spectators undrafted, so
         # waiting on the pool to fully empty would never fire at all.
-        team_size = self.get(ctx.guild.id, "team_size") or 0
+        team_size = self.get(guild_id, "team_size") or 0
         teams_full = (
             team_size
             and len(team1.get_players()) >= team_size
             and len(team2.get_players()) >= team_size
         )
+
         if len(players.get_players()) == 0 or teams_full:
-            if team2_message is not None:
-                await self._finalizeRoster(ctx.guild.id, team1_message, team2_message, team1, team2, use_roles=False)
-            await ctx.channel.send(
+            await interaction.response.edit_message(content=f"{member.name} added! Draft complete.", view=None)
+            team1_message, team2_message = await self._updateDraftEmbeds(
+                guild_id, interaction.channel, team1, team2, players
+            )
+            await self._finalizeRoster(guild_id, team1_message, team2_message, team1, team2, use_roles=False)
+            await interaction.channel.send(
                 "Both teams are set! Press Start on the roster above to move everyone to the "
                 "channels, or Start (no move) to open betting without moving anyone!"
             )
             return
 
-        c1member = discord.utils.get(ctx.guild.members, id=captain1.id)
-        c2member = discord.utils.get(ctx.guild.members, id=captain2.id)
-
-        if turn == 2 and switch:
-            self.update(ctx.guild.id, "turn", 1)
-            await ctx.channel.send(
-                c1member.mention + ', use "/choose  @_____" to pick a player for your team'
-            )
-        elif turn == 1 and switch:
-            self.update(ctx.guild.id, "turn", 2)
-            await ctx.channel.send(
-                c2member.mention + ', use "/choose  @_____" to pick a player for your team'
-            )
-        else:
-            if turn == 1:
-                await ctx.channel.send(
-                    c1member.mention
-                    + ', use "/choose  @_____" to pick a player for your team'
-                )
-            else:
-                await ctx.channel.send(
-                    c2member.mention
-                    + ', use "/choose  @_____" to pick a player for your team'
-                )
+        new_turn = 2 if turn == 1 else 1
+        self.update(guild_id, "turn", new_turn)
+        content, view = self._renderDraftPickView(guild_id)
+        await interaction.response.edit_message(
+            content=f"{member.name} added to team {turn}!\n\n{content}", view=view
+        )
+        await self._updateDraftEmbeds(guild_id, interaction.channel, team1, team2, players)
 
     # clears all current teams
     #
@@ -4837,7 +5235,7 @@ class helpers():
 
         await channel.send(
             f"\U0001f3b2 Betting is open on {len(match_ids)} match{plural} ({match_list})! Use "
-            f"`/wager <amount> <team> match_id:<id>` to bet on one. Betting closes in {duration} seconds."
+            f"`/wager team <amount> <team> match_id:<id>` to bet on one. Betting closes in {duration} seconds."
         )
         asyncio.create_task(self._concurrentBettingTimer(match_ids, channel, duration))
 
@@ -5426,7 +5824,7 @@ class helpers():
         # same match message can't also pass the check above and post a
         # second confirmation for it. Also closes betting on this match
         # right away (same reasoning _handleWinnerReportPick's own
-        # betting_state close has); otherwise /wager match_id: stays open
+        # betting_state close has); otherwise /wager team match_id: stays open
         # for the whole confirmation window, letting someone bet on
         # whichever side just got reported before it's even confirmed.
         # Left closed even if the report is later cancelled.
@@ -5763,7 +6161,7 @@ class helpers():
         return teams
 
     # Every team in the guild `user_id` is a rostered player on (captain or
-    # not), what /team mine pages through. Sorted by team_id so paging
+    # not), what /team lookup pages through. Sorted by team_id so paging
     # stays stable across clicks even though this is recomputed fresh
     # from the DB on every page flip (see _handleMyTeamsPageClick), the same
     # way getLeaderboardEntries is recomputed fresh rather than snapshotted.
@@ -5882,10 +6280,10 @@ class helpers():
     # as leaderboardHelper/myTeamsHelper; clicking a button
     # (_handleTeamListPageClick) edits this same message. `cards` switches
     # to the exact same one-team-full-stats-card-per-page rendering
-    # /team mine uses (_renderMyTeamsEmbed/_myTeamsPageCount take a plain
+    # /team lookup uses (_renderMyTeamsEmbed/_myTeamsPageCount take a plain
     # list of (team_id, team) tuples and don't care where it came from),
     # just sourced from every team matching search/recruiting_only/sort/
-    # order/members instead of one player's own teams, /team mine for the
+    # order/members instead of one player's own teams, /team lookup for the
     # whole server, in effect. `members` (a list of up to 5 discord.Member,
     # possibly empty) is stored as two parallel CSV columns rather than
     # re-derived on every page flip: memberIds is what _filterAndSortTeams
@@ -6141,7 +6539,7 @@ class helpers():
         self.db.commit()
 
     # Records one played tournament match against each side's PERSISTENT
-    # team record (the one /team list, /team mine, and /team stats actually
+    # team record (the one /team list, /team lookup, and /team stats actually
     # read), called from every match-resolution path (winners bracket,
     # losers bracket, Grand Finals). Looked up by name rather than trusting
     # the bracket node's own embedded Team object: that's just a snapshot
@@ -6214,6 +6612,55 @@ class helpers():
         await ctx.response.send_message(
             f"Team **{name}** created! {captain_user.mention} is the captain, looking for {team_size} player"
             f"{'s' if team_size != 1 else ''} total."
+        )
+
+    # Snapshots whichever side of the LAST completed/loaded game (whatever
+    # is currently sitting in servers.team1/team2, the same "last game"
+    # roster /make-teams repeat re-posts) the caller actually played on,
+    # as a brand new persistent team with the caller as captain. Only
+    # reads team1/team2, never touches them, so the ephemeral roster is
+    # untouched and can still be reused/reported on normally afterward.
+    async def saveTeamHelper(self, ctx, team, name):
+        guild_id = ctx.guild.id
+        column = "team1" if team == 1 else "team2"
+
+        serialized = self.get(guild_id, column)
+        if not serialized:
+            await ctx.response.send_message(f"There's no Team {team} from the last game to save.")
+            return
+
+        roster = Team()
+        roster.deserializeTeam(serialized)
+
+        if not any(p.get_id() == ctx.user.id for p in roster.get_players()):
+            await ctx.response.send_message(
+                f"You weren't part of Team {team} in the last game, so you can't save it.", ephemeral=True
+            )
+            return
+
+        if self.getTeamRow(guild_id, name) is not None:
+            await ctx.response.send_message(f"A team named **{name}** already exists in this server.")
+            return
+
+        saved = Team()
+        saved.set_name(name)
+        captain = None
+        for player in roster.get_players():
+            newPlayer = Player(player.get_id(), player.get_name())
+            saved.add_player(newPlayer)
+            if newPlayer.get_id() == ctx.user.id:
+                captain = newPlayer
+        saved.set_captain(captain)
+        # Snapshotted as already full, not "recruiting" (see
+        # _filterAndSortTeams' recruiting_only), since this is a copy of a
+        # roster that was already complete, not a fresh call for players.
+        saved.set_team_size(saved.get_size())
+
+        self._saveNewTeam(guild_id, saved)
+
+        await ctx.response.send_message(
+            f"Team **{name}** saved from Team {team}'s last game roster! {ctx.user.mention} is the captain, "
+            f"{saved.get_size()} player{'s' if saved.get_size() != 1 else ''} total."
         )
 
     # Finds whichever OTHER team (if any) already has `channel_name` set as
@@ -6443,7 +6890,7 @@ class helpers():
             return
 
         # remove_player() relies on __eq__/identity match, same "find the
-        # actual roster object by id first" pattern chooseFunc's own
+        # actual roster object by id first" pattern _applyDraftPick's own
         # players.remove_player call already has to use.
         player = next((p for p in team.get_players() if p.get_id() == ctx.user.id), None)
         if player is None:
@@ -6905,7 +7352,7 @@ class helpers():
 
         await interaction.response.send_message(f"**{target_name}** has joined **{team_name}**!")
 
-    # Builds a team's stats embed, shared by /team stats and /team mine's
+    # Builds a team's stats embed, shared by /team stats and /team lookup's
     # paging, so both stay in sync automatically. Returns (embed, file):
     # file is None whenever there's no logo to attach (the built-in set was
     # unavailable when _ensureLogo ran, or the file's since been removed
@@ -7219,10 +7666,10 @@ class helpers():
         )
         self.db.commit()
 
-    # ---------------- /team mine ----------------
+    # ---------------- /team lookup ----------------
 
     # One team per "page" rather than a batch of rows like /leaderboard;
-    # /team mine is for flipping through each of a player's teams' full
+    # /team lookup is for flipping through each of a player's teams' full
     # stats cards one at a time, not scanning a ranked list.
     def _myTeamsPageCount(self, teams):
         return max(1, len(teams))
@@ -7279,8 +7726,8 @@ class helpers():
 
     # MyTeamsPagingView's button callback, no-ops (with a plain ephemeral
     # note) unless the interaction's message still matches an active
-    # /team mine page view. The stored userId is whoever the list is ABOUT
-    # (the looked-up member, /team mine' own optional `member` param,
+    # /team lookup page view. The stored userId is whoever the list is ABOUT
+    # (the looked-up member, /team lookup' own optional `member` param,
     # defaulting to whoever ran the command), not whoever clicks the
     # button; the button itself is clickable by anyone, and re-derives the
     # team list from that stored userId regardless of who actually clicked,
@@ -7460,7 +7907,7 @@ class helpers():
             "Press Start on the roster below when you're ready to move everyone and open betting, or "
             "Start (no move) to open betting without moving anyone."
         )
-        team1_message, team2_message = await self.printEmbed(ctx, team1, team2)
+        team1_message, team2_message, _ = await self.printEmbed(ctx, team1, team2)
         await self._finalizeRoster(guild_id, team1_message, team2_message, team1, team2, use_roles=False)
 
     # /make-teams repeat: re-posts whichever two rosters /make-teams random, /make-teams draft, or
@@ -7511,7 +7958,7 @@ class helpers():
             "Press Start on the roster below when you're ready to move everyone and open betting, or "
             "Start (no move) to open betting without moving anyone."
         )
-        team1_message, team2_message = await self.printEmbed(ctx, team1, team2, useRoles=use_roles)
+        team1_message, team2_message, _ = await self.printEmbed(ctx, team1, team2, useRoles=use_roles)
         await self._finalizeRoster(
             guild_id, team1_message, team2_message, team1, team2, use_roles=use_roles
         )
@@ -7790,7 +8237,7 @@ class helpers():
 
         duration = self._getBettingTimerSeconds(guild_id)
         msg = await channel.send(
-            f"🎲 Betting is open! Use `/wager <amount> <team>` to bet on this game (closes in "
+            f"🎲 Betting is open! Use `/wager team <amount> <team>` to bet on this game (closes in "
             f"{duration} seconds). Once the game ends, press the winning team's button below to "
             f"report it (you'll be asked to confirm before it's recorded and bets are paid out), or "
             f"Cancel Game to cancel the game.",
@@ -7852,7 +8299,7 @@ class helpers():
     # so a reconnect can't stomp a window that was never actually
     # interrupted). Without this, a guild whose betting_state was OPEN at
     # the moment of a restart would stay OPEN forever, nobody left to
-    # ever flip it to CLOSED, so /wager would keep accepting new bets
+    # ever flip it to CLOSED, so /wager team would keep accepting new bets
     # indefinitely past when the timer should have closed it. Resumes the
     # remaining time via betting_opened_at rather than just closing
     # outright, so a window that had, say, 55 of its 60 seconds left when
@@ -7957,7 +8404,7 @@ class helpers():
         self._cancelBettingTimerTask(guild_id)
 
         # Close betting the moment a report click lands, win-confirmed or
-        # not; otherwise /wager stays open for the entire confirmation
+        # not; otherwise /wager team stays open for the entire confirmation
         # window (state is still OPEN/CLOSED either way, and nothing else
         # here touches it), letting someone place a brand new bet on
         # whichever side just got reported as the winner before it's even
@@ -8091,7 +8538,7 @@ class helpers():
             self.update(guild_id, "active_tournament_match_id", None)
             await self._resolveTournamentMatch(guild_id, active_match_id, winning_team, channel.id)
 
-    # ---------------- Duels (/wager-against) ----------------
+    # ---------------- Duels (/wager against) ----------------
 
     # Challenges `member` to a heads-up wager for `amount` gold, independent
     # of any team game, posts a message mentioning them with a DuelAcceptView
@@ -9514,7 +9961,7 @@ class helpers():
         self.db.commit()
 
     # Every trading-card font style `user_id` has purchased in this guild
-    # (see /shop); unlike titles/color schemes there's no elo-tier path to
+    # (see /shop buy); unlike titles/color schemes there's no elo-tier path to
     # one of these at all, only the shop, so this is a straight itemKey
     # lookup against CARD_SHOP_FONT_STYLES rather than needing a combining
     # catalog the way getUnlockedCardTitles does.
@@ -9532,7 +9979,7 @@ class helpers():
     def getAvailableCardFontStyles(self, guild_id, user_id):
         return [CARD_DEFAULT_FONT_STYLE] + self.getUnlockedCardFontStyles(guild_id, user_id)
 
-    # /preview: the four things worth seeing all at once before spending
+    # /shop preview: the four things worth seeing all at once before spending
     # gold or picking a name blind, every built-in logo, every card title,
     # every color scheme, and every font, regardless of what any specific
     # player has actually unlocked (unlike getAvailableCard*, which are
@@ -9810,7 +10257,7 @@ class helpers():
         if font_style is not None and font_style not in self.getAvailableCardFontStyles(guild_id, user_id):
             await ctx.response.send_message(
                 f"You haven't unlocked the **{font_style}** font. Pick one of your unlocked fonts "
-                "from the autocomplete list, or check /shop to see what's available."
+                "from the autocomplete list, or check /shop browse to see what's available."
             )
             return
 
@@ -9851,8 +10298,8 @@ class helpers():
         return self.cursor.fetchone() is not None
 
     # Every purchasable item across all three CARD_SHOP_* catalogs, each
-    # as {type, name, price, owned}, what /shop displays and
-    # /shop-buy's own autocomplete filters down to just what's still
+    # as {type, name, price, owned}, what /shop browse displays and
+    # /shop buy's own autocomplete filters down to just what's still
     # unowned.
     def getShopCatalog(self, guild_id, user_id):
         catalog = []
@@ -9888,9 +10335,9 @@ class helpers():
 
     # The embed both shopHelper's initial post and every later ShopSortView
     # button click render, kept as one method so a re-sort can never drift
-    # from what /shop itself would show. Each category's items keep their
+    # from what /shop browse itself would show. Each category's items keep their
     # own catalog order when sort_key is None (the original behavior,
-    # still what a fresh /shop call gets); "price" sorts cheapest-first and
+    # still what a fresh /shop browse call gets); "price" sorts cheapest-first and
     # "owned" sorts unowned-first, each reversed by `descending`. Sorting
     # only ever reorders each category's own lines; Titles/Color Schemes/
     # Fonts never mix together, so the three-field layout below stays the
@@ -9922,7 +10369,7 @@ class helpers():
             # own bolded names underneath it.
             embed.add_field(name=f"__{label}__", value="\n".join(lines), inline=False)
 
-        footer = "/shop-buy to purchase; equip with /card-set"
+        footer = "/shop buy to purchase; equip with /card-set"
         if sort_key is not None:
             sort_label = "price" if sort_key == "price" else "owned status"
             direction = "descending" if descending else "ascending"
@@ -9930,7 +10377,7 @@ class helpers():
         embed.set_footer(text=footer)
         return embed
 
-    # /shop: every purchasable cosmetic, grouped by category, with its
+    # /shop browse: every purchasable cosmetic, grouped by category, with its
     # price and the caller's current balance so they can see at a glance
     # what they can actually afford. An owned item still shows its price
     # (rather than hiding it behind an "Owned" marker) with a ✅ appended,
@@ -9967,7 +10414,7 @@ class helpers():
         ]
 
     # /achievements: browses the full catalog with earned/not-earned state,
-    # grouped into fields the same way /shop's own shopHelper groups by
+    # grouped into fields the same way /shop browse's own shopHelper groups by
     # item type (embed.add_field per category rather than one flat
     # description); Veteran and On Fire are each a ladder of several
     # rising thresholds (see CARD_ACHIEVEMENT_VETERAN_LADDER/
@@ -10006,7 +10453,7 @@ class helpers():
         embed.set_footer(text="Earned achievements unlock their title for /card-set")
         await ctx.response.send_message(embed=embed)
 
-    # /shop-buy: spends gold to permanently unlock one CARD_SHOP_* item,
+    # /shop buy: spends gold to permanently unlock one CARD_SHOP_* item,
     # writes to card_unlocks exactly like a tier reward or a special grant
     # does (see _unlockCardReward/grantSpecialCardTitle), so a purchased
     # item shows up through the exact same getUnlockedCardTitles/
@@ -10602,7 +11049,7 @@ class helpers():
     # button (_handleLeaderboardPageClick) edits this same message rather than
     # posting a new one, so the current view is tracked by messageId here.
     # `cards` switches to _renderLeaderboardEntryStatsEmbed's one-player-
-    # per-page rendering instead, /team mine-style, with its own Card/Back
+    # per-page rendering instead, /team lookup-style, with its own Card/Back
     # toggle over to that player's actual trading card (see
     # LeaderboardPagingView), the whole leaderboard, /stats-card by
     # /stats-card, in whatever order was asked for.

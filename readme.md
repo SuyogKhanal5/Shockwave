@@ -211,13 +211,13 @@ are caught and logged as a warning rather than raised.
 
 ### Team formation
 
-`/make-teams` and `/captains` both build two `Team` objects seeded from whoever
-is in the caller's voice channel, then serialize them into the `team1`/`team2`
-columns on `servers`. Nothing is moved yet.
+`/make-teams random` and `/make-teams draft` both build two `Team` objects
+seeded from whoever is in the caller's voice channel, then serialize them into
+the `team1`/`team2` columns on `servers`. Nothing is moved yet.
 
 Both commands check `ctx.user.voice`/`.channel` up front and reply with a plain
-explanation if the caller isn't in a voice channel. `/captains` additionally
-needs at least two people in that channel.
+explanation if the caller isn't in a voice channel. `/make-teams draft`
+additionally needs at least two people in that channel.
 
 Each `Team`'s `.name` comes from `_rosterTeamNames(guild_id)`: an admin's
 configured `channel1`/`channel2` names (`/set`'s `team1`/`team2` params) if
@@ -268,7 +268,7 @@ Unlike those two, `ROLE_BALANCE_DISLIKED_ROLE_WIN_ELO_MULTIPLIER` (1.5) *does*
 touch real elo: `rankedTeamHelper` records every user_id who ended up on a
 disliked role in that particular split (`servers.disliked_role_user_ids`, a
 plain comma-separated list, set alongside `team1`/`team2`, so it lives and
-clears with them the same way, including surviving a `/reuse`), and
+clears with them the same way, including surviving a `/make-teams repeat`), and
 `computeGameDeltas` multiplies up a winning player's own elo delta if their
 id is in that set for the game just resolved. Only a win earns it. A loss on
 a disliked role gets no such break, just the plain team-average delta every
@@ -293,17 +293,18 @@ cancelled" notice `WinnerReportView`'s own Cancel Game button triggers), so an
 in-flight game is always cleanly resolved rather than silently destroyed by the
 next team-formation command.
 
-`/reuse` (`reuseTeamsHelper`) re-posts whichever two rosters `/make-teams`,
-`/captains`, or `/team-use` most recently produced, without drawing a fresh
-random split, elo-balanced split, or captains draft. Nothing clears
-`team1`/`team2` just because a game resolved. Only the next team-forming
-command's `clearTeamsHelper` call does that, so they already hold exactly the
-last game's roster right up until something overwrites them.
+`/make-teams repeat` (`reuseTeamsHelper`) re-posts whichever two rosters
+`/make-teams random`, `/make-teams draft`, or `/make-teams saved` most recently produced,
+without drawing a fresh random split, elo-balanced split, or captains draft.
+Nothing clears `team1`/`team2` just because a game resolved. Only the next
+team-forming command's `clearTeamsHelper` call does that, so they already
+hold exactly the last game's roster right up until something overwrites them.
 
-`/reuse` reads them back, along with `mode`/`is_ranked`/`roster_use_roles`, and
-never writes any of the three. A reused ranked game stays ranked, a casual one
-stays casual, and a role-eligible roster keeps showing role labels, matching
-whatever the original game actually was.
+`/make-teams repeat` reads them back, along with
+`mode`/`is_ranked`/`roster_use_roles`, and never writes any of the three. A
+reused ranked game stays ranked, a casual one stays casual, and a
+role-eligible roster keeps showing role labels, matching whatever the
+original game actually was.
 
 If a game built from those same teams is still being bet on or played, it's
 cancelled first (`cancelGameHelper`: refund plus move back), the same safety net
@@ -313,10 +314,10 @@ it, since reusing them is the entire point.
 ### Voice moves and the betting window
 
 There's no standalone `/start` command. Moving players and opening betting both
-live behind a `RosterActionView` (`Start`/`Start (no move)`/`Reroll` buttons)
-that `_finalizeRoster` attaches to the second of the two team embeds every
-roster-forming path posts (`/make-teams`, ranked or not; `/captains` once the
-draft finishes; `/team-use`).
+live behind a `RosterActionView` (`Start`/`Start (no move)`/`Random Roles`/
+`Balanced Roles` buttons) that `_finalizeRoster` attaches to the second of the
+two team embeds every roster-forming path posts (`/make-teams random`, ranked
+or not; `/make-teams draft` once the draft finishes; `/make-teams saved`).
 
 `RosterActionView` is persistent: a fixed `custom_id` on every button,
 `timeout=None`, registered once via `client.add_view` in `bot.py`'s
@@ -331,9 +332,9 @@ anything stored on the view.
 `roster_team1_message_id`/`roster_team2_message_id`/`roster_channel_id` on the
 guild's `servers` row, the same "remember which message is still live" shape
 `betting_message_id` uses for the winner-report message. That's what lets
-`_handleRosterStartClick`/`_handleRosterRerollClick` tell a stale roster apart
-from the current one, since forming a new roster just overwrites those
-columns.
+`_handleRosterStartClick`/`_handleRosterRerollClick`/
+`_handleRosterBalanceRolesClick` tell a stale roster apart from the current
+one, since forming a new roster just overwrites those columns.
 
 Start (no move) is the same button, `move=False`, for a group that's already
 elsewhere (a stage channel, another platform, in person) and doesn't want
@@ -356,8 +357,8 @@ to click it) and explicitly clears `original_channel` back to `""`, so
 `moveMembersToOriginalChannel` no-ops once the game ends: nothing moved at the
 start, nothing to move back either. That clear matters even though Start (no
 move) itself never sets `original_channel`, since `captainsHelper` captures the
-drafting caller's voice channel the moment a `/captains` draft starts, and a
-stale value from an earlier Start game is possible too.
+drafting caller's voice channel the moment a `/make-teams draft` draft starts,
+and a stale value from an earlier Start game is possible too.
 
 `roster_team2_message_id` is cleared synchronously, before any `await`, the
 moment the (Start-only) checks above it pass, the same "flip before doing
@@ -389,17 +390,42 @@ The headline text comes from whichever `mode` string
 team-forming command left in `servers` (`_matchupLabelForMode`), so it reads
 correctly no matter how the two teams got there.
 
-A Reroll button sits alongside Start/Start (no move) on that same message, but
-only when the roster actually qualifies: `use_roles` was set and both teams
-landed at exactly 5. Since `RosterActionView` is one shared persistent
-instance, it can't conditionally omit a button per message the way adding a
-reaction conditionally once could. Instead, `_finalizeRoster` builds the view
-with `include_reroll=roles_eligible`, which genuinely removes the item from
-that specific message (a persistent view's registration only governs custom_id
-routing, not which buttons any one message actually shows). Clicking Reroll
-(`_rerollRoster`) shuffles both teams' player order, persists the shuffle back
-to `team1`/`team2`, and edits both posted messages in place with freshly
-role-labeled embeds.
+Random Roles and Balanced Roles sit alongside Start/Start (no move) on that
+same message, but only when the roster actually qualifies: both teams landed
+at exactly 5, regardless of `use_roles` or whether the game is ranked at all,
+so roles can be bolted onto any 5v5 roster after the fact (a plain
+`/make-teams random` split included). Since `RosterActionView` is one shared
+persistent instance, it can't conditionally omit a button per message the way
+adding a reaction conditionally once could. Instead, `_finalizeRoster` builds
+the view with `include_role_buttons=size_eligible`, which genuinely removes
+both items from that specific message (a persistent view's registration only
+governs custom_id routing, not which buttons any one message actually shows).
+`roster_use_roles` itself still only starts `True` when the roster was posted
+with `use_roles` (i.e. ranked with roles); it only turns on for everyone else
+once one of these two buttons is actually clicked.
+
+Clicking Random Roles (`_rerollRoster`) shuffles both teams' player order,
+persists the shuffle back to `team1`/`team2`, and edits both posted messages
+in place with freshly role-labeled embeds; it's also how a roster that never
+had `use_roles` set gets roles turned on in the first place, not just a
+re-shuffle of an already-labeled one. Since a pure shuffle makes no preference
+claim about who lands where, it also clears `disliked_role_user_ids` (see
+above), so no stale bonus flag survives a reshuffle.
+
+Clicking Balanced Roles (`_handleRosterBalanceRolesClick` →
+`_applyBalancedRolesToRoster`) runs the same elo+preference logic
+`/make-teams ranked use_roles:true` uses, just adapted so team membership
+never moves: `_assignRolesForFixedTeams` runs `_assignRolesForBalance`
+(the same preference-first fill `formRoleBalancedTeams` uses, just
+`per_role=1` and scoped to one team's own five players instead of two per
+role across ten) independently for each side, then `_refineFixedTeamRoleBalance`
+hill-climbs pairwise role swaps *within* each team (never between them, since
+these two rosters are already fixed) to shrink the gap between the two teams'
+total effective elo, the same way `_refineRoleBalance` hill-climbs for ranked's
+own from-scratch split. The result is persisted back to `team1`/`team2` (same
+players, new role order), `disliked_role_user_ids` is recomputed from
+whichever assignment actually landed, and both posted embeds are edited in
+place with role labels showing.
 
 ### Resolving a winner, or cancelling the game
 
@@ -485,7 +511,7 @@ anyone, since clearing a stale round isn't the player-facing "the game was
 cancelled" event `cancelGameHelper` handles.
 
 The same flip-before-await-anything pattern shows up again in `_acceptDuel` and
-`_resolveDuel` for `/wager-against`.
+`_resolveDuel` for `/wager against`.
 
 ### The economy
 
@@ -583,7 +609,7 @@ Invalidating isn't supported yet for a `match_id`-scoped tournament match.
 Invalidating one would also mean un-advancing whatever it fed into the bracket,
 a bigger change than reversing a guild-wide economy snapshot.
 
-### Heads-up wagers (`/wager-against`)
+### Heads-up wagers (`/wager against`)
 
 A 1-on-1 side bet between two specific players, kept independent of the
 team-game betting above: own table, own buttons, no active game required.
@@ -620,7 +646,7 @@ no wins/losses concept (balance, net gold, gold wagered) showing everyone.
 buttons don't post anything new. `_handleLeaderboardPageClick` looks up the
 stored filter/order/page for that message id in the `leaderboards` table,
 recomputes the requested page, and edits the original message via
-`interaction.response.edit_message()`. `/my-teams` and `/team-list` page the
+`interaction.response.edit_message()`. `/team lookup` and `/team list` page the
 exact same way, through their own `MyTeamsPagingView`/`TeamListPagingView` and
 `my_team_views`/`team_list_views` tables; all three share a single
 `_computeNewPage(direction, page, total_pages)` helper for the First/Prev/
@@ -690,35 +716,47 @@ down to the SQL: `user_id=None` deletes every row for the guild, a real one
 narrows the `DELETE` with an extra `AND userId=?`.
 
 Passing `user` without `clear_achievements` or `clear_card_unlocks` is rejected
-outright. `/tournament-create` follows a narrower version of the same idea:
+outright. `/tournament create` follows a narrower version of the same idea:
 creating a server's first tournament needs no permission at all, but overwriting
 an existing one checks `ctx.user.guild_permissions.manage_guild` before it will
 even show the confirmation view.
 
 ### Persistent teams
 
-Separate from the ephemeral `team1`/`team2` a `/make-teams` or `/captains` game
-produces, `/team-create` writes a row to a dedicated `teams` table: one per
+Separate from the ephemeral `team1`/`team2` a `/make-teams random` or
+`/make-teams draft` game produces, `/team create` writes a row to a dedicated `teams` table: one per
 named team, keyed by its own autoincrement id, with a serialized `Team`
 (captain, roster, target size, voice channel) as its payload. A player can sit
 on more than one team's roster in this table.
 
-`/team-create` normally makes the caller the captain, but an optional `captain`
+`/team create` normally makes the caller the captain, but an optional `captain`
 member argument lets someone stand a team up on another player's behalf. When
 given, that member becomes the sole initial roster entry and captain instead of
 `ctx.user`.
 
-Team names are unique per guild case-insensitively. `getTeamRow` looks a team up
-with `name = ? COLLATE NOCASE`, so "red" finds "Red", and `/team-create`'s (and
-`/team-rename`'s) own uniqueness check rejects "red" as taken if "Red" already
-exists. The one exception is renaming a team to a pure capitalization change of
-its own current name ("Red" → "RED"), which `teamRenameHelper` special-cases by
-comparing `.lower()` first rather than letting the collision check find the team
-colliding with itself. `/team-use` compares its two team-name params the same
-case-insensitive way before ever calling `getTeamRow`, so picking "Red" and
-"red" is still caught as "the same team twice."
+`/team save` builds one the same way, just pre-filled instead of empty: it
+copies whichever side (`team1`/`team2`, picked by its `team` choice param) of
+the guild's last completed game - the same ephemeral roster `/make-teams
+repeat` re-posts - into a brand new persistent team, with the caller as
+captain. `saveTeamHelper` only ever reads `team1`/`team2`, never writes them,
+so the source roster is untouched and still reusable/reportable afterward. A
+caller who wasn't actually rostered on the side they asked to save gets
+rejected outright, so a spectator can't claim a team they never played on; the
+new team's `team_size` is stamped to its current roster size, so it's saved
+already full rather than recruiting.
 
-`/team-invite` uses the same press-to-accept pattern as everything else that
+Team names are unique per guild case-insensitively. `getTeamRow` looks a team up
+with `name = ? COLLATE NOCASE`, so "red" finds "Red", and `/team create`'s (and
+`/team save`'s and `/team rename`'s) own uniqueness check rejects "red" as
+taken if "Red" already exists. The one exception is renaming a team to a pure
+capitalization change of its own current name ("Red" → "RED"), which
+`teamRenameHelper` special-cases by comparing `.lower()` first rather than
+letting the collision check find the team colliding with itself. `/make-teams
+saved` compares its two team-name params the same case-insensitive way before
+ever calling `getTeamRow`, so picking "Red" and "red" is still caught as "the
+same team twice."
+
+`/team invite` uses the same press-to-accept pattern as everything else that
 needs a specific person's consent: a single `TeamInviteAcceptView` (one shared
 Accept button, persistent like `WinnerReportView`) posted once even when
 several people are invited in the same call, its own `team_invites` table
@@ -727,50 +765,62 @@ ever resolves their own row (`_handleTeamInviteAcceptClick` scopes its lookup
 to `targetId=interaction.user.id`), so several different people can accept off
 the same message independently. Its `force` param (Manage Server only, checked
 separately from and on top of the ordinary captain-or-admin gate every
-`/team-invite` call still has to pass first) skips the whole press-to-accept
+`/team invite` call still has to pass first) skips the whole press-to-accept
 dance. Every valid member goes straight onto the roster via the same
 `add_player`/`updateTeamData` pair `_handleTeamInviteAcceptClick` itself
 commits once a real invite is accepted, just run immediately instead of
 waiting on a click. No posted invite, no Accept button, no `team_invites` row
 for anyone to accept later.
 
-`/team-leave` is the self-service opposite of `/team-invite`. Removing yourself
+`/team leave` is the self-service opposite of `/team invite`. Removing yourself
 needs nobody else's permission, so it's the one team command with no
-captain/admin gate at all. The team's own captain is the one exception: there's
-no "who's in charge now" to fall back to, since no transfer-captaincy command
-exists, so letting a captain leave a non-empty team would strand it without
-anyone `isTeamCaptain` recognizes. `teamLeaveHelper` refuses outright instead,
-pointing the captain at `/team-delete`, which already has to answer "what
-happens to this team" regardless of roster size.
+captain/admin gate at all. The team's own captain is the one exception:
+`teamLeaveHelper` refuses outright, pointing them at `/team transfer` to hand
+off the captaincy first or `/team delete` if they want the team gone
+entirely, rather than ever leaving a team with no one `isTeamCaptain`
+recognizes.
 
-`/team-use` is the shortcut: it loads two persistent teams straight into
-`team1`/`team2` so a casual or ranked game can start immediately, without
+`/team transfer` is that hand-off command: the team's captain, or anyone with
+Manage Server, points it at another player already on the roster and
+`team.set_captain(...)` swaps who holds it. `Team.set_captain` itself enforces
+"captain must be a roster player," so the new captain has to already be
+rostered - inviting them first with `/team invite` is on the caller, not
+something this does automatically.
+
+`/make-teams saved` is the shortcut: it loads two persistent teams straight
+into `team1`/`team2` so a casual or ranked game can start immediately, without
 cloning any state back into the `teams` table. The in-memory copy gets
-`set_id(1)`/`set_id(2)` purely for `RosterActionView`'s own start handler.
+`set_id(1)`/`set_id(2)`
+purely for `RosterActionView`'s own start handler.
 
 Every persistent team name gets run through `discord.utils.escape_markdown`
 right before it's dropped into message text, since a team name is free text and
 Discord parses markdown emphasis markers across an entire message, not per line.
 `getRosterName` (the one place a roster's stored name is read back out for
-display) and `/team-use`'s own messages are where this actually matters, since
-every other display path reads a name back through one of those two.
+display) and `/make-teams saved`'s own messages are where this actually
+matters, since every other display path reads a name back through one of
+those two.
 
-`/team-rename`, `/team-set`, `/team-invite`, `/team-delete`, and
-`/tournament-register` are all captain-gated the same way (`isTeamCaptain`), but
-every one of them also lets any member with the Manage Server permission
-through. That's `not isTeamCaptain(...) and not
+`/team rename`, `/team set`, `/team invite`, `/team delete`, `/team transfer`,
+and `/tournament register` are all captain-gated the same way
+(`isTeamCaptain`), but every one of them also lets any member with the Manage
+Server permission through. That's `not isTeamCaptain(...) and not
 ctx.user.guild_permissions.manage_guild`, the same check repeated at each
 command, so a team whose captain has gone inactive, left the server, or just
 isn't around isn't stuck. An admin can rename it, change its voice channel/logo,
-invite players, register it for a tournament, or delete it without being on the
-roster first.
+invite players, register it for a tournament, transfer its captaincy, or
+delete it without being on the roster first. `/team save` has no such gate at
+all, since it never touches an existing team's roster or captaincy - its only
+real check is that the caller was actually playing on the game roster it's
+copying.
 
-`myCaptainedTeamAutocomplete` (the suggestion list backing all five commands'
-`team` param) checks the same permission and switches from `getTeamsCaptainedBy`
-to `getTeamsForGuild` for an admin, so they can actually find a team they don't
-captain to type in. `myTeamAutocomplete` (backing `/team-stats` and `/team-use`,
-which don't require captaincy/rostering at all) gets the same admin carve-out,
-swapping `getTeamsForPlayer` for `getTeamsForGuild`.
+`myCaptainedTeamAutocomplete` (the suggestion list backing all six of those
+commands' `team` param) checks the same permission and switches from
+`getTeamsCaptainedBy` to `getTeamsForGuild` for an admin, so they can actually
+find a team they don't captain to type in. `myTeamAutocomplete` (backing
+`/team stats` and `/make-teams saved`'s `team1`/`team2` params, none of which
+require captaincy/rostering at all) gets the same admin carve-out, swapping
+`getTeamsForPlayer` for `getTeamsForGuild`.
 
 Discord's autocomplete is only a suggestion list, not a hard restriction. Typing
 a name that isn't offered still submits fine, so this doesn't (and shouldn't)
@@ -783,9 +833,9 @@ up by the column. Letting the two drift apart would make the renamed team
 invisible under its new name while a stale row still answered to the old one.
 
 Deleting is destructive and irreversible, so it goes through the same
-confirm/cancel button pattern `/clear` and `/tournament-create`'s overwrite path
+confirm/cancel button pattern `/clear` and `/tournament create`'s overwrite path
 use (`ConfirmTeamDeleteView`) rather than running immediately. On confirm, it
-also deletes any pending `/team-invite` rows for that team (`_deleteTeam`), so
+also deletes any pending `/team invite` rows for that team (`_deleteTeam`), so
 nobody can later "accept" an invite into a team that's already gone.
 
 A tournament this team is already registered in is untouched. `register_team`
@@ -806,7 +856,7 @@ up by captaincy plus size rather than remembered in a separate column:
 `setupHelper` scans `getTeamsCaptainedBy` for a team with `get_team_size() ==
 1`. If one already exists, the name can be omitted (the team's left alone) or
 given again to rename it, through the same case-insensitive collision check and
-pure-capitalization carve-out `/team-rename` uses.
+pure-capitalization carve-out `/team rename` uses.
 
 Picking roles is a two-step flow, both steps sharing one message and one
 `SetupRoleSelectionView` shape: five `SetupRoleToggleButton`s (one per
@@ -845,8 +895,7 @@ message names it and tells the caller to run `/setup` again if they'd like to
 fix it. `_applySetupRolePreferences` then replaces `player_role_preferences`
 for that player outright (a full `DELETE` then re-`INSERT`, not a per-role
 merge) with whatever survived, since the flow always walks both steps in full
-on every run, unlike the old string-param design this replaced,
-which could leave one side untouched. Running `/setup` for the first time
+on every run. Running `/setup` for the first time
 unlocks the Onboarded achievement at this point too, and `hasCompletedSetup`
 reuses that same `card_unlocks` row as its signal rather than a separate
 completion table.
@@ -855,7 +904,7 @@ The view times out (`SETUP_ROLE_TIMEOUT_SECONDS`) if nobody presses Confirm,
 deleting the session row and editing the message to say so, the same
 `on_timeout` shape `ConfirmResetView`/`ConfirmTeamDeleteView` already use.
 
-`/make-teams`'s `use_roles` param reads `hasCompletedSetup`: before forming
+`/make-teams random`'s `use_roles` param reads `hasCompletedSetup`: before forming
 role-based teams (casual or, combined with `ranked:true`, elo-balanced ones
 too, see Team formation), `bot.py` checks every non-bot member currently in
 the caller's voice channel, and if anyone hasn't run `/setup` to completion
@@ -890,7 +939,7 @@ Since a graph of objects can't go through `json.dumps` directly,
 `{team, opponent, next, previous}` dicts referencing each other by index into
 that same list, reconstructed into real object pointers on load.
 
-`/tournament-print-bracket` renders the bracket as an actual image
+`/tournament print-bracket` renders the bracket as an actual image
 (`renderBracketImages`, via Pillow), walking `previous`/`previous.opponent` all
 the way down to the leaves. Discord has a hard 2000-character limit on a
 message's text, which a bracket past a handful of teams blows through fast (a
@@ -962,7 +1011,7 @@ where the two sides genuinely merge. `_renderLosersTwoSidedTreeImage` splits
 there instead, then extends one more ordinary, single-sided hop past that merge
 point to reach the true champion.
 
-### Playing a tournament out (`/tournament-start`)
+### Playing a tournament out (`/tournament start`)
 
 Each pairing that's ready to play becomes its own row in `tournament_matches`,
 holding the two teams, which round/bracket-node it belongs to, and its own
@@ -1057,9 +1106,10 @@ round: the guild's configured per-match base (`_getBettingTimerSeconds`, backing
 `/set`'s `betting_timer` param) times how many matches are in the round, capped
 by `MAX_CONCURRENT_BETTING_SECONDS`.
 
-`/wager` takes an optional `match_id` to say which concurrently-open match a bet
-is for. Omitted, it falls back to the singleton behavior for a casual/ranked
-game or a sequential-mode match. Each match settles its own bets independently
+`/wager team` takes an optional `match_id` to say which concurrently-open match
+a bet is for. Omitted, it falls back to the singleton behavior for a
+casual/ranked game or a sequential-mode match. Each match settles its own bets
+independently
 (`_settleMatchWagers`, same pari-mutuel formula `computeGameDeltas` uses) the
 instant it resolves, rather than waiting on the rest of the round.
 
@@ -1067,7 +1117,7 @@ instant it resolves, rather than waiting on the rest of the round.
 
 `Team.logo_path` is a local file path, not image data, resolved against
 `assets/clash-logos/` (Riot Games' official Clash-mode faction/region logos;
-`/team-set`'s `logo` autocomplete lists every file there by name) via
+`/team set`'s `logo` autocomplete lists every file there by name) via
 `_resolveLogoPath`.
 
 A team with no logo set gets one assigned randomly the moment it's next loaded.
@@ -1075,14 +1125,14 @@ A team with no logo set gets one assigned randomly the moment it's next loaded.
 `getTeamsForGuild`) as well as `_saveNewTeam`, so a team just self-heals the
 first time it's touched rather than needing a one-off migration.
 
-`/team-stats` and `/my-teams` attach a logo as an embed thumbnail via Discord's
-`attachment://<filename>` scheme. The matchup graphic pastes it directly into
-the rendered image instead.
+`/team stats` and `/team lookup` attach a logo as an embed thumbnail via
+Discord's `attachment://<filename>` scheme. The matchup graphic pastes it
+directly into the rendered image instead.
 
 `_ensureLogo` only ever runs for persistent teams, since it needs a `team_id`
-row to write the pick back to. The ad-hoc `Team` objects `/make-teams`,
-`/captains`, and ranked team formation build on the fly for a casual game never
-go through it, so `team.get_logo_path()` is still `None` for them by the time
+row to write the pick back to. The ad-hoc `Team` objects `/make-teams random`,
+`/make-teams draft`, and ranked team formation build on the fly for a casual
+game never go through it, so `team.get_logo_path()` is still `None` for them by the time
 ▶️'s matchup graphic renders. `_drawMatchupColumn` picks a random built-in logo
 right at render time for those instead of drawing a bare accent-colored ring. It
 isn't persisted anywhere, so a re-render can land on a different one, which is
@@ -1213,7 +1263,7 @@ bot is in, including ones with no `card_unlocks` row for them at all.
 
 ### Shop
 
-`/shop`/`/shop-buy` add a third, gold-priced path into `card_unlocks` alongside
+`/shop browse`/`/shop buy` add a third, gold-priced path into `card_unlocks` alongside
 reaching an elo tier and a special grant. `CARD_SHOP_TITLES`,
 `CARD_SHOP_COLOR_SCHEMES`, and `CARD_SHOP_FONT_STYLES` are the three catalogs
 (name to price, color schemes also carrying their own hex pair), kept
@@ -1225,7 +1275,7 @@ category without needing to know it ahead of time.
 themes (Crimson, Emerald, Azure, Sunset, Fire) plus one per Runeterra region
 (Demacia, Noxus, Freljord, Ionia, Piltover, Zaun, Shurima, Shadow Isles,
 Bilgewater, Bandle City, Targon), the same region set `assets/clash-logos/`
-covers for `/team-set`'s `logo` option.
+covers for `/team set`'s `logo` option.
 
 A purchase is `economy.balance -= price` plus the same `INSERT OR IGNORE INTO
 card_unlocks` a tier reward or a special grant writes. There's no separate "did
@@ -1298,10 +1348,10 @@ title/scheme/font/stats/teams/avatar, rendered once) and the thin
 `_cardPreviewEmbedAndFile` wrapper around it render it, with the confirmation
 string passed as `content=` alongside the `embed=`/`file=` pair.
 
-`/preview type:<Logos|Card Titles|Color Schemes|Fonts>` (`previewHelper`) is the
-"what are my options" counterpart to `/card-set`/`/team-set`: a single gallery
-image showing every option for one type, not just what a given player has
-personally unlocked.
+`/shop preview type:<Logos|Card Titles|Color Schemes|Fonts>` (`previewHelper`)
+is the "what are my options" counterpart to `/card-set`/`/team set`: a single
+gallery image showing every option for one type, not just what a given player
+has personally unlocked.
 
 Logos and Color Schemes are real `PREVIEW_COLUMNS`-wide grids
 (`_renderPreviewGridPage`, shared by both). They only differ in what `draw_cell`
@@ -1326,8 +1376,8 @@ shows the complete catalog, purchasable-but-not-yet-owned items included.
 
 Each type is rendered once and cached to `PREVIEW_DIR` (`assets/previews/`) as
 `<stem>-1.png`, `<stem>-2.png`, and so on. `_cachedPreviewFiles` probes
-sequentially until the next page is missing, so `/preview` never re-runs Pillow
-on a later call unless the cached file(s) are deleted by hand. None of these
+sequentially until the next page is missing, so `/shop preview` never re-runs
+Pillow on a later call unless the cached file(s) are deleted by hand. None of these
 four catalogs change without a code change, so deleting the relevant file(s) is
 how a developer forces a regenerate after adding a new logo/scheme/font/title.
 
@@ -1389,13 +1439,13 @@ have.
 `/achievements` itself (`achievementsHelper`/`getAchievementCatalog`, no
 permission gate) lists every achievement with its description and a ✅/🔒 marker
 for the caller, self-healing via a `_checkAchievements` call first. The embed
-groups fields the same way `/shop` groups by item type. Veteran and On Fire each
+groups fields the same way `/shop browse` groups by item type. Veteran and On Fire each
 get their own field, tiers listed lowest-to-highest, and everything else lands
 in a shared `__Other__` field.
 
 ### Team cards
 
-`/team-stats` gets the same card treatment as `/stats`, via its own
+`/team stats` gets the same card treatment as `/stats`, via its own
 `TeamStatsView` (Card/Back buttons, same persistent shape as `StatsView` minus
 the avatar toggle, a team card has no per-player avatar to flip): Card throws
 the embed away for a portrait card (`_renderTeamCardImage`) built around the
@@ -1435,9 +1485,9 @@ in its own `team_stats_views` table (`teamId` instead of a player's
 
 ### Double elimination: losers bracket and Grand Finals
 
-`/tournament-create-bracket`'s double-elimination option builds a real losers
+`/tournament create-bracket`'s double-elimination option builds a real losers
 bracket. `buildLosersBracket` builds a second tree wired to the winners
-bracket's own, and `/tournament-start` plays winners bracket, then losers
+bracket's own, and `/tournament start` plays winners bracket, then losers
 bracket, then Grand Finals (with a bracket reset if needed) as one continuous
 sequence, entirely on its own once started.
 
@@ -1457,7 +1507,7 @@ halving pattern, `Tournament` stores its rounds explicitly
 (`losers_bracket_rounds`) rather than re-deriving them from the graph. Since the
 losers bracket is rendered as an image too, a "fresh drop-in" leaf just gets
 positioned at its actual round's x coordinate like any other node.
-`/tournament-print-bracket` posts the winners bracket and (for double
+`/tournament print-bracket` posts the winners bracket and (for double
 elimination) the losers bracket as two separate image attachments on the same
 message.
 
@@ -1523,14 +1573,14 @@ round that never got a row as resolved once play has moved past it.
 | `economy` | one row per (guild, player) | balance, elo, bet and game win/loss counts, gold wagered/won/lost |
 | `wagers` | active team-game bets (singleton, one per guild/player) | cleared out (paid or refunded) once the game resolves |
 | `tournament_wagers` | active simultaneous-tournament-match bets (one per match/player) | cleared out once that specific match resolves |
-| `duels` | active `/wager-against` challenges | one row per challenge, several can be open at once |
+| `duels` | active `/wager against` challenges | one row per challenge, several can be open at once |
 | `leaderboards` | posted `/leaderboard` messages | which filter/order/page each message is currently showing, plus `cards`/`cardShown` for cards:true mode |
-| `my_team_views` | posted `/my-teams` messages | which page (and whose team list) each message is currently showing |
-| `team_list_views` | posted `/team-list` messages | which filter/sort/page each message is currently showing (`memberIds`/`memberNames` for the member filter), plus `cards`/`cardShown` for cards:true mode |
+| `my_team_views` | posted `/team lookup` messages | which page (and whose team list) each message is currently showing |
+| `team_list_views` | posted `/team list` messages | which filter/sort/page each message is currently showing (`memberIds`/`memberNames` for the member filter), plus `cards`/`cardShown` for cards:true mode |
 | `last_result` | one row per guild | a snapshot of the most recently resolved game, for `/report-correct-winner` |
 | `teams` | persistent named teams | one row per team: captain, roster, target size, voice channel, `logo_path` |
 | `tournaments` | one row per guild | name, team/bracket size, elimination type, registered teams, the winners bracket, and (double elimination only) the losers bracket |
-| `team_invites` | pending `/team-invite`s | one row per invitee per invite. Several invitees from one `/team-invite` call share a `messageId`, each accepting independently |
+| `team_invites` | pending `/team invite`s | one row per invitee per invite. Several invitees from one `/team invite` call share a `messageId`, each accepting independently |
 | `tournament_matches` | every tournament match ever played | which bracket (`bracketType`: winners/losers/finals) and round/bracket-node it's for, its two teams, state, (once decided) its winner, and `bettingClosed` |
 | `player_role_preferences` | each player's liked/disliked roles from `/setup` | one row per (guild, player, role), `preference` is `like` or `dislike` |
 

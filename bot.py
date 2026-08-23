@@ -176,7 +176,8 @@ if not db_already_existed:
         "betting_state, betting_message_id, betting_channel_id, is_ranked, "
         "active_tournament_match_id, wager_channel, betting_timer_seconds, "
         "roster_team1_message_id, roster_team2_message_id, roster_channel_id, roster_use_roles, "
-        "default_elo, betting_opened_at, disliked_role_user_ids)"
+        "default_elo, betting_opened_at, disliked_role_user_ids, draft_pick_page, "
+        "draft_players_message_id)"
     )
     mainDB.commit()
 else:
@@ -184,8 +185,8 @@ else:
     # for schema compatibility with databases that predate this migration.
     ensure_column("servers", "result1", "TEXT")
     ensure_column("servers", "result2", "TEXT")
-    # captain1/captain2 are read and written by captainsHelper and
-    # chooseFunc/chooseHelper (the /make-teams draft flow) but aren't part of
+    # captain1/captain2 are read and written by captainsHelper and the
+    # draft-pick handlers (the /make-teams draft flow) but aren't part of
     # the original CREATE TABLE above, so a pre-existing database needs
     # them added via migration rather than already having them.
     ensure_column("servers", "captain1", "TEXT")
@@ -238,6 +239,16 @@ else:
     # alongside team1/team2 (see clearTeamsHelper), not per-result, so a
     # reused roster (/make-teams repeat) still gets credit for the same assignments.
     ensure_column("servers", "disliked_role_user_ids", "TEXT")
+    # Which page of the draft-pick button picker (CaptainsDraftPickView) is
+    # currently shown, only meaningful once the pool is too big to fit on
+    # one page (see DRAFT_PICK_MAX_UNPAGINATED); reset to 0 on every pick,
+    # since the pool shrinking shifts what each page even contains.
+    ensure_column("servers", "draft_pick_page", "INTEGER", "0")
+    # The posted "PLAYERS" pool embed's message id for a live captain draft
+    # (see _updateDraftEmbeds), edited in place on every pick the same way
+    # roster_team1_message_id/roster_team2_message_id already are, instead
+    # of _applyDraftPick reposting all three embeds from scratch each time.
+    ensure_column("servers", "draft_players_message_id", "INTEGER")
 
 # Per-member currency: gold balance plus win/loss and wagering stats, one
 # row per (guild, user).
@@ -278,7 +289,7 @@ cursor.execute(
 cursor.execute(
     "CREATE TABLE IF NOT EXISTS last_result(guildId PRIMARY KEY, data)"
 )
-# One row per active /wager-against challenge; unlike the team-game
+# One row per active /wager against challenge; unlike the team-game
 # `wagers` table above, several of these can be open at once per guild
 # (different pairs of players), so each is tracked by its own row/message
 # rather than a single column on `servers`.
@@ -300,7 +311,7 @@ cursor.execute(
 )
 ensure_column("leaderboards", "cards", "INTEGER", "0")
 ensure_column("leaderboards", "cardShown", "INTEGER", "0")
-# One row per posted /team mine message, same paging idea as leaderboards
+# One row per posted /team lookup message, same paging idea as leaderboards
 # above, but scoped to a single caller (userId) rather than the whole
 # guild's stats, since each page here is one of THEIR teams, not a page of
 # many players.
@@ -383,7 +394,7 @@ cursor.execute(
     "cards INTEGER DEFAULT 0, cardShown INTEGER DEFAULT 0, memberIds, memberNames)"
 )
 # 1 when a posted /team list message is in "cards" mode (one team's full
-# stats card per page, same shape as /team mine, sourced from the same
+# stats card per page, same shape as /team lookup, sourced from the same
 # filtered/sorted team list a plain /team list would show) rather than the
 # default summary-list mode; _handleTeamListPageClick reads this back to
 # know which of the two ways to re-render on a page flip. cardShown further
@@ -589,6 +600,11 @@ intents.voice_states = True
 client = discord.Client(intents=intents)
 tree = LoggingCommandTree(client)
 helperObj.client = client
+# _DraftPickSlotButton's callback (a DynamicItem, not a plain view button)
+# can't receive helperObj via a constructor the way every other view does,
+# since discord.py reconstructs it straight from a matched custom_id after
+# a restart; it reaches back through interaction.client.helperObj instead.
+client.helperObj = helperObj
 
 # Pure personalization; the bot's Discord status cycles through these
 # instead of sitting on one fixed line. Recalled from memory rather than
@@ -683,7 +699,7 @@ def ensure_guild_row(guild_id, guild_name):
     cursor.execute(
         "INSERT INTO servers VALUES(?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, "
         "NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'NONE', NULL, NULL, 0, NULL, NULL, ?, "
-        "NULL, NULL, NULL, 0, NULL, NULL, NULL)",
+        "NULL, NULL, NULL, 0, NULL, NULL, NULL, 0, NULL)",
         (guild_id, guild_name, helper.BETTING_DURATION_SECONDS)
     )
     mainDB.commit()
@@ -716,6 +732,8 @@ def registerPersistentViews():
     global _persistent_views_registered
     if _persistent_views_registered:
         return
+    client.add_dynamic_items(helper._DraftPickSlotButton)
+    client.add_view(helper.CaptainsDraftPickView(helperObj))
     client.add_view(helper.WinnerReportView(helperObj))
     client.add_view(helper.DuelAcceptView(helperObj))
     client.add_view(helper.DuelResultView(helperObj))
@@ -904,8 +922,17 @@ setDefaultElo.error(_setAdminPermissionError)
 tree.add_command(setGroup)
 
 
-@tree.command(
+# /wager and /wager-against grouped under one /wager command instead of
+# two separate top-level ones, so typing /wager surfaces both the
+# team-game bet and the 1-on-1 challenge together.
+wagerGroup = app_commands.Group(
     name="wager",
+    description="Wager gold on a team game, or challenge another player 1-on-1"
+)
+
+
+@wagerGroup.command(
+    name="team",
     description="Wager gold on the current game, or on one tournament match if you give a match id"
 )
 @app_commands.describe(
@@ -916,17 +943,20 @@ tree.add_command(setGroup)
     app_commands.Choice(name="Team 1", value=1),
     app_commands.Choice(name="Team 2", value=2),
 ])
-async def wager(ctx, amount: int, team: app_commands.Choice[int], match_id: int = None):
+async def wagerTeam(ctx, amount: int, team: app_commands.Choice[int], match_id: int = None):
     await helperObj.wagerHelper(ctx, amount, team.value, match_id)
 
 
-@tree.command(
-    name="wager-against",
+@wagerGroup.command(
+    name="against",
     description="Challenge another player to a heads-up gold wager"
 )
 @app_commands.describe(member="Who to challenge", amount="How much gold is on the line")
 async def wagerAgainst(ctx, member: discord.Member, amount: int):
     await helperObj.challengeDuelHelper(ctx, member, amount)
+
+
+tree.add_command(wagerGroup)
 
 
 @tree.command(
@@ -990,7 +1020,16 @@ async def cardSet(ctx, title: str = None, color_scheme: str = None, font_style: 
     await helperObj.cardSetHelper(ctx, title, color_scheme, font_style)
 
 
-@tree.command(
+# /preview, /shop, and /shop-buy grouped under one /shop command instead
+# of three separate top-level ones, so typing /shop surfaces browsing,
+# previewing, and buying together.
+shopGroup = app_commands.Group(
+    name="shop",
+    description="Browse, preview, or buy trading-card cosmetics with gold"
+)
+
+
+@shopGroup.command(
     name="preview",
     description="See every option for a customization type at once, in one image"
 )
@@ -1001,15 +1040,15 @@ async def cardSet(ctx, title: str = None, color_scheme: str = None, font_style: 
     app_commands.Choice(name="Color Schemes", value="Color Schemes"),
     app_commands.Choice(name="Fonts", value="Fonts"),
 ])
-async def preview(ctx, type: app_commands.Choice[str]):
+async def shopPreview(ctx, type: app_commands.Choice[str]):
     await helperObj.previewHelper(ctx, type.value)
 
 
-@tree.command(
-    name="shop",
+@shopGroup.command(
+    name="browse",
     description="Browse trading-card cosmetics purchasable with gold"
 )
-async def shop(ctx):
+async def shopBrowse(ctx):
     await helperObj.shopHelper(ctx)
 
 
@@ -1024,7 +1063,7 @@ async def achievements(ctx):
 # Unlike the three cardXAutocomplete functions above (which only ever
 # offer what's already unlocked), this one offers what's still buyable -
 # getShopCatalog's own "owned" flag is what filters an already-purchased
-# item out, so /shop-buy never suggests something there's nothing left to
+# item out, so /shop buy never suggests something there's nothing left to
 # do with.
 async def shopBuyAutocomplete(ctx, current: str):
     current = current.lower()
@@ -1033,14 +1072,17 @@ async def shopBuyAutocomplete(ctx, current: str):
     return [app_commands.Choice(name=f"{i['name']} ({i['price']} gold)", value=i["name"]) for i in matches[:25]]
 
 
-@tree.command(
-    name="shop-buy",
+@shopGroup.command(
+    name="buy",
     description="Purchase a trading-card cosmetic with gold"
 )
 @app_commands.describe(item="Which item to purchase, from what you don't already own")
 @app_commands.autocomplete(item=shopBuyAutocomplete)
 async def shopBuy(ctx, item: str):
     await helperObj.shopBuyHelper(ctx, item)
+
+
+tree.add_command(shopGroup)
 
 
 @tree.command(
@@ -1050,7 +1092,7 @@ async def shopBuy(ctx, item: str):
 @app_commands.describe(
     filter="Which stat to rank by; omit for an overview of elo, balance, and record",
     order="Highest-first or lowest-first; defaults to highest-first",
-    cards="Flip through each player's full stats card one at a time, like /team mine, instead of a ranked list",
+    cards="Flip through each player's full stats card one at a time, like /team lookup, instead of a ranked list",
 )
 @app_commands.choices(filter=[
     app_commands.Choice(name="Elo", value="elo"),
@@ -1102,37 +1144,38 @@ COMMAND_HELP = {
     "clear economy": "Wipes the current teams/draft, and resets every player's balance/elo/record/gold entirely for this server. Confirmation required. Requires the Manage Server permission.",
     "clear achievements": "Wipes the current teams/draft, and resets earned achievements for every player, or just one player if user is set. Confirmation required. Requires the Manage Server permission.",
     "clear card-unlocks": "Wipes the current teams/draft, and resets trading-card unlocks for every player, or just one player if user is set. Confirmation required. Requires the Manage Server permission.",
-    "make-teams random": "Randomly splits everyone in your voice channel into two even teams and posts the roster, with a Start button on it to move everyone and open betting when you're ready (Start (no move) to open betting without moving anyone; Reroll to reroll roles too, if use_roles was set). ranked:true forms roughly elo-balanced teams instead, and tracks elo once a winner is reported. Combine ranked:true with use_roles:true (10 players only) to also assign Top/Jungle/Mid/Bottom/Support, preferring each player's liked roles from /setup and nudging the split toward whichever side is more balanced once roles are considered.",
-    "make-teams draft": "Starts a live captain draft. Name two captains, or use_random to pick two automatically; everyone else lands in a pool picked from with /choose. Once both teams are set, press Start on the roster to move everyone and open betting, or Start (no move) to open betting without moving anyone. ranked:true tracks elo for the resulting game.",
+    "make-teams random": "Randomly splits everyone in your voice channel into two even teams and posts the roster, with a Start button on it to move everyone and open betting when you're ready (Start (no move) to open betting without moving anyone). If both teams land at exactly 5 players, Random Roles and Balanced Roles buttons also appear: Random Roles shuffles who's shown in which of Top/Jungle/Mid/Bottom/Support, while Balanced Roles assigns them by elo + each player's liked roles from /setup, the same logic ranked roles uses, without moving anyone between teams. ranked:true forms roughly elo-balanced teams instead, and tracks elo once a winner is reported. Combine ranked:true with use_roles:true (10 players only) to have the roster already show Top/Jungle/Mid/Bottom/Support the moment it posts, nudging the split toward whichever side is more balanced once roles are considered.",
+    "make-teams draft": "Starts a live captain draft. Name two captains, or use_random to pick two automatically; everyone else lands in a pool the captains draft from using the buttons on the posted picker (blue for Team 1's turn, red for Team 2's, plus a Random pick and paging once the pool is too big for one page). Once both teams are set, press Start on the roster to move everyone and open betting, or Start (no move) to open betting without moving anyone. ranked:true tracks elo for the resulting game.",
     "make-teams saved": "Loads two persistent teams straight into a casual or ranked game, skipping the random-split-or-draft step. Posts a roster with the same Start/Start (no move) buttons as /make-teams random to start it.",
     "make-teams repeat": "Re-posts the exact same two teams from whichever of /make-teams random, /make-teams draft, or /make-teams saved ran last, instead of drawing a fresh random split or captains draft. Stays ranked if the last game was ranked, casual if it was casual. Cancels an actively in-progress game from those same teams first (refund + move back) if there is one.",
-    "choose": "Captains only. Picks one player from the draft pool onto your team, then passes the turn to the other captain.",
+    "test-draft": "Admin/dev tool: starts a draft with you as both captains and 10 random non-bot members as the pool, so you can solo-test the button picker. Requires the Manage Server permission.",
     "notify": "DMs a one-time invite link to your voice channel, to one member, or to everyone holding a given role. message optionally replaces the default invite text; either way it's signed \"Sent by\" you. You must be sitting in a voice channel yourself to run this.",
-    "wager": "Bets gold on one team winning the current game, or on a specific tournament match if you give a match id. Only while betting is open, one bet per player per game/match.",
-    "wager-against": "Challenges another player to a heads-up gold wager, separate from team-game betting, no active game required.",
+    "wager team": "Bets gold on one team winning the current game, or on a specific tournament match if you give a match id. Only while betting is open, one bet per player per game/match.",
+    "wager against": "Challenges another player to a heads-up gold wager, separate from team-game betting, no active game required.",
     "daily": "Claims 1000 free gold. Once per calendar day, per player.",
     "stats": "Shows a player's elo, ranked/casual/game record, betting record, balance, and net gold; defaults to you. Press Avatar to toggle the shown avatar between this server's own profile picture and their regular account-wide one, or Card to replace the whole embed with a customizable trading card; Back swaps back.",
-    "card-set": "Equips your unlocked trading-card title, color scheme, and/or font in one go (see /stats' Card button); set any combination of the three at once. Reaching Diamond, Master, Grandmaster, or Challenger permanently unlocks that tier's own title and scheme, even if you derank afterward; \"Default\" is always available for both. Fonts are purchased from /shop.",
-    "preview": "Shows every option for one customization type (Logos, Card Titles, Color Schemes, or Fonts) in a single gallery image (a few images only if there are too many to fit), regardless of what you've personally unlocked yet.",
-    "shop": "Browse every trading-card title, color scheme, and font purchasable with gold, with a ✅ next to anything you already own. Sort: Price / Sort: Owned buttons under the listing re-sort each category (Ascending/Descending toggle which way) without needing to re-run the command.",
+    "card-set": "Equips your unlocked trading-card title, color scheme, and/or font in one go (see /stats' Card button); set any combination of the three at once. Reaching Diamond, Master, Grandmaster, or Challenger permanently unlocks that tier's own title and scheme, even if you derank afterward; \"Default\" is always available for both. Fonts are purchased from /shop buy.",
+    "shop preview": "Shows every option for one customization type (Logos, Card Titles, Color Schemes, or Fonts) in a single gallery image (a few images only if there are too many to fit), regardless of what you've personally unlocked yet.",
+    "shop browse": "Browse every trading-card title, color scheme, and font purchasable with gold, with a ✅ next to anything you already own. Sort: Price / Sort: Owned buttons under the listing re-sort each category (Ascending/Descending toggle which way) without needing to re-run the command.",
     "achievements": "Browse every gameplay achievement, what it takes to earn it, and whether you already have. Earning one unlocks its title for /card-set and posts a one-time announcement in the channel.",
-    "shop-buy": "Purchases a trading-card cosmetic with gold, permanently unlocking it for /card-set. Refuses if you already own it or can't afford it.",
-    "leaderboard": "Ranks the server by a stat, including ranked-only and casual-only wins/losses/win rate. Omit filter for an elo-sorted overview. Players with a 0W-0L record in the selected stat's category (or who've never played a game at all, for the overview and elo views) are left off, so a currency-based stat like balance still shows everyone. Buttons page through the results, and Ascending/Descending buttons flip the sort direction without re-running the command. cards:true flips through each player's full stats card one at a time instead, same as /team mine but ranked; a Card button on that view swaps the current player's stats card for their actual trading card, and stays selected as you keep paging.",
+    "shop buy": "Purchases a trading-card cosmetic with gold, permanently unlocking it for /card-set. Refuses if you already own it or can't afford it.",
+    "leaderboard": "Ranks the server by a stat, including ranked-only and casual-only wins/losses/win rate. Omit filter for an elo-sorted overview. Players with a 0W-0L record in the selected stat's category (or who've never played a game at all, for the overview and elo views) are left off, so a currency-based stat like balance still shows everyone. Buttons page through the results, and Ascending/Descending buttons flip the sort direction without re-running the command. cards:true flips through each player's full stats card one at a time instead, same as /team lookup but ranked; a Card button on that view swaps the current player's stats card for their actual trading card, and stays selected as you keep paging.",
     "report-correct-winner": "Fixes a misreported winner: undoes and reapplies the payouts, records, and elo. invalidate undoes the last game entirely instead (bets refunded, nothing reapplied), as if it never happened. Requires Manage Server.",
     "team create": "Creates a persistent team with you as its captain, or captain as its captain if given.",
+    "team save": "Saves Team 1 or Team 2 from the last game in this server as a new persistent team, with you as its captain. You must have actually been rostered on that side to save it, and the new name can't already belong to another team here.",
     "team set": "Sets a persistent team's voice channel and/or logo, any combination in one call. new_voice_channel creates a fresh one named after the team. The team's captain, or anyone with Manage Server, can do this.",
     "team rename": "Renames a persistent team. The new name can't already belong to another team in this server. The team's captain, or anyone with Manage Server, can do this.",
     "team delete": "Deletes a persistent team: its roster, record, and any pending invites go with it. The team's captain, or anyone with Manage Server, can do this; confirmation required. Doesn't affect a tournament it's already registered in.",
     "team transfer": "Hands off a persistent team's captaincy to another player already on its roster. The team's captain, or anyone with Manage Server, can do this.",
     "team invite": "Invites one or more members (up to 5 per call) to a team. Each invitee must accept before joining. The team's captain, or anyone with Manage Server, can do this. force (Manage Server only) skips the invitee's confirmation and adds them straight to the roster.",
     "team leave": "Removes you from a persistent team's roster. Anyone rostered can do this to themselves, no permission needed, except the team's captain, who has to use /team delete instead since there's no one to hand the captaincy to.",
-    "team mine": "Lists the teams you're a rostered player on in this server, with paging to flip through each one's full stats card.",
+    "team lookup": "Lists the teams you're a rostered player on in this server, with paging to flip through each one's full stats card.",
     "team stats": "Shows a persistent team's captain, roster, voice channel, and win/loss record. Press Card to swap it for a team card: its logo as the focal point, colors sampled from that logo, captain/roster/record/win rate. Back swaps back.",
-    "team list": "Browse every team in the server with filtering (name search, recruiting-only, up to 5 members who all have to be on the roster) and sorting (name, wins, losses, win rate, roster size; sort:\"Win Rate\" order:\"Descending\" to rank teams by win rate). Buttons page through it. cards:true flips through each team's full stats card one at a time instead, same as /team mine but for every team in the server; a Card button on that view swaps the current team's stats card for its actual trading card, and stays selected as you keep paging.",
+    "team list": "Browse every team in the server with filtering (name search, recruiting-only, up to 5 members who all have to be on the roster) and sorting (name, wins, losses, win rate, roster size; sort:\"Win Rate\" order:\"Descending\" to rank teams by win rate). Buttons page through it. cards:true flips through each team's full stats card one at a time instead, same as /team lookup but for every team in the server; a Card button on that view swaps the current team's stats card for its actual trading card, and stays selected as you keep paging.",
     "tournament create": "Creates an empty tournament shell for this server: name, team size, and bracket size. One tournament per server.",
     "tournament register": "Registers one of your teams for the server's tournament. The team's captain, or anyone with Manage Server, can do this.",
     "tournament create-bracket": "Builds the tournament bracket from whichever teams are currently registered, seeded randomly. Rerunning it rerolls the bracket. For double elimination, losers_bracket_timing picks whether the losers bracket waits for the whole winners bracket to finish, or interleaves as each round unlocks.",
-    "tournament print-bracket": "Prints the current bracket, with each match's id for use with /wager and /report-correct-winner.",
+    "tournament print-bracket": "Prints the current bracket, with each match's id for use with /wager team and /report-correct-winner.",
     "tournament start": "Starts playing the current round of the bracket. mode is Sequential (one match at a time) or Simultaneous (all at once, no betting).",
     "roll": "Rolls a random number between 1 and num.",
     "setup": "Introduces Shockwave, creates your personal solo team, and walks you through picking which roles you like/dislike playing (press a role to toggle it, then press Confirm) for future role-aware team balancing. solo_team_name is always optional; omit it the first time and your solo team is named after your current server display name. Run it any time afterward to update either. Unlocks the Onboarded achievement the first time.",
@@ -1279,9 +1322,9 @@ async def makeTeamsRandom(ctx, use_roles: bool = False, ranked: bool = False):
 
     # Roles (Top/Jungle/Mid/Bottom/Support) only make sense for a 5-player
     # team; makeEmbedString() silently falls back to a plain roster for
-    # any other size, and _finalizeRoster silently skips the Reroll
-    # button for the same reason. Explain that instead of leaving people
-    # wondering where the roles went.
+    # any other size, and _finalizeRoster silently skips the Random
+    # Roles/Balanced Roles buttons for the same reason. Explain that
+    # instead of leaving people wondering where the roles went.
     if use_roles:
         unroled = [
             f"{team.get_name()} ({len(team.get_players())} players)"
@@ -1401,21 +1444,6 @@ async def startCaptainsDraft(ctx, captain_1, captain_2, use_random, ranked):
         return
 
     await helperObj.captainsHelper(ctx, captain1, captain2, ranked=ranked)
-
-
-@tree.command(
-    name="choose",
-    description="Choose a player for your team (captains only)"
-)
-@app_commands.describe(
-    member="The player to pick; required unless use_random is set",
-    use_random="Pick a random remaining player instead of naming one",
-)
-async def choose(ctx, member: discord.Member = None, use_random: bool = False):
-    if use_random:
-        await helperObj.chooseRandomMember(ctx)
-    else:
-        await helperObj.chooseFunc(ctx, member)
 
 
 # One subcommand per independent reset instead of a single command with 6
@@ -1628,7 +1656,7 @@ async def tournamentCreateBracket(
 
 @tournamentGroup.command(
     name="print-bracket",
-    description="Print the bracket, with each match's id for use with /wager and /report-correct-winner"
+    description="Print the bracket, with each match's id for use with /wager team and /report-correct-winner"
 )
 async def tournamentPrintBracket(ctx):
     await helperObj.printBracketHelper(ctx)
@@ -1674,6 +1702,21 @@ teamGroup = app_commands.Group(
 )
 async def teamCreate(ctx, name: str, team_size: int, captain: discord.Member = None):
     await helperObj.createTeamHelper(ctx, name, team_size, captain)
+
+
+@teamGroup.command(
+    name="save",
+    description="Save Team 1 or Team 2 from the last game as a new persistent team, with you as captain"
+)
+@app_commands.describe(
+    team="Which side from the last game to save", name="Name for the new team",
+)
+@app_commands.choices(team=[
+    app_commands.Choice(name="Team 1", value=1),
+    app_commands.Choice(name="Team 2", value=2),
+])
+async def teamSave(ctx, team: app_commands.Choice[int], name: str):
+    await helperObj.saveTeamHelper(ctx, team.value, name)
 
 
 @teamGroup.command(
@@ -1781,11 +1824,11 @@ async def teamStats(ctx, team: str):
 
 
 @teamGroup.command(
-    name="mine",
+    name="lookup",
     description="List the teams you (or another player) belong to and flip through their stats"
 )
 @app_commands.describe(member="Whose teams to look up; defaults to you")
-async def teamMine(ctx, member: discord.Member = None):
+async def teamLookup(ctx, member: discord.Member = None):
     await helperObj.myTeamsHelper(ctx, member)
 
 
@@ -1798,7 +1841,7 @@ async def teamMine(ctx, member: discord.Member = None):
     recruiting_only="Only show teams still short of their target roster size",
     sort="What to sort by; defaults to name",
     order="Ascending or descending; defaults to ascending",
-    cards="Flip through each team's full stats card one at a time, like /team mine, instead of a summary list",
+    cards="Flip through each team's full stats card one at a time, like /team lookup, instead of a summary list",
     member_1="Only show teams that have this member on their roster",
     member_2="Also required on the roster (optional)",
     member_3="Also required on the roster (optional)",
@@ -1854,6 +1897,25 @@ async def makeTeamsRepeat(ctx):
 
 
 tree.add_command(makeTeamsGroup)
+
+
+@tree.command(
+    name="test-draft",
+    description="Admin/dev: solo-test the button draft picker against 10 random members"
+)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def testDraft(ctx):
+    await helperObj.testDraftHelper(ctx)
+
+
+@testDraft.error
+async def testDraft_error(ctx, error):
+    if isinstance(error, app_commands.MissingPermissions):
+        await ctx.response.send_message(
+            "You need the Manage Server permission to use /test-draft."
+        )
+    else:
+        raise error
 
 
 @tree.command(
