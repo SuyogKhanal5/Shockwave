@@ -2,6 +2,7 @@ token.txt
 shockwave.log
 *.pyc
 __pycache__/
+.pytest_cache/
 .vscode/
 .claude/
 data/guildData/serverInfo/main.db

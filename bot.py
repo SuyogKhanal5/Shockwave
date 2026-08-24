@@ -960,6 +960,28 @@ wagerGroup = app_commands.Group(
 )
 
 
+# team is free text (with autocomplete), not a static Choice, so the
+# picker can show the roster's own real team names instead of a generic
+# "Team 1"/"Team 2" disconnected from what's actually on screen. Always
+# suggests the CURRENT game's own names, not whichever match_id the
+# caller might also be filling in on the same command: discord.py's real
+# option-resolution for interaction.namespace can't be faithfully
+# exercised by this file's own FakeInteraction-based tests (see
+# LoggingCommandTree's own "BUG FOUND IN PRODUCTION" note above), and
+# match_id is filled in after team in the command's own param order
+# anyway, so it's rarely even set yet at this point. wagerHelper's own
+# server-side resolution still matches against the real match_id's own
+# team names when one is given; this is only the suggestion list.
+async def wagerTeamAutocomplete(ctx, current: str):
+    name1, name2 = helperObj.getWagerTeamNames(ctx.guild.id)
+    current = current.lower()
+    choices = [
+        app_commands.Choice(name=name1, value="1"),
+        app_commands.Choice(name=name2, value="2"),
+    ]
+    return [c for c in choices if current in c.name.lower()]
+
+
 @wagerGroup.command(
     name="team",
     description="Wager gold on the current game, or on one tournament match if you give a match id"
@@ -968,12 +990,16 @@ wagerGroup = app_commands.Group(
     amount="Amount of gold to wager", team="Which team you think will win",
     match_id="A match's id, shown as \"Match #N\" in the bracket; omit to bet on the current game instead"
 )
-@app_commands.choices(team=[
-    app_commands.Choice(name="Team 1", value=1),
-    app_commands.Choice(name="Team 2", value=2),
-])
-async def wagerTeam(ctx, amount: int, team: app_commands.Choice[int], match_id: int = None):
-    await helperObj.wagerHelper(ctx, amount, team.value, match_id)
+@app_commands.autocomplete(team=wagerTeamAutocomplete)
+async def wagerTeam(ctx, amount: int, team: str, match_id: int = None):
+    name1, name2 = helperObj.getWagerTeamNames(ctx.guild.id, match_id)
+    team_value = helperObj.resolveWagerTeamValue(team, name1, name2)
+    if team_value is None:
+        await ctx.response.send_message(
+            f"Couldn't tell which team **{team}** is. Pick **{name1}** or **{name2}**.", ephemeral=True
+        )
+        return
+    await helperObj.wagerHelper(ctx, amount, team_value, match_id)
 
 
 @wagerGroup.command(
@@ -1121,7 +1147,6 @@ tree.add_command(shopGroup)
 @app_commands.describe(
     filter="Which stat to rank by; omit for an overview of elo, balance, and record",
     order="Highest-first or lowest-first; defaults to highest-first",
-    cards="Flip through each player's full stats card one at a time, like /team lookup, instead of a ranked list",
 )
 @app_commands.choices(filter=[
     app_commands.Choice(name="Elo", value="elo"),
@@ -1145,12 +1170,10 @@ tree.add_command(shopGroup)
     app_commands.Choice(name="Descending (highest first)", value="desc"),
     app_commands.Choice(name="Ascending (lowest first)", value="asc"),
 ])
-async def leaderboard(
-    ctx, filter: app_commands.Choice[str] = None, order: app_commands.Choice[str] = None, cards: bool = False
-):
+async def leaderboard(ctx, filter: app_commands.Choice[str] = None, order: app_commands.Choice[str] = None):
     stat = filter.value if filter is not None else None
     sort_order = order.value if order is not None else "desc"
-    await helperObj.leaderboardHelper(ctx, stat, sort_order, cards)
+    await helperObj.leaderboardHelper(ctx, stat, sort_order)
 
 
 SITE_COMMANDS_URL = "https://addshockwave.com/commands.html"
@@ -1189,7 +1212,7 @@ COMMAND_HELP = {
     "shop browse": "Browse every trading-card title, color scheme, and font purchasable with gold, with a ✅ next to anything you already own. Sort: Price / Sort: Owned buttons under the listing re-sort each category (Ascending/Descending toggle which way) without needing to re-run the command.",
     "achievements": "Browse every gameplay achievement, what it takes to earn it, and whether you already have. Earning one unlocks its title for /card-set and posts a one-time announcement in the channel.",
     "shop buy": "Purchases a trading-card cosmetic with gold, permanently unlocking it for /card-set. Refuses if you already own it or can't afford it.",
-    "leaderboard": "Ranks the server by a stat, including ranked-only and casual-only wins/losses/win rate. Omit filter for an elo-sorted overview. Players with a 0W-0L record in the selected stat's category (or who've never played a game at all, for the overview and elo views) are left off, so a currency-based stat like balance still shows everyone. Buttons page through the results, and Ascending/Descending buttons flip the sort direction without re-running the command. cards:true flips through each player's full stats card one at a time instead, same as /team lookup but ranked; a Card button on that view swaps the current player's stats card for their actual trading card, and stays selected as you keep paging.",
+    "leaderboard": "Ranks the server by a stat, including ranked-only and casual-only wins/losses/win rate. Omit filter for an elo-sorted overview. Players with a 0W-0L record in the selected stat's category (or who've never played a game at all, for the overview and elo views) are left off, so a currency-based stat like balance still shows everyone. Buttons page through the results, and Ascending/Descending buttons flip the sort direction without re-running the command. Press Cards to flip through each player's full stats card one at a time instead, same as /team lookup but ranked; a Card button on that view swaps the current player's stats card for their actual trading card, and List brings you back to the ranked list.",
     "team create": "Creates a persistent team with you as its captain, or captain as its captain if given.",
     "team save": "Saves Team 1 or Team 2 from the last game in this server as a new persistent team, with you as its captain. You must have actually been rostered on that side to save it, and the new name can't already belong to another team here.",
     "team set": "Sets a persistent team's voice channel and/or logo, any combination in one call. new_voice_channel creates a fresh one named after the team. The team's captain, or anyone with Manage Server, can do this.",
@@ -1252,7 +1275,9 @@ def _resolveCommand(name):
 @app_commands.autocomplete(command=helpCommandAutocomplete)
 async def help(ctx, command: str = None):
     if command is None:
-        await ctx.response.send_message(f"Full command list: {SITE_COMMANDS_URL}")
+        await ctx.response.send_message(
+            f"Full command list: {SITE_COMMANDS_URL}\nNew here? Run /setup first."
+        )
         return
 
     name = command.strip().lstrip("/").lower()
@@ -1467,43 +1492,48 @@ async def _clearPermissionError(ctx, error):
         raise error
 
 
-async def _clearTeamsAndConfirm(ctx):
-    await helperObj.clearTeamsHelper(ctx)
-    await ctx.response.send_message("Cleared!")
-
-
 @clearGroup.command(
     name="teams",
-    description="Admin: wipe the current teams/draft so you can start a fresh session"
+    description="Admin: wipe the current teams/draft so you can start a fresh session (confirmation required)"
 )
 @app_commands.checks.has_permissions(manage_guild=True)
 async def clearTeams(ctx):
-    await _clearTeamsAndConfirm(ctx)
+    await helperObj.confirmClearActionHelper(
+        ctx, "teams",
+        "Clear the current teams/draft? Any in-progress game will be cancelled (refunded) first. "
+        "This can't be undone.",
+    )
 
 clearTeams.error(_clearPermissionError)
 
 
 @clearGroup.command(
     name="channels",
-    description="Admin: wipe the current teams/draft, and forget the saved team channel names too"
+    description="Admin: wipe the current teams/draft, and forget the saved channel names too "
+                 "(confirmation required)"
 )
 @app_commands.checks.has_permissions(manage_guild=True)
 async def clearChannels(ctx):
-    helperObj.update(ctx.guild.id, "channel1", "")
-    helperObj.update(ctx.guild.id, "channel2", "")
-    await _clearTeamsAndConfirm(ctx)
+    await helperObj.confirmClearActionHelper(
+        ctx, "channels",
+        "Clear the current teams/draft and forget the saved team channel names? This can't be undone.",
+    )
 
 clearChannels.error(_clearPermissionError)
 
 
 @clearGroup.command(
     name="tournament",
-    description="Admin: delete this server's tournament entirely: bracket, registrations, match history"
+    description="Admin: delete this server's tournament (bracket, registrations, history) "
+                 "(confirmation required)"
 )
 @app_commands.checks.has_permissions(manage_guild=True)
 async def clearTournament(ctx):
-    helperObj.deleteTournamentHelper(ctx.guild.id)
-    await _clearTeamsAndConfirm(ctx)
+    await helperObj.confirmClearActionHelper(
+        ctx, "tournament",
+        "Delete this server's tournament entirely (bracket, registrations, match history)? This also "
+        "clears the current teams/draft. This can't be undone.",
+    )
 
 clearTournament.error(_clearPermissionError)
 
@@ -1514,7 +1544,7 @@ clearTournament.error(_clearPermissionError)
 )
 @app_commands.checks.has_permissions(manage_guild=True)
 async def clearElo(ctx):
-    await _clearTeamsAndConfirm(ctx)
+    await helperObj.clearTeamsHelper(ctx)
     await helperObj.confirmDestructiveClearHelper(ctx, False, True, False, False, None)
 
 clearElo.error(_clearPermissionError)
@@ -1526,7 +1556,7 @@ clearElo.error(_clearPermissionError)
 )
 @app_commands.checks.has_permissions(manage_guild=True)
 async def clearEconomy(ctx):
-    await _clearTeamsAndConfirm(ctx)
+    await helperObj.clearTeamsHelper(ctx)
     await helperObj.confirmDestructiveClearHelper(ctx, True, False, False, False, None)
 
 clearEconomy.error(_clearPermissionError)
@@ -1539,7 +1569,7 @@ clearEconomy.error(_clearPermissionError)
 @app_commands.describe(user="Only reset this player instead of everyone")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def clearAchievements(ctx, user: discord.Member = None):
-    await _clearTeamsAndConfirm(ctx)
+    await helperObj.clearTeamsHelper(ctx)
     await helperObj.confirmDestructiveClearHelper(ctx, False, False, True, False, user)
 
 clearAchievements.error(_clearPermissionError)
@@ -1552,7 +1582,7 @@ clearAchievements.error(_clearPermissionError)
 @app_commands.describe(user="Only reset this player instead of everyone")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def clearCardUnlocks(ctx, user: discord.Member = None):
-    await _clearTeamsAndConfirm(ctx)
+    await helperObj.clearTeamsHelper(ctx)
     await helperObj.confirmDestructiveClearHelper(ctx, False, False, False, True, user)
 
 clearCardUnlocks.error(_clearPermissionError)
@@ -1591,6 +1621,23 @@ async def myTeamAutocomplete(ctx, current: str):
         teams = helperObj.getTeamsForGuild(ctx.guild.id)
     else:
         teams = helperObj.getTeamsForPlayer(ctx.guild.id, ctx.user.id)
+    names = [team.get_name() for _team_id, team in teams if current in team.get_name().lower()]
+    return [app_commands.Choice(name=n, value=n) for n in names[:25]]
+
+
+# /team stats works on any team in the guild by exact name (it's a lookup,
+# not an action you need to be rostered for), but suggesting literally
+# every team in a large server the instant the param is focused would bury
+# the ones you actually belong to under everyone else's. So an empty box
+# still suggests just your own teams (myTeamAutocomplete's own behavior,
+# admin carve-out included); the moment you actually type something,
+# that's a deliberate search, so widen to every team in the guild
+# matching it, same as /team list's own search would.
+async def teamStatsAutocomplete(ctx, current: str):
+    if not current:
+        return await myTeamAutocomplete(ctx, current)
+    current = current.lower()
+    teams = helperObj.getTeamsForGuild(ctx.guild.id)
     names = [team.get_name() for _team_id, team in teams if current in team.get_name().lower()]
     return [app_commands.Choice(name=n, value=n) for n in names[:25]]
 
@@ -1817,7 +1864,7 @@ async def teamTransfer(ctx, team: str, member: discord.Member):
     description="View a team's roster and record"
 )
 @app_commands.describe(team="Name of the team")
-@app_commands.autocomplete(team=myTeamAutocomplete)
+@app_commands.autocomplete(team=teamStatsAutocomplete)
 async def teamStats(ctx, team: str):
     await helperObj.teamStatsHelper(ctx, team)
 
@@ -1942,16 +1989,34 @@ async def notify(ctx, member: discord.Member = None, role: discord.Role = None, 
     # notifyHelper DMs the target directly rather than responding to the
     # interaction, so calling it once per role member in a loop is safe -
     # ctx.response.send_message below still only ever fires once either way.
+    # A closed-DMs member (notifyHelper returns False) doesn't stop the
+    # rest of the batch from being invited.
     targets = role.members if role is not None else [member]
+    failures = 0
     for target in targets:
-        await helperObj.notifyHelper(ctx, target, message)
+        if not await helperObj.notifyHelper(ctx, target, message):
+            failures += 1
 
     if member is not None:
-        summary = member.name
+        if failures:
+            await ctx.response.send_message(
+                f"Couldn't DM {member.name} — they may have DMs disabled for this server.",
+                ephemeral=True,
+            )
+        else:
+            await ctx.response.send_message(f"Sent an invite to {member.name}!")
     else:
         count = len(targets)
-        summary = f"{count} member{'s' if count != 1 else ''} in {role.name}"
-    await ctx.response.send_message(f"Sent an invite to {summary}!")
+        sent = count - failures
+        if failures:
+            await ctx.response.send_message(
+                f"Sent an invite to {sent}/{count} member{'s' if count != 1 else ''} in {role.name}; "
+                f"{failures} couldn't be DMed."
+            )
+        else:
+            await ctx.response.send_message(
+                f"Sent an invite to {count} member{'s' if count != 1 else ''} in {role.name}!"
+            )
 
 
 @tree.command(
@@ -1964,7 +2029,11 @@ async def roll(ctx, *, num: int):
         rand = random.randint(1, num)
         await ctx.response.send_message("You rolled " + str(rand))
     else:
-        await ctx.response.send_message("Please use a number greater than 1.")
+        await ctx.response.send_message(
+            f"{num} isn't greater than 1, so there's nothing to roll between 1 and it. "
+            "Try a number greater than 1.",
+            ephemeral=True,
+        )
 
 
 # Runs the full test suite before connecting to Discord, so a broken

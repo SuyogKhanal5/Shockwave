@@ -721,6 +721,17 @@ LEADERBOARD_FIRST_EMOJI = "⏮️"  # ⏮️ jump to the first page
 LEADERBOARD_PREV_EMOJI = "◀️"   # ◀️ previous page
 LEADERBOARD_NEXT_EMOJI = "▶️"   # ▶️ next page
 LEADERBOARD_LAST_EMOJI = "⏭️"   # ⏭️ jump to the last page
+# First/Prev/Next/Last only move one step (or to either end); this opens
+# _PageJumpModal instead, for going straight to an arbitrary page without
+# clicking Next N times. Shared the same way the four above are.
+LEADERBOARD_JUMP_EMOJI = "\U0001F522"  # 🔢 jump to a specific page
+# The ranked-list view's own entry point into cards mode (one player's
+# stats card per page, see _renderLeaderboardEntryStatsEmbed), and cards
+# mode's own way back out to the list - distinct from STATS_CARD_EMOJI/
+# STATS_RETURN_EMOJI, which toggle the stats-card/trading-card swap
+# *within* cards mode, a different action from switching modes entirely.
+LEADERBOARD_CARDS_EMOJI = "\U0001F3B4"  # 🎴 enter cards mode from the list
+LEADERBOARD_LIST_EMOJI = "\U0001F4CB"  # 📋 leave cards mode back to the list
 
 # /make-teams draft's button-based picker (CaptainsDraftPickView). A
 # message tops out at 5 rows of 5 buttons (25 total); one slot is always
@@ -804,6 +815,72 @@ roles = {
 # gets stored in player_role_preferences.
 SETUP_ROLE_NAMES = ["Top", "Jungle", "Mid", "Bottom", "Support"]
 SETUP_ROLE_TIMEOUT_SECONDS = 120
+
+
+# Confirm/cancel buttons for /clear teams, /clear channels, and
+# /clear tournament: none of the three ran a confirmation at all before,
+# unlike their /clear elo/economy/achievements/card-unlocks siblings
+# below, even though /clear tournament in particular is just as
+# irreversible (wipes the bracket, registrations, and match history
+# outright). `action` picks which extra step (if any) Confirm takes
+# beyond the clearTeamsHelper() every /clear subcommand already does;
+# "teams" needs nothing beyond that, so it's the implicit default.
+class ConfirmClearActionView(discord.ui.View):
+    def __init__(self, helperObj, guild_id, invoker_id, action="teams"):
+        super().__init__(timeout=CLEAR_CONFIRM_TIMEOUT_SECONDS)
+        self.helperObj = helperObj
+        self.guild_id = guild_id
+        self.invoker_id = invoker_id
+        self.action = action
+        self.message = None
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.invoker_id:
+            await interaction.response.send_message(
+                "Only the person who ran /clear can confirm this.", ephemeral=True
+            )
+            return False
+        return True
+
+    def _disable_buttons(self):
+        for item in self.children:
+            item.disabled = True
+
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction, button):
+        self._disable_buttons()
+        self.stop()
+        if self.action == "channels":
+            self.helperObj.update(self.guild_id, "channel1", "")
+            self.helperObj.update(self.guild_id, "channel2", "")
+            result = "Cleared! The saved team channel names have been forgotten too."
+        elif self.action == "tournament":
+            self.helperObj.deleteTournamentHelper(self.guild_id)
+            result = (
+                "Cleared! This server's tournament (bracket, registrations, and match history) "
+                "has been deleted."
+            )
+        else:
+            result = "Cleared!"
+        await self.helperObj.clearTeamsHelper(interaction)
+        await interaction.response.edit_message(content=result, view=self)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction, button):
+        self._disable_buttons()
+        self.stop()
+        await interaction.response.edit_message(content="Cancelled. Nothing was cleared.", view=self)
+
+    async def on_timeout(self):
+        self._disable_buttons()
+        if self.message is not None:
+            try:
+                await self.message.edit(
+                    content="Confirmation expired. Run /clear again if you still want to do this.",
+                    view=self,
+                )
+            except discord.HTTPException:
+                pass
 
 
 # Confirm/cancel buttons for /clear elo, /clear economy,
@@ -891,7 +968,13 @@ class ConfirmResetView(discord.ui.View):
     async def on_timeout(self):
         self._disable_buttons()
         if self.message is not None:
-            await self.message.edit(view=self)
+            try:
+                await self.message.edit(
+                    content="Confirmation expired. Run /clear again if you still want to do this.",
+                    view=self,
+                )
+            except discord.HTTPException:
+                pass
 
 
 # Confirm/cancel buttons for /tournament create when a tournament already
@@ -943,7 +1026,16 @@ class ConfirmTournamentOverwriteView(discord.ui.View):
     async def on_timeout(self):
         self._disable_buttons()
         if self.message is not None:
-            await self.message.edit(view=self)
+            try:
+                await self.message.edit(
+                    content=(
+                        "Confirmation expired. Run /tournament create again if you still want to "
+                        "overwrite the existing tournament."
+                    ),
+                    view=self,
+                )
+            except discord.HTTPException:
+                pass
 
 
 # Confirm/cancel buttons for /team set when the requested voice channel is
@@ -996,7 +1088,15 @@ class ConfirmVoiceChannelOverwriteView(discord.ui.View):
     async def on_timeout(self):
         self._disable_buttons()
         if self.message is not None:
-            await self.message.edit(view=self)
+            try:
+                await self.message.edit(
+                    content=(
+                        "Confirmation expired. Run /team set again if you still want to use this channel."
+                    ),
+                    view=self,
+                )
+            except discord.HTTPException:
+                pass
 
 
 # Confirm/cancel buttons for /team delete; deleting a persistent team is
@@ -1050,7 +1150,16 @@ class ConfirmTeamDeleteView(discord.ui.View):
     async def on_timeout(self):
         self._disable_buttons()
         if self.message is not None:
-            await self.message.edit(view=self)
+            try:
+                await self.message.edit(
+                    content=(
+                        "Confirmation expired. Run /team delete again if you still want to delete "
+                        "this team."
+                    ),
+                    view=self,
+                )
+            except discord.HTTPException:
+                pass
 
 
 # One SETUP_ROLE_NAMES entry's own toggle button, primary (highlighted)
@@ -1185,14 +1294,14 @@ class WinnerReportView(discord.ui.View):
 # payouts, game record) shouldn't hinge on a single accidental click the
 # way the roster start/reroll buttons reasonably can, since a fresh
 # roster or /clear cleanly undoes those, while a recorded result only has
-# the heavier /set correct-winner as its way back. Open to anyone to
-# click, same as the winner-report buttons themselves; there's no single
-# "invoker" to restrict this to the way a slash-command-triggered
-# ConfirmXView has ctx.user, since reporting a winner has always been
-# something anyone at the table can do. On Confirm, the original
-# report_message (if handed one) has its buttons stripped too, so a stale
-# Team 1/Team 2/Cancel Game row doesn't linger on a message that's already
-# been resolved.
+# the heavier /set correct-winner as its way back. Unlike the initial
+# report (still open to anyone at the table, same as the winner-report
+# buttons themselves), actually CONFIRMING it is gated to a player rostered
+# in this game or a Manage Server admin (see interaction_check /
+# _isAdminOrInCurrentGame), so a bystander can't finalize a result for a
+# game they were never part of. On Confirm, the original report_message
+# (if handed one) has its buttons stripped too, so a stale Team 1/Team 2/
+# Cancel Game row doesn't linger on a message that's already been resolved.
 class ConfirmWinnerReportView(discord.ui.View):
     def __init__(self, helperObj, guild_id, winning_team, report_message_id, report_message=None):
         super().__init__(timeout=WINNER_REPORT_CONFIRM_TIMEOUT_SECONDS)
@@ -1206,6 +1315,17 @@ class ConfirmWinnerReportView(discord.ui.View):
     def _disable_buttons(self):
         for item in self.children:
             item.disabled = True
+
+    # See _isAdminOrInCurrentGame's own comment for why this is gated at
+    # all now.
+    async def interaction_check(self, interaction):
+        if self.helperObj._isAdminOrInCurrentGame(interaction):
+            return True
+        await interaction.response.send_message(
+            "Only a player in this game, or a member with the Manage Server permission, can confirm this.",
+            ephemeral=True,
+        )
+        return False
 
     @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success)
     async def confirm(self, interaction, button):
@@ -1265,6 +1385,17 @@ class ConfirmCancelGameView(discord.ui.View):
     def _disable_buttons(self):
         for item in self.children:
             item.disabled = True
+
+    # See _isAdminOrInCurrentGame's own comment for why this is gated at
+    # all now.
+    async def interaction_check(self, interaction):
+        if self.helperObj._isAdminOrInCurrentGame(interaction):
+            return True
+        await interaction.response.send_message(
+            "Only a player in this game, or a member with the Manage Server permission, can confirm this.",
+            ephemeral=True,
+        )
+        return False
 
     @discord.ui.button(label="Confirm", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction, button):
@@ -1327,6 +1458,20 @@ class ConfirmTournamentMatchReportView(discord.ui.View):
     def _disable_buttons(self):
         for item in self.children:
             item.disabled = True
+
+    # Scoped to this specific match's own two rosters (_isPlayerInTournamentMatch),
+    # not the guild-wide game, since several matches can be live at once.
+    async def interaction_check(self, interaction):
+        if (
+            interaction.user.guild_permissions.manage_guild
+            or self.helperObj._isPlayerInTournamentMatch(self.match_id, interaction.user.id)
+        ):
+            return True
+        await interaction.response.send_message(
+            "Only a player in this match, or a member with the Manage Server permission, can confirm this.",
+            ephemeral=True,
+        )
+        return False
 
     @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success)
     async def confirm(self, interaction, button):
@@ -1494,6 +1639,12 @@ class TeamInviteAcceptView(discord.ui.View):
     async def accept(self, interaction, button):
         await self.helperObj._handleTeamInviteAcceptClick(interaction)
 
+    @discord.ui.button(
+        label="Decline", style=discord.ButtonStyle.secondary, custom_id="shockwave:team_invite:decline"
+    )
+    async def decline(self, interaction, button):
+        await self.helperObj._handleTeamInviteDeclineClick(interaction)
+
 
 # /stats' own posted message, persistent (custom_id, timeout=None,
 # registered once via client.add_view) since nothing ever expires a stats
@@ -1558,10 +1709,43 @@ class TeamStatsView(discord.ui.View):
         await self.helperObj._handleTeamStatsReturnClick(interaction)
 
 
+# A button can't take free text, so the "Page #" button on each of the
+# three paging views below opens this instead: whichever handler_name
+# names (one of _handleLeaderboardPageClick/_handleMyTeamsPageClick/
+# _handleTeamListPageClick) gets called with target_page set to the
+# 0-based page the user typed, the same call shape a Prev/Next click
+# already uses (see _computeNewPage's own target= branch). total_pages
+# here is only a snapshot from whenever "Page #" was clicked, used for
+# the label's range hint and to reject obvious nonsense early; the
+# handler re-derives the CURRENT total_pages itself before actually
+# jumping; anything typed past it just clamps to the last page, same as
+# Next already does when there's nowhere further to go, in case entries
+# changed while the modal was open.
+class _PageJumpModal(discord.ui.Modal):
+    def __init__(self, helperObj, handler_name, total_pages):
+        super().__init__(title="Jump to Page")
+        self.helperObj = helperObj
+        self.handler_name = handler_name
+        self.page_input = discord.ui.TextInput(
+            label=f"Page number (1-{total_pages})", placeholder="e.g. 3", max_length=6,
+        )
+        self.add_item(self.page_input)
+
+    async def on_submit(self, interaction):
+        raw = self.page_input.value.strip()
+        if not raw.isdigit() or int(raw) < 1:
+            await interaction.response.send_message(
+                f"'{raw}' isn't a valid page number. Enter a whole number, 1 or higher.", ephemeral=True
+            )
+            return
+        handler = getattr(self.helperObj, self.handler_name)
+        await handler(interaction, target_page=int(raw) - 1)
+
+
 # /leaderboard, /team lookup, and /team list all page the exact same way,
-# First/Prev/Next/Last, one shared view per guild/caller/search rather
-# than re-running the command, so all three views below are the same
-# four-button shape, just wired to a different helper.py handler and
+# First/Prev/Next/Last/Page#, one shared view per guild/caller/search
+# rather than re-running the command, so all three views below are the
+# same button shape, just wired to a different helper.py handler and
 # table. Persistent (custom_id, timeout=None, registered once via
 # client.add_view) since nothing ever expires one of these pages on its
 # own, the same open-ended reasoning as WinnerReportView.
@@ -1572,10 +1756,13 @@ class LeaderboardPagingView(discord.ui.View):
         if not cards:
             self.remove_item(self.showCard)
             self.remove_item(self.returnToStats)
-        elif card_shown:
-            self.remove_item(self.showCard)
+            self.remove_item(self.backToList)
         else:
-            self.remove_item(self.returnToStats)
+            self.remove_item(self.viewCards)
+            if card_shown:
+                self.remove_item(self.showCard)
+            else:
+                self.remove_item(self.returnToStats)
 
     @discord.ui.button(label=LEADERBOARD_FIRST_EMOJI, style=discord.ButtonStyle.secondary, custom_id="shockwave:leaderboard:first")
     async def first(self, interaction, button):
@@ -1593,6 +1780,13 @@ class LeaderboardPagingView(discord.ui.View):
     async def last(self, interaction, button):
         await self.helperObj._handleLeaderboardPageClick(interaction, "last")
 
+    @discord.ui.button(
+        label=f"Page # {LEADERBOARD_JUMP_EMOJI}", style=discord.ButtonStyle.secondary,
+        custom_id="shockwave:leaderboard:jump",
+    )
+    async def jump(self, interaction, button):
+        await self.helperObj._handleLeaderboardJumpClick(interaction)
+
     # Re-sorts the same filter in the other direction without re-running
     # the command, same "independent toggle buttons, not one cycling
     # button" shape ShopSortView already established, just persisted in
@@ -1606,6 +1800,27 @@ class LeaderboardPagingView(discord.ui.View):
     @discord.ui.button(label="Descending", style=discord.ButtonStyle.secondary, custom_id="shockwave:leaderboard:desc")
     async def descending(self, interaction, button):
         await self.helperObj._handleLeaderboardOrderClick(interaction, "desc")
+
+    # The ranked list's own entry point into cards mode: one player's full
+    # stats card per page instead of everyone at once (see
+    # _renderLeaderboardEntryStatsEmbed), starting from whichever entry is
+    # first on the currently-shown list page. Only shown outside cards mode.
+    @discord.ui.button(
+        label=f"Cards {LEADERBOARD_CARDS_EMOJI}", style=discord.ButtonStyle.primary,
+        custom_id="shockwave:leaderboard:view_cards",
+    )
+    async def viewCards(self, interaction, button):
+        await self.helperObj._handleLeaderboardViewCardsClick(interaction)
+
+    # Cards mode's own way back to the ranked list, the reverse of
+    # viewCards above. Shown throughout cards mode, alongside whichever of
+    # showCard/returnToStats also applies.
+    @discord.ui.button(
+        label=f"List {LEADERBOARD_LIST_EMOJI}", style=discord.ButtonStyle.secondary,
+        custom_id="shockwave:leaderboard:back_to_list",
+    )
+    async def backToList(self, interaction, button):
+        await self.helperObj._handleLeaderboardBackToListClick(interaction)
 
     # /team list's own Card/Back toggle (see TeamListPagingView), carried
     # over here; cards mode swaps the summary list for one player's full
@@ -1646,6 +1861,13 @@ class MyTeamsPagingView(discord.ui.View):
     async def last(self, interaction, button):
         await self.helperObj._handleMyTeamsPageClick(interaction, "last")
 
+    @discord.ui.button(
+        label=f"Page # {LEADERBOARD_JUMP_EMOJI}", style=discord.ButtonStyle.secondary,
+        custom_id="shockwave:my_teams:jump",
+    )
+    async def jump(self, interaction, button):
+        await self.helperObj._handleMyTeamsJumpClick(interaction)
+
 
 # See LeaderboardPagingView for the paging buttons, /team list's own
 # table/handler. `cards` (only ever True for a /team list cards:true
@@ -1682,6 +1904,13 @@ class TeamListPagingView(discord.ui.View):
     @discord.ui.button(label=LEADERBOARD_LAST_EMOJI, style=discord.ButtonStyle.secondary, custom_id="shockwave:team_list:last")
     async def last(self, interaction, button):
         await self.helperObj._handleTeamListPageClick(interaction, "last")
+
+    @discord.ui.button(
+        label=f"Page # {LEADERBOARD_JUMP_EMOJI}", style=discord.ButtonStyle.secondary,
+        custom_id="shockwave:team_list:jump",
+    )
+    async def jump(self, interaction, button):
+        await self.helperObj._handleTeamListJumpClick(interaction)
 
     @discord.ui.button(
         label=f"Card {TEAM_CARD_EMOJI}", style=discord.ButtonStyle.primary, custom_id="shockwave:team_list:show_card",
@@ -1830,6 +2059,20 @@ class ConfirmDuelResultView(discord.ui.View):
     def _disable_buttons(self):
         for item in self.children:
             item.disabled = True
+
+    # Scoped to this specific duel's own two participants
+    # (_isPlayerInDuel), same reasoning as the other confirm views.
+    async def interaction_check(self, interaction):
+        if (
+            interaction.user.guild_permissions.manage_guild
+            or self.helperObj._isPlayerInDuel(self.duel_id, interaction.user.id)
+        ):
+            return True
+        await interaction.response.send_message(
+            "Only a participant in this duel, or a member with the Manage Server permission, can confirm this.",
+            ephemeral=True,
+        )
+        return False
 
     @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success)
     async def confirm(self, interaction, button):
@@ -2552,30 +2795,37 @@ class helpers():
         ):
             await ctx.response.send_message(
                 "Give at least one setting to change: team1+team2, size, betting_timer, "
-                "wager_channel, member+elo, or default_elo."
+                "wager_channel, member+elo, or default_elo.",
+                ephemeral=True,
             )
             return
 
         if (team1 is None) != (team2 is None):
-            await ctx.response.send_message("Give both team1 and team2 together, or neither.")
+            await ctx.response.send_message(
+                "Give both team1 and team2 together, or neither.", ephemeral=True
+            )
             return
 
         if (member is None) != (elo is None):
-            await ctx.response.send_message("Give both member and elo together, or neither.")
+            await ctx.response.send_message(
+                "Give both member and elo together, or neither.", ephemeral=True
+            )
             return
 
         if betting_timer is not None:
             if betting_timer <= 0:
-                await ctx.response.send_message("betting_timer must be greater than 0 seconds.")
+                await ctx.response.send_message(
+                    "betting_timer must be greater than 0 seconds.", ephemeral=True
+                )
                 return
             if betting_timer > 600:
                 await ctx.response.send_message(
-                    "betting_timer can't be more than 600 seconds (10 minutes)."
+                    "betting_timer can't be more than 600 seconds (10 minutes).", ephemeral=True
                 )
                 return
 
         if default_elo is not None and default_elo <= 0:
-            await ctx.response.send_message("default_elo must be greater than 0.")
+            await ctx.response.send_message("default_elo must be greater than 0.", ephemeral=True)
             return
 
         applied = []
@@ -2965,10 +3215,10 @@ class helpers():
         # reason this guard isn't hit in practice; checking first here
         # keeps it meaningful if that ever changes.
         if captain_1 is None or captain_2 is None:
-            await ctx.response.send_message("Mention two team captains!")
+            await ctx.response.send_message("Mention two team captains!", ephemeral=True)
             return
         elif captain_1 == captain_2:
-            await ctx.response.send_message("Mention two different people!")
+            await ctx.response.send_message("Mention two different people!", ephemeral=True)
             return
 
         await self.clearTeamsHelper(ctx)  # also resets is_ranked to 0
@@ -3040,7 +3290,8 @@ class helpers():
         candidates = [m for m in ctx.guild.members if not m.bot and m.id != ctx.user.id]
         if len(candidates) < 10:
             await ctx.response.send_message(
-                f"Need at least 10 other non-bot members in this server to test with; found {len(candidates)}."
+                f"Need at least 10 other non-bot members in this server to test with; found {len(candidates)}.",
+                ephemeral=True,
             )
             return
 
@@ -3122,7 +3373,16 @@ class helpers():
 
         captain = Player()
         captain.deserializePlayer(self.get(guild_id, f"captain{turn}"))
+
+        team1 = Team()
+        team1.deserializeTeam(self.get(guild_id, "team1") or "")
+        team2 = Team()
+        team2.deserializeTeam(self.get(guild_id, "team2") or "")
+        label = self._draftPickLabel(guild_id, team1, team2)
+
         content = f"<@{captain.get_id()}>, pick a player for your team!"
+        if label is not None:
+            content += f" ({label})"
         return content, view
 
     # Shared by CaptainsDraftPickView's interaction_check and
@@ -3203,14 +3463,38 @@ class helpers():
     # POST-pick rosters (this pick has already been added to one of them),
     # so their combined size minus the two starting captains is the
     # 0-based index of the pick about to happen next.
+    # Which captain a given 0-based pick index belongs to, under the
+    # (1,2,2,1,1,2,2,1,...) snake pattern: pairs of picks alternate
+    # captains, and which captain leads a pair alternates too.
+    def _snakeTurnAtIndex(self, pick_index):
+        round_index = pick_index // 2
+        order = (1, 2) if round_index % 2 == 0 else (2, 1)
+        return order[pick_index % 2]
+
     def _nextDraftTurn(self, guild_id, turn, team1, team2):
         if not self.get(guild_id, "draft_snake"):
             return 2 if turn == 1 else 1
 
         next_pick_index = len(team1.get_players()) + len(team2.get_players()) - 2
-        round_index = next_pick_index // 2
-        order = (1, 2) if round_index % 2 == 0 else (2, 1)
-        return order[next_pick_index % 2]
+        return self._snakeTurnAtIndex(next_pick_index)
+
+    # "Pick 1 of 2"/"Pick 2 of 2" for the draft-pick prompt: whether the
+    # CURRENT pick (team1/team2 already reflect every pick so far, same
+    # index math _nextDraftTurn uses) is the first or second half of a
+    # same-captain snake pair, or a standalone "Pick 1 of 1" when neither
+    # neighboring pick belongs to the same captain. None outside snake
+    # drafts, where straight alternation makes every pick trivially solo.
+    def _draftPickLabel(self, guild_id, team1, team2):
+        if not self.get(guild_id, "draft_snake"):
+            return None
+
+        pick_index = len(team1.get_players()) + len(team2.get_players()) - 2
+        current = self._snakeTurnAtIndex(pick_index)
+        if pick_index > 0 and self._snakeTurnAtIndex(pick_index - 1) == current:
+            return "Pick 2 of 2"
+        if self._snakeTurnAtIndex(pick_index + 1) == current:
+            return "Pick 1 of 2"
+        return "Pick 1 of 1"
 
     # The actual pick: adds `member` to whichever team `turn` is drafting
     # for, removes them from the pool, and either wraps up the draft
@@ -3326,7 +3610,10 @@ class helpers():
     # `message`, when given, replaces the default "You've been invited..."
     # line entirely rather than being appended alongside it; the invite
     # link and a "Sent by" attribution line (since a custom message might
-    # not mention the sender at all) still always follow it.
+    # not mention the sender at all) still always follow it. Returns
+    # whether the DM actually went through, so /notify can tally
+    # successes/failures across a whole role instead of one member's
+    # closed DMs silently aborting the rest of the batch.
     async def notifyHelper(self, ctx, member: discord.Member, message: str = None):
         channel = await member.create_dm()
         invite_channel = ctx.user.voice.channel
@@ -3337,7 +3624,11 @@ class helpers():
             f"{body} Join the voice channel here: {invite_link}\n\n"
             f"Sent by {ctx.user.global_name}"
         )
-        await channel.send(content)
+        try:
+            await channel.send(content)
+        except discord.HTTPException:
+            return False
+        return True
 
     # Moves everyone currently in either team channel (+ spectators) back
     # to the channel they started in. Takes a discord.Guild rather than an
@@ -3477,9 +3768,20 @@ class helpers():
     # regardless, so a combined run mixes "for every player" and "for
     # @member" sentences rather than trying to force everything to one
     # shared scope.
+    # /clear teams/channels/tournament's own confirmation prompt
+    # (ConfirmClearActionView); `action` picks which of the three it is,
+    # see that view's own Confirm handler for what each one actually does.
+    async def confirmClearActionHelper(self, ctx, action, warning):
+        view = ConfirmClearActionView(self, ctx.guild.id, ctx.user.id, action)
+        await ctx.response.send_message(warning, view=view)
+        view.message = await ctx.original_response()
+
     async def confirmDestructiveClearHelper(
         self, ctx, clear_economy, clear_elo, clear_achievements, clear_card_unlocks=False, target=None
     ):
+        # Acks within Discord's 3-second window; the actual warning+view
+        # below is what the user sees, sent as a followup instead.
+        await ctx.response.defer()
         warnings = []
         if clear_economy:
             warnings.append(
@@ -3605,18 +3907,19 @@ class helpers():
         guild_id = ctx.guild.id
 
         if team_size <= 0:
-            await ctx.response.send_message("Team size must be greater than 0.")
+            await ctx.response.send_message("Team size must be greater than 0.", ephemeral=True)
             return
 
         if num_teams <= 1:
-            await ctx.response.send_message("A tournament needs at least 2 teams.")
+            await ctx.response.send_message("A tournament needs at least 2 teams.", ephemeral=True)
             return
 
         existing = self.getTournament(guild_id)
         if existing is not None:
             if not ctx.user.guild_permissions.manage_guild:
                 await ctx.response.send_message(
-                    "Only a member with the Manage Server permission can overwrite an existing tournament."
+                    "Only a member with the Manage Server permission can overwrite an existing tournament.",
+                    ephemeral=True,
                 )
                 return
 
@@ -3649,42 +3952,46 @@ class helpers():
         tournament = self.getTournament(guild_id)
         if tournament is None:
             await ctx.response.send_message(
-                "No tournament set up for this server. Use /tournament create first."
+                "No tournament set up for this server. Use /tournament create first.", ephemeral=True
             )
             return
 
         result = self.getTeamRow(guild_id, team_name)
         if result is None:
-            await ctx.response.send_message(f"No team named **{team_name}** in this server.")
+            await ctx.response.send_message(f"No team named **{team_name}** in this server.", ephemeral=True)
             return
         _, team = result
 
         if not self.isTeamCaptain(team, ctx.user.id) and not ctx.user.guild_permissions.manage_guild:
             await ctx.response.send_message(
                 f"Only **{team_name}**'s captain or a member with the Manage Server permission can "
-                "register it for the tournament."
+                "register it for the tournament.",
+                ephemeral=True,
             )
             return
 
         if team.get_size() != tournament.get_team_size():
             await ctx.response.send_message(
                 f"**{team_name}** has {team.get_size()} player(s), but this tournament needs teams of "
-                f"exactly {tournament.get_team_size()}."
+                f"exactly {tournament.get_team_size()}.",
+                ephemeral=True,
             )
             return
 
         if any(existing.get_id() == team.get_id() for existing in tournament.get_teams()):
-            await ctx.response.send_message(f"**{team_name}** is already registered for this tournament.")
+            await ctx.response.send_message(
+                f"**{team_name}** is already registered for this tournament.", ephemeral=True
+            )
             return
 
         if len(tournament.get_teams()) >= tournament.get_num_teams():
-            await ctx.response.send_message("This tournament's bracket is already full.")
+            await ctx.response.send_message("This tournament's bracket is already full.", ephemeral=True)
             return
 
         try:
             tournament.register_team(team)
         except ValueError as error:
-            await ctx.response.send_message(str(error))
+            await ctx.response.send_message(str(error), ephemeral=True)
             return
 
         self.saveTournament(guild_id, tournament)
@@ -3900,13 +4207,15 @@ class helpers():
         tournament = self.getTournament(guild_id)
         if tournament is None:
             await ctx.response.send_message(
-                "No tournament set up for this server. Use /tournament create first."
+                "No tournament set up for this server. Use /tournament create first.", ephemeral=True
             )
             return
 
         teams = tournament.get_teams()
         if len(teams) < 2:
-            await ctx.response.send_message("Need at least 2 registered teams to build a bracket.")
+            await ctx.response.send_message(
+                "Need at least 2 registered teams to build a bracket.", ephemeral=True
+            )
             return
 
         tournament.set_double_elimination(double_elimination)
@@ -5168,11 +5477,20 @@ class helpers():
         tournament = self.getTournament(ctx.guild.id)
         if tournament is None:
             await ctx.response.send_message(
-                "No tournament set up for this server. Use /tournament create first."
+                "No tournament set up for this server. Use /tournament create first.", ephemeral=True
             )
             return
+
+        # Rendering the whole bracket (Pillow, possibly several rounds and
+        # teams) can take longer than Discord's ~3 second ack window; post
+        # a placeholder immediately and edit it in place with the real
+        # text/images once they're ready, rather than risking "This
+        # interaction failed" while the render is still running.
+        await ctx.response.send_message("Creating bracket, please wait...")
         bracket_files = await asyncio.to_thread(self.renderBracketImages, tournament, ctx.guild.name)
-        await ctx.response.send_message(self.renderBracketText(tournament, ctx.guild.id), files=bracket_files)
+        await ctx.edit_original_response(
+            content=self.renderBracketText(tournament, ctx.guild.id), attachments=bracket_files
+        )
         # The DB read half runs here, not inside the offloaded thread
         # (self.cursor is thread-affined); only the pure drawing that
         # depends on it is actually offloaded.
@@ -5743,19 +6061,22 @@ class helpers():
         tournament = self.getTournament(guild_id)
         if tournament is None:
             await ctx.response.send_message(
-                "No tournament set up for this server. Use /tournament create first."
+                "No tournament set up for this server. Use /tournament create first.", ephemeral=True
             )
             return
 
         bracket = tournament.get_bracket()
         if not bracket:
-            await ctx.response.send_message("No bracket has been created yet. Use /tournament create-bracket first.")
+            await ctx.response.send_message(
+                "No bracket has been created yet. Use /tournament create-bracket first.", ephemeral=True
+            )
             return
 
         champion_name = self._tournamentChampionName(guild_id, tournament)
         if champion_name is not None:
             await ctx.response.send_message(
-                f"**{tournament.get_name()}** is already finished; **{champion_name}** is the champion!"
+                f"**{tournament.get_name()}** is already finished; **{champion_name}** is the champion!",
+                ephemeral=True,
             )
             return
 
@@ -5763,7 +6084,9 @@ class helpers():
             "SELECT COUNT(*) FROM tournament_matches WHERE guildId=? AND state != 'RESOLVED'", (guild_id,)
         )
         if self.cursor.fetchone()[0] > 0:
-            await ctx.response.send_message("This tournament's current round is already in progress.")
+            await ctx.response.send_message(
+                "This tournament's current round is already in progress.", ephemeral=True
+            )
             return
 
         await ctx.response.send_message(
@@ -5862,6 +6185,17 @@ class helpers():
             return
         match_id, team1_ser, team2_ser = row
 
+        team1, team2 = Team(), Team()
+        team1.deserializeTeam(team1_ser)
+        team2.deserializeTeam(team2_ser)
+        rostered_ids = {p.get_id() for p in team1.get_players()} | {p.get_id() for p in team2.get_players()}
+        if not (interaction.user.guild_permissions.manage_guild or interaction.user.id in rostered_ids):
+            await interaction.response.send_message(
+                "Only a player in this match, or a member with the Manage Server permission, can report a winner.",
+                ephemeral=True,
+            )
+            return
+
         # BUG-PRONE PATTERN AVOIDED: flip out of AWAITING_RESULT before
         # anything async below, so a second near-simultaneous click on this
         # same match message can't also pass the check above and post a
@@ -5876,9 +6210,6 @@ class helpers():
         )
         self.db.commit()
 
-        team1, team2 = Team(), Team()
-        team1.deserializeTeam(team1_ser)
-        team2.deserializeTeam(team2_ser)
         name = team1.get_name() if winning_team == 1 else team2.get_name()
 
         view = ConfirmTournamentMatchReportView(
@@ -6101,23 +6432,28 @@ class helpers():
         )
         row = self.cursor.fetchone()
         if row is None:
-            await ctx.response.send_message(f"No tournament match with id {match_id} in this server.")
+            await ctx.response.send_message(
+                f"No tournament match with id {match_id} in this server.", ephemeral=True
+            )
             return
         round_index, node_index, state, winner, bracket_type, settled_wagers_json = row
 
         if bracket_type != "winners":
             await ctx.response.send_message(
                 f"Match #{match_id} is a {'losers bracket' if bracket_type == 'losers' else 'Grand Finals'} "
-                f"match. Correcting those isn't supported yet."
+                f"match. Correcting those isn't supported yet.",
+                ephemeral=True,
             )
             return
 
         if state != "RESOLVED":
-            await ctx.response.send_message(f"Match #{match_id} hasn't been resolved yet.")
+            await ctx.response.send_message(f"Match #{match_id} hasn't been resolved yet.", ephemeral=True)
             return
 
         if winner == correct_team:
-            await ctx.response.send_message(f"Match #{match_id} is already recorded as Team {correct_team}.")
+            await ctx.response.send_message(
+                f"Match #{match_id} is already recorded as Team {correct_team}.", ephemeral=True
+            )
             return
 
         self.cursor.execute(
@@ -6126,13 +6462,13 @@ class helpers():
         )
         if self.cursor.fetchone()[0] > 0:
             await ctx.response.send_message(
-                f"Can't correct Match #{match_id}; the next round has already started."
+                f"Can't correct Match #{match_id}; the next round has already started.", ephemeral=True
             )
             return
 
         tournament = self.getTournament(guild_id)
         if tournament is None:
-            await ctx.response.send_message("This server's tournament no longer exists.")
+            await ctx.response.send_message("This server's tournament no longer exists.", ephemeral=True)
             return
 
         bracket = tournament.get_bracket()
@@ -6344,7 +6680,7 @@ class helpers():
         if not teams_sorted:
             message = "No teams have been created in this server yet!" \
                 if not (search or recruiting_only or member_ids) else "No teams match those filters."
-            await ctx.response.send_message(message)
+            await ctx.response.send_message(message, ephemeral=True)
             return
 
         if cards:
@@ -6398,7 +6734,7 @@ class helpers():
     # mode) carries across the flip, so paging while looking at a team's
     # trading card keeps showing trading cards, and paging on the plain
     # stats card keeps showing stats.
-    async def _handleTeamListPageClick(self, interaction, direction):
+    async def _handleTeamListPageClick(self, interaction, direction=None, target_page=None):
         guild_id = interaction.guild_id
         if guild_id is None:
             return
@@ -6431,7 +6767,7 @@ class helpers():
             return
         total_pages = self._myTeamsPageCount(teams_sorted) if cards else self._teamListPageCount(teams_sorted)
         page = min(page, total_pages - 1)
-        new_page = self._computeNewPage(direction, page, total_pages)
+        new_page = self._computeNewPage(direction, page, total_pages, target_page)
 
         if new_page == page:
             await interaction.response.defer()
@@ -6460,6 +6796,37 @@ class helpers():
             (new_page, guild_id, interaction.message.id)
         )
         self.db.commit()
+
+    # TeamListPagingView's Page # button: see _handleLeaderboardJumpClick,
+    # same "no longer live"/empty-cards guards _handleTeamListPageClick
+    # needs.
+    async def _handleTeamListJumpClick(self, interaction):
+        guild_id = interaction.guild_id
+        if guild_id is None:
+            return
+
+        self.cursor.execute(
+            "SELECT search, recruitingOnly, sort, sort_order, cards, memberIds "
+            "FROM team_list_views WHERE guildId=? AND messageId=?",
+            (guild_id, interaction.message.id)
+        )
+        row = self.cursor.fetchone()
+        if row is None:
+            await interaction.response.send_message("This list is no longer live.", ephemeral=True)
+            return
+        search, recruiting_only, sort, order, cards, member_ids_raw = row
+        recruiting_only = bool(recruiting_only)
+        cards = bool(cards)
+        member_ids = {int(x) for x in member_ids_raw.split(",") if x} if member_ids_raw else set()
+
+        teams_sorted = self._filterAndSortTeams(guild_id, search, recruiting_only, sort, order, member_ids)
+        if cards and not teams_sorted:
+            await interaction.response.defer()
+            return
+        total_pages = self._myTeamsPageCount(teams_sorted) if cards else self._teamListPageCount(teams_sorted)
+        await interaction.response.send_modal(
+            _PageJumpModal(self, "_handleTeamListPageClick", total_pages)
+        )
 
     # TeamListPagingView's Card button callback (cards mode only), swaps
     # the currently-paged team's plain stats card for its actual trading
@@ -6634,11 +7001,13 @@ class helpers():
         guild_id = ctx.guild.id
 
         if team_size <= 0:
-            await ctx.response.send_message("Team size must be greater than 0.")
+            await ctx.response.send_message("Team size must be greater than 0.", ephemeral=True)
             return
 
         if self.getTeamRow(guild_id, name) is not None:
-            await ctx.response.send_message(f"A team named **{name}** already exists in this server.")
+            await ctx.response.send_message(
+                f"A team named **{name}** already exists in this server.", ephemeral=True
+            )
             return
 
         captain_user = captain_member if captain_member is not None else ctx.user
@@ -6669,7 +7038,9 @@ class helpers():
 
         serialized = self.get(guild_id, column)
         if not serialized:
-            await ctx.response.send_message(f"There's no Team {team} from the last game to save.")
+            await ctx.response.send_message(
+                f"There's no Team {team} from the last game to save.", ephemeral=True
+            )
             return
 
         roster = Team()
@@ -6682,7 +7053,9 @@ class helpers():
             return
 
         if self.getTeamRow(guild_id, name) is not None:
-            await ctx.response.send_message(f"A team named **{name}** already exists in this server.")
+            await ctx.response.send_message(
+                f"A team named **{name}** already exists in this server.", ephemeral=True
+            )
             return
 
         saved = Team()
@@ -6730,25 +7103,28 @@ class helpers():
 
         result = self.getTeamRow(guild_id, team_name)
         if result is None:
-            await ctx.response.send_message(f"No team named **{team_name}** in this server.")
+            await ctx.response.send_message(f"No team named **{team_name}** in this server.", ephemeral=True)
             return
         team_id, team = result
 
         if not self.isTeamCaptain(team, ctx.user.id) and not ctx.user.guild_permissions.manage_guild:
             await ctx.response.send_message(
                 f"Only **{team_name}**'s captain or a member with the Manage Server permission can "
-                "change its settings."
+                "change its settings.",
+                ephemeral=True,
             )
             return
 
         if voice_channel is None and not new_voice_channel and logo is None:
             await ctx.response.send_message(
-                "Give at least one of voice_channel, new_voice_channel, or logo to set."
+                "Give at least one of voice_channel, new_voice_channel, or logo to set.", ephemeral=True
             )
             return
 
         if voice_channel is not None and new_voice_channel:
-            await ctx.response.send_message("Pick either voice_channel or new_voice_channel, not both.")
+            await ctx.response.send_message(
+                "Pick either voice_channel or new_voice_channel, not both.", ephemeral=True
+            )
             return
 
         logo_path = None
@@ -6756,7 +7132,7 @@ class helpers():
             logo_path = self._resolveLogoPath(logo)
             if logo_path is None:
                 await ctx.response.send_message(
-                    f"No logo named **{logo}**; pick one from the autocomplete list."
+                    f"No logo named **{logo}**; pick one from the autocomplete list.", ephemeral=True
                 )
                 return
 
@@ -6824,21 +7200,23 @@ class helpers():
 
         result = self.getTeamRow(guild_id, team_name)
         if result is None:
-            await ctx.response.send_message(f"No team named **{team_name}** in this server.")
+            await ctx.response.send_message(f"No team named **{team_name}** in this server.", ephemeral=True)
             return
         team_id, team = result
 
         if not self.isTeamCaptain(team, ctx.user.id) and not ctx.user.guild_permissions.manage_guild:
             await ctx.response.send_message(
                 f"Only **{team_name}**'s captain or a member with the Manage Server permission can "
-                "invite players."
+                "invite players.",
+                ephemeral=True,
             )
             return
 
         if force and not ctx.user.guild_permissions.manage_guild:
             await ctx.response.send_message(
                 "Only a member with the Manage Server permission can force-add players; "
-                "everyone else still needs the invitee's own confirmation."
+                "everyone else still needs the invitee's own confirmation.",
+                ephemeral=True,
             )
             return
 
@@ -6864,12 +7242,14 @@ class helpers():
             if len(unique_members) == 1:
                 member, reason = skipped[0]
                 if reason == "bot":
-                    await ctx.response.send_message("You can't invite a bot to a team.")
+                    await ctx.response.send_message("You can't invite a bot to a team.", ephemeral=True)
                 else:
-                    await ctx.response.send_message(f"{member.display_name} is already on **{team_name}**.")
+                    await ctx.response.send_message(
+                        f"{member.display_name} is already on **{team_name}**.", ephemeral=True
+                    )
                 return
             reasons = "; ".join(f"{member.display_name} ({reason})" for member, reason in skipped)
-            await ctx.response.send_message(f"Nobody to invite: {reasons}.")
+            await ctx.response.send_message(f"Nobody to invite: {reasons}.", ephemeral=True)
             return
 
         if force:
@@ -6921,14 +7301,15 @@ class helpers():
 
         result = self.getTeamRow(guild_id, team_name)
         if result is None:
-            await ctx.response.send_message(f"No team named **{team_name}** in this server.")
+            await ctx.response.send_message(f"No team named **{team_name}** in this server.", ephemeral=True)
             return
         team_id, team = result
 
         if self.isTeamCaptain(team, ctx.user.id):
             await ctx.response.send_message(
                 f"You're **{team_name}**'s captain; use /team transfer to hand off the captaincy first, "
-                "or /team delete if you want the team gone entirely."
+                "or /team delete if you want the team gone entirely.",
+                ephemeral=True,
             )
             return
 
@@ -6937,7 +7318,7 @@ class helpers():
         # players.remove_player call already has to use.
         player = next((p for p in team.get_players() if p.get_id() == ctx.user.id), None)
         if player is None:
-            await ctx.response.send_message(f"You're not on **{team_name}**.")
+            await ctx.response.send_message(f"You're not on **{team_name}**.", ephemeral=True)
             return
 
         team.remove_player(player)
@@ -7006,12 +7387,14 @@ class helpers():
                 if auto_named:
                     await ctx.response.send_message(
                         f"Your display name, **{solo_team_name}**, is already taken by another team in "
-                        "this server. Run /setup again with solo_team_name set to something else."
+                        "this server. Run /setup again with solo_team_name set to something else.",
+                        ephemeral=True,
                     )
                 else:
                     await ctx.response.send_message(
                         f"A team named **{solo_team_name}** already exists in this server; pick another "
-                        "name for your solo team."
+                        "name for your solo team.",
+                        ephemeral=True,
                     )
                 return
             solo_team = Team()
@@ -7028,7 +7411,8 @@ class helpers():
             if self.getTeamRow(guild_id, solo_team_name) is not None:
                 await ctx.response.send_message(
                     f"A team named **{solo_team_name}** already exists in this server; pick another "
-                    "name for your solo team."
+                    "name for your solo team.",
+                    ephemeral=True,
                 )
                 return
             old_name = solo_team.get_name()
@@ -7048,7 +7432,8 @@ class helpers():
             "draft, or roughly elo-balanced for ranked play) and moves everyone into the right "
             "channel automatically. It also runs a gold economy (betting, a daily allowance, a "
             "leaderboard) and tournaments (persistent teams, a real bracket, sequential or "
-            "simultaneous matches). Run **/help** any time for the full command list."
+            "simultaneous matches). Run **/daily** now to claim your first gold, and **/help** "
+            "any time for the full command list."
         )
         view = SetupRoleSelectionView(self, guild_id, user_id)
         await ctx.response.send_message(
@@ -7242,7 +7627,7 @@ class helpers():
 
         result = self.getTeamRow(guild_id, team_name)
         if result is None:
-            await ctx.response.send_message(f"No team named **{team_name}** in this server.")
+            await ctx.response.send_message(f"No team named **{team_name}** in this server.", ephemeral=True)
             return
         team_id, team = result
         current_name = team.get_name()
@@ -7250,18 +7635,19 @@ class helpers():
         if not self.isTeamCaptain(team, ctx.user.id) and not ctx.user.guild_permissions.manage_guild:
             await ctx.response.send_message(
                 f"Only **{current_name}**'s captain or a member with the Manage Server permission can "
-                "rename it."
+                "rename it.",
+                ephemeral=True,
             )
             return
 
         if new_name == current_name:
-            await ctx.response.send_message(f"**{current_name}** is already named that.")
+            await ctx.response.send_message(f"**{current_name}** is already named that.", ephemeral=True)
             return
 
         if new_name.lower() != current_name.lower():
             if self.getTeamRow(guild_id, new_name) is not None:
                 await ctx.response.send_message(
-                    f"A team named **{new_name}** already exists in this server."
+                    f"A team named **{new_name}** already exists in this server.", ephemeral=True
                 )
                 return
 
@@ -7284,26 +7670,30 @@ class helpers():
 
         result = self.getTeamRow(guild_id, team_name)
         if result is None:
-            await ctx.response.send_message(f"No team named **{team_name}** in this server.")
+            await ctx.response.send_message(f"No team named **{team_name}** in this server.", ephemeral=True)
             return
         team_id, team = result
 
         if not self.isTeamCaptain(team, ctx.user.id) and not ctx.user.guild_permissions.manage_guild:
             await ctx.response.send_message(
                 f"Only **{team_name}**'s captain or a member with the Manage Server permission can "
-                "transfer it."
+                "transfer it.",
+                ephemeral=True,
             )
             return
 
         if self.isTeamCaptain(team, new_captain.id):
-            await ctx.response.send_message(f"{new_captain.mention} is already **{team_name}**'s captain.")
+            await ctx.response.send_message(
+                f"{new_captain.mention} is already **{team_name}**'s captain.", ephemeral=True
+            )
             return
 
         player = next((p for p in team.get_players() if p.get_id() == new_captain.id), None)
         if player is None:
             await ctx.response.send_message(
                 f"{new_captain.mention} isn't on **{team_name}**'s roster; invite them with "
-                "/team invite first."
+                "/team invite first.",
+                ephemeral=True,
             )
             return
 
@@ -7339,13 +7729,14 @@ class helpers():
 
         result = self.getTeamRow(guild_id, team_name)
         if result is None:
-            await ctx.response.send_message(f"No team named **{team_name}** in this server.")
+            await ctx.response.send_message(f"No team named **{team_name}** in this server.", ephemeral=True)
             return
         team_id, team = result
 
         if not self.isTeamCaptain(team, ctx.user.id) and not ctx.user.guild_permissions.manage_guild:
             await ctx.response.send_message(
-                f"Only **{team_name}**'s captain or a member with the Manage Server permission can delete it."
+                f"Only **{team_name}**'s captain or a member with the Manage Server permission can delete it.",
+                ephemeral=True,
             )
             return
 
@@ -7395,6 +7786,34 @@ class helpers():
 
         await interaction.response.send_message(f"**{target_name}** has joined **{team_name}**!")
 
+    # TeamInviteAcceptView's Decline button callback. Same per-invitee
+    # row lookup as _handleTeamInviteAcceptClick, just without the
+    # add_player/updateTeamData side effect: only this invitee's own
+    # invite row is deleted, so anyone else still invited on the same
+    # message keeps their own Accept/Decline choice.
+    async def _handleTeamInviteDeclineClick(self, interaction):
+        guild_id = interaction.guild_id
+        if guild_id is None:
+            return
+
+        self.cursor.execute(
+            "SELECT id, teamName, targetName "
+            "FROM team_invites WHERE guildId=? AND messageId=? AND targetId=?",
+            (guild_id, interaction.message.id, interaction.user.id)
+        )
+        row = self.cursor.fetchone()
+        if row is None:
+            await interaction.response.send_message(
+                "This isn't an invite for you, or it's already been used.", ephemeral=True
+            )
+            return
+        invite_id, team_name, target_name = row
+
+        self.cursor.execute("DELETE FROM team_invites WHERE id=?", (invite_id,))
+        self.db.commit()
+
+        await interaction.response.send_message(f"**{target_name}** declined the invite to **{team_name}**.")
+
     # Builds a team's stats embed, shared by /team stats and /team lookup's
     # paging, so both stay in sync automatically. Returns (embed, file):
     # file is None whenever there's no logo to attach (the built-in set was
@@ -7430,7 +7849,7 @@ class helpers():
     async def teamStatsHelper(self, ctx, team_name):
         result = self.getTeamRow(ctx.guild.id, team_name)
         if result is None:
-            await ctx.response.send_message(f"No team named **{team_name}** in this server.")
+            await ctx.response.send_message(f"No team named **{team_name}** in this server.", ephemeral=True)
             return
         team_id, team = result
 
@@ -7729,8 +8148,14 @@ class helpers():
     # Shared by every LeaderboardPagingView/MyTeamsPagingView/
     # TeamListPagingView button callback, First/Prev/Next/Last all reduce
     # to the same arithmetic regardless of which of the three tables/
-    # render functions the caller actually pages through.
-    def _computeNewPage(self, direction, page, total_pages):
+    # render functions the caller actually pages through. `target`, when
+    # given (a 0-based page from _PageJumpModal.on_submit), skips
+    # direction entirely and just clamps straight to it - same "landing
+    # on the nearest valid page instead of erroring" behavior Last already
+    # gives you when total_pages shrank out from under a stale view.
+    def _computeNewPage(self, direction, page, total_pages, target=None):
+        if target is not None:
+            return max(0, min(target, total_pages - 1))
         if direction == "first":
             return 0
         if direction == "prev":
@@ -7747,9 +8172,11 @@ class helpers():
         teams = self.getTeamsForPlayer(guild_id, user_id)
         if not teams:
             if member is None:
-                await ctx.response.send_message("You're not on any teams in this server.")
+                await ctx.response.send_message("You're not on any teams in this server.", ephemeral=True)
             else:
-                await ctx.response.send_message(f"{target.display_name} isn't on any teams in this server.")
+                await ctx.response.send_message(
+                    f"{target.display_name} isn't on any teams in this server.", ephemeral=True
+                )
             return
 
         embed, file = self._renderMyTeamsEmbed(teams, page=0)
@@ -7778,7 +8205,7 @@ class helpers():
     # how /leaderboard's own paging already behaves (any clicker can page a
     # guild-wide view); a personal view being paged by someone else just
     # steps through the looked-up player's teams, not the clicker's.
-    async def _handleMyTeamsPageClick(self, interaction, direction):
+    async def _handleMyTeamsPageClick(self, interaction, direction=None, target_page=None):
         guild_id = interaction.guild_id
         if guild_id is None:
             return
@@ -7799,7 +8226,7 @@ class helpers():
             return
         total_pages = self._myTeamsPageCount(teams)
         page = min(page, total_pages - 1)
-        new_page = self._computeNewPage(direction, page, total_pages)
+        new_page = self._computeNewPage(direction, page, total_pages, target_page)
 
         if new_page == page:
             await interaction.response.defer()
@@ -7816,6 +8243,32 @@ class helpers():
             (new_page, guild_id, interaction.message.id)
         )
         self.db.commit()
+
+    # MyTeamsPagingView's Page # button: see _handleLeaderboardJumpClick,
+    # same "no longer live"/empty guards _handleMyTeamsPageClick needs.
+    async def _handleMyTeamsJumpClick(self, interaction):
+        guild_id = interaction.guild_id
+        if guild_id is None:
+            return
+
+        self.cursor.execute(
+            "SELECT userId FROM my_team_views WHERE guildId=? AND messageId=?",
+            (guild_id, interaction.message.id)
+        )
+        row = self.cursor.fetchone()
+        if row is None:
+            await interaction.response.send_message("This view is no longer live.", ephemeral=True)
+            return
+        user_id, = row
+
+        teams = self.getTeamsForPlayer(guild_id, user_id)
+        if not teams:
+            await interaction.response.defer()
+            return
+        total_pages = self._myTeamsPageCount(teams)
+        await interaction.response.send_modal(
+            _PageJumpModal(self, "_handleMyTeamsPageClick", total_pages)
+        )
 
     # Per-team win/loss record scoped to just THIS tournament, computed from
     # resolved tournament_matches rows rather than each team's own persisted
@@ -7909,20 +8362,22 @@ class helpers():
         # right up until both getTeamRow calls below returned the exact
         # same row.
         if team1_name.lower() == team2_name.lower():
-            await ctx.response.send_message("Pick two different teams.")
+            await ctx.response.send_message("Pick two different teams.", ephemeral=True)
             return
 
         result1 = self.getTeamRow(guild_id, team1_name)
         if result1 is None:
             await ctx.response.send_message(
-                f"No team named **{discord.utils.escape_markdown(team1_name)}** in this server."
+                f"No team named **{discord.utils.escape_markdown(team1_name)}** in this server.",
+                ephemeral=True,
             )
             return
 
         result2 = self.getTeamRow(guild_id, team2_name)
         if result2 is None:
             await ctx.response.send_message(
-                f"No team named **{discord.utils.escape_markdown(team2_name)}** in this server."
+                f"No team named **{discord.utils.escape_markdown(team2_name)}** in this server.",
+                ephemeral=True,
             )
             return
 
@@ -7972,7 +8427,8 @@ class helpers():
         if not team1_data or not team2_data:
             await ctx.response.send_message(
                 "No previous teams to reuse. Make some first with /make-teams random, /make-teams draft, or "
-                "/make-teams saved."
+                "/make-teams saved.",
+                ephemeral=True,
             )
             return
 
@@ -8024,8 +8480,16 @@ class helpers():
         last_daily = self.getEconomy(guild_id, user_id, "last_daily")
 
         if last_daily == today:
+            # <t:...:R> is Discord's own relative-timestamp markdown, so
+            # this reads correctly in whatever timezone the viewer's own
+            # client is set to instead of guessing at one; the underlying
+            # cutoff is still just local midnight on the host machine (the
+            # same boundary `today`/`last_daily` already compare against).
+            tomorrow = datetime.date.today() + datetime.timedelta(days=1)
+            reset_at = datetime.datetime.combine(tomorrow, datetime.time.min)
             await ctx.response.send_message(
-                "You've already claimed your daily gold today! Come back tomorrow."
+                f"You've already claimed your daily gold today! Come back <t:{int(reset_at.timestamp())}:R>.",
+                ephemeral=True,
             )
             return
 
@@ -8099,6 +8563,52 @@ class helpers():
         player_ids |= {uid for uid, _name in self.getRosterPlayers(guild_id, "team2")}
         return user_id in player_ids
 
+    # Same idea as isPlayerInCurrentGame, scoped to one specific
+    # simultaneous-mode tournament match instead of the guild-wide
+    # singleton game, since several matches (each with their own rosters)
+    # can be live at once. Used by the winner-report confirm gate below,
+    # not betting (that's already scoped to a match itself, no roster
+    # check needed beyond "not one of the two teams", see wagerHelper).
+    def _isPlayerInTournamentMatch(self, match_id, user_id):
+        self.cursor.execute("SELECT team1, team2 FROM tournament_matches WHERE id=?", (match_id,))
+        row = self.cursor.fetchone()
+        if row is None:
+            return False
+        team1, team2 = Team(), Team()
+        team1.deserializeTeam(row[0])
+        team2.deserializeTeam(row[1])
+        rostered_ids = {p.get_id() for p in team1.get_players()} | {p.get_id() for p in team2.get_players()}
+        return user_id in rostered_ids
+
+    # Same idea, scoped to one specific heads-up duel (/wager against):
+    # only its own two participants count as "in the game".
+    def _isPlayerInDuel(self, duel_id, user_id):
+        self.cursor.execute("SELECT challengerId, targetId FROM duels WHERE id=?", (duel_id,))
+        row = self.cursor.fetchone()
+        if row is None:
+            return False
+        challenger_id, target_id = row
+        return user_id in (challenger_id, target_id)
+
+    # Shared gate for confirming a game/match/duel RESULT specifically
+    # (elo, payouts, records - real, hard-to-casually-undo consequences):
+    # the two team-game confirm views (winner report, cancel game) share
+    # this exact "admin or rostered in the CURRENT guild-wide game" check;
+    # the tournament-match and duel confirm views use the narrower
+    # per-match/per-duel checks above instead, since several of either can
+    # be live in the same guild at once. Previously these views were open
+    # to literally anyone in the server to click (reporting a winner has
+    # always been something anyone at the table could initiate) - now
+    # narrowed to just the people who actually have something at stake,
+    # or an admin, so a bystander can't finalize (or troll-cancel) a game
+    # they were never part of.
+    def _isAdminOrInCurrentGame(self, interaction):
+        guild_id = interaction.guild_id
+        return (
+            interaction.user.guild_permissions.manage_guild
+            or self.isPlayerInCurrentGame(guild_id, interaction.user.id)
+        )
+
     # Current elo for each (user_id, name) in `roster`, defaulting to this
     # guild's configured default (see _defaultEloForGuild) for anyone
     # without an economy row yet.
@@ -8110,6 +8620,50 @@ class helpers():
             lookup[user_id] = elo if elo is not None else default_elo
         return lookup
 
+    # The two real team names a `team` param resolves against for
+    # `match_id` (a specific tournament match) or the current guild-wide
+    # game (no match_id): /wager team's own autocomplete, plus
+    # resolveWagerTeamValue below, both go through this so a mistyped or
+    # stale match_id falls back to the same generic "Team 1"/"Team 2"
+    # labels the roster itself would show for an unnamed team. escape=False
+    # since these only ever end up in a Choice label or plain comparison,
+    # never markdown-rendered message text.
+    def getWagerTeamNames(self, guild_id, match_id=None):
+        if match_id is not None:
+            self.cursor.execute(
+                "SELECT team1, team2 FROM tournament_matches WHERE id=? AND guildId=?", (match_id, guild_id)
+            )
+            row = self.cursor.fetchone()
+            if row is not None:
+                team1, team2 = Team(), Team()
+                team1.deserializeTeam(row[0])
+                team2.deserializeTeam(row[1])
+                return team1.get_name() or "Team 1", team2.get_name() or "Team 2"
+            return "Team 1", "Team 2"
+        return (
+            self.getRosterName(guild_id, "team1", "Team 1", escape=False),
+            self.getRosterName(guild_id, "team2", "Team 2", escape=False),
+        )
+
+    # Accepts "1"/"2" (autocomplete's own Choice values) or either team's
+    # real name typed out directly (case-insensitive), so someone who
+    # ignores the suggestion list and just types the team they mean still
+    # works. None if it matches neither, letting the caller reject it.
+    # Resolves the caller's free-text `team` input at the command boundary
+    # (bot.py's own wagerTeam), not inside wagerHelper itself, so
+    # wagerHelper's own signature/tests keep taking the already-resolved
+    # 1/2 int exactly as before.
+    def resolveWagerTeamValue(self, team_input, name1, name2):
+        normalized = team_input.strip()
+        if normalized in ("1", "2"):
+            return int(normalized)
+        lowered = normalized.lower()
+        if lowered == name1.lower():
+            return 1
+        if lowered == name2.lower():
+            return 2
+        return None
+
     # `match_id`, when given, bets on that ONE specific tournament match
     # (see _openConcurrentTournamentBetting) instead of the single current
     # casual/ranked/sequential-tournament game, a separate path
@@ -8120,7 +8674,7 @@ class helpers():
         user_id = ctx.user.id
 
         if amount <= 0:
-            await ctx.response.send_message("Wager amount must be greater than 0.")
+            await ctx.response.send_message("Wager amount must be greater than 0.", ephemeral=True)
             return
 
         if match_id is not None:
@@ -8131,12 +8685,13 @@ class helpers():
         if state != "OPEN":
             await ctx.response.send_message(
                 "Betting is not currently open. Press Start on the roster message to start a game "
-                "and open betting."
+                "and open betting.",
+                ephemeral=True,
             )
             return
 
         if self.isPlayerInCurrentGame(guild_id, user_id):
-            await ctx.response.send_message("You can't wager on a game you're playing in!")
+            await ctx.response.send_message("You can't wager on a game you're playing in!", ephemeral=True)
             return
 
         self.ensureEconomyRow(guild_id, user_id, ctx.user.name)
@@ -8144,7 +8699,7 @@ class helpers():
 
         if amount > balance:
             await ctx.response.send_message(
-                f"You don't have enough gold for that! Your balance is {balance}."
+                f"You don't have enough gold for that! Your balance is {balance}.", ephemeral=True
             )
             return
 
@@ -8152,7 +8707,7 @@ class helpers():
             "SELECT team FROM wagers WHERE guildId=? AND userId=?", (guild_id, user_id)
         )
         if self.cursor.fetchone() is not None:
-            await ctx.response.send_message("You've already placed a bet on this game.")
+            await ctx.response.send_message("You've already placed a bet on this game.", ephemeral=True)
             return
 
         self.cursor.execute(
@@ -8180,11 +8735,13 @@ class helpers():
         )
         row = self.cursor.fetchone()
         if row is None:
-            await ctx.response.send_message(f"No tournament match with id {match_id} in this server.")
+            await ctx.response.send_message(
+                f"No tournament match with id {match_id} in this server.", ephemeral=True
+            )
             return
         team1_ser, team2_ser, state, betting_closed = row
         if state == "RESOLVED" or betting_closed:
-            await ctx.response.send_message(f"Betting is closed for match #{match_id}.")
+            await ctx.response.send_message(f"Betting is closed for match #{match_id}.", ephemeral=True)
             return
 
         team1, team2 = Team(), Team()
@@ -8192,20 +8749,22 @@ class helpers():
         team2.deserializeTeam(team2_ser)
         rostered_ids = {p.get_id() for p in team1.get_players()} | {p.get_id() for p in team2.get_players()}
         if user_id in rostered_ids:
-            await ctx.response.send_message("You can't wager on a match you're playing in!")
+            await ctx.response.send_message("You can't wager on a match you're playing in!", ephemeral=True)
             return
 
         self.ensureEconomyRow(guild_id, user_id, ctx.user.name)
         balance = self.getEconomy(guild_id, user_id, "balance")
         if amount > balance:
-            await ctx.response.send_message(f"You don't have enough gold for that! Your balance is {balance}.")
+            await ctx.response.send_message(
+                f"You don't have enough gold for that! Your balance is {balance}.", ephemeral=True
+            )
             return
 
         self.cursor.execute(
             "SELECT team FROM tournament_wagers WHERE matchId=? AND userId=?", (match_id, user_id)
         )
         if self.cursor.fetchone() is not None:
-            await ctx.response.send_message(f"You've already placed a bet on match #{match_id}.")
+            await ctx.response.send_message(f"You've already placed a bet on match #{match_id}.", ephemeral=True)
             return
 
         self.cursor.execute(
@@ -8219,7 +8778,10 @@ class helpers():
         )
         self.db.commit()
 
-        await ctx.response.send_message(f"You wagered {amount} gold on Team {team} for match #{match_id}!")
+        team_name = discord.utils.escape_markdown(
+            (team1.get_name() if team == 1 else team2.get_name()) or f"Team {team}"
+        )
+        await ctx.response.send_message(f"You wagered {amount} gold on **{team_name}** for match #{match_id}!")
 
 
     # This guild's own configured betting-window length (/set betting-timer's
@@ -8421,6 +8983,13 @@ class helpers():
         if guild_id is None:
             return
 
+        if not self._isAdminOrInCurrentGame(interaction):
+            await interaction.response.send_message(
+                "Only a player in this game, or a member with the Manage Server permission, can report a winner.",
+                ephemeral=True,
+            )
+            return
+
         state = self.get(guild_id, "betting_state")
         if state not in ("OPEN", "CLOSED"):
             await interaction.response.send_message(
@@ -8477,6 +9046,13 @@ class helpers():
     async def _handleWinnerReportCancelClick(self, interaction):
         guild_id = interaction.guild_id
         if guild_id is None:
+            return
+
+        if not self._isAdminOrInCurrentGame(interaction):
+            await interaction.response.send_message(
+                "Only a player in this game, or a member with the Manage Server permission, can cancel it.",
+                ephemeral=True,
+            )
             return
 
         state = self.get(guild_id, "betting_state")
@@ -8592,22 +9168,22 @@ class helpers():
         challenger = ctx.user
 
         if member.id == challenger.id:
-            await ctx.response.send_message("You can't wager against yourself!")
+            await ctx.response.send_message("You can't wager against yourself!", ephemeral=True)
             return
 
         if member.bot:
-            await ctx.response.send_message("You can't wager against a bot!")
+            await ctx.response.send_message("You can't wager against a bot!", ephemeral=True)
             return
 
         if amount <= 0:
-            await ctx.response.send_message("Wager amount must be greater than 0.")
+            await ctx.response.send_message("Wager amount must be greater than 0.", ephemeral=True)
             return
 
         self.ensureEconomyRow(guild_id, challenger.id, challenger.name)
         balance = self.getEconomy(guild_id, challenger.id, "balance")
         if amount > balance:
             await ctx.response.send_message(
-                f"You don't have enough gold for that! Your balance is {balance}."
+                f"You don't have enough gold for that! Your balance is {balance}.", ephemeral=True
             )
             return
 
@@ -8677,7 +9253,7 @@ class helpers():
             return
 
         self.cursor.execute(
-            "SELECT id, challengerName, targetName FROM duels "
+            "SELECT id, challengerId, challengerName, targetId, targetName FROM duels "
             "WHERE guildId=? AND messageId=? AND state='AWAITING_RESULT'",
             (guild_id, interaction.message.id)
         )
@@ -8687,7 +9263,18 @@ class helpers():
                 "This duel has already been reported or is no longer pending.", ephemeral=True
             )
             return
-        duel_id, challenger_name, target_name = row
+        duel_id, challenger_id, challenger_name, target_id, target_name = row
+
+        if not (
+            interaction.user.guild_permissions.manage_guild
+            or interaction.user.id in (challenger_id, target_id)
+        ):
+            await interaction.response.send_message(
+                "Only a participant in this duel, or a member with the Manage Server permission, can "
+                "report a result.",
+                ephemeral=True,
+            )
+            return
 
         # BUG-PRONE PATTERN AVOIDED: flip the state before doing anything
         # async below, so a second near-simultaneous click (the other
@@ -9072,10 +9659,12 @@ class helpers():
             parts = []
             if winner_count:
                 word = "player" if winner_count == 1 else "players"
-                parts.append(f"{winner_count} winning {word} earned {GAME_WIN_GOLD} gold each")
+                each = "" if winner_count == 1 else " each"
+                parts.append(f"{winner_count} winning {word} earned {GAME_WIN_GOLD} gold{each}")
             if loser_count:
                 word = "player" if loser_count == 1 else "players"
-                parts.append(f"{loser_count} losing {word} earned {GAME_LOSS_GOLD} gold each")
+                each = "" if loser_count == 1 else " each"
+                parts.append(f"{loser_count} losing {word} earned {GAME_LOSS_GOLD} gold{each}")
             lines.append(" and ".join(parts) + " just for playing.")
 
         return "\n".join(lines)
@@ -9170,18 +9759,19 @@ class helpers():
             if invalidate:
                 await ctx.response.send_message(
                     "Invalidating isn't supported for a specific tournament match yet; correct it "
-                    "to the other team instead."
+                    "to the other team instead.",
+                    ephemeral=True,
                 )
                 return
             await self._correctTournamentMatchHelper(ctx, match_id, correct_team)
             return
 
         if invalidate and correct_team is not None:
-            await ctx.response.send_message("Give team or invalidate, not both.")
+            await ctx.response.send_message("Give team or invalidate, not both.", ephemeral=True)
             return
         if not invalidate and correct_team is None:
             await ctx.response.send_message(
-                "Give team (who actually won), or invalidate to undo the game entirely."
+                "Give team (who actually won), or invalidate to undo the game entirely.", ephemeral=True
             )
             return
 
@@ -9189,7 +9779,7 @@ class helpers():
         last = self.getLastResult(guild_id)
 
         if last is None:
-            await ctx.response.send_message("There's no recent game result to correct.")
+            await ctx.response.send_message("There's no recent game result to correct.", ephemeral=True)
             return
 
         # .get(...) with a fallback rather than last[...]: an older
@@ -9210,7 +9800,7 @@ class helpers():
 
         if last["winning_team"] == correct_team:
             await ctx.response.send_message(
-                f"**{correct_name}** is already the recorded winner; nothing to correct."
+                f"**{correct_name}** is already the recorded winner; nothing to correct.", ephemeral=True
             )
             return
 
@@ -10278,14 +10868,15 @@ class helpers():
 
         if title is None and color_scheme is None and font_style is None:
             await ctx.response.send_message(
-                "Give at least one of title, color_scheme, or font_style to equip."
+                "Give at least one of title, color_scheme, or font_style to equip.", ephemeral=True
             )
             return
 
         if title is not None and title not in self.getAvailableCardTitles(guild_id, user_id):
             await ctx.response.send_message(
                 f"You haven't unlocked **{title}**. Pick one of your unlocked titles from the "
-                "autocomplete list, or check /stats to see what you've earned."
+                "autocomplete list, or check /stats to see what you've earned.",
+                ephemeral=True,
             )
             return
 
@@ -10293,14 +10884,16 @@ class helpers():
         if color_scheme is not None and color_scheme not in schemes:
             await ctx.response.send_message(
                 f"You haven't unlocked the **{color_scheme}** color scheme. Pick one of your unlocked "
-                "schemes from the autocomplete list, or check /stats to see what you've earned."
+                "schemes from the autocomplete list, or check /stats to see what you've earned.",
+                ephemeral=True,
             )
             return
 
         if font_style is not None and font_style not in self.getAvailableCardFontStyles(guild_id, user_id):
             await ctx.response.send_message(
                 f"You haven't unlocked the **{font_style}** font. Pick one of your unlocked fonts "
-                "from the autocomplete list, or check /shop browse to see what's available."
+                "from the autocomplete list, or check /shop browse to see what's available.",
+                ephemeral=True,
             )
             return
 
@@ -10325,9 +10918,15 @@ class helpers():
         else:
             summary = f"{', '.join(applied[:-1])}, and {applied[-1]}"
 
+        # _cardPreviewEmbedAndFile fetches the caller's own avatar (a real
+        # network round trip) and renders the card with Pillow, either of
+        # which can push this past Discord's ~3 second ack window; post a
+        # placeholder immediately and edit it in place once the real card
+        # is ready, rather than risking "This interaction failed".
+        await ctx.response.send_message(f"Updating your trading card to use {summary}, please wait...")
         embed, file = await self._cardPreviewEmbedAndFile(ctx, ctx.user)
-        await ctx.response.send_message(
-            content=f'Your trading card now uses {summary}.', embed=embed, file=file
+        await ctx.edit_original_response(
+            content=f"Your trading card now uses {summary}.", embed=embed, attachments=[file]
         )
 
     # Whether `user_id` already owns `item_key` (any shop item type) in
@@ -10467,6 +11066,29 @@ class helpers():
     # snapshot self-heal first (same as _buildStatsEmbed does) so anyone
     # who already qualified sees it reflected immediately rather than
     # needing a /stats call first.
+    # Discord caps an embed field's value at 1024 characters; __Other__
+    # only grows as new non-ladder achievements are added, so this keeps
+    # whatever whole lines fit and notes how many were cut instead of
+    # risking add_field/send outright failing once the catalog is large
+    # enough. No need for real pagination here yet (see _teamButtonLabel
+    # for the same "just truncate" call on an unrelated 80-char limit).
+    def _joinEmbedFieldLines(self, lines, limit=1024):
+        joined = "\n".join(lines)
+        if len(joined) <= limit:
+            return joined
+
+        kept = []
+        length = 0
+        for line in lines:
+            added = len(line) + (1 if kept else 0)
+            if length + added > limit - 40:
+                break
+            kept.append(line)
+            length += added
+
+        remaining = len(lines) - len(kept)
+        return "\n".join(kept) + f"\n*+{remaining} more*"
+
     async def achievementsHelper(self, ctx):
         guild_id = ctx.guild.id
         user_id = ctx.user.id
@@ -10491,7 +11113,7 @@ class helpers():
             embed.add_field(name=f"__{label}__", value="\n".join(render(key) for key in keys), inline=False)
 
         other_lines = [render(key) for key in CARD_ACHIEVEMENT_TITLES if key not in ladder_keys]
-        embed.add_field(name="__Other__", value="\n".join(other_lines), inline=False)
+        embed.add_field(name="__Other__", value=self._joinEmbedFieldLines(other_lines), inline=False)
 
         embed.set_footer(text="Earned achievements unlock their title for /card-set")
         await ctx.response.send_message(embed=embed)
@@ -10508,18 +11130,18 @@ class helpers():
 
         item_type, price = self._resolveShopItem(item)
         if item_type is None:
-            await ctx.response.send_message(f"**{item}** isn't in the shop.")
+            await ctx.response.send_message(f"**{item}** isn't in the shop.", ephemeral=True)
             return
 
         if self._shopItemOwned(guild_id, user_id, item_type, item):
-            await ctx.response.send_message(f"You already own **{item}**.")
+            await ctx.response.send_message(f"You already own **{item}**.", ephemeral=True)
             return
 
         self.ensureEconomyRow(guild_id, user_id, ctx.user.name)
         balance = self.getEconomy(guild_id, user_id, "balance")
         if balance < price:
             await ctx.response.send_message(
-                f"**{item}** costs {price} gold, but you only have {balance}."
+                f"**{item}** costs {price} gold, but you only have {balance}.", ephemeral=True
             )
             return
 
@@ -11091,34 +11713,33 @@ class helpers():
     # Posts the first page with its own LeaderboardPagingView; clicking a
     # button (_handleLeaderboardPageClick) edits this same message rather than
     # posting a new one, so the current view is tracked by messageId here.
-    # `cards` switches to _renderLeaderboardEntryStatsEmbed's one-player-
-    # per-page rendering instead, /team lookup-style, with its own Card/Back
-    # toggle over to that player's actual trading card (see
-    # LeaderboardPagingView), the whole leaderboard, /stats-card by
-    # /stats-card, in whatever order was asked for.
-    async def leaderboardHelper(self, ctx, stat, order, cards=False):
+    # Always starts as the ranked list; the view's own Cards button
+    # (_handleLeaderboardViewCardsClick) is what switches over to
+    # _renderLeaderboardEntryStatsEmbed's one-player-per-page rendering,
+    # /team lookup-style, with its own Card/Back toggle over to that
+    # player's actual trading card - no longer something you have to
+    # pre-select before the command even runs.
+    async def leaderboardHelper(self, ctx, stat, order):
         guild_id = ctx.guild.id
 
         entries = self._filterLeaderboardEntries(self.getLeaderboardEntries(guild_id), stat)
         if not entries:
-            await ctx.response.send_message("Nobody has any stats to show yet in this server!")
+            await ctx.response.send_message(
+                "Nobody has any stats to show yet in this server!", ephemeral=True
+            )
             return
 
         entries_sorted = self._sortLeaderboardEntries(entries, stat if stat is not None else "elo", order)
-        if cards:
-            view = LeaderboardPagingView(self, cards=True, card_shown=False)
-            embed = await self._renderLeaderboardEntryStatsEmbed(guild_id, entries_sorted, page=0)
-        else:
-            view = LeaderboardPagingView(self)
-            embed = self._renderLeaderboardEmbed(ctx.guild.name, entries_sorted, stat, order, page=0)
+        view = LeaderboardPagingView(self)
+        embed = self._renderLeaderboardEmbed(ctx.guild.name, entries_sorted, stat, order, page=0)
         await ctx.response.send_message(embed=embed, view=view)
         msg = await ctx.original_response()
 
         self.cursor.execute(
             "INSERT OR REPLACE INTO leaderboards"
             "(messageId, guildId, channelId, filter, sort_order, page, cards, cardShown) "
-            "VALUES(?, ?, ?, ?, ?, 0, ?, 0)",
-            (msg.id, guild_id, ctx.channel.id, stat, order, int(cards))
+            "VALUES(?, ?, ?, ?, ?, 0, 0, 0)",
+            (msg.id, guild_id, ctx.channel.id, stat, order)
         )
         self.db.commit()
 
@@ -11127,7 +11748,7 @@ class helpers():
     # active leaderboard page view. cardShown (only meaningful in cards
     # mode) carries across the flip, same reasoning
     # _handleTeamListPageClick's own cardShown branch already established.
-    async def _handleLeaderboardPageClick(self, interaction, direction):
+    async def _handleLeaderboardPageClick(self, interaction, direction=None, target_page=None):
         guild_id = interaction.guild_id
         if guild_id is None:
             return
@@ -11157,7 +11778,7 @@ class helpers():
             return
         total_pages = self._myTeamsPageCount(entries_sorted) if cards else self._leaderboardPageCount(entries_sorted)
         page = min(page, total_pages - 1)
-        new_page = self._computeNewPage(direction, page, total_pages)
+        new_page = self._computeNewPage(direction, page, total_pages, target_page)
 
         if new_page == page:
             await interaction.response.defer()
@@ -11182,6 +11803,38 @@ class helpers():
             (new_page, guild_id, interaction.message.id)
         )
         self.db.commit()
+
+    # LeaderboardPagingView's Page # button: opens _PageJumpModal rather
+    # than moving one step at a time. Same "no longer live"/empty-cards
+    # guards _handleLeaderboardPageClick itself needs, since the modal's
+    # own on_submit calls straight back into that handler and can't do
+    # anything useful with target_page if this message isn't a live
+    # leaderboard view at all.
+    async def _handleLeaderboardJumpClick(self, interaction):
+        guild_id = interaction.guild_id
+        if guild_id is None:
+            return
+
+        self.cursor.execute(
+            "SELECT filter, sort_order, cards FROM leaderboards WHERE guildId=? AND messageId=?",
+            (guild_id, interaction.message.id)
+        )
+        row = self.cursor.fetchone()
+        if row is None:
+            await interaction.response.send_message("This leaderboard is no longer live.", ephemeral=True)
+            return
+        stat, order, cards = row
+        cards = bool(cards)
+
+        entries = self._filterLeaderboardEntries(self.getLeaderboardEntries(guild_id), stat)
+        entries_sorted = self._sortLeaderboardEntries(entries, stat if stat is not None else "elo", order)
+        if cards and not entries_sorted:
+            await interaction.response.defer()
+            return
+        total_pages = self._myTeamsPageCount(entries_sorted) if cards else self._leaderboardPageCount(entries_sorted)
+        await interaction.response.send_modal(
+            _PageJumpModal(self, "_handleLeaderboardPageClick", total_pages)
+        )
 
     # /leaderboard's own Ascending/Descending buttons (see
     # LeaderboardPagingView), re-sorts the same filter/mode in the other
@@ -11355,6 +12008,69 @@ class helpers():
         )
         self.cursor.execute(
             "UPDATE leaderboards SET cardShown=0 WHERE guildId=? AND messageId=?",
+            (guild_id, message.id)
+        )
+        self.db.commit()
+
+    # LeaderboardPagingView's Cards button callback (list mode only):
+    # switches from the ranked list to cards mode, one player's stats
+    # card per page, starting fresh at page 0 rather than trying to map
+    # the list's own page/index onto cards mode's different page size.
+    async def _handleLeaderboardViewCardsClick(self, interaction):
+        guild_id = interaction.guild_id
+        message = interaction.message
+
+        self.cursor.execute(
+            "SELECT filter, sort_order FROM leaderboards WHERE guildId=? AND messageId=? AND cards=0",
+            (guild_id, message.id)
+        )
+        row = self.cursor.fetchone()
+        if row is None:
+            await interaction.response.send_message("This leaderboard is no longer live.", ephemeral=True)
+            return
+        stat, order = row
+
+        entries = self._filterLeaderboardEntries(self.getLeaderboardEntries(guild_id), stat)
+        entries_sorted = self._sortLeaderboardEntries(entries, stat if stat is not None else "elo", order)
+        if not entries_sorted:
+            await interaction.response.send_message("This leaderboard is no longer live.", ephemeral=True)
+            return
+
+        await interaction.response.defer()
+        embed = await self._renderLeaderboardEntryStatsEmbed(guild_id, entries_sorted, 0)
+        await message.edit(embed=embed, attachments=[], view=LeaderboardPagingView(self, cards=True, card_shown=False))
+        self.cursor.execute(
+            "UPDATE leaderboards SET cards=1, cardShown=0, page=0 WHERE guildId=? AND messageId=?",
+            (guild_id, message.id)
+        )
+        self.db.commit()
+
+    # LeaderboardPagingView's List button callback, the reverse of
+    # viewCards above: back to the ranked list, page 0, from either cards
+    # sub-state (stats card or trading card).
+    async def _handleLeaderboardBackToListClick(self, interaction):
+        guild_id = interaction.guild_id
+        message = interaction.message
+
+        self.cursor.execute(
+            "SELECT filter, sort_order FROM leaderboards WHERE guildId=? AND messageId=? AND cards=1",
+            (guild_id, message.id)
+        )
+        row = self.cursor.fetchone()
+        if row is None:
+            await interaction.response.send_message("This leaderboard is no longer live.", ephemeral=True)
+            return
+        stat, order = row
+
+        entries = self._filterLeaderboardEntries(self.getLeaderboardEntries(guild_id), stat)
+        entries_sorted = self._sortLeaderboardEntries(entries, stat if stat is not None else "elo", order)
+
+        await interaction.response.defer()
+        guild_name = interaction.guild.name if interaction.guild is not None else ""
+        embed = self._renderLeaderboardEmbed(guild_name, entries_sorted, stat, order, 0)
+        await message.edit(embed=embed, attachments=[], view=LeaderboardPagingView(self))
+        self.cursor.execute(
+            "UPDATE leaderboards SET cards=0, cardShown=0, page=0 WHERE guildId=? AND messageId=?",
             (guild_id, message.id)
         )
         self.db.commit()

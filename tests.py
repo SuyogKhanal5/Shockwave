@@ -367,6 +367,7 @@ class FakeInteraction:
         self.response = AsyncMock()
         self.followup = AsyncMock()
         self.original_response = AsyncMock(return_value=FakeMessage())
+        self.edit_original_response = AsyncMock(return_value=FakeMessage())
         # The message a component (button) interaction is attached to -
         # only set for tests that click a view's button and need
         # interaction.message (e.g. SetupRoleSelectionView.confirm, which
@@ -1539,7 +1540,7 @@ class CaptainsHelperTests(HelperTestCase):
 
         await self.helperObj.captainsHelper(ctx, captain1, captain1)
 
-        ctx.response.send_message.assert_awaited_once_with("Mention two different people!")
+        ctx.response.send_message.assert_awaited_once_with("Mention two different people!", ephemeral=True)
         # nothing should have been written; clearTeamsHelper never ran
         self.assertIsNone(self.helperObj.get(GUILD_ID, "team1"))
 
@@ -1552,7 +1553,7 @@ class CaptainsHelperTests(HelperTestCase):
         # showing this message.
         await self.helperObj.captainsHelper(ctx, captain1, None)
 
-        ctx.response.send_message.assert_awaited_once_with("Mention two team captains!")
+        ctx.response.send_message.assert_awaited_once_with("Mention two team captains!", ephemeral=True)
 
     async def test_snake_flag_defaults_off(self):
         captain1 = FakeMember("Cap1", id=301)
@@ -1606,6 +1607,26 @@ class NextDraftTurnTests(HelperTestCase):
             # only the pool index derived from team1/team2's sizes is.
             self.assertEqual(self.helperObj._nextDraftTurn(GUILD_ID, 1, team1, team2), expected)
 
+    def test_returns_none_outside_snake_drafts(self):
+        self.helperObj.update(GUILD_ID, "draft_snake", 0)
+        team1, team2 = self._team(1), self._team(1)
+        self.assertIsNone(self.helperObj._draftPickLabel(GUILD_ID, team1, team2))
+
+    # Sizes here are the CURRENT (pre-pick) roster state, one captain each
+    # to start (1, 1) is "about to make pick 1"; the label describes the
+    # pick that's about to happen, not one already made.
+    def test_pick_label_across_first_eight_picks(self):
+        self.helperObj.update(GUILD_ID, "draft_snake", 1)
+        sizes_before_each_pick = [(1, 1), (2, 1), (2, 2), (2, 3), (3, 3), (4, 3), (4, 4), (4, 5)]
+        expected_labels = [
+            "Pick 1 of 1", "Pick 1 of 2", "Pick 2 of 2", "Pick 1 of 2",
+            "Pick 2 of 2", "Pick 1 of 2", "Pick 2 of 2", "Pick 1 of 2",
+        ]
+
+        for (team1_size, team2_size), expected in zip(sizes_before_each_pick, expected_labels):
+            team1, team2 = self._team(team1_size), self._team(team2_size)
+            self.assertEqual(self.helperObj._draftPickLabel(GUILD_ID, team1, team2), expected)
+
 
 class CaptainsDraftPickTests(HelperTestCase):
     def setUp(self):
@@ -1652,6 +1673,29 @@ class CaptainsDraftPickTests(HelperTestCase):
         view = last_call.kwargs["view"]
         self.assertIn(f"<@{captain1.id}>", content)
         self.assertIsInstance(view, helper_module.CaptainsDraftPickView)
+
+    async def test_prompt_shows_no_pick_count_outside_snake_drafts(self):
+        await self._draft_setup([(501, "Pool1"), (502, "Pool2")], snake=False)
+
+        content, _ = self.helperObj._renderDraftPickView(GUILD_ID)
+
+        self.assertNotIn("Pick", content)
+
+    async def test_prompt_shows_pick_count_in_a_snake_draft(self):
+        captain1, captain2, pool, ctx = await self._draft_setup(
+            [(501, "Pool1"), (502, "Pool2"), (503, "Pool3")], snake=True
+        )
+
+        content, _ = self.helperObj._renderDraftPickView(GUILD_ID)
+        self.assertIn("Pick 1 of 1", content)
+
+        await self.helperObj._applyDraftPick(self._pick_ctx(captain1), pool[0], 1)
+        content, _ = self.helperObj._renderDraftPickView(GUILD_ID)
+        self.assertIn("Pick 1 of 2", content)
+
+        await self.helperObj._applyDraftPick(self._pick_ctx(captain2), pool[1], 2)
+        content, _ = self.helperObj._renderDraftPickView(GUILD_ID)
+        self.assertIn("Pick 2 of 2", content)
 
     async def test_view_colors_player_buttons_by_turn(self):
         await self._draft_setup([(501, "Pool1"), (502, "Pool2")])
@@ -1936,7 +1980,7 @@ class TestDraftHelperTests(HelperTestCase):
         await self.helperObj.testDraftHelper(ctx)
 
         ctx.response.send_message.assert_awaited_once_with(
-            "Need at least 10 other non-bot members in this server to test with; found 9."
+            "Need at least 10 other non-bot members in this server to test with; found 9.", ephemeral=True
         )
         self.assertIsNone(self.helperObj.get(GUILD_ID, "team1"))
 
@@ -2245,6 +2289,24 @@ class ConfirmDestructiveClearHelperTests(HelperTestCase):
         self.assertTrue(stranger.response.send_message.call_args.kwargs.get("ephemeral"))
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "elo"), 1400)
 
+    async def test_timeout_marks_the_prompt_expired(self):
+        self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.cursor.execute("UPDATE economy SET elo=1400 WHERE guildId=? AND userId=?", (GUILD_ID, 901))
+        self.db.commit()
+        ctx = self._ctx()
+        posted = FakeMessage(id=7002)
+        ctx.followup.send.return_value = posted
+
+        await self.helperObj.confirmDestructiveClearHelper(ctx, False, True, False, False, None)
+        view = ctx.followup.send.call_args.kwargs["view"]
+
+        await view.on_timeout()
+
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "elo"), 1400)
+        posted.edit.assert_awaited_once()
+        self.assertIn("expired", posted.edit.call_args.kwargs["content"])
+        self.assertTrue(view.confirm.disabled)
+
 
 class SaveGetTournamentTests(HelperTestCase):
     def test_get_tournament_returns_none_when_unset(self):
@@ -2294,13 +2356,13 @@ class CreateTournamentHelperTests(HelperTestCase):
     async def test_rejects_non_positive_team_size(self):
         ctx = self._ctx()
         await self.helperObj.createTournamentHelper(ctx, "Cup", 0, 8, False)
-        ctx.response.send_message.assert_awaited_once_with("Team size must be greater than 0.")
+        ctx.response.send_message.assert_awaited_once_with("Team size must be greater than 0.", ephemeral=True)
         self.assertIsNone(self.helperObj.getTournament(GUILD_ID))
 
     async def test_rejects_too_few_teams(self):
         ctx = self._ctx()
         await self.helperObj.createTournamentHelper(ctx, "Cup", 5, 1, False)
-        ctx.response.send_message.assert_awaited_once_with("A tournament needs at least 2 teams.")
+        ctx.response.send_message.assert_awaited_once_with("A tournament needs at least 2 teams.", ephemeral=True)
         self.assertIsNone(self.helperObj.getTournament(GUILD_ID))
 
     async def test_creates_immediately_when_none_exists(self):
@@ -2321,7 +2383,7 @@ class CreateTournamentHelperTests(HelperTestCase):
         await self.helperObj.createTournamentHelper(ctx, "New Cup", 3, 4, False)
 
         ctx.response.send_message.assert_awaited_once_with(
-            "Only a member with the Manage Server permission can overwrite an existing tournament."
+            "Only a member with the Manage Server permission can overwrite an existing tournament.", ephemeral=True
         )
         # nothing changed; the old tournament is still there untouched
         self.assertEqual(self.helperObj.getTournament(GUILD_ID).get_name(), "Old Cup")
@@ -2400,7 +2462,7 @@ class CreateTeamHelperTests(HelperTestCase):
     async def test_rejects_non_positive_team_size(self):
         ctx = self._ctx()
         await self.helperObj.createTeamHelper(ctx, "Red", 0)
-        ctx.response.send_message.assert_awaited_once_with("Team size must be greater than 0.")
+        ctx.response.send_message.assert_awaited_once_with("Team size must be greater than 0.", ephemeral=True)
         self.assertIsNone(self.helperObj.getTeamRow(GUILD_ID, "Red"))
 
     async def test_rejects_duplicate_team_name(self):
@@ -2409,7 +2471,7 @@ class CreateTeamHelperTests(HelperTestCase):
         ctx2 = self._ctx(user_id=902, name="Bob")
         await self.helperObj.createTeamHelper(ctx2, "Red", 5)
         ctx2.response.send_message.assert_awaited_once_with(
-            "A team named **Red** already exists in this server."
+            "A team named **Red** already exists in this server.", ephemeral=True
         )
 
     async def test_rejects_a_duplicate_that_only_differs_in_case(self):
@@ -2418,7 +2480,7 @@ class CreateTeamHelperTests(HelperTestCase):
         ctx2 = self._ctx(user_id=902, name="Bob")
         await self.helperObj.createTeamHelper(ctx2, "red", 5)
         ctx2.response.send_message.assert_awaited_once_with(
-            "A team named **red** already exists in this server."
+            "A team named **red** already exists in this server.", ephemeral=True
         )
         self.cursor.execute("SELECT COUNT(*) FROM teams WHERE guildId=?", (GUILD_ID,))
         self.assertEqual(self.cursor.fetchone()[0], 1)
@@ -2488,7 +2550,7 @@ class SaveTeamHelperTests(HelperTestCase):
     async def test_rejects_when_there_is_no_roster_to_save(self):
         ctx = self._ctx()
         await self.helperObj.saveTeamHelper(ctx, 1, "Red")
-        ctx.response.send_message.assert_awaited_once_with("There's no Team 1 from the last game to save.")
+        ctx.response.send_message.assert_awaited_once_with("There's no Team 1 from the last game to save.", ephemeral=True)
         self.assertIsNone(self.helperObj.getTeamRow(GUILD_ID, "Red"))
 
     async def test_rejects_a_caller_who_was_not_on_that_team(self):
@@ -2523,7 +2585,7 @@ class SaveTeamHelperTests(HelperTestCase):
         await self.helperObj.saveTeamHelper(ctx, 1, "Red")
 
         ctx.response.send_message.assert_awaited_once_with(
-            "A team named **Red** already exists in this server."
+            "A team named **Red** already exists in this server.", ephemeral=True
         )
 
     async def test_saves_the_caller_as_captain_with_the_full_roster(self):
@@ -2576,14 +2638,14 @@ class TeamRenameHelperTests(HelperTestCase):
     async def test_rejects_unknown_team(self):
         ctx = self._ctx()
         await self.helperObj.teamRenameHelper(ctx, "Ghosts", "Phantoms")
-        ctx.response.send_message.assert_awaited_once_with("No team named **Ghosts** in this server.")
+        ctx.response.send_message.assert_awaited_once_with("No team named **Ghosts** in this server.", ephemeral=True)
 
     async def test_rejects_non_captain_non_admin(self):
         await self._make_team("Red")
         ctx = self._ctx(user_id=902, name="Bob", manage_guild=False)
         await self.helperObj.teamRenameHelper(ctx, "Red", "Crimson")
         ctx.response.send_message.assert_awaited_once_with(
-            "Only **Red**'s captain or a member with the Manage Server permission can rename it."
+            "Only **Red**'s captain or a member with the Manage Server permission can rename it.", ephemeral=True
         )
         self.assertIsNotNone(self.helperObj.getTeamRow(GUILD_ID, "Red"))
 
@@ -2598,7 +2660,7 @@ class TeamRenameHelperTests(HelperTestCase):
         await self._make_team("Red")
         ctx = self._ctx()
         await self.helperObj.teamRenameHelper(ctx, "Red", "Red")
-        ctx.response.send_message.assert_awaited_once_with("**Red** is already named that.")
+        ctx.response.send_message.assert_awaited_once_with("**Red** is already named that.", ephemeral=True)
 
     async def test_rejects_a_name_already_taken_by_another_team(self):
         await self._make_team("Red")
@@ -2606,7 +2668,7 @@ class TeamRenameHelperTests(HelperTestCase):
         ctx = self._ctx()
         await self.helperObj.teamRenameHelper(ctx, "Red", "Blue")
         ctx.response.send_message.assert_awaited_once_with(
-            "A team named **Blue** already exists in this server."
+            "A team named **Blue** already exists in this server.", ephemeral=True
         )
         self.assertIsNotNone(self.helperObj.getTeamRow(GUILD_ID, "Red"))
 
@@ -2616,7 +2678,7 @@ class TeamRenameHelperTests(HelperTestCase):
         ctx = self._ctx()
         await self.helperObj.teamRenameHelper(ctx, "Red", "blue")
         ctx.response.send_message.assert_awaited_once_with(
-            "A team named **blue** already exists in this server."
+            "A team named **blue** already exists in this server.", ephemeral=True
         )
         self.assertIsNotNone(self.helperObj.getTeamRow(GUILD_ID, "Red"))
 
@@ -2684,7 +2746,7 @@ class TeamTransferHelperTests(HelperTestCase):
     async def test_rejects_unknown_team(self):
         ctx = self._ctx()
         await self.helperObj.teamTransferHelper(ctx, "Ghosts", FakeMember("Bob", id=902))
-        ctx.response.send_message.assert_awaited_once_with("No team named **Ghosts** in this server.")
+        ctx.response.send_message.assert_awaited_once_with("No team named **Ghosts** in this server.", ephemeral=True)
 
     async def test_rejects_non_captain_non_admin(self):
         await self._make_team("Red")
@@ -2692,7 +2754,7 @@ class TeamTransferHelperTests(HelperTestCase):
         ctx = self._ctx(user_id=903, name="Charlie", manage_guild=False)
         await self.helperObj.teamTransferHelper(ctx, "Red", FakeMember("Bob", id=902))
         ctx.response.send_message.assert_awaited_once_with(
-            "Only **Red**'s captain or a member with the Manage Server permission can transfer it."
+            "Only **Red**'s captain or a member with the Manage Server permission can transfer it.", ephemeral=True
         )
         _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
         self.assertTrue(self.helperObj.isTeamCaptain(team, 901))
@@ -2703,7 +2765,7 @@ class TeamTransferHelperTests(HelperTestCase):
         ctx = self._ctx()
         await self.helperObj.teamTransferHelper(ctx, "Red", target)
         ctx.response.send_message.assert_awaited_once_with(
-            f"{target.mention} isn't on **Red**'s roster; invite them with /team invite first."
+            f"{target.mention} isn't on **Red**'s roster; invite them with /team invite first.", ephemeral=True
         )
         _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
         self.assertTrue(self.helperObj.isTeamCaptain(team, 901))
@@ -2713,7 +2775,7 @@ class TeamTransferHelperTests(HelperTestCase):
         target = FakeMember("Alice", id=901)
         ctx = self._ctx()
         await self.helperObj.teamTransferHelper(ctx, "Red", target)
-        ctx.response.send_message.assert_awaited_once_with(f"{target.mention} is already **Red**'s captain.")
+        ctx.response.send_message.assert_awaited_once_with(f"{target.mention} is already **Red**'s captain.", ephemeral=True)
 
     async def test_captain_transfers_to_a_rostered_teammate(self):
         await self._make_team("Red")
@@ -2768,14 +2830,14 @@ class TeamDeleteHelperTests(HelperTestCase):
     async def test_rejects_unknown_team(self):
         ctx = self._ctx()
         await self.helperObj.teamDeleteHelper(ctx, "Ghosts")
-        ctx.response.send_message.assert_awaited_once_with("No team named **Ghosts** in this server.")
+        ctx.response.send_message.assert_awaited_once_with("No team named **Ghosts** in this server.", ephemeral=True)
 
     async def test_rejects_non_captain_non_admin(self):
         await self._make_team("Red")
         ctx = self._ctx(user_id=902, name="Bob", manage_guild=False)
         await self.helperObj.teamDeleteHelper(ctx, "Red")
         ctx.response.send_message.assert_awaited_once_with(
-            "Only **Red**'s captain or a member with the Manage Server permission can delete it."
+            "Only **Red**'s captain or a member with the Manage Server permission can delete it.", ephemeral=True
         )
         self.assertIsNotNone(self.helperObj.getTeamRow(GUILD_ID, "Red"))
 
@@ -2853,6 +2915,21 @@ class TeamDeleteHelperTests(HelperTestCase):
         self.assertFalse(allowed)
         stranger.response.send_message.assert_awaited_once()
         self.assertTrue(stranger.response.send_message.call_args.kwargs.get("ephemeral"))
+
+    async def test_timeout_marks_the_prompt_expired(self):
+        await self._make_team("Red")
+        ctx = self._ctx()
+        posted_message = FakeMessage(id=556)
+        ctx.original_response.return_value = posted_message
+        await self.helperObj.teamDeleteHelper(ctx, "Red")
+        view = ctx.response.send_message.call_args.kwargs["view"]
+
+        await view.on_timeout()
+
+        self.assertIsNotNone(self.helperObj.getTeamRow(GUILD_ID, "Red"))
+        posted_message.edit.assert_awaited_once()
+        self.assertIn("expired", posted_message.edit.call_args.kwargs["content"])
+        self.assertTrue(view.confirm.disabled)
 
 
 class _FakeLogoDirTestCase(HelperTestCase):
@@ -2960,14 +3037,14 @@ class TeamSetHelperTests(_FakeLogoDirTestCase):
     async def test_rejects_unknown_team(self):
         ctx = self._ctx()
         await self.helperObj.teamSetHelper(ctx, "Nonexistent", None, False, None)
-        ctx.response.send_message.assert_awaited_once_with("No team named **Nonexistent** in this server.")
+        ctx.response.send_message.assert_awaited_once_with("No team named **Nonexistent** in this server.", ephemeral=True)
 
     async def test_rejects_non_captain_non_admin(self):
         await self._make_team()
         ctx = self._ctx(user_id=902, name="Bob", manage_guild=False)
         await self.helperObj.teamSetHelper(ctx, "Red", None, False, None)
         ctx.response.send_message.assert_awaited_once_with(
-            "Only **Red**'s captain or a member with the Manage Server permission can change its settings."
+            "Only **Red**'s captain or a member with the Manage Server permission can change its settings.", ephemeral=True
         )
 
     async def test_non_captain_admin_can_change_settings(self):
@@ -2983,7 +3060,7 @@ class TeamSetHelperTests(_FakeLogoDirTestCase):
         ctx = self._ctx()
         await self.helperObj.teamSetHelper(ctx, "Red", None, False, None)
         ctx.response.send_message.assert_awaited_once_with(
-            "Give at least one of voice_channel, new_voice_channel, or logo to set."
+            "Give at least one of voice_channel, new_voice_channel, or logo to set.", ephemeral=True
         )
 
     async def test_rejects_both_voice_channel_and_new_voice_channel(self):
@@ -2992,7 +3069,7 @@ class TeamSetHelperTests(_FakeLogoDirTestCase):
         channel = FakeChannel("general-voice")
         await self.helperObj.teamSetHelper(ctx, "Red", channel, True, None)
         ctx.response.send_message.assert_awaited_once_with(
-            "Pick either voice_channel or new_voice_channel, not both."
+            "Pick either voice_channel or new_voice_channel, not both.", ephemeral=True
         )
 
     async def test_new_voice_channel_creates_one_named_after_the_team(self):
@@ -3101,7 +3178,7 @@ class TeamSetHelperTests(_FakeLogoDirTestCase):
         ctx = self._ctx()
         await self.helperObj.teamSetHelper(ctx, "Red", None, False, "NotALogo")
         ctx.response.send_message.assert_awaited_once_with(
-            "No logo named **NotALogo**; pick one from the autocomplete list."
+            "No logo named **NotALogo**; pick one from the autocomplete list.", ephemeral=True
         )
 
     async def test_sets_the_logo_case_insensitively_and_attaches_the_file(self):
@@ -3160,7 +3237,7 @@ class TeamInviteHelperTests(HelperTestCase):
         ctx = self._ctx()
         target = FakeMember("Bob", id=902)
         await self.helperObj.teamInviteHelper(ctx, "Nonexistent", [target])
-        ctx.response.send_message.assert_awaited_once_with("No team named **Nonexistent** in this server.")
+        ctx.response.send_message.assert_awaited_once_with("No team named **Nonexistent** in this server.", ephemeral=True)
 
     async def test_rejects_non_captain_non_admin(self):
         await self._make_team()
@@ -3168,7 +3245,7 @@ class TeamInviteHelperTests(HelperTestCase):
         target = FakeMember("Bob", id=902)
         await self.helperObj.teamInviteHelper(ctx, "Red", [target])
         ctx.response.send_message.assert_awaited_once_with(
-            "Only **Red**'s captain or a member with the Manage Server permission can invite players."
+            "Only **Red**'s captain or a member with the Manage Server permission can invite players.", ephemeral=True
         )
 
     async def test_non_captain_admin_can_invite(self):
@@ -3187,13 +3264,13 @@ class TeamInviteHelperTests(HelperTestCase):
         ctx = self._ctx()
         target = FakeMember("Botty", id=902, bot=True)
         await self.helperObj.teamInviteHelper(ctx, "Red", [target])
-        ctx.response.send_message.assert_awaited_once_with("You can't invite a bot to a team.")
+        ctx.response.send_message.assert_awaited_once_with("You can't invite a bot to a team.", ephemeral=True)
 
     async def test_rejects_inviting_someone_already_on_the_team(self):
         await self._make_team()
         ctx = self._ctx()
         await self.helperObj.teamInviteHelper(ctx, "Red", [ctx.user])
-        ctx.response.send_message.assert_awaited_once_with("Alice is already on **Red**.")
+        ctx.response.send_message.assert_awaited_once_with("Alice is already on **Red**.", ephemeral=True)
 
     async def test_successful_invite_posts_message_and_stores_pending_row(self):
         await self._make_team()
@@ -3303,7 +3380,7 @@ class TeamInviteHelperTests(HelperTestCase):
         await self.helperObj.teamInviteHelper(ctx, "Red", [target], force=True)
         ctx.response.send_message.assert_awaited_once_with(
             "Only a member with the Manage Server permission can force-add players; "
-            "everyone else still needs the invitee's own confirmation."
+            "everyone else still needs the invitee's own confirmation.", ephemeral=True
         )
         _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
         self.assertEqual([p.get_id() for p in team.get_players()], [901])
@@ -3438,6 +3515,48 @@ class TeamInviteAcceptViewTests(HelperTestCase):
         _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
         self.assertEqual({p.get_id() for p in team.get_players()}, {901, 902, 903})
 
+    async def test_decline_from_someone_other_than_the_invitee_is_rejected(self):
+        message = await self._make_team_and_invite()
+        view = helper_module.TeamInviteAcceptView(self.helperObj)
+        click = self._click(message, 903)
+        await view.decline.callback(click)
+
+        self.cursor.execute("SELECT COUNT(*) FROM team_invites")
+        self.assertEqual(self.cursor.fetchone()[0], 1)
+        self.assertTrue(click.response.send_message.call_args.kwargs.get("ephemeral"))
+
+    async def test_decline_from_invitee_removes_the_invite_without_joining(self):
+        message = await self._make_team_and_invite()
+        view = helper_module.TeamInviteAcceptView(self.helperObj)
+        click = self._click(message, 902)
+        await view.decline.callback(click)
+
+        _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        self.assertEqual({p.get_id() for p in team.get_players()}, {901})
+        click.response.send_message.assert_awaited_once()
+        self.assertIn("Bob", click.response.send_message.call_args.args[0])
+        self.assertIn("declined", click.response.send_message.call_args.args[0])
+
+        self.cursor.execute("SELECT COUNT(*) FROM team_invites")
+        self.assertEqual(self.cursor.fetchone()[0], 0)
+
+    async def test_multiple_invitees_on_the_same_message_decline_independently(self):
+        message = await self._make_team_and_invite(
+            [FakeMember("Bob", id=902), FakeMember("Cleo", id=903)]
+        )
+        view = helper_module.TeamInviteAcceptView(self.helperObj)
+
+        await view.decline.callback(self._click(message, 902))
+
+        # Cleo's own invite (same messageId) is untouched by Bob's decline
+        self.cursor.execute("SELECT targetId FROM team_invites WHERE messageId=?", (message.id,))
+        self.assertEqual(self.cursor.fetchall(), [(903,)])
+
+        await view.accept.callback(self._click(message, 903))
+
+        _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        self.assertEqual({p.get_id() for p in team.get_players()}, {901, 903})
+
 
 class TeamLeaveHelperTests(HelperTestCase):
     def _ctx(self, user_id=901, name="Alice"):
@@ -3450,7 +3569,7 @@ class TeamLeaveHelperTests(HelperTestCase):
     async def test_rejects_unknown_team(self):
         ctx = self._ctx()
         await self.helperObj.teamLeaveHelper(ctx, "Nonexistent")
-        ctx.response.send_message.assert_awaited_once_with("No team named **Nonexistent** in this server.")
+        ctx.response.send_message.assert_awaited_once_with("No team named **Nonexistent** in this server.", ephemeral=True)
 
     async def test_rejects_the_captain(self):
         await self._make_team()
@@ -3458,7 +3577,7 @@ class TeamLeaveHelperTests(HelperTestCase):
         await self.helperObj.teamLeaveHelper(ctx, "Red")
         ctx.response.send_message.assert_awaited_once_with(
             "You're **Red**'s captain; use /team transfer to hand off the captaincy first, "
-            "or /team delete if you want the team gone entirely."
+            "or /team delete if you want the team gone entirely.", ephemeral=True
         )
         _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
         self.assertEqual([p.get_id() for p in team.get_players()], [901])
@@ -3467,7 +3586,7 @@ class TeamLeaveHelperTests(HelperTestCase):
         await self._make_team()
         ctx = self._ctx(user_id=902, name="Bob")
         await self.helperObj.teamLeaveHelper(ctx, "Red")
-        ctx.response.send_message.assert_awaited_once_with("You're not on **Red**.")
+        ctx.response.send_message.assert_awaited_once_with("You're not on **Red**.", ephemeral=True)
 
     async def test_removes_a_non_captain_player_from_the_roster(self):
         await self._make_team()
@@ -3524,7 +3643,7 @@ class SetupHelperTests(HelperTestCase):
 
         ctx.response.send_message.assert_awaited_once_with(
             "Your display name, **Alice**, is already taken by another team in this server. Run "
-            "/setup again with solo_team_name set to something else."
+            "/setup again with solo_team_name set to something else.", ephemeral=True
         )
         self.cursor.execute("SELECT COUNT(*) FROM setup_role_sessions")
         self.assertEqual(self.cursor.fetchone()[0], 0)
@@ -3550,7 +3669,7 @@ class SetupHelperTests(HelperTestCase):
         ctx = self._ctx()
         await self.helperObj.setupHelper(ctx, "Taken")
         ctx.response.send_message.assert_awaited_once_with(
-            "A team named **Taken** already exists in this server; pick another name for your solo team."
+            "A team named **Taken** already exists in this server; pick another name for your solo team.", ephemeral=True
         )
 
     async def test_solo_team_name_is_optional_once_one_already_exists(self):
@@ -3590,7 +3709,7 @@ class SetupHelperTests(HelperTestCase):
         ctx = self._ctx()
         await self.helperObj.setupHelper(ctx, "Taken")
         ctx.response.send_message.assert_awaited_once_with(
-            "A team named **Taken** already exists in this server; pick another name for your solo team."
+            "A team named **Taken** already exists in this server; pick another name for your solo team.", ephemeral=True
         )
         # the original solo team is untouched
         self.assertIsNotNone(self.helperObj.getTeamRow(GUILD_ID, "Alice's Team"))
@@ -3851,7 +3970,7 @@ class TeamStatsHelperTests(_FakeLogoDirTestCase):
     async def test_rejects_unknown_team(self):
         ctx = self._ctx()
         await self.helperObj.teamStatsHelper(ctx, "Nonexistent")
-        ctx.response.send_message.assert_awaited_once_with("No team named **Nonexistent** in this server.")
+        ctx.response.send_message.assert_awaited_once_with("No team named **Nonexistent** in this server.", ephemeral=True)
 
     async def test_reports_fresh_team_stats(self):
         await self.helperObj.createTeamHelper(self._ctx(), "Red", 5)
@@ -4285,13 +4404,13 @@ class MyTeamsHelperTests(_FakeLogoDirTestCase):
     async def test_no_teams_sends_a_message(self):
         ctx = self._ctx()
         await self.helperObj.myTeamsHelper(ctx)
-        ctx.response.send_message.assert_awaited_once_with("You're not on any teams in this server.")
+        ctx.response.send_message.assert_awaited_once_with("You're not on any teams in this server.", ephemeral=True)
 
     async def test_no_teams_for_another_member_names_them_instead_of_you(self):
         other = FakeMember("Bob", id=902)
         ctx = self._ctx()  # caller is Alice (901)
         await self.helperObj.myTeamsHelper(ctx, other)
-        ctx.response.send_message.assert_awaited_once_with("Bob isn't on any teams in this server.")
+        ctx.response.send_message.assert_awaited_once_with("Bob isn't on any teams in this server.", ephemeral=True)
 
     async def test_looks_up_another_members_teams(self):
         other = FakeMember("Bob", id=902)
@@ -4357,14 +4476,14 @@ class TeamListHelperTests(HelperTestCase):
         ctx = self._ctx()
         await self.helperObj.teamListHelper(ctx, None, False, "name", "asc")
         ctx.response.send_message.assert_awaited_once_with(
-            "No teams have been created in this server yet!"
+            "No teams have been created in this server yet!", ephemeral=True
         )
 
     async def test_filters_that_match_nothing_send_a_different_message(self):
         await self.helperObj.createTeamHelper(self._ctx(), "Red", 5)
         ctx = self._ctx()
         await self.helperObj.teamListHelper(ctx, "Nonexistent", False, "name", "asc")
-        ctx.response.send_message.assert_awaited_once_with("No teams match those filters.")
+        ctx.response.send_message.assert_awaited_once_with("No teams match those filters.", ephemeral=True)
 
     async def test_sorted_by_name_ascending_by_default(self):
         await self.helperObj.createTeamHelper(self._ctx(901, "Alice"), "Zeta", 5)
@@ -4461,7 +4580,7 @@ class TeamListHelperTests(HelperTestCase):
         ctx = self._ctx()
         await self.helperObj.teamListHelper(ctx, None, False, "name", "asc", members=[FakeMember("Bob", id=902)])
 
-        ctx.response.send_message.assert_awaited_once_with("No teams match those filters.")
+        ctx.response.send_message.assert_awaited_once_with("No teams match those filters.", ephemeral=True)
 
     async def test_posts_and_reacts_and_stores_the_view(self):
         await self.helperObj.createTeamHelper(self._ctx(901, "Alice"), "Red", 5)
@@ -4568,7 +4687,7 @@ class TeamListCardsModeTests(_FakeLogoDirTestCase):
         ctx = self._ctx()
         await self.helperObj.teamListHelper(ctx, None, False, "name", "asc", cards=True)
         ctx.response.send_message.assert_awaited_once_with(
-            "No teams have been created in this server yet!"
+            "No teams have been created in this server yet!", ephemeral=True
         )
 
 
@@ -4757,24 +4876,24 @@ class UseTeamsHelperTests(HelperTestCase):
         await self.helperObj.createTeamHelper(self._ctx(), "Red", 5)
         ctx = self._ctx()
         await self.helperObj.useTeamsHelper(ctx, "Red", "Red", False)
-        ctx.response.send_message.assert_awaited_once_with("Pick two different teams.")
+        ctx.response.send_message.assert_awaited_once_with("Pick two different teams.", ephemeral=True)
 
     async def test_rejects_the_same_team_twice_even_if_only_case_differs(self):
         await self.helperObj.createTeamHelper(self._ctx(), "Red", 5)
         ctx = self._ctx()
         await self.helperObj.useTeamsHelper(ctx, "Red", "red", False)
-        ctx.response.send_message.assert_awaited_once_with("Pick two different teams.")
+        ctx.response.send_message.assert_awaited_once_with("Pick two different teams.", ephemeral=True)
 
     async def test_rejects_unknown_first_team(self):
         ctx = self._ctx()
         await self.helperObj.useTeamsHelper(ctx, "Red", "Blue", False)
-        ctx.response.send_message.assert_awaited_once_with("No team named **Red** in this server.")
+        ctx.response.send_message.assert_awaited_once_with("No team named **Red** in this server.", ephemeral=True)
 
     async def test_rejects_unknown_second_team(self):
         await self.helperObj.createTeamHelper(self._ctx(901, "Alice"), "Red", 5)
         ctx = self._ctx()
         await self.helperObj.useTeamsHelper(ctx, "Red", "Blue", False)
-        ctx.response.send_message.assert_awaited_once_with("No team named **Blue** in this server.")
+        ctx.response.send_message.assert_awaited_once_with("No team named **Blue** in this server.", ephemeral=True)
 
     async def test_escapes_markdown_special_characters_in_team_names(self):
         # A stray underscore/asterisk in one team's name can pair up with
@@ -4848,7 +4967,7 @@ class ReuseTeamsHelperTests(HelperTestCase):
         await self.helperObj.reuseTeamsHelper(ctx)
         ctx.response.send_message.assert_awaited_once_with(
             "No previous teams to reuse. Make some first with /make-teams random, /make-teams draft, or "
-            "/make-teams saved."
+            "/make-teams saved.", ephemeral=True
         )
 
     async def test_reposts_the_exact_same_roster(self):
@@ -5008,14 +5127,14 @@ class RegisterTeamHelperTests(HelperTestCase):
         ctx = self._ctx()
         await self.helperObj.registerTeamHelper(ctx, "Red")
         ctx.response.send_message.assert_awaited_once_with(
-            "No tournament set up for this server. Use /tournament create first."
+            "No tournament set up for this server. Use /tournament create first.", ephemeral=True
         )
 
     async def test_rejects_unknown_team(self):
         self.helperObj.saveTournament(GUILD_ID, Tournament("Cup", 2, 4))
         ctx = self._ctx()
         await self.helperObj.registerTeamHelper(ctx, "Nonexistent")
-        ctx.response.send_message.assert_awaited_once_with("No team named **Nonexistent** in this server.")
+        ctx.response.send_message.assert_awaited_once_with("No team named **Nonexistent** in this server.", ephemeral=True)
 
     async def test_rejects_non_captain_non_admin(self):
         self.helperObj.saveTournament(GUILD_ID, Tournament("Cup", 2, 4))
@@ -5024,7 +5143,7 @@ class RegisterTeamHelperTests(HelperTestCase):
         await self.helperObj.registerTeamHelper(ctx, "Red")
         ctx.response.send_message.assert_awaited_once_with(
             "Only **Red**'s captain or a member with the Manage Server permission can register it "
-            "for the tournament."
+            "for the tournament.", ephemeral=True
         )
 
     async def test_non_captain_admin_can_register(self):
@@ -5041,7 +5160,7 @@ class RegisterTeamHelperTests(HelperTestCase):
         ctx = self._ctx()
         await self.helperObj.registerTeamHelper(ctx, "Red")
         ctx.response.send_message.assert_awaited_once_with(
-            "**Red** has 2 player(s), but this tournament needs teams of exactly 3."
+            "**Red** has 2 player(s), but this tournament needs teams of exactly 3.", ephemeral=True
         )
 
     async def test_rejects_double_registration(self):
@@ -5052,7 +5171,7 @@ class RegisterTeamHelperTests(HelperTestCase):
         ctx2 = self._ctx()
         await self.helperObj.registerTeamHelper(ctx2, "Red")
         ctx2.response.send_message.assert_awaited_once_with(
-            "**Red** is already registered for this tournament."
+            "**Red** is already registered for this tournament.", ephemeral=True
         )
 
     async def test_rejects_when_bracket_is_full(self):
@@ -5065,7 +5184,7 @@ class RegisterTeamHelperTests(HelperTestCase):
 
         ctx2 = self._ctx(user_id=902, name="Bob")
         await self.helperObj.registerTeamHelper(ctx2, "Blue")
-        ctx2.response.send_message.assert_awaited_once_with("This tournament's bracket is already full.")
+        ctx2.response.send_message.assert_awaited_once_with("This tournament's bracket is already full.", ephemeral=True)
 
     async def test_rejects_shared_player_across_registered_teams(self):
         self.helperObj.saveTournament(GUILD_ID, Tournament("Cup", 2, 4))
@@ -5179,7 +5298,7 @@ class CreateBracketHelperTests(HelperTestCase):
         ctx = self._ctx()
         await self.helperObj.createBracketHelper(ctx, False)
         ctx.response.send_message.assert_awaited_once_with(
-            "No tournament set up for this server. Use /tournament create first."
+            "No tournament set up for this server. Use /tournament create first.", ephemeral=True
         )
 
     async def test_rejects_fewer_than_two_registered_teams(self):
@@ -5190,7 +5309,7 @@ class CreateBracketHelperTests(HelperTestCase):
         ctx = self._ctx()
         await self.helperObj.createBracketHelper(ctx, False)
         ctx.response.send_message.assert_awaited_once_with(
-            "Need at least 2 registered teams to build a bracket."
+            "Need at least 2 registered teams to build a bracket.", ephemeral=True
         )
 
     async def test_builds_and_saves_a_bracket(self):
@@ -5645,7 +5764,7 @@ class PrintBracketHelperTests(HelperTestCase):
         ctx = self._ctx()
         await self.helperObj.printBracketHelper(ctx)
         ctx.response.send_message.assert_awaited_once_with(
-            "No tournament set up for this server. Use /tournament create first."
+            "No tournament set up for this server. Use /tournament create first.", ephemeral=True
         )
 
     async def test_prints_the_bracket(self):
@@ -5660,12 +5779,30 @@ class PrintBracketHelperTests(HelperTestCase):
         await self.helperObj.printBracketHelper(ctx)
 
         ctx.response.send_message.assert_awaited_once()
-        text = ctx.response.send_message.call_args.args[0]
+        ctx.edit_original_response.assert_awaited_once()
+        text = ctx.edit_original_response.call_args.kwargs.get("content")
         self.assertIn("Cup", text)
 
-        files = ctx.response.send_message.call_args.kwargs.get("files")
+        files = ctx.edit_original_response.call_args.kwargs.get("attachments")
         self.assertEqual(len(files), 1)
         self.assertEqual(files[0].filename, "winners_bracket.png")
+
+    # Regression test: rendering a full bracket can outrun Discord's ~3s
+    # ack window; the interaction has to be acknowledged with a
+    # placeholder immediately, before the (potentially slow) render even
+    # starts, not after.
+    async def test_acknowledges_immediately_with_a_placeholder(self):
+        tournament = Tournament("Cup", 2, 4)
+        red, blue = Team(), Team()
+        red.set_name("Red")
+        blue.set_name("Blue")
+        tournament.set_bracket(self.helperObj.buildBracket([red, blue]))
+        self.helperObj.saveTournament(GUILD_ID, tournament)
+
+        ctx = self._ctx()
+        await self.helperObj.printBracketHelper(ctx)
+
+        ctx.response.send_message.assert_awaited_once_with("Creating bracket, please wait...")
 
 
 class RenderMatchupImageTests(_FakeLogoDirTestCase):
@@ -5826,7 +5963,7 @@ class StartTournamentHelperTests(HelperTestCase):
         ctx = self._ctx()
         await self.helperObj.startTournamentHelper(ctx, "sequential")
         ctx.response.send_message.assert_awaited_once_with(
-            "No tournament set up for this server. Use /tournament create first."
+            "No tournament set up for this server. Use /tournament create first.", ephemeral=True
         )
 
     async def test_rejects_when_no_bracket_exists(self):
@@ -5834,7 +5971,7 @@ class StartTournamentHelperTests(HelperTestCase):
         ctx = self._ctx()
         await self.helperObj.startTournamentHelper(ctx, "sequential")
         ctx.response.send_message.assert_awaited_once_with(
-            "No bracket has been created yet. Use /tournament create-bracket first."
+            "No bracket has been created yet. Use /tournament create-bracket first.", ephemeral=True
         )
 
     async def test_rejects_when_already_finished(self):
@@ -5848,7 +5985,7 @@ class StartTournamentHelperTests(HelperTestCase):
         ctx = self._ctx()
         await self.helperObj.startTournamentHelper(ctx, "sequential")
         ctx.response.send_message.assert_awaited_once_with(
-            "**Cup** is already finished; **Red** is the champion!"
+            "**Cup** is already finished; **Red** is the champion!", ephemeral=True
         )
 
     async def test_rejects_when_round_already_in_progress(self):
@@ -5865,7 +6002,7 @@ class StartTournamentHelperTests(HelperTestCase):
         ctx = self._ctx()
         await self.helperObj.startTournamentHelper(ctx, "sequential")
         ctx.response.send_message.assert_awaited_once_with(
-            "This tournament's current round is already in progress."
+            "This tournament's current round is already in progress.", ephemeral=True
         )
 
     async def test_sequential_posts_ready_check_for_first_match_only(self):
@@ -6303,6 +6440,62 @@ class TournamentReadyAndReportViewTests(HelperTestCase):
         second_click = await self._click_report(message_id, 2)
         self.assertTrue(second_click.response.send_message.call_args.kwargs.get("ephemeral"))
 
+    async def test_report_click_rejects_a_bystander(self):
+        red = _captained_team("Red", 901, "Alice")
+        blue = _captained_team("Blue", 902, "Bob")
+        await self._start("simultaneous", red, blue)
+        match_id, message_id = self._only_match()
+
+        click = self._click(message_id, 999)
+        click.user.guild_permissions.manage_guild = False
+        view = helper_module.TournamentMatchReportView(self.helperObj)
+        await view.team1.callback(click)
+
+        self.assertTrue(click.response.send_message.call_args.kwargs.get("ephemeral"))
+        self.cursor.execute("SELECT state FROM tournament_matches WHERE id=?", (match_id,))
+        self.assertEqual(self.cursor.fetchone()[0], "AWAITING_RESULT")
+
+    async def test_report_click_allows_a_rostered_non_admin_captain(self):
+        red = _captained_team("Red", 901, "Alice")
+        blue = _captained_team("Blue", 902, "Bob")
+        await self._start("simultaneous", red, blue)
+        match_id, message_id = self._only_match()
+
+        click = self._click(message_id, 901)
+        click.user.guild_permissions.manage_guild = False
+        view = helper_module.TournamentMatchReportView(self.helperObj)
+        await view.team1.callback(click)
+
+        self.assertIn("reported as the winner", click.response.send_message.call_args.args[0])
+
+    # discord.py calls interaction_check before ever routing to Confirm's
+    # own callback, so this is what actually exercises the confirm-time
+    # gate (separate from the initial report click's own check above).
+    async def test_confirm_view_interaction_check_rejects_a_bystander(self):
+        red = _captained_team("Red", 901, "Alice")
+        blue = _captained_team("Blue", 902, "Bob")
+        await self._start("simultaneous", red, blue)
+        match_id, _message_id = self._only_match()
+
+        view = helper_module.ConfirmTournamentMatchReportView(self.helperObj, GUILD_ID, match_id, 1, self.channel.id)
+        click = FakeInteraction(self.guild, FakeMember("Bystander", id=999), channel=self.channel)
+        click.user.guild_permissions.manage_guild = False
+
+        self.assertFalse(await view.interaction_check(click))
+        self.assertTrue(click.response.send_message.call_args.kwargs.get("ephemeral"))
+
+    async def test_confirm_view_interaction_check_allows_a_rostered_captain(self):
+        red = _captained_team("Red", 901, "Alice")
+        blue = _captained_team("Blue", 902, "Bob")
+        await self._start("simultaneous", red, blue)
+        match_id, _message_id = self._only_match()
+
+        view = helper_module.ConfirmTournamentMatchReportView(self.helperObj, GUILD_ID, match_id, 1, self.channel.id)
+        click = FakeInteraction(self.guild, FakeMember("Alice", id=901), channel=self.channel)
+        click.user.guild_permissions.manage_guild = False
+
+        self.assertTrue(await view.interaction_check(click))
+
     async def test_confirming_a_simultaneous_result_resolves_the_match_and_advances(self):
         red = _captained_team("Red", 901, "Alice")
         blue = _captained_team("Blue", 902, "Bob")
@@ -6451,7 +6644,7 @@ class CorrectTournamentMatchHelperTests(HelperTestCase):
         ctx = self._ctx()
         await self.helperObj.reportCorrectWinnerHelper(ctx, 1, match_id=9999)
         ctx.response.send_message.assert_awaited_once_with(
-            "No tournament match with id 9999 in this server."
+            "No tournament match with id 9999 in this server.", ephemeral=True
         )
 
     async def test_rejects_unresolved_match(self):
@@ -6469,14 +6662,14 @@ class CorrectTournamentMatchHelperTests(HelperTestCase):
 
         ctx = self._ctx()
         await self.helperObj.reportCorrectWinnerHelper(ctx, 1, match_id=match_id)
-        ctx.response.send_message.assert_awaited_once_with(f"Match #{match_id} hasn't been resolved yet.")
+        ctx.response.send_message.assert_awaited_once_with(f"Match #{match_id} hasn't been resolved yet.", ephemeral=True)
 
     async def test_rejects_already_correct_team(self):
         match_id = await self._resolved_match(winner=1)
         ctx = self._ctx()
         await self.helperObj.reportCorrectWinnerHelper(ctx, 1, match_id=match_id)
         ctx.response.send_message.assert_awaited_once_with(
-            f"Match #{match_id} is already recorded as Team 1."
+            f"Match #{match_id} is already recorded as Team 1.", ephemeral=True
         )
 
     async def test_rejects_once_next_round_has_started(self):
@@ -6496,7 +6689,7 @@ class CorrectTournamentMatchHelperTests(HelperTestCase):
         ctx = self._ctx()
         await self.helperObj.reportCorrectWinnerHelper(ctx, 2, match_id=match_id)
         ctx.response.send_message.assert_awaited_once_with(
-            f"Can't correct Match #{match_id}; the next round has already started."
+            f"Can't correct Match #{match_id}; the next round has already started.", ephemeral=True
         )
 
     async def test_successful_correction_flips_bracket_and_winner(self):
@@ -6597,7 +6790,7 @@ class CorrectTournamentMatchHelperTests(HelperTestCase):
         ctx = self._ctx()
         await self.helperObj.reportCorrectWinnerHelper(ctx, 2, match_id=match_id)
         ctx.response.send_message.assert_awaited_once_with(
-            f"Match #{match_id} is a losers bracket match. Correcting those isn't supported yet."
+            f"Match #{match_id} is a losers bracket match. Correcting those isn't supported yet.", ephemeral=True
         )
 
     async def test_rejects_correcting_a_grand_finals_match(self):
@@ -6614,7 +6807,7 @@ class CorrectTournamentMatchHelperTests(HelperTestCase):
         ctx = self._ctx()
         await self.helperObj.reportCorrectWinnerHelper(ctx, 2, match_id=match_id)
         ctx.response.send_message.assert_awaited_once_with(
-            f"Match #{match_id} is a Grand Finals match. Correcting those isn't supported yet."
+            f"Match #{match_id} is a Grand Finals match. Correcting those isn't supported yet.", ephemeral=True
         )
 
 
@@ -7470,35 +7663,35 @@ class AdminSetHelperTests(HelperTestCase):
         ctx = self._ctx()
         await self._set(ctx, team1="Red")
         ctx.response.send_message.assert_awaited_once_with(
-            "Give both team1 and team2 together, or neither."
+            "Give both team1 and team2 together, or neither.", ephemeral=True
         )
 
     async def test_rejects_team2_without_team1(self):
         ctx = self._ctx()
         await self._set(ctx, team2="Blue")
         ctx.response.send_message.assert_awaited_once_with(
-            "Give both team1 and team2 together, or neither."
+            "Give both team1 and team2 together, or neither.", ephemeral=True
         )
 
     async def test_rejects_member_without_elo(self):
         ctx = self._ctx()
         await self._set(ctx, member=FakeMember("Target", id=555))
         ctx.response.send_message.assert_awaited_once_with(
-            "Give both member and elo together, or neither."
+            "Give both member and elo together, or neither.", ephemeral=True
         )
 
     async def test_rejects_elo_without_member(self):
         ctx = self._ctx()
         await self._set(ctx, elo=1500)
         ctx.response.send_message.assert_awaited_once_with(
-            "Give both member and elo together, or neither."
+            "Give both member and elo together, or neither.", ephemeral=True
         )
 
     async def test_rejects_non_positive_betting_timer(self):
         ctx = self._ctx()
         await self._set(ctx, betting_timer=0)
         ctx.response.send_message.assert_awaited_once_with(
-            "betting_timer must be greater than 0 seconds."
+            "betting_timer must be greater than 0 seconds.", ephemeral=True
         )
         self.assertEqual(
             self.helperObj.get(GUILD_ID, "betting_timer_seconds"),
@@ -7509,14 +7702,14 @@ class AdminSetHelperTests(HelperTestCase):
         ctx = self._ctx()
         await self._set(ctx, betting_timer=601)
         ctx.response.send_message.assert_awaited_once_with(
-            "betting_timer can't be more than 600 seconds (10 minutes)."
+            "betting_timer can't be more than 600 seconds (10 minutes).", ephemeral=True
         )
 
     async def test_rejects_non_positive_default_elo(self):
         ctx = self._ctx()
         await self._set(ctx, default_elo=0)
         ctx.response.send_message.assert_awaited_once_with(
-            "default_elo must be greater than 0."
+            "default_elo must be greater than 0.", ephemeral=True
         )
         self.assertIsNone(self.helperObj.get(GUILD_ID, "default_elo"))
 
@@ -7693,6 +7886,31 @@ class NotifyHelperTests(HelperTestCase):
         self.assertIn("https://discord.gg/fake-invite", content)
         self.assertIn("Sent by Caller", content)
 
+    async def test_returns_true_when_the_dm_sends_successfully(self):
+        voice_channel = FakeChannel("Lobby")
+        caller = FakeMember("Caller")
+        caller.voice = FakeVoiceState(voice_channel)
+        ctx = FakeInteraction(self.guild, caller)
+        target = FakeMember("Target")
+
+        result = await self.helperObj.notifyHelper(ctx, target)
+
+        self.assertTrue(result)
+
+    async def test_returns_false_when_the_member_has_dms_closed(self):
+        voice_channel = FakeChannel("Lobby")
+        caller = FakeMember("Caller")
+        caller.voice = FakeVoiceState(voice_channel)
+        ctx = FakeInteraction(self.guild, caller)
+        target = FakeMember("Target")
+        target.create_dm.return_value.send.side_effect = discord.Forbidden(
+            SimpleNamespace(status=403, reason="Forbidden"), "Cannot send messages to this user"
+        )
+
+        result = await self.helperObj.notifyHelper(ctx, target)
+
+        self.assertFalse(result)
+
 
 class CancelGameHelperTests(HelperTestCase):
     async def test_moves_members_back_and_refunds_open_bets(self):
@@ -7862,9 +8080,11 @@ class EconomyTests(HelperTestCase):
         await self.helperObj.dailyHelper(ctx2)
 
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "balance"), 1000)
-        ctx2.response.send_message.assert_awaited_once_with(
-            "You've already claimed your daily gold today! Come back tomorrow."
-        )
+        ctx2.response.send_message.assert_awaited_once()
+        args, kwargs = ctx2.response.send_message.call_args
+        self.assertIn("<t:", args[0])
+        self.assertIn(":R>", args[0])
+        self.assertTrue(kwargs.get("ephemeral"))
 
 
 class GetRosterNameTests(HelperTestCase):
@@ -7904,7 +8124,7 @@ class WagerHelperTests(HelperTestCase):
         ctx = self._ctx()
         await self.helperObj.wagerHelper(ctx, 0, 1)
         ctx.response.send_message.assert_awaited_once_with(
-            "Wager amount must be greater than 0."
+            "Wager amount must be greater than 0.", ephemeral=True
         )
 
     async def test_rejects_when_betting_not_open(self):
@@ -7912,7 +8132,7 @@ class WagerHelperTests(HelperTestCase):
         await self.helperObj.wagerHelper(ctx, 100, 1)
         ctx.response.send_message.assert_awaited_once_with(
             "Betting is not currently open. Press Start on the roster message to start a game "
-            "and open betting."
+            "and open betting.", ephemeral=True
         )
 
     async def test_rejects_a_new_wager_once_a_winner_report_is_pending_confirmation(self):
@@ -7936,7 +8156,7 @@ class WagerHelperTests(HelperTestCase):
         await self.helperObj.wagerHelper(ctx, 100, 2)
         ctx.response.send_message.assert_awaited_once_with(
             "Betting is not currently open. Press Start on the roster message to start a game "
-            "and open betting."
+            "and open betting.", ephemeral=True
         )
 
     async def test_rejects_insufficient_balance(self):
@@ -7946,7 +8166,7 @@ class WagerHelperTests(HelperTestCase):
         await self.helperObj.wagerHelper(ctx, 100, 1)
 
         ctx.response.send_message.assert_awaited_once_with(
-            "You don't have enough gold for that! Your balance is 0."
+            "You don't have enough gold for that! Your balance is 0.", ephemeral=True
         )
 
     async def test_rejects_duplicate_bet(self):
@@ -7963,7 +8183,7 @@ class WagerHelperTests(HelperTestCase):
         await self.helperObj.wagerHelper(ctx2, 50, 2)
 
         ctx2.response.send_message.assert_awaited_once_with(
-            "You've already placed a bet on this game."
+            "You've already placed a bet on this game.", ephemeral=True
         )
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "balance"), 900)
 
@@ -8005,7 +8225,7 @@ class WagerHelperTests(HelperTestCase):
         await self.helperObj.wagerHelper(ctx, 100, 2)
 
         ctx.response.send_message.assert_awaited_once_with(
-            "You can't wager on a game you're playing in!"
+            "You can't wager on a game you're playing in!", ephemeral=True
         )
         # no gold moved, no wager recorded
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "balance"), 1000)
@@ -8027,7 +8247,7 @@ class WagerHelperTests(HelperTestCase):
         await self.helperObj.wagerHelper(ctx, 100, 1)
 
         ctx.response.send_message.assert_awaited_once_with(
-            "You can't wager on a game you're playing in!"
+            "You can't wager on a game you're playing in!", ephemeral=True
         )
 
     async def test_spectator_not_in_either_team_can_still_wager(self):
@@ -8355,8 +8575,8 @@ class RecordResultTests(HelperTestCase):
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 702, "balance"), helper_module.GAME_LOSS_GOLD)
         messages = [c.args[0] for c in channel.send.call_args_list]
         self.assertTrue(any(
-            f"1 winning player earned {helper_module.GAME_WIN_GOLD} gold each and "
-            f"1 losing player earned {helper_module.GAME_LOSS_GOLD} gold each just for playing." in m
+            f"1 winning player earned {helper_module.GAME_WIN_GOLD} gold and "
+            f"1 losing player earned {helper_module.GAME_LOSS_GOLD} gold just for playing." in m
             for m in messages
         ))
 
@@ -8656,7 +8876,7 @@ class FormatResultMessageTests(HelperTestCase):
         )
         message = self.helperObj.formatResultMessage(1, summary)
         self.assertIn(
-            f"1 winning player earned {helper_module.GAME_WIN_GOLD} gold each and "
+            f"1 winning player earned {helper_module.GAME_WIN_GOLD} gold and "
             f"2 losing players earned {helper_module.GAME_LOSS_GOLD} gold each just for playing.",
             message,
         )
@@ -8667,7 +8887,23 @@ class FormatResultMessageTests(HelperTestCase):
         )
         message = self.helperObj.formatResultMessage(1, summary)
         self.assertIn(
-            f"1 winning player earned {helper_module.GAME_WIN_GOLD} gold each just for playing.", message
+            f"1 winning player earned {helper_module.GAME_WIN_GOLD} gold just for playing.", message
+        )
+
+    def test_omits_each_only_for_the_side_with_exactly_one_player(self):
+        # A lone winner against a multi-player losing side isn't a full
+        # 1v1, but "1 winning player earned N gold each" still reads wrong
+        # for that one player specifically; each side's wording is judged
+        # independently rather than only checking if the whole game was 1v1.
+        _deltas, summary = self.helperObj.computeGameDeltas(
+            wagers=[], team1_roster=[(1, "A")], team2_roster=[(2, "B")],
+            elo_lookup={1: 1000, 2: 1000}, winning_team=1,
+        )
+        message = self.helperObj.formatResultMessage(1, summary)
+        self.assertIn(
+            f"1 winning player earned {helper_module.GAME_WIN_GOLD} gold and "
+            f"1 losing player earned {helper_module.GAME_LOSS_GOLD} gold just for playing.",
+            message,
         )
 
     def test_disliked_role_bonus_line_appears_when_someone_earned_it(self):
@@ -8755,7 +8991,7 @@ class ReportCorrectWinnerHelperTests(HelperTestCase):
         ctx = FakeInteraction(self.guild, FakeMember("Admin"))
         await self.helperObj.reportCorrectWinnerHelper(ctx, 2)
         ctx.response.send_message.assert_awaited_once_with(
-            "There's no recent game result to correct."
+            "There's no recent game result to correct.", ephemeral=True
         )
 
     async def test_already_recorded_winner_is_a_noop(self):
@@ -8765,7 +9001,7 @@ class ReportCorrectWinnerHelperTests(HelperTestCase):
         await self.helperObj.reportCorrectWinnerHelper(ctx, 1)
 
         ctx.response.send_message.assert_awaited_once_with(
-            "**Team 1** is already the recorded winner; nothing to correct."
+            "**Team 1** is already the recorded winner; nothing to correct.", ephemeral=True
         )
 
     async def test_corrects_bettor_payouts_when_winner_flips(self):
@@ -8876,13 +9112,13 @@ class ReportCorrectWinnerHelperTests(HelperTestCase):
     async def test_invalidate_rejects_when_team_also_given(self):
         ctx = FakeInteraction(self.guild, FakeMember("Admin"))
         await self.helperObj.reportCorrectWinnerHelper(ctx, 2, invalidate=True)
-        ctx.response.send_message.assert_awaited_once_with("Give team or invalidate, not both.")
+        ctx.response.send_message.assert_awaited_once_with("Give team or invalidate, not both.", ephemeral=True)
 
     async def test_rejects_when_neither_team_nor_invalidate_given(self):
         ctx = FakeInteraction(self.guild, FakeMember("Admin"))
         await self.helperObj.reportCorrectWinnerHelper(ctx, None)
         ctx.response.send_message.assert_awaited_once_with(
-            "Give team (who actually won), or invalidate to undo the game entirely."
+            "Give team (who actually won), or invalidate to undo the game entirely.", ephemeral=True
         )
 
     async def test_invalidate_rejects_a_specific_tournament_match(self):
@@ -8890,14 +9126,14 @@ class ReportCorrectWinnerHelperTests(HelperTestCase):
         await self.helperObj.reportCorrectWinnerHelper(ctx, None, match_id=1, invalidate=True)
         ctx.response.send_message.assert_awaited_once_with(
             "Invalidating isn't supported for a specific tournament match yet; correct it "
-            "to the other team instead."
+            "to the other team instead.", ephemeral=True
         )
 
     async def test_invalidate_with_no_recent_result(self):
         ctx = FakeInteraction(self.guild, FakeMember("Admin"))
         await self.helperObj.reportCorrectWinnerHelper(ctx, None, invalidate=True)
         ctx.response.send_message.assert_awaited_once_with(
-            "There's no recent game result to correct."
+            "There's no recent game result to correct.", ephemeral=True
         )
 
     async def test_invalidate_refunds_bets_and_undoes_elo_and_records(self):
@@ -9824,6 +10060,26 @@ class AchievementsHelperTests(HelperTestCase):
             self.helperObj.getUnlockedCardTitles(GUILD_ID, 901)
         )
 
+    async def test_other_field_stays_within_discords_1024_char_limit(self):
+        ctx = self._ctx()
+        await self.helperObj.achievementsHelper(ctx)
+        embed = ctx.response.send_message.call_args.kwargs["embed"]
+        other_field = next(field for field in embed.fields if field.name == "__Other__")
+        self.assertLessEqual(len(other_field.value), 1024)
+
+    def test_join_embed_field_lines_keeps_everything_under_the_limit(self):
+        lines = ["a short line"] * 5
+        joined = self.helperObj._joinEmbedFieldLines(lines, limit=1024)
+        self.assertEqual(joined, "\n".join(lines))
+
+    def test_join_embed_field_lines_truncates_and_notes_how_many_were_cut(self):
+        lines = [f"line {i} " + "x" * 20 for i in range(50)]
+        joined = self.helperObj._joinEmbedFieldLines(lines, limit=200)
+
+        self.assertLessEqual(len(joined), 200)
+        self.assertIn("more", joined)
+        self.assertTrue(joined.startswith("line 0 "))
+
 
 class CardUnlocksTests(HelperTestCase):
     def test_reaching_diamond_unlocks_its_title_and_color_scheme(self):
@@ -9998,12 +10254,17 @@ class CardSetHelperTests(HelperTestCase):
     async def test_equipping_the_default_title_always_succeeds(self):
         ctx = self._ctx()
         await self.helperObj.cardSetHelper(ctx, helper_module.CARD_DEFAULT_TITLE, None, None)
-        kwargs = ctx.response.send_message.call_args.kwargs
+        # An immediate placeholder ack, then the real card via an edit -
+        # see cardSetHelper's own defer/edit comment.
+        ctx.response.send_message.assert_awaited_once()
+        kwargs = ctx.edit_original_response.call_args.kwargs
         self.assertIn(f'title **"{helper_module.CARD_DEFAULT_TITLE}"**', kwargs["content"])
         # the card itself is shown too, not just confirmed in text
-        self.assertIsInstance(kwargs["file"], discord.File)
+        files = kwargs["attachments"]
+        self.assertEqual(len(files), 1)
+        self.assertIsInstance(files[0], discord.File)
         self.assertTrue(kwargs["embed"].image.url.startswith("attachment://"))
-        kwargs["file"].close()
+        files[0].close()
         self.assertEqual(
             self.helperObj.getCardSettings(GUILD_ID, 901)["title"], helper_module.CARD_DEFAULT_TITLE
         )
@@ -10042,10 +10303,12 @@ class CardSetHelperTests(HelperTestCase):
     async def test_equipping_the_default_scheme_always_succeeds(self):
         ctx = self._ctx()
         await self.helperObj.cardSetHelper(ctx, None, helper_module.CARD_DEFAULT_SCHEME_NAME, None)
-        kwargs = ctx.response.send_message.call_args.kwargs
+        kwargs = ctx.edit_original_response.call_args.kwargs
         self.assertIn(f'the **{helper_module.CARD_DEFAULT_SCHEME_NAME}** color scheme', kwargs["content"])
-        self.assertIsInstance(kwargs["file"], discord.File)
-        kwargs["file"].close()
+        files = kwargs["attachments"]
+        self.assertEqual(len(files), 1)
+        self.assertIsInstance(files[0], discord.File)
+        files[0].close()
         settings = self.helperObj.getCardSettings(GUILD_ID, 901)
         self.assertEqual(settings["accent_color"], helper_module.CARD_DEFAULT_ACCENT_COLOR)
         self.assertEqual(settings["background_color"], helper_module.CARD_DEFAULT_BACKGROUND_COLOR)
@@ -10136,10 +10399,12 @@ class CardSetHelperTests(HelperTestCase):
     async def test_equipping_the_default_font_always_succeeds(self):
         ctx = self._ctx()
         await self.helperObj.cardSetHelper(ctx, None, None, helper_module.CARD_DEFAULT_FONT_STYLE)
-        kwargs = ctx.response.send_message.call_args.kwargs
+        kwargs = ctx.edit_original_response.call_args.kwargs
         self.assertIn(f'the **{helper_module.CARD_DEFAULT_FONT_STYLE}** font', kwargs["content"])
-        self.assertIsInstance(kwargs["file"], discord.File)
-        kwargs["file"].close()
+        files = kwargs["attachments"]
+        self.assertEqual(len(files), 1)
+        self.assertIsInstance(files[0], discord.File)
+        files[0].close()
         settings = self.helperObj.getCardSettings(GUILD_ID, 901)
         self.assertEqual(settings["font_style"], helper_module.CARD_DEFAULT_FONT_STYLE)
 
@@ -11312,6 +11577,48 @@ class OpenConcurrentTournamentBettingTests(HelperTestCase):
         self.assertEqual(channel.send.await_count, 2)  # open, then closed
 
 
+class WagerTeamNameResolutionTests(HelperTestCase):
+    def test_get_wager_team_names_falls_back_without_a_current_game(self):
+        self.assertEqual(self.helperObj.getWagerTeamNames(GUILD_ID), ("Team 1", "Team 2"))
+
+    def test_get_wager_team_names_reads_the_current_roster(self):
+        team1, team2 = Team(), Team()
+        team1.set_name("Ravens")
+        team2.set_name("Falcons")
+        self.helperObj.update(GUILD_ID, "team1", team1.serializeTeam())
+        self.helperObj.update(GUILD_ID, "team2", team2.serializeTeam())
+
+        self.assertEqual(self.helperObj.getWagerTeamNames(GUILD_ID), ("Ravens", "Falcons"))
+
+    def test_get_wager_team_names_reads_a_specific_match(self):
+        team1, team2 = Team(), Team()
+        team1.set_name("Ravens")
+        team2.set_name("Falcons")
+        self.cursor.execute(
+            "INSERT INTO tournament_matches(id, guildId, roundIndex, nodeIndex, team1, team2, state, "
+            "mode, messageId, channelId, winner, bracketType) "
+            "VALUES(5, ?, 0, 0, ?, ?, 'AWAITING_RESULT', 'simultaneous', NULL, NULL, NULL, 'winners')",
+            (GUILD_ID, team1.serializeTeam(), team2.serializeTeam())
+        )
+        self.db.commit()
+
+        self.assertEqual(self.helperObj.getWagerTeamNames(GUILD_ID, match_id=5), ("Ravens", "Falcons"))
+
+    def test_get_wager_team_names_falls_back_for_an_unknown_match(self):
+        self.assertEqual(self.helperObj.getWagerTeamNames(GUILD_ID, match_id=999), ("Team 1", "Team 2"))
+
+    def test_resolve_accepts_numeric_strings(self):
+        self.assertEqual(self.helperObj.resolveWagerTeamValue("1", "Ravens", "Falcons"), 1)
+        self.assertEqual(self.helperObj.resolveWagerTeamValue("2", "Ravens", "Falcons"), 2)
+
+    def test_resolve_accepts_real_names_case_insensitively(self):
+        self.assertEqual(self.helperObj.resolveWagerTeamValue("ravens", "Ravens", "Falcons"), 1)
+        self.assertEqual(self.helperObj.resolveWagerTeamValue("FALCONS", "Ravens", "Falcons"), 2)
+
+    def test_resolve_returns_none_for_anything_else(self):
+        self.assertIsNone(self.helperObj.resolveWagerTeamValue("Seahawks", "Ravens", "Falcons"))
+
+
 class PlaceTournamentWagerTests(HelperTestCase):
     def _ctx(self, user_id=901, name="Alice"):
         return FakeInteraction(self.guild, FakeMember(name, id=user_id))
@@ -11340,20 +11647,20 @@ class PlaceTournamentWagerTests(HelperTestCase):
         ctx = self._ctx()
         await self.helperObj.wagerHelper(ctx, 100, 1, match_id=42)
         ctx.response.send_message.assert_awaited_once_with(
-            "No tournament match with id 42 in this server."
+            "No tournament match with id 42 in this server.", ephemeral=True
         )
 
     async def test_rejects_when_match_is_resolved(self):
         self._insert_match(1, state="RESOLVED")
         ctx = self._ctx()
         await self.helperObj.wagerHelper(ctx, 100, 1, match_id=1)
-        ctx.response.send_message.assert_awaited_once_with("Betting is closed for match #1.")
+        ctx.response.send_message.assert_awaited_once_with("Betting is closed for match #1.", ephemeral=True)
 
     async def test_rejects_when_the_betting_closed_flag_is_set(self):
         self._insert_match(1, betting_closed=1)
         ctx = self._ctx()
         await self.helperObj.wagerHelper(ctx, 100, 1, match_id=1)
-        ctx.response.send_message.assert_awaited_once_with("Betting is closed for match #1.")
+        ctx.response.send_message.assert_awaited_once_with("Betting is closed for match #1.", ephemeral=True)
 
     async def test_rejects_once_a_report_reaction_is_pending_confirmation(self):
         # Regression: a simultaneous-match report reaction used to resolve
@@ -11364,7 +11671,7 @@ class PlaceTournamentWagerTests(HelperTestCase):
         self._insert_match(1, state="CONFIRMING", betting_closed=1)
         ctx = self._ctx()
         await self.helperObj.wagerHelper(ctx, 100, 1, match_id=1)
-        ctx.response.send_message.assert_awaited_once_with("Betting is closed for match #1.")
+        ctx.response.send_message.assert_awaited_once_with("Betting is closed for match #1.", ephemeral=True)
 
     async def test_rejects_a_rostered_player(self):
         team1 = Team()
@@ -11374,7 +11681,7 @@ class PlaceTournamentWagerTests(HelperTestCase):
         ctx = self._ctx()
         await self.helperObj.wagerHelper(ctx, 100, 1, match_id=1)
         ctx.response.send_message.assert_awaited_once_with(
-            "You can't wager on a match you're playing in!"
+            "You can't wager on a match you're playing in!", ephemeral=True
         )
 
     async def test_rejects_insufficient_balance(self):
@@ -11382,7 +11689,7 @@ class PlaceTournamentWagerTests(HelperTestCase):
         ctx = self._ctx()
         await self.helperObj.wagerHelper(ctx, 100, 1, match_id=1)
         ctx.response.send_message.assert_awaited_once_with(
-            "You don't have enough gold for that! Your balance is 0."
+            "You don't have enough gold for that! Your balance is 0.", ephemeral=True
         )
 
     async def test_rejects_duplicate_bet_on_the_same_match(self):
@@ -11394,7 +11701,7 @@ class PlaceTournamentWagerTests(HelperTestCase):
         await self.helperObj.wagerHelper(ctx2, 50, 2, match_id=1)
 
         ctx2.response.send_message.assert_awaited_once_with(
-            "You've already placed a bet on match #1."
+            "You've already placed a bet on match #1.", ephemeral=True
         )
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "balance"), 900)
 
@@ -11411,7 +11718,21 @@ class PlaceTournamentWagerTests(HelperTestCase):
         )
         self.assertEqual(self.cursor.fetchone(), (2, 250))
         ctx.response.send_message.assert_awaited_once_with(
-            "You wagered 250 gold on Team 2 for match #1!"
+            "You wagered 250 gold on **Team 2** for match #1!"
+        )
+
+    async def test_confirmation_uses_the_matchs_own_real_team_name(self):
+        team1, team2 = Team(), Team()
+        team1.name = "Ravens"
+        team2.name = "Falcons"
+        self._insert_match(2, team1=team1, team2=team2)
+        self._give_gold(901, "Alice", 1000)
+
+        ctx = self._ctx()
+        await self.helperObj.wagerHelper(ctx, 250, 2, match_id=2)
+
+        ctx.response.send_message.assert_awaited_once_with(
+            "You wagered 250 gold on **Falcons** for match #2!"
         )
 
     async def test_a_user_can_bet_on_multiple_concurrent_matches_independently(self):
@@ -11610,6 +11931,42 @@ class WinnerReportViewTests(HelperTestCase):
         cancel_mock.assert_not_awaited()
         self.assertTrue(click.response.send_message.call_args.kwargs.get("ephemeral"))
 
+    # Regression coverage for the "only admins and rostered players can
+    # report/cancel" gate: a bystander (not on either team, not an admin)
+    # must be rejected before anything about the game/betting state is
+    # even touched.
+    async def test_report_click_rejects_a_bystander(self):
+        click = self._click(user_id=999)
+        click.user.guild_permissions.manage_guild = False
+        await helper_module.WinnerReportView(self.helperObj).team1.callback(click)
+
+        click.response.send_message.assert_awaited_once()
+        self.assertNotIn("reported as the winner", click.response.send_message.call_args.args[0])
+        self.assertTrue(click.response.send_message.call_args.kwargs.get("ephemeral"))
+        # never touched, unlike the valid-click path
+        self.assertEqual(self.helperObj.get(GUILD_ID, "betting_message_id"), 555)
+
+    async def test_report_click_allows_a_rostered_non_admin_player(self):
+        team1 = Team()
+        team1.add_player(Player(999, "Rostered"))
+        self.helperObj.update(GUILD_ID, "team1", team1.serializeTeam())
+        click = self._click(user_id=999)
+        click.user.guild_permissions.manage_guild = False
+
+        await helper_module.WinnerReportView(self.helperObj).team1.callback(click)
+
+        self.assertIn("reported as the winner", click.response.send_message.call_args.args[0])
+
+    async def test_cancel_click_rejects_a_bystander(self):
+        click = self._click(user_id=999)
+        click.user.guild_permissions.manage_guild = False
+        with patch.object(self.helperObj, "cancelGameHelper", AsyncMock()) as cancel_mock:
+            await helper_module.WinnerReportView(self.helperObj).cancelGame.callback(click)
+
+        cancel_mock.assert_not_awaited()
+        self.assertTrue(click.response.send_message.call_args.kwargs.get("ephemeral"))
+        self.assertEqual(self.helperObj.get(GUILD_ID, "betting_message_id"), 555)
+
 
 class ConfirmWinnerReportViewTests(HelperTestCase):
     def _click(self, user_id=901, name="Alice", channel=None, guild=None):
@@ -11697,6 +12054,36 @@ class ConfirmWinnerReportViewTests(HelperTestCase):
         view = helper_module.ConfirmWinnerReportView(self.helperObj, GUILD_ID, 1, 555)
         await view.on_timeout()  # view.message is still None - should just no-op the edit
 
+    # discord.py calls interaction_check before ever routing to a button's
+    # own callback (the callback tests above call .confirm.callback(...)
+    # directly, which bypasses it entirely), so this is the only place
+    # that actually exercises the "admin or rostered player" gate itself.
+    async def test_interaction_check_rejects_a_bystander(self):
+        view = helper_module.ConfirmWinnerReportView(self.helperObj, GUILD_ID, 1, 555)
+        click = self._click(user_id=999)
+        click.user.guild_permissions.manage_guild = False
+
+        allowed = await view.interaction_check(click)
+
+        self.assertFalse(allowed)
+        self.assertTrue(click.response.send_message.call_args.kwargs.get("ephemeral"))
+
+    async def test_interaction_check_allows_a_rostered_non_admin_player(self):
+        team2 = Team()
+        team2.add_player(Player(999, "Rostered"))
+        self.helperObj.update(GUILD_ID, "team2", team2.serializeTeam())
+        view = helper_module.ConfirmWinnerReportView(self.helperObj, GUILD_ID, 1, 555)
+        click = self._click(user_id=999)
+        click.user.guild_permissions.manage_guild = False
+
+        self.assertTrue(await view.interaction_check(click))
+
+    async def test_interaction_check_allows_an_admin_who_is_not_rostered(self):
+        view = helper_module.ConfirmWinnerReportView(self.helperObj, GUILD_ID, 1, 555)
+        click = self._click(user_id=999)  # manage_guild=True by default
+
+        self.assertTrue(await view.interaction_check(click))
+
 
 class ConfirmCancelGameViewTests(HelperTestCase):
     def _click(self, user_id=901, name="Alice", channel=None, guild=None):
@@ -11770,6 +12157,24 @@ class ConfirmCancelGameViewTests(HelperTestCase):
         view = helper_module.ConfirmCancelGameView(self.helperObj, GUILD_ID, 555)
         await view.on_timeout()  # view.message is still None - should just no-op the edit
 
+    async def test_interaction_check_rejects_a_bystander(self):
+        view = helper_module.ConfirmCancelGameView(self.helperObj, GUILD_ID, 555)
+        click = self._click(user_id=999)
+        click.user.guild_permissions.manage_guild = False
+
+        self.assertFalse(await view.interaction_check(click))
+        self.assertTrue(click.response.send_message.call_args.kwargs.get("ephemeral"))
+
+    async def test_interaction_check_allows_a_rostered_non_admin_player(self):
+        team1 = Team()
+        team1.add_player(Player(999, "Rostered"))
+        self.helperObj.update(GUILD_ID, "team1", team1.serializeTeam())
+        view = helper_module.ConfirmCancelGameView(self.helperObj, GUILD_ID, 555)
+        click = self._click(user_id=999)
+        click.user.guild_permissions.manage_guild = False
+
+        self.assertTrue(await view.interaction_check(click))
+
 
 class RestoreWinnerReportMessageTests(HelperTestCase):
     async def test_restores_when_betting_is_open_and_unset(self):
@@ -11804,20 +12209,20 @@ class ChallengeDuelHelperTests(HelperTestCase):
     async def test_rejects_challenging_yourself(self):
         ctx = self._ctx()
         await self.helperObj.challengeDuelHelper(ctx, ctx.user, 100)
-        ctx.response.send_message.assert_awaited_once_with("You can't wager against yourself!")
+        ctx.response.send_message.assert_awaited_once_with("You can't wager against yourself!", ephemeral=True)
 
     async def test_rejects_challenging_a_bot(self):
         ctx = self._ctx()
         target = FakeMember("Botty", id=902, bot=True)
         await self.helperObj.challengeDuelHelper(ctx, target, 100)
-        ctx.response.send_message.assert_awaited_once_with("You can't wager against a bot!")
+        ctx.response.send_message.assert_awaited_once_with("You can't wager against a bot!", ephemeral=True)
 
     async def test_rejects_non_positive_amount(self):
         ctx = self._ctx()
         target = FakeMember("Bob", id=902)
         await self.helperObj.challengeDuelHelper(ctx, target, 0)
         ctx.response.send_message.assert_awaited_once_with(
-            "Wager amount must be greater than 0."
+            "Wager amount must be greater than 0.", ephemeral=True
         )
 
     async def test_rejects_insufficient_balance(self):
@@ -11825,7 +12230,7 @@ class ChallengeDuelHelperTests(HelperTestCase):
         target = FakeMember("Bob", id=902)
         await self.helperObj.challengeDuelHelper(ctx, target, 100)
         ctx.response.send_message.assert_awaited_once_with(
-            "You don't have enough gold for that! Your balance is 0."
+            "You don't have enough gold for that! Your balance is 0.", ephemeral=True
         )
 
     async def test_successful_challenge_posts_message_and_stores_pending_duel(self):
@@ -11980,6 +12385,26 @@ class DuelResultViewTests(HelperTestCase):
         self.assertEqual(self.cursor.fetchone()[0], "PENDING_ACCEPT")
         self.assertTrue(click.response.send_message.call_args.kwargs.get("ephemeral"))
 
+    async def test_result_click_rejects_a_non_admin_bystander(self):
+        result_message_id = await self._accept()
+        click = self._click(result_message_id, 999)
+        click.user.guild_permissions.manage_guild = False
+
+        await helper_module.DuelResultView(self.helperObj).challengerWon.callback(click)
+
+        self.assertTrue(click.response.send_message.call_args.kwargs.get("ephemeral"))
+        self.cursor.execute("SELECT state FROM duels WHERE messageId=?", (result_message_id,))
+        self.assertEqual(self.cursor.fetchone()[0], "AWAITING_RESULT")
+
+    async def test_result_click_allows_a_non_admin_participant(self):
+        result_message_id = await self._accept()
+        click = self._click(result_message_id, 902)  # the target, non-admin
+        click.user.guild_permissions.manage_guild = False
+
+        await helper_module.DuelResultView(self.helperObj).challengerWon.callback(click)
+
+        self.assertIn("reported as the winner", click.response.send_message.call_args.args[0])
+
     async def test_challenger_won_posts_a_confirmation_instead_of_paying_out(self):
         result_message_id = await self._accept()
 
@@ -12108,6 +12533,21 @@ class ConfirmDuelResultViewTests(HelperTestCase):
         for item in view.children:
             self.assertTrue(item.disabled)
 
+    async def test_interaction_check_rejects_a_bystander(self):
+        view = helper_module.ConfirmDuelResultView(self.helperObj, self.duel_id, True)
+        click = self._click(user_id=999)
+        click.user.guild_permissions.manage_guild = False
+
+        self.assertFalse(await view.interaction_check(click))
+        self.assertTrue(click.response.send_message.call_args.kwargs.get("ephemeral"))
+
+    async def test_interaction_check_allows_a_participant(self):
+        view = helper_module.ConfirmDuelResultView(self.helperObj, self.duel_id, True)
+        click = self._click(user_id=902)  # the target, not the challenger
+        click.user.guild_permissions.manage_guild = False
+
+        self.assertTrue(await view.interaction_check(click))
+
 
 class LeaderboardHelperTests(HelperTestCase):
     def _ctx(self, user_id=901, name="Alice", channel=None):
@@ -12138,7 +12578,7 @@ class LeaderboardHelperTests(HelperTestCase):
         await self.helperObj.leaderboardHelper(ctx, None, "desc")
 
         ctx.response.send_message.assert_awaited_once_with(
-            "Nobody has any stats to show yet in this server!"
+            "Nobody has any stats to show yet in this server!", ephemeral=True
         )
         self.cursor.execute("SELECT COUNT(*) FROM leaderboards")
         self.assertEqual(self.cursor.fetchone()[0], 0)
@@ -12298,10 +12738,13 @@ class LeaderboardHelperTests(HelperTestCase):
         self.assertIn(f"Ranked: {alice['ranked_wins']}W-{alice['ranked_losses']}L", lines[0])
 
 
-# cards:true mode: /my-teams-style one-player-full-/stats-embed-per-page
+# Cards mode: /my-teams-style one-player-full-/stats-embed-per-page
 # rendering, sourced from the same sorted/filtered entries a plain
 # /leaderboard would list, plus a Card/Back toggle over to that player's
-# actual trading card (see LeaderboardPagingView).
+# actual trading card (see LeaderboardPagingView). /leaderboard itself
+# always posts the ranked list first; these tests drive the view's own
+# Cards button (_handleLeaderboardViewCardsClick) to reach cards mode,
+# the same way a real user would, rather than a cards= command param.
 class LeaderboardCardsModeTests(HelperTestCase):
     def setUp(self):
         super().setUp()
@@ -12325,13 +12768,25 @@ class LeaderboardCardsModeTests(HelperTestCase):
         )
         self.db.commit()
 
+    # Posts the list (leaderboardHelper always starts there now) and
+    # clicks its Cards button, returning the posted FakeMessage so
+    # callers can inspect message.edit's own call args for the resulting
+    # cards-mode render.
+    async def _enter_cards_mode(self, ctx, stat, order, message_id):
+        posted = FakeMessage(id=message_id)
+        ctx.original_response.return_value = posted
+        await self.helperObj.leaderboardHelper(ctx, stat, order)
+        click = FakeInteraction(self.guild, ctx.user, channel=self.channel, message=posted)
+        await self.helperObj._handleLeaderboardViewCardsClick(click)
+        return posted
+
     async def test_renders_the_first_ranked_players_stats_embed(self):
         self._seed_players()
         ctx = self._ctx()
 
-        await self.helperObj.leaderboardHelper(ctx, None, "desc", cards=True)
+        posted = await self._enter_cards_mode(ctx, None, "desc", 7101)
 
-        kwargs = ctx.response.send_message.call_args.kwargs
+        kwargs = posted.edit.call_args.kwargs
         embed = kwargs["embed"]
         self.assertEqual(embed.title, "Alice's Stats")  # highest elo, descending
         self.assertIn("Player 1/2", embed.footer.text)
@@ -12341,54 +12796,69 @@ class LeaderboardCardsModeTests(HelperTestCase):
         self._seed_players()
         ctx = self._ctx()
 
-        await self.helperObj.leaderboardHelper(ctx, "elo", "asc", cards=True)
+        posted = await self._enter_cards_mode(ctx, "elo", "asc", 7102)
 
-        embed = ctx.response.send_message.call_args.kwargs["embed"]
+        embed = posted.edit.call_args.kwargs["embed"]
         self.assertEqual(embed.title, "Bob's Stats")  # lowest elo, ascending
 
     async def test_stores_the_cards_flag_alongside_the_rest_of_the_view_state(self):
         self._seed_players()
         ctx = self._ctx()
-        posted = FakeMessage(id=7171)
-        ctx.original_response.return_value = posted
 
-        await self.helperObj.leaderboardHelper(ctx, None, "desc", cards=True)
+        await self._enter_cards_mode(ctx, None, "desc", 7171)
 
         self.cursor.execute(
             "SELECT filter, sort_order, page, cards, cardShown FROM leaderboards WHERE messageId=7171"
         )
         self.assertEqual(self.cursor.fetchone(), (None, "desc", 0, 1, 0))
-        view = ctx.response.send_message.call_args.kwargs["view"]
-        self.assertIn(view.showCard, view.children)
-        self.assertNotIn(view.returnToStats, view.children)
 
     async def test_falls_back_gracefully_when_the_member_has_left(self):
         self._seed_players()
         self.guild.members = []  # Alice no longer resolvable as a guild member
         ctx = self._ctx()
 
-        await self.helperObj.leaderboardHelper(ctx, None, "desc", cards=True)
+        posted = await self._enter_cards_mode(ctx, None, "desc", 7103)
 
-        embed = ctx.response.send_message.call_args.kwargs["embed"]
+        embed = posted.edit.call_args.kwargs["embed"]
         # falls back to discord.User (fetch_user), which still has a name
         self.assertIn("Stats", embed.title)
 
-    async def test_no_entries_message_is_unaffected_by_cards_mode(self):
-        ctx = self._ctx()
-        await self.helperObj.leaderboardHelper(ctx, None, "desc", cards=True)
-        ctx.response.send_message.assert_awaited_once_with(
-            "Nobody has any stats to show yet in this server!"
+    async def test_cards_button_rejects_a_stale_or_gone_leaderboard(self):
+        click = FakeInteraction(
+            self.guild, FakeMember("Alice", id=901), channel=self.channel, message=FakeMessage(id=999)
         )
+        await self.helperObj._handleLeaderboardViewCardsClick(click)
+        self.assertTrue(click.response.send_message.call_args.kwargs.get("ephemeral"))
 
-    async def test_list_mode_never_gets_the_card_toggle(self):
+    async def test_list_mode_shows_the_cards_button_but_not_the_card_toggle(self):
         self._seed_players()
         ctx = self._ctx()
 
-        await self.helperObj.leaderboardHelper(ctx, None, "desc", cards=False)
+        await self.helperObj.leaderboardHelper(ctx, None, "desc")
 
         view = ctx.response.send_message.call_args.kwargs["view"]
+        self.assertIn(view.viewCards, view.children)
         self.assertNotIn(view.showCard, view.children)
         self.assertNotIn(view.returnToStats, view.children)
+        self.assertNotIn(view.backToList, view.children)
+
+    async def test_back_to_list_click_returns_to_the_ranked_list(self):
+        self._seed_players()
+        ctx = self._ctx()
+        posted = await self._enter_cards_mode(ctx, None, "desc", 7104)
+        posted.edit.reset_mock()
+
+        click = FakeInteraction(self.guild, ctx.user, channel=self.channel, message=posted)
+        await self.helperObj._handleLeaderboardBackToListClick(click)
+
+        kwargs = posted.edit.call_args.kwargs
+        self.assertIn("Alice", kwargs["embed"].description)
+        view = kwargs["view"]
+        self.assertIn(view.viewCards, view.children)
+        self.assertNotIn(view.showCard, view.children)
+        self.assertNotIn(view.backToList, view.children)
+        self.cursor.execute("SELECT cards, cardShown, page FROM leaderboards WHERE messageId=7104")
+        self.assertEqual(self.cursor.fetchone(), (0, 0, 0))
 
 
 class LeaderboardPagingViewCardsModeTests(HelperTestCase):
@@ -12632,6 +13102,34 @@ class TeamListPagingViewTests(HelperTestCase):
         self.assertIn("with Alice", embed.footer.text)
         self.assertIn("Page 2/2", embed.footer.text)
 
+    async def test_jump_button_opens_a_modal_sized_to_the_real_page_count(self):
+        view = helper_module.TeamListPagingView(self.helperObj)
+        click = self._click()
+        await view.jump.callback(click)
+
+        click.response.send_modal.assert_awaited_once()
+        modal = click.response.send_modal.call_args.args[0]
+        self.assertIsInstance(modal, helper_module._PageJumpModal)
+        self.assertIn("1-2", modal.page_input.label)  # 12 teams / 10 per page = 2 pages
+
+    async def test_jump_ignores_unknown_message(self):
+        view = helper_module.TeamListPagingView(self.helperObj)
+        click = self._click(message=FakeMessage(id=12345))
+        await view.jump.callback(click)
+        click.response.send_modal.assert_not_awaited()
+        self.assertTrue(click.response.send_message.call_args.kwargs.get("ephemeral"))
+
+    async def test_modal_submit_jumps_straight_to_the_typed_page(self):
+        click = self._click()
+        modal = helper_module._PageJumpModal(self.helperObj, "_handleTeamListPageClick", 2)
+        modal.page_input._value = "2"
+
+        await modal.on_submit(click)
+
+        self.assertEqual(self._page(), 1)
+        embed = click.response.edit_message.call_args.kwargs["embed"]
+        self.assertIn("Page 2/2", embed.footer.text)
+
 
 class MyTeamsPagingViewTests(_FakeLogoDirTestCase):
     def _ctx(self, user_id=901, name="Alice"):
@@ -12727,6 +13225,36 @@ class MyTeamsPagingViewTests(_FakeLogoDirTestCase):
         view = helper_module.MyTeamsPagingView(self.helperObj)
         click = self._click(user_id=999)
         await view.next.callback(click)
+        embed = click.response.edit_message.call_args.kwargs["embed"]
+        self.assertEqual(embed.title, "Charlie Stats")
+        for f in click.response.edit_message.call_args.kwargs["attachments"]:
+            f.close()
+
+    async def test_jump_button_opens_a_modal_sized_to_the_team_count(self):
+        view = helper_module.MyTeamsPagingView(self.helperObj)
+        click = self._click()
+        await view.jump.callback(click)
+
+        click.response.send_modal.assert_awaited_once()
+        modal = click.response.send_modal.call_args.args[0]
+        self.assertIsInstance(modal, helper_module._PageJumpModal)
+        self.assertIn("1-3", modal.page_input.label)
+
+    async def test_jump_ignores_unknown_message(self):
+        click = self._click(message=FakeMessage(id=12345))
+        view = helper_module.MyTeamsPagingView(self.helperObj)
+        await view.jump.callback(click)
+        click.response.send_modal.assert_not_awaited()
+        self.assertTrue(click.response.send_message.call_args.kwargs.get("ephemeral"))
+
+    async def test_modal_submit_jumps_straight_to_the_typed_team(self):
+        click = self._click()
+        modal = helper_module._PageJumpModal(self.helperObj, "_handleMyTeamsPageClick", 3)
+        modal.page_input._value = "3"
+
+        await modal.on_submit(click)
+
+        self.assertEqual(self._page(), 2)
         embed = click.response.edit_message.call_args.kwargs["embed"]
         self.assertEqual(embed.title, "Charlie Stats")
         for f in click.response.edit_message.call_args.kwargs["attachments"]:
@@ -12836,6 +13364,62 @@ class LeaderboardPagingViewTests(HelperTestCase):
     async def test_order_click_on_an_unknown_message_is_rejected(self):
         click = self._click(message=FakeMessage(id=424242))
         await helper_module.LeaderboardPagingView(self.helperObj).ascending.callback(click)
+        self.assertTrue(click.response.send_message.call_args.kwargs.get("ephemeral"))
+
+    async def test_jump_button_opens_a_modal_sized_to_the_real_page_count(self):
+        click = self._click()
+        await helper_module.LeaderboardPagingView(self.helperObj).jump.callback(click)
+
+        click.response.send_modal.assert_awaited_once()
+        modal = click.response.send_modal.call_args.args[0]
+        self.assertIsInstance(modal, helper_module._PageJumpModal)
+        self.assertIn("1-3", modal.page_input.label)  # 25 entries / 10 per page = 3 pages
+
+    async def test_jump_on_an_unknown_message_is_rejected(self):
+        click = self._click(message=FakeMessage(id=424242))
+        await helper_module.LeaderboardPagingView(self.helperObj).jump.callback(click)
+        click.response.send_modal.assert_not_awaited()
+        self.assertTrue(click.response.send_message.call_args.kwargs.get("ephemeral"))
+
+    async def test_modal_submit_jumps_straight_to_the_typed_page(self):
+        click = self._click()
+        modal = helper_module._PageJumpModal(self.helperObj, "_handleLeaderboardPageClick", 3)
+        modal.page_input._value = "3"
+
+        await modal.on_submit(click)
+
+        self.assertEqual(self._page(), 2)  # 1-based input, 0-based stored page
+        embed = click.response.edit_message.call_args.kwargs["embed"]
+        self.assertIn("Page 3/3", embed.footer.text)
+
+    async def test_modal_submit_clamps_past_the_last_page(self):
+        click = self._click()
+        modal = helper_module._PageJumpModal(self.helperObj, "_handleLeaderboardPageClick", 3)
+        modal.page_input._value = "999"
+
+        await modal.on_submit(click)
+
+        self.assertEqual(self._page(), 2)  # clamped to the real last page
+
+    async def test_modal_submit_rejects_non_numeric_input(self):
+        click = self._click()
+        modal = helper_module._PageJumpModal(self.helperObj, "_handleLeaderboardPageClick", 3)
+        modal.page_input._value = "abc"
+
+        await modal.on_submit(click)
+
+        self.assertEqual(self._page(), 1)  # untouched
+        click.response.send_message.assert_awaited_once()
+        self.assertTrue(click.response.send_message.call_args.kwargs.get("ephemeral"))
+
+    async def test_modal_submit_rejects_zero_and_negative_numbers(self):
+        click = self._click()
+        modal = helper_module._PageJumpModal(self.helperObj, "_handleLeaderboardPageClick", 3)
+        modal.page_input._value = "0"
+
+        await modal.on_submit(click)
+
+        self.assertEqual(self._page(), 1)  # untouched
         self.assertTrue(click.response.send_message.call_args.kwargs.get("ephemeral"))
 
 
@@ -13339,6 +13923,74 @@ class MyTeamAutocompleteTests(BotModuleTestCase):
         self.assertEqual(sorted(c.value for c in choices), ["Blue Sharks", "Red Dragons"])
         guild_mock.assert_called_once_with(ctx.guild.id)
         player_mock.assert_not_called()
+
+
+class TeamStatsAutocompleteTests(BotModuleTestCase):
+    async def test_empty_input_behaves_like_my_team_autocomplete(self):
+        ctx = self._ctx(manage_guild=False)
+        with patch.object(
+            self.bot.helperObj, "getTeamsForPlayer", return_value=_named_teams("Red Dragons")
+        ) as player_mock, patch.object(
+            self.bot.helperObj, "getTeamsForGuild", return_value=_named_teams("Red Dragons", "Blue Sharks")
+        ) as guild_mock:
+            choices = await self.bot.teamStatsAutocomplete(ctx, "")
+        self.assertEqual([c.value for c in choices], ["Red Dragons"])
+        player_mock.assert_called_once()
+        guild_mock.assert_not_called()
+
+    # The whole point of this override: once the caller actually types
+    # something, that's a deliberate search, so it widens to every team in
+    # the guild instead of staying scoped to just the caller's own.
+    async def test_non_empty_input_searches_every_team_in_the_guild(self):
+        ctx = self._ctx(manage_guild=False)
+        with patch.object(
+            self.bot.helperObj, "getTeamsForPlayer", return_value=[]
+        ) as player_mock, patch.object(
+            self.bot.helperObj, "getTeamsForGuild", return_value=_named_teams("Red Dragons", "Blue Sharks")
+        ) as guild_mock:
+            choices = await self.bot.teamStatsAutocomplete(ctx, "sha")
+        self.assertEqual([c.value for c in choices], ["Blue Sharks"])
+        guild_mock.assert_called_once_with(ctx.guild.id)
+        player_mock.assert_not_called()
+
+
+class WagerTeamAutocompleteTests(BotModuleTestCase):
+    async def test_suggests_the_current_games_real_team_names(self):
+        guild_id = 9320
+        await self._insert_guild_row(guild_id)
+        ctx = self._ctx(guild_id=guild_id)
+        team1, team2 = Team(), Team()
+        team1.set_name("Ravens")
+        team2.set_name("Falcons")
+        self.bot.helperObj.update(guild_id, "team1", team1.serializeTeam())
+        self.bot.helperObj.update(guild_id, "team2", team2.serializeTeam())
+
+        choices = await self.bot.wagerTeamAutocomplete(ctx, "")
+
+        self.assertEqual([(c.name, c.value) for c in choices], [("Ravens", "1"), ("Falcons", "2")])
+
+    async def test_filters_by_current_input(self):
+        guild_id = 9321
+        await self._insert_guild_row(guild_id)
+        ctx = self._ctx(guild_id=guild_id)
+        team1, team2 = Team(), Team()
+        team1.set_name("Ravens")
+        team2.set_name("Falcons")
+        self.bot.helperObj.update(guild_id, "team1", team1.serializeTeam())
+        self.bot.helperObj.update(guild_id, "team2", team2.serializeTeam())
+
+        choices = await self.bot.wagerTeamAutocomplete(ctx, "fal")
+
+        self.assertEqual([c.name for c in choices], ["Falcons"])
+
+    async def test_falls_back_to_generic_labels_for_an_unnamed_roster(self):
+        guild_id = 9322
+        await self._insert_guild_row(guild_id)
+        ctx = self._ctx(guild_id=guild_id)
+
+        choices = await self.bot.wagerTeamAutocomplete(ctx, "")
+
+        self.assertEqual([c.name for c in choices], ["Team 1", "Team 2"])
 
 
 class CardColorSchemeAutocompleteTests(BotModuleTestCase):
@@ -14005,12 +14657,41 @@ class GlobalErrorHandlerTests(BotModuleTestCase):
 
 class CommandDelegationTests(BotModuleTestCase):
     async def test_wager_passes_resolved_team_value(self):
-        ctx = self._ctx()
+        guild_id = 9309
+        await self._insert_guild_row(guild_id)
+        ctx = self._ctx(guild_id=guild_id)
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "wagerHelper", mock):
-            choice = app_commands.Choice(name="Team 2", value=2)
-            await self._command("wager team").callback(ctx, 250, choice)
+            await self._command("wager team").callback(ctx, 250, "2")
         mock.assert_awaited_once_with(ctx, 250, 2, None)
+
+    async def test_wager_resolves_the_teams_real_name_too(self):
+        guild_id = 9310
+        await self._insert_guild_row(guild_id)
+        ctx = self._ctx(guild_id=guild_id)
+        team1 = Team()
+        team1.set_name("Ravens")
+        team2 = Team()
+        team2.set_name("Falcons")
+        self.bot.helperObj.update(guild_id, "team1", team1.serializeTeam())
+        self.bot.helperObj.update(guild_id, "team2", team2.serializeTeam())
+
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "wagerHelper", mock):
+            await self._command("wager team").callback(ctx, 250, "falcons")
+        mock.assert_awaited_once_with(ctx, 250, 2, None)
+
+    async def test_wager_rejects_an_unrecognized_team(self):
+        guild_id = 9311
+        await self._insert_guild_row(guild_id)
+        ctx = self._ctx(guild_id=guild_id)
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "wagerHelper", mock):
+            await self._command("wager team").callback(ctx, 250, "Not A Team")
+        mock.assert_not_awaited()
+        args, kwargs = ctx.response.send_message.call_args
+        self.assertIn("Not A Team", args[0])
+        self.assertTrue(kwargs.get("ephemeral"))
 
     async def test_wager_against_delegates(self):
         ctx = self._ctx()
@@ -14032,7 +14713,7 @@ class CommandDelegationTests(BotModuleTestCase):
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "leaderboardHelper", mock):
             await self._command("leaderboard").callback(ctx)
-        mock.assert_awaited_once_with(ctx, None, "desc", False)
+        mock.assert_awaited_once_with(ctx, None, "desc")
 
     async def test_leaderboard_passes_resolved_filter_and_order(self):
         ctx = self._ctx()
@@ -14041,14 +14722,7 @@ class CommandDelegationTests(BotModuleTestCase):
             filter_choice = app_commands.Choice(name="Balance", value="balance")
             order_choice = app_commands.Choice(name="Ascending (lowest first)", value="asc")
             await self._command("leaderboard").callback(ctx, filter=filter_choice, order=order_choice)
-        mock.assert_awaited_once_with(ctx, "balance", "asc", False)
-
-    async def test_leaderboard_forwards_cards_true(self):
-        ctx = self._ctx()
-        mock = AsyncMock()
-        with patch.object(self.bot.helperObj, "leaderboardHelper", mock):
-            await self._command("leaderboard").callback(ctx, cards=True)
-        mock.assert_awaited_once_with(ctx, None, "desc", True)
+        mock.assert_awaited_once_with(ctx, "balance", "asc")
 
     async def test_create_tournament_delegates(self):
         ctx = self._ctx()
@@ -14268,6 +14942,12 @@ class HelpCommandTests(BotModuleTestCase):
         message = ctx.response.send_message.call_args.args[0]
         self.assertIn("addshockwave.com", message)
 
+    async def test_no_command_points_new_players_at_setup(self):
+        ctx = self._ctx()
+        await self._command("help").callback(ctx, command=None)
+        message = ctx.response.send_message.call_args.args[0]
+        self.assertIn("/setup", message)
+
     async def test_known_command_describes_it_with_usage(self):
         ctx = self._ctx()
         await self._command("help").callback(ctx, command="wager team")
@@ -14422,9 +15102,10 @@ class RollCommandTests(BotModuleTestCase):
     async def test_rejects_numbers_not_greater_than_one(self):
         ctx = self._ctx()
         await self._command("roll").callback(ctx, num=1)
-        ctx.response.send_message.assert_awaited_once_with(
-            "Please use a number greater than 1."
-        )
+        ctx.response.send_message.assert_awaited_once()
+        args, kwargs = ctx.response.send_message.call_args
+        self.assertIn("1", args[0])
+        self.assertTrue(kwargs.get("ephemeral"))
 
     async def test_rolls_within_requested_range(self):
         ctx = self._ctx()
@@ -14461,7 +15142,7 @@ class ClearCommandTests(BotModuleTestCase):
             "You need the Manage Server permission to use /clear."
         )
 
-    async def test_clear_channels_wipes_the_saved_channel_names(self):
+    async def test_clear_channels_does_not_wipe_channel_names_until_confirmed(self):
         guild_id = 903
         await self._insert_guild_row(guild_id)
         self.bot.helperObj.update(guild_id, "channel1", "Red")
@@ -14469,10 +15150,17 @@ class ClearCommandTests(BotModuleTestCase):
 
         await self._command("clear channels").callback(ctx)
 
-        self.assertEqual(self.bot.helperObj.get(guild_id, "channel1"), "")
-        ctx.response.send_message.assert_awaited_once_with("Cleared!")
+        self.assertEqual(self.bot.helperObj.get(guild_id, "channel1"), "Red")
+        view = ctx.response.send_message.call_args.kwargs["view"]
+        self.assertIsInstance(view, helper_module.ConfirmClearActionView)
 
-    async def test_clear_tournament_also_wipes_its_match_history(self):
+        click = self._ctx(guild_id=guild_id)
+        await view.confirm.callback(click)
+
+        self.assertEqual(self.bot.helperObj.get(guild_id, "channel1"), "")
+        self.assertIn("channel names", click.response.edit_message.call_args.kwargs["content"])
+
+    async def test_clear_tournament_does_not_wipe_match_history_until_confirmed(self):
         guild_id = 9037
         await self._insert_guild_row(guild_id)
         self.bot.helperObj.saveTournament(guild_id, Tournament("Spring Cup", 2, 4))
@@ -14489,6 +15177,12 @@ class ClearCommandTests(BotModuleTestCase):
 
         # regression: clear_tournament used to write to a dead servers.tournament
         # column and never actually touch a real /tournament-create tournament.
+        self.assertIsNotNone(self.bot.helperObj.getTournament(guild_id))
+        view = ctx.response.send_message.call_args.kwargs["view"]
+
+        click = self._ctx(guild_id=guild_id)
+        await view.confirm.callback(click)
+
         self.assertIsNone(self.bot.helperObj.getTournament(guild_id))
         self.bot.cursor.execute(
             "SELECT COUNT(*) FROM tournament_matches WHERE guildId=?", (guild_id,)
@@ -14502,8 +15196,77 @@ class ClearCommandTests(BotModuleTestCase):
         ctx = self._ctx(guild_id=guild_id)
 
         await self._command("clear teams").callback(ctx)
+        view = ctx.response.send_message.call_args.kwargs["view"]
+        click = self._ctx(guild_id=guild_id)
+        await view.confirm.callback(click)
 
         self.assertEqual(self.bot.helperObj.get(guild_id, "channel1"), "Red")
+
+    async def test_clear_teams_does_not_wipe_the_draft_until_confirmed(self):
+        guild_id = 9033
+        await self._insert_guild_row(guild_id)
+        self.bot.helperObj.update(guild_id, "mode", "Draft")
+        ctx = self._ctx(guild_id=guild_id)
+
+        await self._command("clear teams").callback(ctx)
+
+        self.assertEqual(self.bot.helperObj.get(guild_id, "mode"), "Draft")
+        view = ctx.response.send_message.call_args.kwargs["view"]
+        self.assertIsInstance(view, helper_module.ConfirmClearActionView)
+
+        click = self._ctx(guild_id=guild_id)
+        await view.confirm.callback(click)
+
+        self.assertEqual(self.bot.helperObj.get(guild_id, "mode"), "Normal")
+        click.response.edit_message.assert_awaited_once_with(content="Cleared!", view=view)
+
+    async def test_cancelling_clear_teams_leaves_the_draft_untouched(self):
+        guild_id = 9039
+        await self._insert_guild_row(guild_id)
+        self.bot.helperObj.update(guild_id, "mode", "Draft")
+        ctx = self._ctx(guild_id=guild_id)
+
+        await self._command("clear teams").callback(ctx)
+        view = ctx.response.send_message.call_args.kwargs["view"]
+
+        click = self._ctx(guild_id=guild_id)
+        await view.cancel.callback(click)
+
+        self.assertEqual(self.bot.helperObj.get(guild_id, "mode"), "Draft")
+        click.response.edit_message.assert_awaited_once_with(
+            content="Cancelled. Nothing was cleared.", view=view
+        )
+
+    async def test_clear_action_view_rejects_non_invoker(self):
+        guild_id = 9040
+        await self._insert_guild_row(guild_id)
+        ctx = self._ctx(guild_id=guild_id)
+
+        await self._command("clear teams").callback(ctx)
+        view = ctx.response.send_message.call_args.kwargs["view"]
+
+        stranger = FakeInteraction(FakeGuild(id=guild_id), FakeMember("Stranger", id=999))
+        allowed = await view.interaction_check(stranger)
+
+        self.assertFalse(allowed)
+        stranger.response.send_message.assert_awaited_once()
+        self.assertTrue(stranger.response.send_message.call_args.kwargs.get("ephemeral"))
+
+    async def test_clear_action_view_timeout_marks_the_prompt_expired(self):
+        guild_id = 9041
+        await self._insert_guild_row(guild_id)
+        self.bot.helperObj.update(guild_id, "mode", "Draft")
+        ctx = self._ctx(guild_id=guild_id)
+
+        await self._command("clear teams").callback(ctx)
+        view = ctx.response.send_message.call_args.kwargs["view"]
+
+        await view.on_timeout()
+
+        self.assertEqual(self.bot.helperObj.get(guild_id, "mode"), "Draft")
+        view.message.edit.assert_awaited_once()
+        self.assertIn("expired", view.message.edit.call_args.kwargs["content"])
+        self.assertTrue(view.confirm.disabled)
 
     async def test_clear_economy_does_not_wipe_stats_until_confirmed(self):
         guild_id = 9032
@@ -14517,9 +15280,7 @@ class ClearCommandTests(BotModuleTestCase):
 
         await self._command("clear economy").callback(ctx)
 
-        # "Cleared!" goes out immediately for the non-destructive team wipe...
-        ctx.response.send_message.assert_awaited_once_with("Cleared!")
-        # ...but the guild-wide economy wipe waits on the confirmation view.
+        # the guild-wide economy wipe waits on the confirmation view.
         self.bot.cursor.execute("SELECT COUNT(*) FROM economy WHERE guildId=?", (guild_id,))
         self.assertEqual(self.bot.cursor.fetchone()[0], 1)
         ctx.followup.send.assert_awaited_once()
@@ -14770,6 +15531,35 @@ class NotifyCommandTests(BotModuleTestCase):
             await self._command("notify").callback(ctx, role=role)
 
         ctx.response.send_message.assert_awaited_once_with("Sent an invite to 1 member in Squad!")
+
+    async def test_notify_member_reports_closed_dms(self):
+        guild_id = 910
+        await self._insert_guild_row(guild_id)
+        ctx = self._ctx_in_voice(guild_id=guild_id)
+        target = FakeMember("Target")
+
+        mock = AsyncMock(return_value=False)
+        with patch.object(self.bot.helperObj, "notifyHelper", mock):
+            await self._command("notify").callback(ctx, member=target)
+
+        ctx.response.send_message.assert_awaited_once()
+        args, kwargs = ctx.response.send_message.call_args
+        self.assertIn("Target", args[0])
+        self.assertTrue(kwargs.get("ephemeral"))
+
+    async def test_notify_role_reports_partial_dm_failures(self):
+        guild_id = 911
+        await self._insert_guild_row(guild_id)
+        ctx = self._ctx_in_voice(guild_id=guild_id)
+        role = SimpleNamespace(name="Squad", members=[FakeMember("A"), FakeMember("B"), FakeMember("C")])
+
+        mock = AsyncMock(side_effect=[True, False, True])
+        with patch.object(self.bot.helperObj, "notifyHelper", mock):
+            await self._command("notify").callback(ctx, role=role)
+
+        ctx.response.send_message.assert_awaited_once_with(
+            "Sent an invite to 2/3 members in Squad; 1 couldn't be DMed."
+        )
 
     async def test_notify_rejects_when_neither_member_nor_role_given(self):
         guild_id = 905
