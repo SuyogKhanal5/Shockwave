@@ -71,7 +71,8 @@ SERVERS_SCHEMA = (
     "active_tournament_match_id, wager_channel, betting_timer_seconds, "
     "roster_team1_message_id, roster_team2_message_id, roster_channel_id, "
     "roster_use_roles DEFAULT 0, default_elo, betting_opened_at, disliked_role_user_ids, "
-    "draft_pick_page DEFAULT 0, draft_players_message_id, draft_snake DEFAULT 0)"
+    "draft_pick_page DEFAULT 0, draft_players_message_id, draft_snake DEFAULT 0, "
+    "betting_closed_message_id, make_teams_message_ids, matchup_message_id, roster_starting DEFAULT 0)"
 )
 ECONOMY_SCHEMA = (
     "CREATE TABLE economy(guildId, userId, username, balance, wins, losses, "
@@ -129,7 +130,7 @@ TEAM_INVITES_SCHEMA = (
 TOURNAMENT_MATCHES_SCHEMA = (
     "CREATE TABLE tournament_matches(id INTEGER PRIMARY KEY AUTOINCREMENT, guildId, roundIndex, "
     "nodeIndex, team1, team2, state, mode, messageId, channelId, winner, bracketType, "
-    "bettingClosed DEFAULT 0, settledWagers)"
+    "bettingClosed DEFAULT 0, settledWagers, roundBettingMessageId, roundBettingClosedMessageId)"
 )
 TOURNAMENT_WAGERS_SCHEMA = (
     "CREATE TABLE tournament_wagers(matchId, guildId, userId, username, team, amount, "
@@ -175,7 +176,7 @@ def insert_guild_row(cursor, db, guild_id=GUILD_ID, name="Test Guild"):
     cursor.execute(
         "INSERT INTO servers VALUES(?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, "
         "NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'NONE', NULL, NULL, 0, NULL, NULL, ?, "
-        "NULL, NULL, NULL, 0, NULL, NULL, NULL, 0, NULL, 0)",
+        "NULL, NULL, NULL, 0, NULL, NULL, NULL, 0, NULL, 0, NULL, NULL, NULL, 0)",
         (guild_id, name, helper_module.BETTING_DURATION_SECONDS),
     )
     db.commit()
@@ -279,6 +280,7 @@ class FakeMessage:
         self.clear_reaction = AsyncMock()
         self.clear_reactions = AsyncMock()
         self.edit = AsyncMock()
+        self.delete = AsyncMock()
 
 
 class FakeChannel:
@@ -725,6 +727,38 @@ class FinalizeRosterTests(HelperTestCase):
         self.assertNotIn(view.balanceRoles, view.children)
         self.assertEqual(self.helperObj.get(GUILD_ID, "roster_use_roles"), 0)
 
+    async def test_intro_messages_are_stored_for_later_cleanup(self):
+        channel = FakeChannel("game-chat")
+        team1_message = FakeMessage()
+        team2_message = FakeMessage()
+        team2_message.channel = channel
+        team1 = self._team("Team 1", 3)
+        team2 = self._team("Team 2", 3, start_id=400)
+        intro1, intro2 = FakeMessage(id=501), FakeMessage(id=502)
+
+        await self.helperObj._finalizeRoster(
+            GUILD_ID, team1_message, team2_message, team1, team2, False,
+            intro_messages=[intro1, intro2],
+        )
+
+        self.assertEqual(self.helperObj.get(GUILD_ID, "make_teams_message_ids"), "501,502")
+
+    async def test_no_intro_messages_leaves_the_column_untouched(self):
+        # The draft flow tracks make_teams_message_ids itself (see
+        # captainsHelper/_applyDraftPick) well before _finalizeRoster ever
+        # runs for it; passing nothing here must not wipe that out.
+        channel = FakeChannel("game-chat")
+        team1_message = FakeMessage()
+        team2_message = FakeMessage()
+        team2_message.channel = channel
+        team1 = self._team("Team 1", 3)
+        team2 = self._team("Team 2", 3, start_id=400)
+        self.helperObj.update(GUILD_ID, "make_teams_message_ids", "999")
+
+        await self.helperObj._finalizeRoster(GUILD_ID, team1_message, team2_message, team1, team2, False)
+
+        self.assertEqual(self.helperObj.get(GUILD_ID, "make_teams_message_ids"), "999")
+
 
 class FindRosterVoiceChannelTests(HelperTestCase):
     def test_finds_first_rostered_player_currently_in_voice(self):
@@ -845,8 +879,54 @@ class RosterActionViewTests(HelperTestCase):
         self.member2.move_to.assert_awaited_once_with(self.channel2)
         open_betting.assert_awaited_once_with(GUILD_ID, self.channel)
         matchup.assert_awaited_once()
-        self.assertIsNone(self.helperObj.get(GUILD_ID, "roster_team2_message_id"))
+        self.assertEqual(self.helperObj.get(GUILD_ID, "roster_starting"), 1)
         self.assertEqual(self.helperObj.get(GUILD_ID, "original_channel"), "Lobby")
+
+    # roster_team2_message_id itself stays intact (not cleared) so
+    # recordResult's own cleanup can still find team2's roster message by
+    # it once the game actually ends; roster_starting is the real
+    # anti-double-click mutex instead.
+    async def test_does_not_clear_team2_message_id_and_sets_roster_starting_instead(self):
+        with patch.object(self.helperObj, "_openBetting", AsyncMock()), \
+             patch.object(self.helperObj, "_sendMatchupImage", AsyncMock()):
+            await self.helperObj._handleRosterStartClick(self._click(message_id=112), move=True)
+
+        self.assertEqual(self.helperObj.get(GUILD_ID, "roster_team2_message_id"), 112)
+        self.assertEqual(self.helperObj.get(GUILD_ID, "roster_starting"), 1)
+
+    async def test_a_second_start_click_while_the_first_is_still_running_is_rejected(self):
+        self.helperObj.update(GUILD_ID, "roster_starting", 1)
+        click = self._click()
+
+        await self.helperObj._handleRosterStartClick(click, move=True)
+
+        click.response.send_message.assert_awaited_once_with("This roster is no longer live.", ephemeral=True)
+        self.member1.move_to.assert_not_awaited()
+
+    async def test_deletes_the_make_teams_intro_message_once_the_graphic_posts(self):
+        # The matchup graphic (posted right before this) already shows
+        # both full rosters, so the original "Teams created!"-style text
+        # reply has nothing left to say - gone now rather than waiting for
+        # the whole game to finish (see recordResult's own, later,
+        # roster-embed cleanup).
+        intro_message = FakeMessage(id=113, channel=self.channel)
+        self.channel._sent_messages[intro_message.id] = intro_message
+        team1_message = FakeMessage(id=114, channel=self.channel)
+        self.channel._sent_messages[team1_message.id] = team1_message
+        self.helperObj.update(GUILD_ID, "roster_channel_id", self.channel.id)
+        self.helperObj.update(GUILD_ID, "roster_team1_message_id", team1_message.id)
+        self.helperObj.update(GUILD_ID, "make_teams_message_ids", "113")
+
+        with patch.object(self.helperObj, "_openBetting", AsyncMock()), \
+             patch.object(self.helperObj, "_sendMatchupImage", AsyncMock()):
+            await self.helperObj._handleRosterStartClick(self._click(), move=True)
+
+        intro_message.delete.assert_awaited_once()
+        self.assertIsNone(self.helperObj.get(GUILD_ID, "make_teams_message_ids"))
+        # The roster embeds themselves are a different cleanup, still owed
+        # to recordResult once the game actually ends, not here.
+        team1_message.delete.assert_not_awaited()
+        self.assertEqual(self.helperObj.get(GUILD_ID, "roster_team1_message_id"), team1_message.id)
 
     async def test_clears_the_view_on_the_roster_message_afterward(self):
         with patch.object(self.helperObj, "_openBetting", AsyncMock()), \
@@ -855,6 +935,29 @@ class RosterActionViewTests(HelperTestCase):
             await self.helperObj._handleRosterStartClick(click, move=True)
 
         click.message.edit.assert_awaited_once_with(view=None)
+
+    async def test_passes_roster_use_roles_through_to_the_matchup_image(self):
+        self.helperObj.update(GUILD_ID, "roster_use_roles", 1)
+        with patch.object(self.helperObj, "_openBetting", AsyncMock()), \
+             patch.object(self.helperObj, "_sendMatchupImage", AsyncMock()) as matchup:
+            await self.helperObj._handleRosterStartClick(self._click(), move=True)
+
+        self.assertTrue(matchup.call_args.kwargs.get("use_roles"))
+
+    async def test_no_roles_used_passes_false_to_the_matchup_image(self):
+        self.helperObj.update(GUILD_ID, "roster_use_roles", 0)
+        with patch.object(self.helperObj, "_openBetting", AsyncMock()), \
+             patch.object(self.helperObj, "_sendMatchupImage", AsyncMock()) as matchup:
+            await self.helperObj._handleRosterStartClick(self._click(), move=True)
+
+        self.assertFalse(matchup.call_args.kwargs.get("use_roles"))
+
+    async def test_passes_guild_id_through_to_the_matchup_image(self):
+        with patch.object(self.helperObj, "_openBetting", AsyncMock()), \
+             patch.object(self.helperObj, "_sendMatchupImage", AsyncMock()) as matchup:
+            await self.helperObj._handleRosterStartClick(self._click(), move=True)
+
+        self.assertEqual(matchup.call_args.kwargs.get("guild_id"), GUILD_ID)
 
     async def test_move_false_opens_betting_without_moving_anyone(self):
         with patch.object(self.helperObj, "_openBetting", AsyncMock()) as open_betting, \
@@ -865,7 +968,7 @@ class RosterActionViewTests(HelperTestCase):
         self.member2.move_to.assert_not_awaited()
         open_betting.assert_awaited_once_with(GUILD_ID, self.channel)
         matchup.assert_awaited_once()
-        self.assertIsNone(self.helperObj.get(GUILD_ID, "roster_team2_message_id"))
+        self.assertEqual(self.helperObj.get(GUILD_ID, "roster_starting"), 1)
         # Cleared, not left alone, see test_move_false_clears_a_previously_set_original_channel.
         self.assertEqual(self.helperObj.get(GUILD_ID, "original_channel"), "")
         self.assertNotIn("Moved!", [c.args[0] for c in self.channel.send.call_args_list])
@@ -896,7 +999,7 @@ class RosterActionViewTests(HelperTestCase):
             await self.helperObj._handleRosterStartClick(self._click(), move=False)
 
         open_betting.assert_awaited_once_with(GUILD_ID, self.channel)
-        self.assertIsNone(self.helperObj.get(GUILD_ID, "roster_team2_message_id"))
+        self.assertEqual(self.helperObj.get(GUILD_ID, "roster_starting"), 1)
 
     async def test_nobody_in_voice_sends_a_message_and_does_not_start(self):
         self.member1.voice = None
@@ -1638,6 +1741,12 @@ class CaptainsDraftPickTests(HelperTestCase):
         # first posted the roster embeds to for _updateDraftEmbeds' own
         # fetch_message(id) to resolve anything.
         self.channel = FakeChannel("draft-chat")
+        # Only actually set once _draft_setup runs captainsHelper for real;
+        # a test that pokes DB state directly without ever posting a real
+        # picker message (e.g. an already-empty-pool click) has no message
+        # to reference, same as a None interaction.message would mean for
+        # a real, no-longer-live Discord message.
+        self.picker_message = None
 
     async def _draft_setup(self, pool_ids_names, snake=False):
         captain1 = FakeMember("Cap1", id=401)
@@ -1645,6 +1754,12 @@ class CaptainsDraftPickTests(HelperTestCase):
         pool = [FakeMember(name, id=pid) for pid, name in pool_ids_names]
         ctx = self._ctx(captain1, captain2, pool)
         await self.helperObj.captainsHelper(ctx, captain1, captain2, snake=snake)
+        # captainsHelper's own LAST channel.send is the picker view message
+        # itself (after printEmbed's team/player embeds); every subsequent
+        # pick edits THIS SAME message in place (never posts a new one), the
+        # same way a real Discord button click's own interaction.message is
+        # always the message its button lives on.
+        self.picker_message = list(self.channel._sent_messages.values())[-1]
         return captain1, captain2, pool, ctx
 
     def _ctx(self, captain1, captain2, pool_members, user=None):
@@ -1660,7 +1775,7 @@ class CaptainsDraftPickTests(HelperTestCase):
         return FakeInteraction(self.guild, user, channel=self.channel)
 
     def _pick_ctx(self, user):
-        return FakeInteraction(self.guild, user, channel=self.channel)
+        return FakeInteraction(self.guild, user, channel=self.channel, message=self.picker_message)
 
     def _slot_buttons(self, view):
         return [c for c in view.children if isinstance(c, helper_module._DraftPickSlotButton)]
@@ -1806,6 +1921,26 @@ class CaptainsDraftPickTests(HelperTestCase):
         pick_ctx.response.edit_message.assert_awaited_once_with(content="Pool1 added! Draft complete.", view=None)
         last_message = pick_ctx.channel.send.call_args_list[-1].args[0]
         self.assertIn("Press Start", last_message)
+
+    async def test_draft_complete_accumulates_every_make_teams_message_for_later_cleanup(self):
+        captain1, captain2, pool, ctx = await self._draft_setup([(501, "Pool1")])
+        intro_id = self.helperObj.get(GUILD_ID, "make_teams_message_ids")
+        # captainsHelper's own intro reply is already tracked the moment
+        # the draft starts, well before the draft (or _finalizeRoster)
+        # ever finishes.
+        self.assertEqual(intro_id, str(ctx.original_response.return_value.id))
+        pool_message_id = self.helperObj.get(GUILD_ID, "draft_players_message_id")
+        picker_message_id = self.picker_message.id
+
+        pick_ctx = self._pick_ctx(captain1)
+        await self.helperObj._handleDraftPickSlotClick(pick_ctx, 0)
+
+        ready_message = list(self.channel._sent_messages.values())[-1]
+        all_ids = self.helperObj.get(GUILD_ID, "make_teams_message_ids").split(",")
+        self.assertEqual(
+            set(all_ids),
+            {intro_id, str(pool_message_id), str(picker_message_id), str(ready_message.id)},
+        )
 
     async def test_pick_edits_the_existing_roster_embeds_instead_of_posting_new_ones(self):
         captain1, captain2, pool, ctx = await self._draft_setup([(501, "Pool1"), (502, "Pool2")])
@@ -1967,83 +2102,40 @@ class CaptainsDraftPickTests(HelperTestCase):
         pick_ctx.response.edit_message.assert_not_awaited()
 
 
-class TestDraftHelperTests(HelperTestCase):
-    def _ctx(self, user=None, members=()):
+class TestImageHelperTests(HelperTestCase):
+    def _ctx(self, user=None):
         user = user if user is not None else FakeMember("Tester", id=901)
-        self.guild.members = [user] + list(members)
         return FakeInteraction(self.guild, user)
 
-    async def test_rejects_when_fewer_than_ten_non_bot_members(self):
-        others = [FakeMember(f"P{i}", id=1000 + i) for i in range(9)]
-        ctx = self._ctx(members=others)
+    async def test_posts_a_rendered_matchup_image(self):
+        ctx = self._ctx()
 
-        await self.helperObj.testDraftHelper(ctx)
+        await self.helperObj.testImageHelper(ctx)
 
-        ctx.response.send_message.assert_awaited_once_with(
-            "Need at least 10 other non-bot members in this server to test with; found 9.", ephemeral=True
-        )
+        ctx.response.send_message.assert_awaited_once()
+        file = ctx.response.send_message.call_args.kwargs["file"]
+        self.assertIsInstance(file, discord.File)
+
+    async def test_renders_with_roles_showing(self):
+        ctx = self._ctx()
+
+        with patch.object(
+            self.helperObj, "_renderMatchupImage", wraps=self.helperObj._renderMatchupImage
+        ) as render:
+            await self.helperObj.testImageHelper(ctx)
+
+        self.assertTrue(render.call_args.args[-1])  # use_roles positional arg
+
+    async def test_does_not_touch_any_guild_state(self):
+        # Purely a render preview - nothing here is a real roster, so
+        # unlike every real team-formation path this must not write team1/
+        # team2 (or anything else) to the guild's own row.
+        ctx = self._ctx()
+
+        await self.helperObj.testImageHelper(ctx)
+
         self.assertIsNone(self.helperObj.get(GUILD_ID, "team1"))
-
-    async def test_ignores_bots_and_the_caller_when_counting_candidates(self):
-        others = [FakeMember(f"P{i}", id=1000 + i) for i in range(10)]
-        bots = [FakeMember(f"Bot{i}", id=2000 + i, bot=True) for i in range(3)]
-        user = FakeMember("Tester", id=901)
-        ctx = self._ctx(user=user, members=others + bots)
-
-        await self.helperObj.testDraftHelper(ctx)
-
-        players = self.deserialize_team("players")
-        self.assertEqual(len(players.get_players()), 10)
-        picked_ids = {p.get_id() for p in players.get_players()}
-        self.assertNotIn(901, picked_ids)
-        self.assertTrue(picked_ids <= {m.id for m in others})
-
-    async def test_sets_the_caller_as_both_captains(self):
-        others = [FakeMember(f"P{i}", id=1000 + i) for i in range(10)]
-        user = FakeMember("Tester", id=901)
-        ctx = self._ctx(user=user, members=others)
-
-        await self.helperObj.testDraftHelper(ctx)
-
-        captain1 = Player()
-        captain1.deserializePlayer(self.helperObj.get(GUILD_ID, "captain1"))
-        captain2 = Player()
-        captain2.deserializePlayer(self.helperObj.get(GUILD_ID, "captain2"))
-        self.assertEqual(captain1.get_id(), 901)
-        self.assertEqual(captain2.get_id(), 901)
-
-    async def test_always_runs_as_a_snake_draft(self):
-        others = [FakeMember(f"P{i}", id=1000 + i) for i in range(10)]
-        ctx = self._ctx(members=others)
-
-        await self.helperObj.testDraftHelper(ctx)
-
-        self.assertEqual(self.helperObj.get(GUILD_ID, "draft_snake"), 1)
-        message = ctx.response.send_message.call_args.args[0]
-        self.assertIn("snake draft", message)
-
-    async def test_caller_can_pick_for_both_turns(self):
-        others = [FakeMember(f"P{i}", id=1000 + i) for i in range(10)]
-        user = FakeMember("Tester", id=901)
-        ctx = self._ctx(user=user, members=others)
-        await self.helperObj.testDraftHelper(ctx)
-
-        turn1_ctx = FakeInteraction(self.guild, user)
-        self.assertTrue(await self.helperObj._isDraftPickTurn(turn1_ctx))
-
-        self.helperObj.update(GUILD_ID, "turn", 2)
-        turn2_ctx = FakeInteraction(self.guild, user)
-        self.assertTrue(await self.helperObj._isDraftPickTurn(turn2_ctx))
-
-    async def test_posts_the_picker_view(self):
-        others = [FakeMember(f"P{i}", id=1000 + i) for i in range(10)]
-        user = FakeMember("Tester", id=901)
-        ctx = self._ctx(user=user, members=others)
-
-        await self.helperObj.testDraftHelper(ctx)
-
-        last_call = ctx.channel.send.call_args_list[-1]
-        self.assertIsInstance(last_call.kwargs["view"], helper_module.CaptainsDraftPickView)
+        self.assertIsNone(self.helperObj.get(GUILD_ID, "team2"))
 
 
 class ClearTeamsHelperTests(HelperTestCase):
@@ -5941,6 +6033,133 @@ class RenderMatchupImageTests(_FakeLogoDirTestCase):
         )
 
 
+class RoleAssignmentsTests(HelperTestCase):
+    def _team_of_five(self, name="Red"):
+        team = Team()
+        team.set_name(name)
+        for i, role in enumerate(helper_module.SETUP_ROLE_NAMES):
+            team.add_player(Player(900 + i, f"{role}Player"))
+        return team
+
+    def test_maps_players_to_roles_positionally(self):
+        team = self._team_of_five()
+        assignments = self.helperObj._roleAssignments(team, use_roles=True)
+        self.assertEqual(
+            assignments,
+            {900: "Top", 901: "Jungle", 902: "Mid", 903: "Bottom", 904: "Support"},
+        )
+
+    def test_empty_when_use_roles_is_false(self):
+        team = self._team_of_five()
+        self.assertEqual(self.helperObj._roleAssignments(team, use_roles=False), {})
+
+    def test_empty_when_not_exactly_five_players(self):
+        team = self._team_of_five()
+        team.add_player(Player(999, "Sixth"))
+        self.assertEqual(self.helperObj._roleAssignments(team, use_roles=True), {})
+
+
+# Original, solid-color placeholder squares (not any real game's artwork),
+# same "generate a tiny real decodable PNG per name" shape
+# _FakeLogoDirTestCase already uses for team logos, just pointed at
+# ROLE_ICON_DIR/SETUP_ROLE_NAMES instead of TEAM_LOGO_DIR.
+class _FakeRoleIconDirTestCase(_FakeLogoDirTestCase):
+    def setUp(self):
+        super().setUp()
+        self._role_icon_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        for role in helper_module.SETUP_ROLE_NAMES:
+            Image.new("RGBA", (4, 4), (0, 200, 0, 255)).save(
+                os.path.join(self._role_icon_dir.name, f"{role.lower()}.png")
+            )
+        self._role_icon_dir_patch = patch.object(helper_module, "ROLE_ICON_DIR", self._role_icon_dir.name)
+        self._role_icon_dir_patch.start()
+        # Keyed by (path, size); a fresh tempdir every test means a cache
+        # entry left over from an earlier test would resolve to a path
+        # that no longer exists.
+        helper_module._role_icon_cache.clear()
+
+    def tearDown(self):
+        self._role_icon_dir_patch.stop()
+        self._role_icon_dir.cleanup()
+        helper_module._role_icon_cache.clear()
+        super().tearDown()
+
+
+class RoleIconImageTests(_FakeRoleIconDirTestCase):
+    def test_loads_and_resizes_an_existing_icon(self):
+        icon = self.helperObj._roleIconImage("Top", 8)
+        self.assertIsNotNone(icon)
+        self.assertLessEqual(icon.width, 8)
+        self.assertLessEqual(icon.height, 8)
+
+    def test_caches_repeat_loads_of_the_same_role_and_size(self):
+        first = self.helperObj._roleIconImage("Jungle", 8)
+        second = self.helperObj._roleIconImage("Jungle", 8)
+        self.assertIs(first, second)
+
+    def test_missing_icon_file_returns_none_instead_of_crashing(self):
+        self.assertIsNone(self.helperObj._roleIconImage("Nonexistent", 8))
+
+
+class MatchupRoleIconTests(_FakeRoleIconDirTestCase):
+    def _team_of_five(self, name, captain_id=901, captain_name="Alice"):
+        team = Team()
+        team.set_name(name)
+        captain = None
+        for i, role in enumerate(helper_module.SETUP_ROLE_NAMES):
+            player_id = captain_id if i == 0 else 900 + i
+            player_name = captain_name if i == 0 else f"{role}Player"
+            player = Player(player_id, player_name)
+            team.add_player(player)
+            if i == 0:
+                captain = player
+        team.set_captain(captain)
+        return team
+
+    def test_matchup_image_widens_when_roles_are_used(self):
+        team1 = self._team_of_five("Red")
+        team2 = self._team_of_five("Blue", captain_id=902, captain_name="Bob")
+
+        without_roles = self.helperObj._renderMatchupImage(
+            1, team1, team2, "Round 1", "Cup", "Test Guild", use_roles=False
+        )
+        with_roles = self.helperObj._renderMatchupImage(
+            2, team1, team2, "Round 1", "Cup", "Test Guild", use_roles=True
+        )
+
+        self.assertGreater(with_roles.width, without_roles.width)
+
+    def test_renders_without_crashing_when_a_teams_size_isnt_five(self):
+        team1 = self._team_of_five("Red")
+        small_team = Team()
+        small_team.set_name("Blue")
+        small_team.add_player(Player(902, "Bob"))
+
+        image = self.helperObj._renderMatchupImage(
+            1, team1, small_team, "Round 1", "Cup", "Test Guild", use_roles=True
+        )
+        self.assertGreater(image.width, 0)
+
+    def test_missing_icon_files_degrade_to_no_extra_width(self):
+        # Same rosters, but ROLE_ICON_DIR points somewhere with none of the
+        # expected files (a dev checkout that hasn't added the assets yet)
+        # - use_roles=True must not crash, and must not reserve width for
+        # icons it can't actually draw.
+        team1 = self._team_of_five("Red")
+        team2 = self._team_of_five("Blue", captain_id=902, captain_name="Bob")
+        with patch.object(helper_module, "ROLE_ICON_DIR", os.path.join(self._role_icon_dir.name, "nope")):
+            helper_module._role_icon_cache.clear()
+            without_roles = self.helperObj._renderMatchupImage(
+                1, team1, team2, "Round 1", "Cup", "Test Guild", use_roles=False
+            )
+            with_roles = self.helperObj._renderMatchupImage(
+                2, team1, team2, "Round 1", "Cup", "Test Guild", use_roles=True
+            )
+            helper_module._role_icon_cache.clear()
+
+        self.assertEqual(with_roles.width, without_roles.width)
+
+
 class StartTournamentHelperTests(HelperTestCase):
     def setUp(self):
         super().setUp()
@@ -6111,13 +6330,27 @@ class ImageRenderThreadOffloadTests(HelperTestCase):
             await self.helperObj._sendMatchupImage(self.channel, team1, team2, "Normal")
 
         mock_to_thread.assert_awaited_once_with(
-            self.helperObj._renderMatchupImage, None, team1, team2, "Normal", None, self.guild.name
+            self.helperObj._renderMatchupImage, None, team1, team2, "Normal", None, self.guild.name, False
         )
         # The real renderer actually ran (in the executor) and produced a
         # real file, not just a recorded call, proves wraps= genuinely
         # delegated rather than the offload silently swallowing the work.
         self.channel.send.assert_awaited_once()
         self.assertIsInstance(self.channel.send.call_args.kwargs["file"], discord.File)
+
+    async def test_stores_the_posted_messages_id_when_given_a_guild_id(self):
+        team1, team2 = self._team("Red"), self._team("Blue")
+        posted = FakeMessage(id=4001)
+        self.channel.send = AsyncMock(return_value=posted)
+
+        await self.helperObj._sendMatchupImage(self.channel, team1, team2, "Normal", guild_id=GUILD_ID)
+
+        self.assertEqual(self.helperObj.get(GUILD_ID, "matchup_message_id"), 4001)
+
+    async def test_no_guild_id_does_not_touch_matchup_message_id(self):
+        team1, team2 = self._team("Red"), self._team("Blue")
+        await self.helperObj._sendMatchupImage(self.channel, team1, team2, "Normal")
+        self.assertIsNone(self.helperObj.get(GUILD_ID, "matchup_message_id"))
 
     async def test_sequential_ready_check_matchup_image_is_offloaded(self):
         red = _captained_team("Red", 901, "Alice")
@@ -6517,6 +6750,68 @@ class TournamentReadyAndReportViewTests(HelperTestCase):
         updated = self.helperObj.getTournament(GUILD_ID)
         champion = updated.get_bracket()[-1]
         self.assertEqual(champion.team.get_name(), team2.get_name())
+
+    async def test_confirming_deletes_the_match_report_and_confirmation_messages(self):
+        red = _captained_team("Red", 901, "Alice")
+        blue = _captained_team("Blue", 902, "Bob")
+        await self._start("simultaneous", red, blue)
+        match_id, message_id = self._only_match()
+
+        click = await self._click_report(message_id, 2)
+        confirm_view = await self._confirm_report(click)
+
+        # click.message (from _click_report) is the match's own report
+        # message, the same object _confirm_report's view was built with as
+        # report_message.
+        click.message.delete.assert_awaited_once()
+        self.assertIs(confirm_view.report_message, click.message)
+
+    async def test_open_betting_stores_the_same_round_message_id_on_every_match(self):
+        red = _captained_team("Red", 901, "Alice")
+        blue = _captained_team("Blue", 902, "Bob")
+        cleo = _captained_team("Cleo Team", 903, "Cleo")
+        dan = _captained_team("Dan Team", 904, "Dan")
+        await self._start("simultaneous", red, blue, cleo, dan)
+
+        self.cursor.execute(
+            "SELECT roundBettingMessageId FROM tournament_matches WHERE guildId=?", (GUILD_ID,)
+        )
+        ids = [row[0] for row in self.cursor.fetchall()]
+        self.assertEqual(len(ids), 2)
+        self.assertIsNotNone(ids[0])
+        self.assertEqual(ids[0], ids[1])
+
+    async def test_round_betting_message_is_deleted_only_once_every_match_in_it_resolves(self):
+        red = _captained_team("Red", 901, "Alice")
+        blue = _captained_team("Blue", 902, "Bob")
+        cleo = _captained_team("Cleo Team", 903, "Cleo")
+        dan = _captained_team("Dan Team", 904, "Dan")
+        await self._start("simultaneous", red, blue, cleo, dan)
+
+        self.cursor.execute(
+            "SELECT id, messageId, roundBettingMessageId FROM tournament_matches WHERE guildId=? ORDER BY id",
+            (GUILD_ID,)
+        )
+        (match1_id, message1_id, round_msg_id), (match2_id, message2_id, _) = self.cursor.fetchall()
+        round_open_message = await self.channel.fetch_message(round_msg_id)
+
+        # Resolving only the first of two matches shouldn't touch the
+        # shared round-betting message; the round isn't done yet.
+        click1 = await self._click_report(message1_id, 1)
+        await self._confirm_report(click1)
+        round_open_message.delete.assert_not_awaited()
+        self.cursor.execute("SELECT roundBettingMessageId FROM tournament_matches WHERE id=?", (match2_id,))
+        self.assertIsNotNone(self.cursor.fetchone()[0])
+
+        # Resolving the second (and last) match finishes the round.
+        click2 = await self._click_report(message2_id, 1)
+        await self._confirm_report(click2)
+        round_open_message.delete.assert_awaited_once()
+        self.cursor.execute(
+            "SELECT roundBettingMessageId FROM tournament_matches WHERE id IN (?, ?)",
+            (match1_id, match2_id),
+        )
+        self.assertTrue(all(row[0] is None for row in self.cursor.fetchall()))
 
     async def test_cancelling_a_simultaneous_confirmation_allows_reporting_again(self):
         red = _captained_team("Red", 901, "Alice")
@@ -8595,6 +8890,109 @@ class RecordResultTests(HelperTestCase):
         messages = [c.args[0] for c in channel.send.call_args_list]
         self.assertTrue(any("**Red** wins!" in m for m in messages))
         self.assertTrue(any("Red" in m and "Blue" in m and "Elo:" in m for m in messages))
+
+    async def test_deletes_the_betting_closed_notice_once_the_game_is_scored(self):
+        channel = FakeChannel("game-chat")
+        closed_notice = FakeMessage(id=4242, channel=channel)
+        channel._sent_messages[closed_notice.id] = closed_notice
+        self.helperObj.update(GUILD_ID, "betting_closed_message_id", closed_notice.id)
+
+        await self.helperObj.recordResult(GUILD_ID, 1, channel)
+
+        closed_notice.delete.assert_awaited_once()
+        self.assertIsNone(self.helperObj.get(GUILD_ID, "betting_closed_message_id"))
+
+    async def test_no_betting_closed_notice_to_delete_does_not_crash(self):
+        channel = FakeChannel("game-chat")
+        # betting_closed_message_id stays NULL when a winner is reported
+        # before the timer ever fires it (the common case) - nothing to
+        # clean up, and definitely nothing to crash on.
+        await self.helperObj.recordResult(GUILD_ID, 1, channel)
+
+    async def test_deletes_make_teams_messages_once_the_game_is_scored(self):
+        channel = FakeChannel("roster-chat")
+        self.helperObj.client = FakeClient(channels=[channel], guilds=[self.guild])
+        team1_message = FakeMessage(id=1001, channel=channel)
+        team2_message = FakeMessage(id=1002, channel=channel)
+        intro_message = FakeMessage(id=1003, channel=channel)
+        for m in (team1_message, team2_message, intro_message):
+            channel._sent_messages[m.id] = m
+
+        self.helperObj.update(GUILD_ID, "roster_team1_message_id", team1_message.id)
+        self.helperObj.update(GUILD_ID, "roster_team2_message_id", team2_message.id)
+        self.helperObj.update(GUILD_ID, "roster_channel_id", channel.id)
+        self.helperObj.update(GUILD_ID, "make_teams_message_ids", str(intro_message.id))
+
+        result_channel = FakeChannel("game-chat")
+        await self.helperObj.recordResult(GUILD_ID, 1, result_channel)
+
+        team1_message.delete.assert_awaited_once()
+        team2_message.delete.assert_awaited_once()
+        intro_message.delete.assert_awaited_once()
+        self.assertIsNone(self.helperObj.get(GUILD_ID, "roster_team1_message_id"))
+        self.assertIsNone(self.helperObj.get(GUILD_ID, "roster_team2_message_id"))
+        self.assertIsNone(self.helperObj.get(GUILD_ID, "make_teams_message_ids"))
+
+    async def test_does_not_touch_make_teams_messages_for_a_tournament_match(self):
+        # A tournament match never goes through /make-teams at all (see
+        # _handleReadyClick), so roster_team1_message_id here would just be
+        # a stale leftover from some earlier, unrelated casual game -
+        # deleting it while resolving a tournament match would be a bug.
+        channel = FakeChannel("roster-chat")
+        self.helperObj.client = FakeClient(channels=[channel], guilds=[self.guild])
+        stale_message = FakeMessage(id=2001, channel=channel)
+        channel._sent_messages[stale_message.id] = stale_message
+        self.helperObj.update(GUILD_ID, "roster_team1_message_id", stale_message.id)
+        self.helperObj.update(GUILD_ID, "roster_channel_id", channel.id)
+        self.helperObj.update(GUILD_ID, "active_tournament_match_id", 555)
+
+        result_channel = FakeChannel("game-chat")
+        with patch.object(self.helperObj, "_resolveTournamentMatch", AsyncMock()):
+            await self.helperObj.recordResult(GUILD_ID, 1, result_channel)
+
+        stale_message.delete.assert_not_awaited()
+        self.assertEqual(self.helperObj.get(GUILD_ID, "roster_team1_message_id"), stale_message.id)
+
+    async def test_result_message_replies_to_the_matchup_graphic(self):
+        channel = FakeChannel("game-chat")
+        matchup_message = FakeMessage(id=3001, channel=channel)
+        channel._sent_messages[matchup_message.id] = matchup_message
+        self.helperObj.update(GUILD_ID, "matchup_message_id", matchup_message.id)
+
+        await self.helperObj.recordResult(GUILD_ID, 1, channel)
+
+        result_call = next(c for c in channel.send.call_args_list if c.args and "wins!" in c.args[0])
+        self.assertIs(result_call.kwargs.get("reference"), matchup_message)
+        self.assertIsNone(self.helperObj.get(GUILD_ID, "matchup_message_id"))
+
+    async def test_no_matchup_graphic_to_reply_to_sends_plainly(self):
+        channel = FakeChannel("game-chat")
+        # matchup_message_id stays NULL when /start never posted a graphic
+        # (or it's already been consumed by an earlier result) - nothing
+        # to reply to, and definitely nothing to crash on.
+        await self.helperObj.recordResult(GUILD_ID, 1, channel)
+
+        result_call = next(c for c in channel.send.call_args_list if c.args and "wins!" in c.args[0])
+        self.assertIsNone(result_call.kwargs.get("reference"))
+
+    async def test_does_not_reply_to_a_stale_matchup_graphic_for_a_tournament_match(self):
+        # A tournament match never posts a matchup graphic at all (see
+        # _handleReadyClick), so matchup_message_id here would just be a
+        # stale leftover from some earlier, unrelated casual game.
+        channel = FakeChannel("game-chat")
+        stale_matchup = FakeMessage(id=3002, channel=channel)
+        channel._sent_messages[stale_matchup.id] = stale_matchup
+        self.helperObj.update(GUILD_ID, "matchup_message_id", stale_matchup.id)
+        self.helperObj.update(GUILD_ID, "active_tournament_match_id", 555)
+
+        with patch.object(self.helperObj, "_resolveTournamentMatch", AsyncMock()):
+            await self.helperObj.recordResult(GUILD_ID, 1, channel)
+
+        result_call = next(c for c in channel.send.call_args_list if c.args and "wins!" in c.args[0])
+        self.assertIsNone(result_call.kwargs.get("reference"))
+        # Left alone too - it's not this function's own message to manage
+        # when the game it belongs to was never even a real match.
+        self.assertEqual(self.helperObj.get(GUILD_ID, "matchup_message_id"), stale_matchup.id)
 
 
 class ImbalanceRakeFractionTests(HelperTestCase):
@@ -11976,24 +12374,26 @@ class ConfirmWinnerReportViewTests(HelperTestCase):
         super().setUp()
         self.helperObj.update(GUILD_ID, "betting_state", "OPEN")
 
-    async def test_confirm_records_the_result_and_disables_the_buttons(self):
+    async def test_confirm_records_the_result_and_deletes_both_messages(self):
         report_message = FakeMessage(id=555)
         view = helper_module.ConfirmWinnerReportView(self.helperObj, GUILD_ID, 1, 555, report_message=report_message)
         channel = FakeChannel("game-chat")
         click = self._click(channel=channel)
+        confirm_message = FakeMessage(id=556)
+        click.message = confirm_message
 
         with patch.object(self.helperObj, "recordResult", AsyncMock()) as mock:
             await view.confirm.callback(click)
 
         mock.assert_awaited_once_with(GUILD_ID, 1, channel, self.guild)
-        click.response.edit_message.assert_awaited_once()
-        self.assertIn("confirmed", click.response.edit_message.call_args.kwargs["content"])
-        for item in view.children:
-            self.assertTrue(item.disabled)
-        # The original report message's own Team 1/Team 2/Cancel Game
-        # buttons are stripped once the result is actually recorded, so a
-        # resolved game doesn't keep showing live buttons.
-        report_message.edit.assert_awaited_once_with(view=None)
+        click.response.defer.assert_awaited_once()
+        # Both the original report message (Team 1/Team 2/Cancel Game) and
+        # this confirmation prompt itself are deleted once the result is
+        # actually recorded, so neither lingers once formatResultMessage's
+        # own message (posted by recordResult) has said the same thing for
+        # good.
+        report_message.delete.assert_awaited_once()
+        confirm_message.delete.assert_awaited_once()
 
     async def test_confirm_with_no_report_message_does_not_crash(self):
         view = helper_module.ConfirmWinnerReportView(self.helperObj, GUILD_ID, 1, 555)
@@ -13516,8 +13916,8 @@ class ConcurrentMultiGuildCommandsTests(HelperTestCase):
 
         self.assertEqual(self.helperObj.get(self.guild_a, "original_channel"), "A Lobby")
         self.assertEqual(self.helperObj.get(self.guild_b, "original_channel"), "B Lobby")
-        self.assertIsNone(self.helperObj.get(self.guild_a, "roster_team2_message_id"))
-        self.assertIsNone(self.helperObj.get(self.guild_b, "roster_team2_message_id"))
+        self.assertEqual(self.helperObj.get(self.guild_a, "roster_starting"), 1)
+        self.assertEqual(self.helperObj.get(self.guild_b, "roster_starting"), 1)
 
     async def test_guild_b_finishing_mid_flight_does_not_corrupt_guild_a(self):
         # Forces genuine interleaving rather than hoping asyncio.gather
@@ -13718,7 +14118,7 @@ class CommandRegistrationTests(BotModuleTestCase):
             "leaderboard", "help", "make-teams",
             "clear", "notify",
             "roll", "team", "tournament",
-            "setup", "test-draft",
+            "setup", "test-image",
         }
         self.assertEqual(names, expected)
 
@@ -16075,16 +16475,16 @@ class SetCorrectWinnerCommandTests(BotModuleTestCase):
             await cmd.on_error(ctx, RuntimeError("boom"))
 
 
-class TestDraftCommandTests(BotModuleTestCase):
+class TestImageCommandTests(BotModuleTestCase):
     async def test_delegates(self):
         ctx = self._ctx()
         mock = AsyncMock()
-        with patch.object(self.bot.helperObj, "testDraftHelper", mock):
-            await self._command("test-draft").callback(ctx)
+        with patch.object(self.bot.helperObj, "testImageHelper", mock):
+            await self._command("test-image").callback(ctx)
         mock.assert_awaited_once_with(ctx)
 
     def test_requires_manage_guild_permission(self):
-        cmd = self._command("test-draft")
+        cmd = self._command("test-image")
         denied = SimpleNamespace(permissions=discord.Permissions.none())
 
         with self.assertRaises(app_commands.MissingPermissions):
@@ -16092,14 +16492,14 @@ class TestDraftCommandTests(BotModuleTestCase):
                 check(denied)
 
     def test_manage_guild_permission_is_sufficient(self):
-        cmd = self._command("test-draft")
+        cmd = self._command("test-image")
         allowed = SimpleNamespace(permissions=discord.Permissions(manage_guild=True))
 
         for check in cmd.checks:
             self.assertTrue(check(allowed))
 
     async def test_error_handler_gives_a_friendly_denial_message(self):
-        cmd = self._command("test-draft")
+        cmd = self._command("test-image")
         ctx = self._ctx()
 
         await cmd.on_error(ctx, app_commands.MissingPermissions(["manage_guild"]))
@@ -16108,7 +16508,7 @@ class TestDraftCommandTests(BotModuleTestCase):
         self.assertIn("Manage Server", ctx.response.send_message.call_args.args[0])
 
     async def test_error_handler_reraises_unrelated_errors(self):
-        cmd = self._command("test-draft")
+        cmd = self._command("test-image")
         ctx = self._ctx()
 
         with self.assertRaises(RuntimeError):

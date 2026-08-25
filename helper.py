@@ -144,6 +144,24 @@ TEAM2_ACCENT_COLOR = (231, 76, 60)    # --team-red
 MATCHUP_LOGO_SIZE = 96 * BRACKET_SUPERSAMPLE
 MATCHUP_COLUMN_GAP = 56 * BRACKET_SUPERSAMPLE   # width reserved for the "VS" divider between columns
 MATCHUP_VS_FONT_SIZE = 30 * BRACKET_SUPERSAMPLE
+# One icon per SETUP_ROLE_NAMES entry (see _roleIconImage), in
+# assets/role-icons/. Not bundled here; drawing degrades to "no icon, no
+# extra row width" if a file is missing, same "off by default until the
+# assets exist" shape ELO_BADGE_DIR/TEAM_LOGO_DIR already use.
+ROLE_ICON_DIR = os.path.join(os.path.dirname(__file__), "assets", "role-icons")
+# _roleIconImage tries each of these filename stems (+ ".png") in order for
+# a given role, so either the plain name we ask for or whatever naming an
+# icon set was actually exported with (e.g. "Top_icon.png", "Mid" spelled
+# "Middle") just works without renaming anything.
+ROLE_ICON_FILENAME_CANDIDATES = {
+    "Top": ["top", "Top_icon"],
+    "Jungle": ["jungle", "Jungle_icon"],
+    "Mid": ["mid", "Middle_icon", "middle"],
+    "Bottom": ["bottom", "Bottom_icon"],
+    "Support": ["support", "Support_icon"],
+}
+MATCHUP_ROLE_ICON_SIZE = 20 * BRACKET_SUPERSAMPLE
+MATCHUP_ROLE_ICON_GAP = 6 * BRACKET_SUPERSAMPLE  # space between the icon and the player's name
 
 # A bracket this many rounds deep (16+ teams) splits into two halves that
 # grow toward the center instead of one long strip growing left-to-right,
@@ -177,6 +195,10 @@ _font_cache = {}
 # handful of small PNGs from disk on every single render. Same "mutate the
 # dict directly" reasoning _font_cache's own comment gives.
 _elo_badge_cache = {}
+
+# Role icons (see ROLE_ICON_DIR), same load-once-per-(path, size)-and-reuse
+# shape _elo_badge_cache already uses.
+_role_icon_cache = {}
 
 BETTING_DURATION_SECONDS = 60
 # _openConcurrentTournamentBetting multiplies a guild's configured
@@ -1299,9 +1321,10 @@ class WinnerReportView(discord.ui.View):
 # buttons themselves), actually CONFIRMING it is gated to a player rostered
 # in this game or a Manage Server admin (see interaction_check /
 # _isAdminOrInCurrentGame), so a bystander can't finalize a result for a
-# game they were never part of. On Confirm, the original report_message
-# (if handed one) has its buttons stripped too, so a stale Team 1/Team 2/
-# Cancel Game row doesn't linger on a message that's already been resolved.
+# game they were never part of. On Confirm, both the original
+# report_message (if handed one) and this confirmation prompt itself are
+# deleted once the result is recorded, so nothing stale lingers once
+# formatResultMessage's own message has said the same thing for good.
 class ConfirmWinnerReportView(discord.ui.View):
     def __init__(self, helperObj, guild_id, winning_team, report_message_id, report_message=None):
         super().__init__(timeout=WINNER_REPORT_CONFIRM_TIMEOUT_SECONDS)
@@ -1329,15 +1352,17 @@ class ConfirmWinnerReportView(discord.ui.View):
 
     @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success)
     async def confirm(self, interaction, button):
-        self._disable_buttons()
         self.stop()
-        await interaction.response.edit_message(
-            content="Winner confirmed, recording the result...", view=self
-        )
+        await interaction.response.defer()
         await self.helperObj.recordResult(
             self.guild_id, self.winning_team, interaction.channel, interaction.guild
         )
-        await self.helperObj._clearMessageButtons(self.report_message)
+        # Both the original betting-open/winner-report message and this
+        # confirmation prompt itself are done saying anything useful once
+        # the result is actually recorded - formatResultMessage's own
+        # message above is what the channel keeps instead.
+        await self.helperObj._deleteMessageSafely(self.report_message)
+        await self.helperObj._deleteMessageSafely(interaction.message)
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction, button):
@@ -1440,8 +1465,8 @@ class ConfirmCancelGameView(discord.ui.View):
 # own match_id/channel_id rather than the one guild_id a normal game's
 # report has. Confirm calls _resolveTournamentMatch directly (the same
 # function recordResult's own tournament hook calls for sequential mode)
-# and then strips the original match message's own buttons via
-# _clearMessageButtons, matching ConfirmWinnerReportView; Cancel/timeout
+# and then deletes the original match message along with this
+# confirmation prompt, matching ConfirmWinnerReportView; Cancel/timeout
 # put the match back to AWAITING_RESULT via
 # _restoreTournamentMatchAwaitingResult so it can be reacted on again.
 class ConfirmTournamentMatchReportView(discord.ui.View):
@@ -1475,15 +1500,13 @@ class ConfirmTournamentMatchReportView(discord.ui.View):
 
     @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success)
     async def confirm(self, interaction, button):
-        self._disable_buttons()
         self.stop()
-        await interaction.response.edit_message(
-            content="Winner confirmed, recording the result...", view=self
-        )
+        await interaction.response.defer()
         await self.helperObj._resolveTournamentMatch(
             self.guild_id, self.match_id, self.winning_team, self.channel_id
         )
-        await self.helperObj._clearMessageButtons(self.report_message)
+        await self.helperObj._deleteMessageSafely(self.report_message)
+        await self.helperObj._deleteMessageSafely(interaction.message)
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction, button):
@@ -2651,9 +2674,11 @@ class helpers():
             "Start (no move) to open betting without moving anyone."
         )
         await ctx.response.send_message(message)
+        intro_message = await ctx.original_response()
         team1_message, team2_message, _ = await self.printEmbed(ctx, team1, team2, useRoles=role_split is not None)
         await self._finalizeRoster(
-            ctx.guild.id, team1_message, team2_message, team1, team2, use_roles=role_split is not None
+            ctx.guild.id, team1_message, team2_message, team1, team2, use_roles=role_split is not None,
+            intro_messages=[intro_message],
         )
 
     def makeEmbedString(self, team: Team, useRoles=False):
@@ -2707,10 +2732,10 @@ class helpers():
         team1_embed, team2_embed = self._buildTeamEmbeds(team1, team2, useRoles)
 
         # ctx.response.send_message can only be called once per interaction,
-        # and printEmbed is sometimes called from a place (captainsHelper/
-        # testDraftHelper) where the interaction was already responded to
-        # earlier in the flow; channel.send for both embeds here lets the
-        # caller decide if/when to do the initial interaction response.
+        # and printEmbed is sometimes called from a place (captainsHelper)
+        # where the interaction was already responded to earlier in the
+        # flow; channel.send for both embeds here lets the caller decide
+        # if/when to do the initial interaction response.
         team1_message = await ctx.channel.send(embed=team1_embed)
         team2_message = await ctx.channel.send(embed=team2_embed)
 
@@ -2721,10 +2746,10 @@ class helpers():
 
     # A live captain draft's own team1/team2/PLAYERS embeds, edited in
     # place for every pick instead of _applyDraftPick reposting all three
-    # via printEmbed each time; captainsHelper/testDraftHelper's own
-    # initial printEmbed call is what actually posts them, storing their
-    # ids on roster_team1_message_id/roster_team2_message_id (the same
-    # fields _finalizeRoster reuses once the draft finishes) and
+    # via printEmbed each time; captainsHelper's own initial printEmbed
+    # call is what actually posts them, storing their ids on
+    # roster_team1_message_id/roster_team2_message_id (the same fields
+    # _finalizeRoster reuses once the draft finishes) and
     # draft_players_message_id. Same "fetch by stored id, rebuild, edit"
     # shape _rerollRoster already uses for the equivalent post-draft Reroll
     # click. draft_players_message_id can be None if the pool was already
@@ -2923,7 +2948,17 @@ class helpers():
     # embeds are already SHOWING role labels the moment this posts (true
     # for /make-teams ranked use_roles:true, false otherwise until Random
     # Roles/Balanced Roles is actually clicked).
-    async def _finalizeRoster(self, guild_id, team1_message, team2_message, team1, team2, use_roles):
+    # `intro_messages`, when given, is every "team formation" text message
+    # (the "Teams created!"-style reply, plus anything else like it) the
+    # caller already posted for this roster - stored onto
+    # make_teams_message_ids so recordResult can delete them all once the
+    # game they announced is actually scored, the same cleanup
+    # roster_team1_message_id/roster_team2_message_id already get here.
+    # Left untouched (None, the default) for the draft flow, which stores
+    # its own intro/picker/pool messages onto that column separately
+    # (captainsHelper starts it, _applyDraftPick appends to it once the
+    # draft actually finishes and calls in here).
+    async def _finalizeRoster(self, guild_id, team1_message, team2_message, team1, team2, use_roles, intro_messages=None):
         size_eligible = len(team1.get_players()) == 5 and len(team2.get_players()) == 5
         roles_shown = use_roles and size_eligible
 
@@ -2931,6 +2966,11 @@ class helpers():
         self.update(guild_id, "roster_team2_message_id", team2_message.id)
         self.update(guild_id, "roster_channel_id", team2_message.channel.id)
         self.update(guild_id, "roster_use_roles", 1 if roles_shown else 0)
+        # A fresh roster is always startable, even if the previous one
+        # (now superseded) was mid-Start when this posted.
+        self.update(guild_id, "roster_starting", 0)
+        if intro_messages is not None:
+            self.update(guild_id, "make_teams_message_ids", ",".join(str(m.id) for m in intro_messages))
 
         await team2_message.edit(view=RosterActionView(self, include_role_buttons=size_eligible))
 
@@ -3129,7 +3169,8 @@ class helpers():
             return
 
         stored_message_id = self.get(guild_id, "roster_team2_message_id")
-        if stored_message_id is None or int(stored_message_id) != interaction.message.id:
+        already_starting = bool(self.get(guild_id, "roster_starting"))
+        if stored_message_id is None or int(stored_message_id) != interaction.message.id or already_starting:
             await interaction.response.send_message("This roster is no longer live.", ephemeral=True)
             return
 
@@ -3169,7 +3210,12 @@ class helpers():
         # near-simultaneous Start/Start (no move) click can't also pass
         # those checks and start the game twice, same reasoning
         # _handleWinnerReportPick's own betting_message_id clear documents.
-        self.update(guild_id, "roster_team2_message_id", None)
+        # roster_team2_message_id itself stays intact (not cleared) so
+        # recordResult's own cleanup can still find team2's roster message
+        # by it once the game actually ends; roster_starting is the actual
+        # mutex here instead, reset back to 0 the next time _finalizeRoster
+        # posts a fresh roster.
+        self.update(guild_id, "roster_starting", 1)
 
         await interaction.response.defer()
 
@@ -3198,7 +3244,13 @@ class helpers():
             self.update(guild_id, "original_channel", "")
 
         label = self._matchupLabelForMode(self.get(guild_id, "mode"))
-        await self._sendMatchupImage(channel, team1, team2, label)
+        use_roles = bool(self.get(guild_id, "roster_use_roles"))
+        await self._sendMatchupImage(channel, team1, team2, label, use_roles=use_roles, guild_id=guild_id)
+        # The graphic above already shows both full rosters, so the
+        # original "Teams created!"-style text reply (and, for a draft,
+        # its picker/pool messages) has nothing left to say - gone now
+        # rather than waiting for the whole game to finish.
+        await self._deleteMakeTeamsIntroMessages(guild_id)
         await self._openBetting(guild_id, channel)
 
         try:
@@ -3264,6 +3316,12 @@ class helpers():
                 "alternating every pick."
             )
         await ctx.response.send_message(message)
+        intro_message = await ctx.original_response()
+        # _applyDraftPick appends the picker/pool messages onto this once
+        # the draft actually finishes; started here rather than left for
+        # _finalizeRoster (which only runs at that later point) so this
+        # intro reply isn't lost track of in the meantime.
+        self.update(ctx.guild.id, "make_teams_message_ids", str(intro_message.id))
         team1_message, team2_message, players_message = await self.printEmbed(ctx, team1, team2, players)
         self.update(ctx.guild.id, "roster_team1_message_id", team1_message.id)
         self.update(ctx.guild.id, "roster_team2_message_id", team2_message.id)
@@ -3273,61 +3331,33 @@ class helpers():
         content, view = self._renderDraftPickView(ctx.guild.id)
         await ctx.channel.send(content, view=view)
 
-    # /test-draft: lets a single admin solo-test the button draft picker
-    # without needing 9 other real people sitting in a voice channel.
-    # captain1 and captain2 both get set to the caller's own Player, not
-    # two different members the way captainsHelper requires, so
-    # _isDraftPickTurn's "does this click's user match the current
-    # captain" check passes for both sides and the same person can click
-    # through every pick themselves. The pool is 10 real (non-bot) guild
-    # members chosen at random, same shape captainsHelper's own
-    # voice-channel pool takes, just sourced from the whole server instead
-    # of one voice channel since there's no real draft happening. Always
-    # runs as a snake draft (see _nextDraftTurn) rather than taking a param
-    # for it, so solo-testing exercises the same pick-order logic a real
-    # /make-teams draft snake:true would.
-    async def testDraftHelper(self, ctx):
-        candidates = [m for m in ctx.guild.members if not m.bot and m.id != ctx.user.id]
-        if len(candidates) < 10:
-            await ctx.response.send_message(
-                f"Need at least 10 other non-bot members in this server to test with; found {len(candidates)}.",
-                ephemeral=True,
-            )
-            return
+    # /test-image: renders the matchup graphic (with role icons showing,
+    # see _renderMatchupImage's use_roles) against two dummy 5-player
+    # teams and posts it, so an admin/dev can preview image changes
+    # without needing a real 10-person voice channel just to get
+    # /make-teams random use_roles:true to actually assign roles. Doesn't
+    # touch team1/team2 or any other guild state - purely a render
+    # preview, nothing here is a real roster.
+    async def testImageHelper(self, ctx):
+        def dummy_team(name, start_id):
+            team = Team()
+            team.set_name(name)
+            captain = None
+            for i, role in enumerate(SETUP_ROLE_NAMES):
+                player = Player(start_id + i, f"{role}Player")
+                team.add_player(player)
+                if i == 0:
+                    captain = player
+            team.set_captain(captain)
+            return team
 
-        await self.clearTeamsHelper(ctx)
+        team1 = dummy_team("Team 1", 1)
+        team2 = dummy_team("Team 2", 100)
 
-        self.update(ctx.guild.id, "captain1", Player(ctx.user.id, ctx.user.name).serializePlayer())
-        self.update(ctx.guild.id, "captain2", Player(ctx.user.id, ctx.user.name).serializePlayer())
-        self.update(ctx.guild.id, "mode", "Captains (Test)")
-        self.update(ctx.guild.id, "original_channel", "")
-        self.update(ctx.guild.id, "draft_snake", 1)
-
-        team1 = Team()
-        team2 = Team()
-        team1.add_player(Player(ctx.user.id, ctx.user.name))
-        team2.add_player(Player(ctx.user.id, ctx.user.name))
-        team1.name, team2.name = self._rosterTeamNames(ctx.guild.id)
-        self.update(ctx.guild.id, "team1", team1.serializeTeam())
-        self.update(ctx.guild.id, "team2", team2.serializeTeam())
-
-        players = Team()
-        for member in random.sample(candidates, 10):
-            players.add_player(Player(member.id, member.name))
-        self.update(ctx.guild.id, "players", players.serializeTeam())
-
-        await ctx.response.send_message(
-            f"Test draft started (snake draft)! {ctx.user.mention} is drafting for both teams against "
-            "a pool of 10 random members."
+        image = await asyncio.to_thread(
+            self._renderMatchupImage, None, team1, team2, "Test Render", None, ctx.guild.name, True
         )
-        team1_message, team2_message, players_message = await self.printEmbed(ctx, team1, team2, players)
-        self.update(ctx.guild.id, "roster_team1_message_id", team1_message.id)
-        self.update(ctx.guild.id, "roster_team2_message_id", team2_message.id)
-        self.update(ctx.guild.id, "roster_channel_id", team2_message.channel.id)
-        self.update(ctx.guild.id, "draft_players_message_id", players_message.id if players_message else None)
-
-        content, view = self._renderDraftPickView(ctx.guild.id)
-        await ctx.channel.send(content, view=view)
+        await ctx.response.send_message(file=self._imageToFile(image, "test_matchup.png"))
 
     async def getRandomMember(self, ctx):
         playersSer = self.get(ctx.guild.id, "players")
@@ -3556,10 +3586,24 @@ class helpers():
                 guild_id, interaction.channel, team1, team2, players
             )
             await self._finalizeRoster(guild_id, team1_message, team2_message, team1, team2, use_roles=False)
-            await interaction.channel.send(
+            ready_message = await interaction.channel.send(
                 "Both teams are set! Press Start on the roster above to move everyone to the "
                 "channels, or Start (no move) to open betting without moving anyone!"
             )
+            # Appended onto whatever captainsHelper already started this
+            # column with (the "Captains selected!" reply): the picker
+            # message (interaction.message, now showing "Draft complete"),
+            # the pool embed, and this "Both teams are set!" notice are all
+            # just as much "make teams" chatter as that intro reply was,
+            # done saying anything useful the moment recordResult scores
+            # the game they were for.
+            extra_ids = [interaction.message.id, ready_message.id]
+            pool_message_id = self.get(guild_id, "draft_players_message_id")
+            if pool_message_id is not None:
+                extra_ids.append(int(pool_message_id))
+            existing = self.get(guild_id, "make_teams_message_ids")
+            all_ids = (existing.split(",") if existing else []) + [str(i) for i in extra_ids]
+            self.update(guild_id, "make_teams_message_ids", ",".join(all_ids))
             return
 
         new_turn = self._nextDraftTurn(guild_id, turn, team1, team2)
@@ -3597,8 +3641,8 @@ class helpers():
         # fresh roster's own players earned no disliked-role bonus yet.
         self.update(guild_id, "disliked_role_user_ids", "")
         # A prior draft's snake flag has nothing to do with whatever
-        # team-formation command runs next; captainsHelper/testDraftHelper
-        # set this back to 1 themselves when the new draft actually wants it.
+        # team-formation command runs next; captainsHelper sets this back
+        # to 1 itself when the new draft actually wants it.
         self.update(guild_id, "draft_snake", 0)
         # Every team-formation path (/make-teams random, /make-teams draft, either with or
         # without ranked:true) runs through here first; resetting is_ranked
@@ -5199,6 +5243,39 @@ class helpers():
             return [captain] + rest
         return list(players)
 
+    # SETUP_ROLE_NAMES entries are positional (team.players[i] is whichever
+    # role useRoles put them in, see makeEmbedString's own roles.get(i)
+    # lookup), tried under a few candidate filenames in ROLE_ICON_DIR (the
+    # plain lowercase name we ask for, plus the "{Role}_icon.png"/"Middle"
+    # naming whoever populates that folder actually used) and cached the
+    # same load-once-per-(role, size) shape _eloBadgeImage already uses.
+    # Returns None (draw nothing, reserve no extra width) if none of them
+    # exist - the assets aren't bundled with the repo, so this has to
+    # degrade cleanly rather than crash every roled matchup image until
+    # they're added.
+    def _roleIconImage(self, role_name, size):
+        cache_key = (role_name, size)
+        if cache_key not in _role_icon_cache:
+            icon = None
+            for stem in ROLE_ICON_FILENAME_CANDIDATES.get(role_name, [role_name.lower()]):
+                path = os.path.join(ROLE_ICON_DIR, f"{stem}.png")
+                if os.path.isfile(path):
+                    icon = Image.open(path).convert("RGBA")
+                    icon.thumbnail((size, size), Image.LANCZOS)
+                    break
+            _role_icon_cache[cache_key] = icon
+        return _role_icon_cache[cache_key]
+
+    # {player_id: role_name} for a team formed with useRoles, positional
+    # exactly like makeEmbedString's own roles.get(i) lookup (team.players[i]
+    # is whichever role useRoles assigned them) - empty for a team not
+    # formed with roles, or one that isn't exactly 5 players, the only size
+    # roles are ever assigned for.
+    def _roleAssignments(self, team, use_roles):
+        if not use_roles or len(team.players) != 5:
+            return {}
+        return {p.get_id(): SETUP_ROLE_NAMES[i] for i, p in enumerate(team.players)}
+
     # One team's half of the matchup image: its logo, its name, then its
     # roster with the captain marked with a star (on top of _orderedRoster
     # already having put them first). A persistent team always has a logo
@@ -5212,7 +5289,8 @@ class helpers():
     # place. Only falls back to the ring if the built-in set itself is
     # unavailable (assets folder missing/empty).
     def _drawMatchupColumn(
-        self, image, draw, team, roster, cx, logo_top, name_y, roster_top, name_font, team_font, accent_color
+        self, image, draw, team, roster, cx, logo_top, name_y, roster_top, name_font, team_font, accent_color,
+        column_width_px, use_roles=False,
     ):
         logo_path = team.get_logo_path()
         if logo_path is None or not os.path.isfile(logo_path):
@@ -5239,20 +5317,56 @@ class helpers():
 
         captain = team.get_captain()
         captain_id = captain.get_id() if isinstance(captain, Player) else None
+        role_by_id = self._roleAssignments(team, use_roles)
         star_radius = BRACKET_FONT_SIZE / 3
-        for i, player in enumerate(roster):
-            is_captain = captain_id is not None and player.get_id() == captain_id
-            y = roster_top + i * BRACKET_ROW_HEIGHT
-            color = BRACKET_TITLE_COLOR if is_captain else BRACKET_TEXT_COLOR
-            if is_captain:
-                # A drawn star (same shape _drawChampionLabel uses for the
-                # champion badge), not a "★" text glyph; PIL's default
-                # font doesn't actually have that character, so it was
-                # rendering as a tofu box instead of a star.
-                name_width = draw.textlength(player.get_name(), font=name_font)
-                star_cx = cx - name_width / 2 - BRACKET_PADDING / 2 - star_radius
-                self._drawStar(draw, star_cx, y + BRACKET_FONT_SIZE / 2, star_radius, color)
-            draw.text((cx, y), player.get_name(), font=name_font, fill=color, anchor="ma")
+
+        if role_by_id:
+            # Roles showing: left-justify the whole row (icon, then
+            # captain star, then name) from the column's own left edge,
+            # rather than centering the name and hanging the icon/star off
+            # one side of it - keeps every row's icon at the same x
+            # regardless of how long the name is.
+            row_left = cx - column_width_px / 2
+            for i, player in enumerate(roster):
+                is_captain = captain_id is not None and player.get_id() == captain_id
+                y = roster_top + i * BRACKET_ROW_HEIGHT
+                color = BRACKET_TITLE_COLOR if is_captain else BRACKET_TEXT_COLOR
+                content_x = row_left
+
+                role_name = role_by_id.get(player.get_id())
+                if role_name is not None:
+                    icon = self._roleIconImage(role_name, MATCHUP_ROLE_ICON_SIZE)
+                    if icon is not None:
+                        # Centered on the text's own rendered bounding box
+                        # (not a hardcoded font-size guess), so it lines up
+                        # with the glyphs regardless of the font's own
+                        # ascent/descent metrics.
+                        bbox = draw.textbbox((content_x, y), player.get_name(), font=name_font, anchor="la")
+                        text_center_y = (bbox[1] + bbox[3]) / 2
+                        icon_y = int(text_center_y - icon.height / 2)
+                        image.paste(icon, (int(content_x), icon_y), icon)
+                        content_x += icon.width + MATCHUP_ROLE_ICON_GAP
+
+                if is_captain:
+                    # A drawn star (same shape _drawChampionLabel uses for
+                    # the champion badge), not a "★" text glyph; PIL's
+                    # default font doesn't actually have that character, so
+                    # it was rendering as a tofu box instead of a star.
+                    star_cx = content_x + star_radius
+                    self._drawStar(draw, star_cx, y + BRACKET_FONT_SIZE / 2, star_radius, color)
+                    content_x += 2 * star_radius + BRACKET_PADDING / 2
+
+                draw.text((content_x, y), player.get_name(), font=name_font, fill=color, anchor="la")
+        else:
+            for i, player in enumerate(roster):
+                is_captain = captain_id is not None and player.get_id() == captain_id
+                y = roster_top + i * BRACKET_ROW_HEIGHT
+                color = BRACKET_TITLE_COLOR if is_captain else BRACKET_TEXT_COLOR
+                if is_captain:
+                    name_width = draw.textlength(player.get_name(), font=name_font)
+                    star_cx = cx - name_width / 2 - BRACKET_PADDING / 2 - star_radius
+                    self._drawStar(draw, star_cx, y + BRACKET_FONT_SIZE / 2, star_radius, color)
+                draw.text((cx, y), player.get_name(), font=name_font, fill=color, anchor="ma")
 
     # The "vs" matchup graphic posted alongside the existing text
     # announcement whenever a tournament match is created (_postMatchReport,
@@ -5265,10 +5379,12 @@ class helpers():
     # headline, since "what round is this" is the thing someone glancing at
     # the graphic wants first; the tournament/server name and match id are
     # supporting context underneath.
-    def _renderMatchupImage(self, match_id, team1, team2, round_label, tournament_name, guild_name):
+    def _renderMatchupImage(self, match_id, team1, team2, round_label, tournament_name, guild_name, use_roles=False):
         # match_id is None for a casual/ranked (non-tournament) matchup,
         # see _sendMatchupImage, which just omits the "Match #N" part of
-        # the subtitle.
+        # the subtitle. use_roles is always False for a tournament match
+        # (registered teams aren't formed with /make-teams' role balancing
+        # at all); only _sendMatchupImage's own caller ever passes True.
         name_font = self._loadFont(IBM_PLEX_SANS, BRACKET_FONT_SIZE, "Regular")
         team_font = self._loadFont(CHAKRA_PETCH_BOLD, BRACKET_TITLE_FONT_SIZE)
         vs_font = self._loadFont(CHAKRA_PETCH_BOLD, MATCHUP_VS_FONT_SIZE)
@@ -5292,17 +5408,39 @@ class helpers():
         captain_star_radius = BRACKET_FONT_SIZE / 3
         captain_star_overhang = BRACKET_PADDING / 2 + 2 * captain_star_radius
         captain_star_allowance = 2 * captain_star_overhang
+        # A role icon's own left-to-right footprint (icon + gap); unlike
+        # the captain star above this is never doubled, since role rows
+        # are left-justified from the column's own left edge (see
+        # _drawMatchupColumn) rather than centered with the icon hanging
+        # off one side of a centered name.
+        role_icon_footprint = MATCHUP_ROLE_ICON_SIZE + MATCHUP_ROLE_ICON_GAP
+        captain_star_footprint = 2 * captain_star_radius + BRACKET_PADDING / 2
 
         def column_width(team, roster):
             name_width = measurer.textlength(team.get_name(), font=team_font)
             captain = team.get_captain()
             captain_id = captain.get_id() if isinstance(captain, Player) else None
+            role_by_id = self._roleAssignments(team, use_roles)
             roster_width = 0
             for p in roster:
                 player_width = measurer.textlength(p.get_name(), font=name_font)
-                if captain_id is not None and p.get_id() == captain_id:
-                    player_width += captain_star_allowance
-                roster_width = max(roster_width, player_width)
+                is_captain_row = captain_id is not None and p.get_id() == captain_id
+                role_name = role_by_id.get(p.get_id())
+                # Only reserved if there's actually an icon to draw there -
+                # a role assigned but its icon file missing must render
+                # identically to use_roles=False, not leave dead space.
+                has_icon = role_name is not None and self._roleIconImage(role_name, MATCHUP_ROLE_ICON_SIZE) is not None
+                if role_by_id:
+                    row_width = player_width
+                    if has_icon:
+                        row_width += role_icon_footprint
+                    if is_captain_row:
+                        row_width += captain_star_footprint
+                else:
+                    row_width = player_width
+                    if is_captain_row:
+                        row_width += captain_star_allowance
+                roster_width = max(roster_width, row_width)
             return max(name_width, roster_width, MATCHUP_LOGO_SIZE)
 
         column_width_px = max(column_width(team1, roster1), column_width(team2, roster2))
@@ -5331,11 +5469,11 @@ class helpers():
         right_cx = width - BRACKET_MARGIN - column_width_px / 2
         self._drawMatchupColumn(
             image, draw, team1, roster1, left_cx, logo_top, name_y, roster_top,
-            name_font, team_font, TEAM1_ACCENT_COLOR
+            name_font, team_font, TEAM1_ACCENT_COLOR, column_width_px, use_roles=use_roles
         )
         self._drawMatchupColumn(
             image, draw, team2, roster2, right_cx, logo_top, name_y, roster_top,
-            name_font, team_font, TEAM2_ACCENT_COLOR
+            name_font, team_font, TEAM2_ACCENT_COLOR, column_width_px, use_roles=use_roles
         )
 
         divider_x = width / 2
@@ -5354,10 +5492,17 @@ class helpers():
     # sendCurrentMatchupImage), same renderer tournament matches use
     # (_renderMatchupImage), just with no match id or tournament name to
     # put in the subtitle.
-    async def _sendMatchupImage(self, channel, team1, team2, label):
+    async def _sendMatchupImage(self, channel, team1, team2, label, use_roles=False, guild_id=None):
         guild_name = channel.guild.name if channel.guild is not None else None
-        image = await asyncio.to_thread(self._renderMatchupImage, None, team1, team2, label, None, guild_name)
-        await channel.send(file=self._imageToFile(image, "matchup.png"))
+        image = await asyncio.to_thread(
+            self._renderMatchupImage, None, team1, team2, label, None, guild_name, use_roles
+        )
+        msg = await channel.send(file=self._imageToFile(image, "matchup.png"))
+        # Read back by recordResult once this game's result is scored, so
+        # it can reply to this same message instead of just posting the
+        # result on its own further down the channel.
+        if guild_id is not None:
+            self.update(guild_id, "matchup_message_id", msg.id)
 
     # Maps the "mode" stored per-guild (set by /make-teams random, /make-teams draft,
     # /make-teams saved) to the matchup image's headline, used by /start, which
@@ -5594,10 +5739,20 @@ class helpers():
         match_list = ", ".join(f"#{match_id}" for match_id in match_ids)
         plural = "es" if len(match_ids) != 1 else ""
 
-        await channel.send(
+        msg = await channel.send(
             f"\U0001f3b2 Betting is open on {len(match_ids)} match{plural} ({match_list})! Use "
             f"`/wager team <amount> <team> match_id:<id>` to bet on one. Betting closes in {duration} seconds."
         )
+        # Shared across every match in this round (see the column's own
+        # comment in bot.py); read back and deleted once the round's last
+        # match resolves, whichever of _resolveTournamentMatch/
+        # _resolveLosersMatch/_resolveFinalsMatch that ends up being.
+        placeholders = ",".join("?" * len(match_ids))
+        self.cursor.execute(
+            f"UPDATE tournament_matches SET roundBettingMessageId=? WHERE id IN ({placeholders})",
+            [msg.id] + list(match_ids)
+        )
+        self.db.commit()
         asyncio.create_task(self._concurrentBettingTimer(match_ids, channel, duration))
 
     # No cancellation path (unlike cancelBettingHelper for the singleton
@@ -5614,7 +5769,39 @@ class helpers():
             f"UPDATE tournament_matches SET bettingClosed=1 WHERE id IN ({placeholders})", match_ids
         )
         self.db.commit()
-        await channel.send("\U0001f512 Betting is now closed for this round's matches!")
+        msg = await channel.send("\U0001f512 Betting is now closed for this round's matches!")
+        self.cursor.execute(
+            f"UPDATE tournament_matches SET roundBettingClosedMessageId=? WHERE id IN ({placeholders})",
+            [msg.id] + list(match_ids)
+        )
+        self.db.commit()
+
+    # Deletes one simultaneous-mode round's shared "Betting is open on N
+    # matches"/"Betting is now closed" messages, once every match in it
+    # has resolved - called from _resolveTournamentMatch/
+    # _resolveLosersMatch/_resolveFinalsMatch, right where each already
+    # knows the round is done. A no-op for sequential mode (which never
+    # sets these columns at all) or a round that never had betting on it
+    # in the first place.
+    async def _deleteRoundBettingMessages(self, guild_id, round_index, bracket_type, channel):
+        self.cursor.execute(
+            "SELECT roundBettingMessageId, roundBettingClosedMessageId FROM tournament_matches "
+            "WHERE guildId=? AND roundIndex=? AND bracketType=? "
+            "AND (roundBettingMessageId IS NOT NULL OR roundBettingClosedMessageId IS NOT NULL) LIMIT 1",
+            (guild_id, round_index, bracket_type)
+        )
+        row = self.cursor.fetchone()
+        if row is None:
+            return
+        open_id, closed_id = row
+        await self._deleteMessageIdSafely(channel, open_id)
+        await self._deleteMessageIdSafely(channel, closed_id)
+        self.cursor.execute(
+            "UPDATE tournament_matches SET roundBettingMessageId=NULL, roundBettingClosedMessageId=NULL "
+            "WHERE guildId=? AND roundIndex=? AND bracketType=?",
+            (guild_id, round_index, bracket_type)
+        )
+        self.db.commit()
 
     # What fraction of the losing pool gets raked off before it's split
     # among winners, see MAX_IMBALANCE_RAKE. 0 at an even 50/50 split
@@ -6314,6 +6501,7 @@ class helpers():
         # handled by discord.py as their own tasks, so a round transition
         # (even one that recurses through several bye rounds) never blocks
         # other users from placing bets or running other commands meanwhile.
+        await self._deleteRoundBettingMessages(guild_id, round_index, "winners", channel)
         await channel.send(f"\U0001f3c1 **Round {round_index + 1} has ended!**")
         await self._sendBracketText(channel, tournament, guild_id)
 
@@ -6359,6 +6547,7 @@ class helpers():
                     await self._postReadyCheck(guild_id, next_row[0], channel)
             return
 
+        await self._deleteRoundBettingMessages(guild_id, round_index, "losers", channel)
         await channel.send(f"\U0001f3c1 **Losers Bracket Round {round_index + 1} has ended!**")
         await self._sendBracketText(channel, tournament, guild_id)
 
@@ -6383,6 +6572,10 @@ class helpers():
         # result just leads into a reset rather than ending the tournament.
         self._recordMatchResult(guild_id, winner, loser)
         await self._settleMatchWagers(guild_id, match_id, winning_team, channel)
+        # Unlike winners/losers rounds (several matches, only "done" once
+        # every one resolves), a finals round is always exactly this one
+        # match, so it's fully resolved the moment it is.
+        await self._deleteRoundBettingMessages(guild_id, round_index, "finals", channel)
 
         if round_index == 0:
             # Compared by name, not id, see _tournamentChampionName.
@@ -8405,8 +8598,12 @@ class helpers():
             "Press Start on the roster below when you're ready to move everyone and open betting, or "
             "Start (no move) to open betting without moving anyone."
         )
+        intro_message = await ctx.original_response()
         team1_message, team2_message, _ = await self.printEmbed(ctx, team1, team2)
-        await self._finalizeRoster(guild_id, team1_message, team2_message, team1, team2, use_roles=False)
+        await self._finalizeRoster(
+            guild_id, team1_message, team2_message, team1, team2, use_roles=False,
+            intro_messages=[intro_message],
+        )
 
     # /make-teams repeat: re-posts whichever two rosters /make-teams random, /make-teams draft, or
     # /make-teams saved most recently produced, instead of drawing a fresh random
@@ -8457,9 +8654,11 @@ class helpers():
             "Press Start on the roster below when you're ready to move everyone and open betting, or "
             "Start (no move) to open betting without moving anyone."
         )
+        intro_message = await ctx.original_response()
         team1_message, team2_message, _ = await self.printEmbed(ctx, team1, team2, useRoles=use_roles)
         await self._finalizeRoster(
-            guild_id, team1_message, team2_message, team1, team2, use_roles=use_roles
+            guild_id, team1_message, team2_message, team1, team2, use_roles=use_roles,
+            intro_messages=[intro_message],
         )
 
     def getEconomy(self, guild_id, user_id, column):
@@ -8871,7 +9070,12 @@ class helpers():
     # closed notice itself.
     async def _closeBettingWindow(self, guild_id, channel):
         self.update(guild_id, "betting_state", "CLOSED")
-        await channel.send("🔒 Betting is now closed! No more wagers will be accepted for this game.")
+        msg = await channel.send("🔒 Betting is now closed! No more wagers will be accepted for this game.")
+        # Read back by recordResult once the game this window was for is
+        # actually scored, so this notice doesn't linger in the channel
+        # after it's no longer relevant. NULL whenever a winner is
+        # reported before the timer ever gets here in the first place.
+        self.update(guild_id, "betting_closed_message_id", msg.id)
 
     # Just waits out the configured duration, then closes the window.
     async def _bettingTimer(self, guild_id, channel, duration):
@@ -8969,6 +9173,100 @@ class helpers():
             await message.edit(view=None)
         except discord.HTTPException:
             pass
+
+    # Same "optional/already-gone message just no-ops" shape as
+    # _clearMessageButtons above, for callers that want the message gone
+    # entirely rather than just stripped of its buttons - recordResult's
+    # own betting/make-teams cleanup, and the winner-confirmed flows'
+    # report/confirmation messages once the result they were for is
+    # actually recorded.
+    async def _deleteMessageSafely(self, message):
+        if message is None:
+            return
+        try:
+            await message.delete()
+        except discord.HTTPException:
+            pass
+
+    # Fetches and deletes a message by id in `channel`, same best-effort
+    # shape as _deleteMessageSafely for callers that only have an id
+    # (recordResult's own betting_closed_message_id/make_teams_message_ids
+    # cleanup, and the tournament round-betting cleanup), not a live
+    # message object already in hand.
+    async def _deleteMessageIdSafely(self, channel, message_id):
+        if channel is None or message_id is None:
+            return
+        try:
+            message = await channel.fetch_message(int(message_id))
+        except discord.HTTPException:
+            return
+        await self._deleteMessageSafely(message)
+
+    # Resolves roster_channel_id to an actual channel object, best-effort
+    # (None if it's unset, or the client/guild can't resolve it right now)
+    # - shared by _deleteMakeTeamsIntroMessages and _deleteMakeTeamsMessages,
+    # which each need to reach the same roster channel for a different
+    # subset of its "make teams" messages.
+    async def _resolveRosterChannel(self, guild_id):
+        channel_id = self.get(guild_id, "roster_channel_id")
+        if channel_id is None or self.client is None:
+            return None
+        try:
+            channel = self.client.get_channel(int(channel_id))
+            if channel is None:
+                channel = await self.client.fetch_channel(int(channel_id))
+        except discord.HTTPException:
+            return None
+        return channel
+
+    # The "make teams" INTRO text message(s) for the CURRENT roster (the
+    # "Teams created!"-style reply, plus a draft's own picker/pool/"Both
+    # teams are set!" messages, see make_teams_message_ids) - called by
+    # _handleRosterStartClick right after /start's own matchup graphic
+    # posts, since the graphic has already said everything that intro text
+    # did by then. NOT the roster embeds themselves
+    # (roster_team1_message_id/roster_team2_message_id); those stay up as
+    # a live reference until the game actually ends (see
+    # _deleteMakeTeamsMessages).
+    async def _deleteMakeTeamsIntroMessages(self, guild_id):
+        channel = await self._resolveRosterChannel(guild_id)
+        if channel is None:
+            return
+        extra_ids = self.get(guild_id, "make_teams_message_ids")
+        if extra_ids:
+            for message_id in extra_ids.split(","):
+                if message_id:
+                    await self._deleteMessageIdSafely(channel, int(message_id))
+        self.update(guild_id, "make_teams_message_ids", None)
+
+    # The roster embeds (team1/team2) for the JUST-RESOLVED game, now that
+    # recordResult is done with them - called once the game they were for
+    # is actually scored, never for a tournament match (which never goes
+    # through /make-teams at all, so these columns would just be stale
+    # leftovers from an unrelated earlier game). make_teams_message_ids is
+    # normally already empty by this point (see
+    # _deleteMakeTeamsIntroMessages), but is swept here too in case a
+    # game somehow ended without ever going through a Start click.
+    async def _deleteMakeTeamsMessages(self, guild_id):
+        channel = await self._resolveRosterChannel(guild_id)
+        if channel is None:
+            return
+
+        message_ids = []
+        for column in ("roster_team1_message_id", "roster_team2_message_id"):
+            value = self.get(guild_id, column)
+            if value is not None:
+                message_ids.append(int(value))
+        extra_ids = self.get(guild_id, "make_teams_message_ids")
+        if extra_ids:
+            message_ids.extend(int(x) for x in extra_ids.split(",") if x)
+
+        for message_id in message_ids:
+            await self._deleteMessageIdSafely(channel, message_id)
+
+        self.update(guild_id, "roster_team1_message_id", None)
+        self.update(guild_id, "roster_team2_message_id", None)
+        self.update(guild_id, "make_teams_message_ids", None)
 
     # WinnerReportView's Team 1/Team 2 button callback. A pick no longer
     # records the result immediately; it posts a ConfirmWinnerReportView
@@ -9109,6 +9407,14 @@ class helpers():
     # game, no separate cancel/return needed. `guild` is optional only so
     # callers/tests that don't care about the move can omit it.
     async def recordResult(self, guild_id, winning_team, channel, guild=None):
+        # Captured before active_tournament_match_id gets cleared below,
+        # so the make-teams cleanup near the end knows whether this game
+        # ever went through /make-teams at all - a tournament match never
+        # does (see _handleReadyClick), so roster_team1_message_id and
+        # friends would just be stale leftovers from an unrelated earlier
+        # game there, not this match's own messages.
+        is_tournament_match = self.get(guild_id, "active_tournament_match_id") is not None
+
         self.cursor.execute(
             "SELECT userId, username, team, amount FROM wagers WHERE guildId=?", (guild_id,)
         )
@@ -9140,11 +9446,39 @@ class helpers():
             disliked_role_user_ids=disliked_role_user_ids,
         )
 
-        await channel.send(self.formatResultMessage(winning_team, summary))
+        # Replies to /start's own matchup graphic (see _sendMatchupImage)
+        # when there is one, so the result stays visually anchored to the
+        # game it's for instead of just landing further down the channel.
+        # Never set for a tournament match (sequential mode has no
+        # matchup graphic at all, see _handleReadyClick), and best-effort
+        # even for a real one - an already-deleted message just falls back
+        # to a plain, un-replied send.
+        matchup_message = None
+        if not is_tournament_match:
+            matchup_message_id = self.get(guild_id, "matchup_message_id")
+            if matchup_message_id is not None:
+                try:
+                    matchup_message = await channel.fetch_message(int(matchup_message_id))
+                except discord.HTTPException:
+                    matchup_message = None
+            self.update(guild_id, "matchup_message_id", None)
+
+        await channel.send(self.formatResultMessage(winning_team, summary), reference=matchup_message)
         await self._announceAchievements(channel, newly_unlocked)
 
         if guild is not None and await self.moveMembersToOriginalChannel(guild):
             await channel.send("Moved everyone back to the original channel!")
+
+        # The betting-open/winner-report message itself is deleted by
+        # whichever Confirm view called into this (it's the one holding
+        # that message, not this function); this is just the separate
+        # "Betting is now closed!" notice _closeBettingWindow may have
+        # posted after it, if the timer beat the report to it.
+        await self._deleteMessageIdSafely(channel, self.get(guild_id, "betting_closed_message_id"))
+        self.update(guild_id, "betting_closed_message_id", None)
+
+        if not is_tournament_match:
+            await self._deleteMakeTeamsMessages(guild_id)
 
         # /tournament start (sequential mode) routes its matches through
         # this exact same betting/report cycle by temporarily setting

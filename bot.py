@@ -177,7 +177,8 @@ if not db_already_existed:
         "active_tournament_match_id, wager_channel, betting_timer_seconds, "
         "roster_team1_message_id, roster_team2_message_id, roster_channel_id, roster_use_roles, "
         "default_elo, betting_opened_at, disliked_role_user_ids, draft_pick_page, "
-        "draft_players_message_id, draft_snake)"
+        "draft_players_message_id, draft_snake, betting_closed_message_id, make_teams_message_ids, "
+        "matchup_message_id, roster_starting)"
     )
     mainDB.commit()
 else:
@@ -227,6 +228,15 @@ else:
     ensure_column("servers", "roster_team2_message_id", "INTEGER")
     ensure_column("servers", "roster_channel_id", "INTEGER")
     ensure_column("servers", "roster_use_roles", "INTEGER", "0")
+    # Flipped synchronously the instant a Start/Start (no move) click
+    # passes its checks, so a second near-simultaneous click on the same
+    # roster can't also pass them and start the game twice - the same
+    # anti-double-click mutex roster_team2_message_id used to double as,
+    # before that column needed to stay intact for recordResult's own
+    # cleanup to still find team2's roster message by the time the game
+    # ends. Reset back to 0 by _finalizeRoster whenever a fresh roster
+    # posts.
+    ensure_column("servers", "roster_starting", "INTEGER", "0")
     # /set default-elo: what a brand new player's elo starts at in
     # this guild (see helpers._defaultEloForGuild), NULL until an admin
     # sets it, meaning "use the global helper.DEFAULT_ELO (1000)".
@@ -249,12 +259,33 @@ else:
     # roster_team1_message_id/roster_team2_message_id already are, instead
     # of _applyDraftPick reposting all three embeds from scratch each time.
     ensure_column("servers", "draft_players_message_id", "INTEGER")
-    # Whether the CURRENT captain draft (/make-teams draft snake:true, or
-    # /test-draft, which always runs one) reverses pick order every 2 picks
-    # instead of alternating every single pick; see _nextDraftTurn. Lives
+    # Whether the CURRENT captain draft (/make-teams draft snake:true)
+    # reverses pick order every 2 picks instead of alternating every
+    # single pick; see _nextDraftTurn. Lives
     # and clears alongside team1/team2 (see clearTeamsHelper), the same
     # shape disliked_role_user_ids already uses.
     ensure_column("servers", "draft_snake", "INTEGER", "0")
+    # The "Betting is now closed!" message _closeBettingWindow posts once
+    # the timer expires, so recordResult can delete it along with the
+    # betting-open/winner-report message once the game it was for is
+    # actually scored. NULL whenever a winner got reported before the
+    # timer ever fired (nothing to delete then).
+    ensure_column("servers", "betting_closed_message_id", "INTEGER")
+    # Comma-separated ids of every "team formation" text message for the
+    # CURRENT roster (the "Teams created!"/"Captains selected!"-style
+    # replies, plus a draft's own picker/pool messages) - not the roster
+    # embeds themselves, which already have their own
+    # roster_team1_message_id/roster_team2_message_id. All live in
+    # roster_channel_id, and all get deleted by recordResult once the
+    # game they were for is scored, the same cleanup roster_team1_message_id/
+    # roster_team2_message_id already get there.
+    ensure_column("servers", "make_teams_message_ids", "TEXT")
+    # The matchup graphic's own message id (see _sendMatchupImage), posted
+    # right as the game starts; recordResult replies to it when it posts
+    # the result, so the two stay visually linked in the channel. NULL for
+    # a tournament match (sequential mode never posts this graphic at all,
+    # see _handleReadyClick) or before /start's own matchup image goes out.
+    ensure_column("servers", "matchup_message_id", "INTEGER")
 
 # Per-member currency: gold balance plus win/loss and wagering stats, one
 # row per (guild, user).
@@ -478,6 +509,16 @@ ensure_column("tournament_matches", "bettingClosed", "INTEGER", "0")
 # match_id correction would have no way to know who to reverse/repay.
 # NULL for a match nobody bet on, or one settled before this existed.
 ensure_column("tournament_matches", "settledWagers", "TEXT")
+# The simultaneous-mode round this match belongs to shares one "Betting is
+# open on N matches"/"Betting is now closed" message pair (see
+# _openConcurrentTournamentBetting/_concurrentBettingTimer) across every
+# match in the round, so every one of that round's rows gets the SAME
+# value here rather than each match tracking its own. Read back (from
+# whichever row) and deleted once the round's last match resolves - see
+# _resolveTournamentMatch/_resolveLosersMatch/_resolveFinalsMatch. NULL
+# for sequential mode, which has no round-wide betting message at all.
+ensure_column("tournament_matches", "roundBettingMessageId", "INTEGER")
+ensure_column("tournament_matches", "roundBettingClosedMessageId", "INTEGER")
 # Wagers on a SPECIFIC tournament match; unlike `wagers` above (one bet
 # per user per guild, tied to whatever single casual/ranked game or
 # sequential-mode tournament match is currently active), simultaneous-mode
@@ -705,7 +746,7 @@ def ensure_guild_row(guild_id, guild_name):
     cursor.execute(
         "INSERT INTO servers VALUES(?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, "
         "NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'NONE', NULL, NULL, 0, NULL, NULL, ?, "
-        "NULL, NULL, NULL, 0, NULL, NULL, NULL, 0, NULL, 0)",
+        "NULL, NULL, NULL, 0, NULL, NULL, NULL, 0, NULL, 0, NULL, NULL, NULL, 0)",
         (guild_id, guild_name, helper.BETTING_DURATION_SECONDS)
     )
     mainDB.commit()
@@ -1201,7 +1242,7 @@ COMMAND_HELP = {
     "make-teams draft": "Starts a live captain draft. Name two captains, or use_random to pick two automatically; everyone else lands in a pool the captains draft from using the buttons on the posted picker (blue for Team 1's turn, red for Team 2's, plus a Random pick and paging once the pool is too big for one page). Once both teams are set, press Start on the roster to move everyone and open betting, or Start (no move) to open betting without moving anyone. ranked:true tracks elo for the resulting game. snake:true reverses pick order every 2 picks (1,2,2,1,1,2,...) instead of alternating every single pick, so neither captain always drafts right after seeing the other's pick.",
     "make-teams saved": "Loads two persistent teams straight into a casual or ranked game, skipping the random-split-or-draft step. Posts a roster with the same Start/Start (no move) buttons as /make-teams random to start it.",
     "make-teams repeat": "Re-posts the exact same two teams from whichever of /make-teams random, /make-teams draft, or /make-teams saved ran last, instead of drawing a fresh random split or captains draft. Stays ranked if the last game was ranked, casual if it was casual. Cancels an actively in-progress game from those same teams first (refund + move back) if there is one.",
-    "test-draft": "Admin/dev tool: starts a snake draft with you as both captains and 10 random non-bot members as the pool, so you can solo-test the button picker. Requires the Manage Server permission.",
+    "test-image": "Admin/dev tool: renders the matchup graphic (with role icons) against two dummy 5-player teams and posts it, so you can preview image changes without needing a real 10-player roster. Requires the Manage Server permission.",
     "notify": "DMs a one-time invite link to your voice channel, to one member, or to everyone holding a given role. message optionally replaces the default invite text; either way it's signed \"Sent by\" you. You must be sitting in a voice channel yourself to run this.",
     "wager team": "Bets gold on one team winning the current game, or on a specific tournament match if you give a match id. Only while betting is open, one bet per player per game/match.",
     "wager against": "Challenges another player to a heads-up gold wager, separate from team-game betting, no active game required.",
@@ -1373,6 +1414,7 @@ async def makeTeamsRandom(ctx, use_roles: bool = False, ranked: bool = False):
     team2Obj.deserializeTeam(team2)
 
     await ctx.response.send_message("Teams created!")
+    intro_messages = [await ctx.original_response()]
 
     # Roles (Top/Jungle/Mid/Bottom/Support) only make sense for a 5-player
     # team; makeEmbedString() silently falls back to a plain roster for
@@ -1386,21 +1428,24 @@ async def makeTeamsRandom(ctx, use_roles: bool = False, ranked: bool = False):
             if len(team.get_players()) != 5
         ]
         if unroled:
-            await ctx.channel.send(
+            intro_messages.append(await ctx.channel.send(
                 "Roles need exactly 5 players on a team to assign, so no roles were "
                 f"assigned for: {', '.join(unroled)}. Showing the roster as normal instead."
-            )
+            ))
 
     team1_message, team2_message = await helperObj.printEmbed(ctx, team1Obj, team2Obj, useRoles=use_roles)
-    await helperObj._finalizeRoster(ctx.guild.id, team1_message, team2_message, team1Obj, team2Obj, use_roles)
 
     # Posted last (after the rosters, bolded) rather than folded into the
     # very first response message, which is easy to scroll past once the
     # (visually much bigger) rosters land right after it; this puts it
     # where people are actually looking once they're done reading the teams.
-    await ctx.channel.send(
+    intro_messages.append(await ctx.channel.send(
         "📣 **Ready?** Press Start on the roster above to move everyone into their channels and open "
         "betting, or Start (no move) to open betting without moving anyone."
+    ))
+    await helperObj._finalizeRoster(
+        ctx.guild.id, team1_message, team2_message, team1Obj, team2Obj, use_roles,
+        intro_messages=intro_messages,
     )
 
 
@@ -1946,19 +1991,19 @@ tree.add_command(makeTeamsGroup)
 
 
 @tree.command(
-    name="test-draft",
-    description="Admin/dev: solo-test the button draft picker against 10 random members"
+    name="test-image",
+    description="Admin/dev: render the matchup graphic (with roles) against dummy teams to preview image changes"
 )
 @app_commands.checks.has_permissions(manage_guild=True)
-async def testDraft(ctx):
-    await helperObj.testDraftHelper(ctx)
+async def testImage(ctx):
+    await helperObj.testImageHelper(ctx)
 
 
-@testDraft.error
-async def testDraft_error(ctx, error):
+@testImage.error
+async def testImage_error(ctx, error):
     if isinstance(error, app_commands.MissingPermissions):
         await ctx.response.send_message(
-            "You need the Manage Server permission to use /test-draft."
+            "You need the Manage Server permission to use /test-image."
         )
     else:
         raise error
