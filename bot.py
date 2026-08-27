@@ -13,20 +13,19 @@ from discord.ext import tasks
 from TourneyClasses import Team, Player
 import helper
 
-# Anchors every path below to this file's own directory rather than the
-# process's current working directory: matches helper.py's own asset
-# paths (see TEAM_LOGO_DIR/FONTS_DIR/etc., all built off
-# os.path.dirname(__file__)). A relative path resolves against whatever
-# directory the process happened to be launched from, which is easy to get
-# right by always `cd`-ing into the project folder first on a dev machine,
-# and easy to get wrong under a service manager (e.g. a systemd unit with
-# no WorkingDirectory=) that doesn't set that up the same way.
+# Every path in this file is built from BASE_DIR so it always points at this
+# file's own folder, no matter what directory the process was started from.
+# A relative path only works if you `cd` into the project folder first,
+# which is easy to forget under a service manager (e.g. a systemd unit with
+# no WorkingDirectory= set). helper.py's asset paths (TEAM_LOGO_DIR,
+# FONTS_DIR, etc.) use the same os.path.dirname(__file__) trick.
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Caps shockwave.log at a fixed number of lines rather than
-# RotatingFileHandler's size-based, multi-file rotation: a single,
-# chronologically-ordered file (oldest lines dropped once it grows past
-# LOG_FILE_MAX_LINES) instead of scattered across shockwave.log/.1/.2/.3.
+# Keeps shockwave.log at this many lines at most, instead of using the
+# standard library's RotatingFileHandler, which would split it into
+# shockwave.log, .log.1, .log.2, and so on once it got too big. This way
+# there's always just one file, in time order, and only the oldest lines
+# get dropped once it grows past the cap.
 LOG_FILE_MAX_LINES = 10000
 
 
@@ -34,9 +33,9 @@ class MaxLinesFileHandler(logging.FileHandler):
     def __init__(self, filename, max_lines, encoding=None):
         self.max_lines = max_lines
         super().__init__(filename, mode="a", encoding=encoding)
-        # Seeded once from whatever's already on disk (a previous run's
-        # leftover log), so the very first emit this run already knows
-        # whether a trim is overdue instead of assuming an empty file.
+        # Counted once at startup from whatever's already on disk, so this
+        # run knows right away if a trim is already overdue, instead of
+        # wrongly assuming the file starts empty.
         self._line_count = self._countLines()
 
     def _countLines(self):
@@ -52,11 +51,11 @@ class MaxLinesFileHandler(logging.FileHandler):
         if self._line_count > self.max_lines:
             self._trim()
 
-    # Drops the oldest lines so the file holds exactly max_lines. No
-    # locking of its own; Handler.handle() already wraps every emit()
-    # call (and so this, called from inside one) in self.acquire()/
-    # release(), so this is already safe against a concurrent emit from
-    # another thread.
+    # Drops the oldest lines so the file holds exactly max_lines. Doesn't
+    # need its own locking: this only ever runs from inside emit(), and
+    # Handler.handle() already wraps every emit() call in self.acquire()/
+    # release(), so a concurrent emit from another thread is already
+    # blocked out.
     def _trim(self):
         self.stream.close()
         with open(self.baseFilename, encoding=self.encoding) as f:
@@ -68,11 +67,11 @@ class MaxLinesFileHandler(logging.FileHandler):
         self.stream = self._open()
 
 
-# Logs to both the console and the line-capped file above; the file is
-# what survives a restart or a run with no attached terminal (e.g. as a
-# background service), which stdout alone doesn't. Configured on the root
-# logger so discord.py's own internal logging (gateway, HTTP) is captured
-# the same way, not just this file's own logger calls.
+# Logs to both the console and the line-capped file above. The file is what
+# survives a restart, or a run with no attached terminal (e.g. as a
+# background service). Stdout alone wouldn't survive that. This is set up
+# on the root logger, so discord.py's own internal logging (gateway, HTTP)
+# gets logged the same way, not just calls made from this file.
 LOG_FILE = os.path.join(BASE_DIR, "shockwave.log")
 _log_formatter = logging.Formatter(
     "[{asctime}] [{levelname:<8}] {name}: {message}", "%Y-%m-%d %H:%M:%S", style="{"
@@ -87,10 +86,10 @@ logger = logging.getLogger("shockwave")
 # Get token from text file
 token = ""
 
-# encoding="utf-8" pinned explicitly rather than left to the platform
-# default text encoding, which differs (e.g. Windows' ANSI codepage vs.
-# Linux's near-universal UTF-8); a plain ASCII token round-trips fine
-# either way, but there's no reason to leave that to chance.
+# encoding="utf-8" is set explicitly instead of left to the platform
+# default, since that default differs by OS (Windows' ANSI codepage vs.
+# Linux's near-universal UTF-8). A plain ASCII token would work fine
+# either way, but there's no reason to leave it to chance.
 with open(os.path.join(BASE_DIR, "token.txt"), encoding="utf-8") as f:
     token = f.readline().strip()
 
@@ -98,24 +97,25 @@ with open(os.path.join(BASE_DIR, "token.txt"), encoding="utf-8") as f:
 dataFolder = os.path.join(BASE_DIR, "data", "guildData", "serverInfo")
 dbpath = os.path.join(dataFolder, "main.db")
 
-# sqlite3.connect() creates the database FILE on disk as a side effect of
-# connecting, even if it's empty; this check has to run before connect()
-# or the file will always already exist by the time it's checked, and
-# CREATE TABLE below will never execute, even on a brand new install.
-# makedirs is needed first too; a fresh clone has no data/ tree at all
-# (it's gitignored), and sqlite3.connect() doesn't create missing parent
-# directories, only the file itself.
+# This check has to happen before sqlite3.connect() runs, because connect()
+# creates the database file on disk as a side effect, even if it's empty.
+# Check after connecting and the file would always already exist, so the
+# CREATE TABLE below would never run, even on a brand new install. makedirs
+# has to run first too: a fresh clone has no data/ folder at all (it's
+# gitignored), and connect() only creates the file, not missing parent
+# folders.
 os.makedirs(dataFolder, exist_ok=True)
 db_already_existed = path.isfile(dbpath)
 
 mainDB = sqlite3.connect(dbpath)
 cursor = mainDB.cursor()
 
-# A single row change (a long serialized team roster in particular) can run
-# to thousands of characters once its bound parameters are expanded inline
-# below, and a command's own params can include a full discord.py object
-# repr, capped so one oversized line can't dominate the log file. Shared
-# by _logDatabaseStatement below and LoggingCommandTree further down.
+# Caps how long a single logged line can get. A row update (a serialized
+# team roster especially) can run to thousands of characters once its
+# parameters are expanded inline, and a command's own logged params can
+# include a full discord.py object repr. Without a cap, one oversized line
+# could dominate the whole log file. Shared by _logDatabaseStatement below
+# and LoggingCommandTree further down.
 LOG_LINE_MAX_LENGTH = 500
 
 
@@ -128,16 +128,17 @@ def _truncateForLog(text):
 _MUTATING_SQL_PREFIXES = ("INSERT", "UPDATE", "DELETE")
 
 
-# discord.py's own internal logging (View.on_error for a button callback,
-# Loop._error for a background task) and on_app_command_error below already
-# funnel unhandled exceptions into this same root-configured logger; this
-# covers the other half: every database write. sqlite3's trace callback
-# receives each executed statement with its bound parameters already
-# expanded inline (not the raw `?` placeholders), so this reads as a real
-# audit trail rather than opaque parameterized SQL. Everything that isn't
-# an INSERT/UPDATE/DELETE (SELECTs, the trace callback's own "BEGIN " for
-# an implicit transaction) is filtered out; only mutations are "important
-# actions" worth a permanent record.
+# Logs every database write (INSERT/UPDATE/DELETE) to this file's log, so
+# there's a real audit trail of every change made. Everything else that
+# isn't a mutation (SELECTs, the trace callback's own "BEGIN " for an
+# implicit transaction) is filtered out and not logged. sqlite3's trace
+# callback hands us each statement with its bound parameters already
+# filled in, not the raw `?` placeholders, so the log line reads like real
+# SQL rather than something you'd have to decode. This covers database
+# writes specifically. discord.py's own internal logging (View.on_error
+# for a button callback, Loop._error for a background task) and
+# on_app_command_error below already send unhandled exceptions to this
+# same logger.
 def _logDatabaseStatement(sql):
     statement = sql.strip()
     if not statement.upper().startswith(_MUTATING_SQL_PREFIXES):
@@ -147,17 +148,19 @@ def _logDatabaseStatement(sql):
 
 mainDB.set_trace_callback(_logDatabaseStatement)
 
-# Where daily database snapshots land (see backupDatabaseTask below) -
-# separate from serverInfo/ so a backup can never collide with or get
-# mistaken for the live database file.
+# Where daily database snapshots land (see backupDatabaseTask below). Kept
+# separate from serverInfo/, the live database's own folder, so a backup
+# can never collide with, or get mistaken for, the real database file.
 BACKUP_DIR = os.path.join(BASE_DIR, "data", "guildData", "backups")
 BACKUP_RETENTION_DAYS = 7
 
 
 def ensure_column(table, column, coltype="", default=None):
-    # Adds a column to an existing table if it isn't already there, so
-    # databases that predate the economy/betting feature don't need a one
-    # only used for tables that existed before this feature.
+    # Adds a column to a table only if it isn't already there. This is the
+    # migration mechanism for every table that existed before a given
+    # feature: a fresh install gets the column from CREATE TABLE directly,
+    # while an older database that predates the feature gets it added here
+    # instead.
     cursor.execute(f"PRAGMA table_info({table})")
     existing_cols = [row[1] for row in cursor.fetchall()]
     if column not in existing_cols:
@@ -182,108 +185,106 @@ if not db_already_existed:
     )
     mainDB.commit()
 else:
-    # result1/result2 are unused (nothing reads or writes them), kept only
-    # for schema compatibility with databases that predate this migration.
+    # result1/result2 are unused now (nothing reads or writes them). Kept
+    # only so an older database's schema still matches.
     ensure_column("servers", "result1", "TEXT")
     ensure_column("servers", "result2", "TEXT")
     # captain1/captain2 are read and written by captainsHelper and the
-    # draft-pick handlers (the /make-teams draft flow) but aren't part of
-    # the original CREATE TABLE above, so a pre-existing database needs
-    # them added via migration rather than already having them.
+    # draft-pick handlers (the /make-teams draft flow). They weren't part
+    # of the original CREATE TABLE above, so a pre-existing database needs
+    # them added here.
     ensure_column("servers", "captain1", "TEXT")
     ensure_column("servers", "captain2", "TEXT")
     ensure_column("servers", "betting_state", "TEXT", "'NONE'")
     ensure_column("servers", "betting_message_id", "INTEGER")
     ensure_column("servers", "betting_channel_id", "INTEGER")
-    # When the current betting window was opened (unix seconds), lets
+    # When the current betting window was opened (unix seconds). Lets
     # reconcileStaleBettingWindows (called from on_ready) work out how much
-    # of the window was actually left if the bot restarts mid-window.
+    # time was actually left on the window if the bot restarts mid-window.
     ensure_column("servers", "betting_opened_at", "INTEGER")
-    # Whether the current team1/team2 game was formed with ranked:true (on
-    # /make-teams random or /make-teams draft), gates whether recordResult
+    # Whether the current team1/team2 game was formed with ranked:true (via
+    # /make-teams random or /make-teams draft). Gates whether recordResult
     # touches anyone's elo.
     ensure_column("servers", "is_ranked", "INTEGER", "0")
-    # Set while a /tournament start sequential match is using team1/team2,
-    # tells recordResult to also advance the tournament bracket once the
+    # Set while a /tournament start sequential match is using team1/team2.
+    # Tells recordResult to also advance the tournament bracket once the
     # normal betting/elo resolution for that game finishes.
     ensure_column("servers", "active_tournament_match_id", "INTEGER")
-    # /set wager-channel: when set, all betting postings (open/
-    # closed/winner-report) go here instead of wherever a game (or a
-    # tournament match) happened to start.
+    # /set wager-channel: when set, every betting posting (open, closed,
+    # winner report) goes here instead of wherever the game or tournament
+    # match happened to start.
     ensure_column("servers", "wager_channel", "TEXT")
-    # /set betting-timer: how long a betting window stays open (replaces
-    # the previously-hardcoded BETTING_DURATION_SECONDS). For a
-    # simultaneous-mode tournament round with several concurrent matches,
-    # this is the PER-MATCH base; the round's actual window is this times
-    # however many matches are open at once (see
+    # /set betting-timer: how long a betting window stays open. Replaces
+    # what used to be a hardcoded value (BETTING_DURATION_SECONDS). For a
+    # simultaneous-mode tournament round with several matches running at
+    # once, this is the per-match base. The round's actual window is this
+    # value times however many matches are open at once (see
     # _openConcurrentTournamentBetting).
     ensure_column("servers", "betting_timer_seconds", "INTEGER", str(helper.BETTING_DURATION_SECONDS))
-    # The live "reroll roles / start the game" button controls on a just-
-    # posted, actually-final roster, see _finalizeRoster/RosterActionView
-    # (replaces the old standalone /randomize-roles and /start commands).
-    # roster_team2_message_id is what a click is actually checked against;
-    # overwriting it on every new roster is what makes an older roster's
-    # buttons inert once a newer one has been posted.
+    # Backs the live "reroll roles / start the game" buttons on a
+    # just-posted, final roster (see _finalizeRoster/RosterActionView).
+    # This replaced what used to be separate /randomize-roles and /start
+    # commands. roster_team2_message_id is what a button click actually
+    # gets checked against, and overwriting it on every new roster is what
+    # makes an older roster's buttons stop working once a newer one posts.
     ensure_column("servers", "roster_team1_message_id", "INTEGER")
     ensure_column("servers", "roster_team2_message_id", "INTEGER")
     ensure_column("servers", "roster_channel_id", "INTEGER")
     ensure_column("servers", "roster_use_roles", "INTEGER", "0")
-    # Flipped synchronously the instant a Start/Start (no move) click
-    # passes its checks, so a second near-simultaneous click on the same
-    # roster can't also pass them and start the game twice - the same
-    # anti-double-click mutex roster_team2_message_id used to double as,
-    # before that column needed to stay intact for recordResult's own
-    # cleanup to still find team2's roster message by the time the game
-    # ends. Reset back to 0 by _finalizeRoster whenever a fresh roster
-    # posts.
+    # Flipped to true the instant a Start / Start (no move) click passes its
+    # checks, so a second, near-simultaneous click on the same roster can't
+    # also pass and start the game twice. This is the same double-click
+    # guard that roster_team2_message_id used to serve as, before that
+    # column needed to stay untouched so recordResult's own cleanup could
+    # still find team2's roster message once the game ends. Reset back to 0
+    # by _finalizeRoster whenever a fresh roster posts.
     ensure_column("servers", "roster_starting", "INTEGER", "0")
-    # /set default-elo: what a brand new player's elo starts at in
-    # this guild (see helpers._defaultEloForGuild), NULL until an admin
-    # sets it, meaning "use the global helper.DEFAULT_ELO (1000)".
+    # /set default-elo: what a brand new player's elo starts at in this
+    # guild (see helpers._defaultEloForGuild). NULL until an admin sets it,
+    # meaning "use the global helper.DEFAULT_ELO (1000)".
     ensure_column("servers", "default_elo", "INTEGER")
     # Comma-separated user ids of whoever the current team1/team2 roster
     # assigned a disliked role to (rankedTeamHelper, ranked:true
-    # use_roles:true only), read back by recordResult/
+    # use_roles:true only). Read back by recordResult and
     # reportCorrectWinnerHelper so a win on a disliked role earns the
-    # ROLE_BALANCE_DISLIKED_ROLE_WIN_ELO_MULTIPLIER bonus. Lives and clears
-    # alongside team1/team2 (see clearTeamsHelper), not per-result, so a
-    # reused roster (/make-teams repeat) still gets credit for the same assignments.
+    # ROLE_BALANCE_DISLIKED_ROLE_WIN_ELO_MULTIPLIER bonus. This lives and
+    # clears alongside team1/team2 (see clearTeamsHelper) rather than being
+    # cleared per result, so a reused roster (/make-teams repeat) still
+    # gets credit for the same assignments.
     ensure_column("servers", "disliked_role_user_ids", "TEXT")
     # Which page of the draft-pick button picker (CaptainsDraftPickView) is
-    # currently shown, only meaningful once the pool is too big to fit on
-    # one page (see DRAFT_PICK_MAX_UNPAGINATED); reset to 0 on every pick,
-    # since the pool shrinking shifts what each page even contains.
+    # currently shown. Only matters once the pool is too big to fit on one
+    # page (see DRAFT_PICK_MAX_UNPAGINATED). Reset to 0 on every pick, since
+    # the pool shrinking changes what each page even contains.
     ensure_column("servers", "draft_pick_page", "INTEGER", "0")
     # The posted "PLAYERS" pool embed's message id for a live captain draft
-    # (see _updateDraftEmbeds), edited in place on every pick the same way
+    # (see _updateDraftEmbeds). Edited in place on every pick, the same way
     # roster_team1_message_id/roster_team2_message_id already are, instead
     # of _applyDraftPick reposting all three embeds from scratch each time.
     ensure_column("servers", "draft_players_message_id", "INTEGER")
-    # Whether the CURRENT captain draft (/make-teams draft snake:true)
-    # reverses pick order every 2 picks instead of alternating every
-    # single pick; see _nextDraftTurn. Lives
-    # and clears alongside team1/team2 (see clearTeamsHelper), the same
-    # shape disliked_role_user_ids already uses.
+    # Whether the current captain draft (/make-teams draft snake:true)
+    # reverses pick order every 2 picks instead of alternating every single
+    # pick. See _nextDraftTurn. Lives and clears alongside team1/team2 (see
+    # clearTeamsHelper), the same pattern disliked_role_user_ids uses.
     ensure_column("servers", "draft_snake", "INTEGER", "0")
-    # The "Betting is now closed!" message _closeBettingWindow posts once
-    # the timer expires, so recordResult can delete it along with the
-    # betting-open/winner-report message once the game it was for is
-    # actually scored. NULL whenever a winner got reported before the
-    # timer ever fired (nothing to delete then).
+    # The "Betting is now closed!" message that _closeBettingWindow posts
+    # once the timer expires. Lets recordResult delete it, along with the
+    # betting-open/winner-report message, once the game it was for is
+    # actually scored. NULL whenever a winner got reported before the timer
+    # ever fired (nothing to delete then).
     ensure_column("servers", "betting_closed_message_id", "INTEGER")
     # Comma-separated ids of every "team formation" text message for the
-    # CURRENT roster (the "Teams created!"/"Captains selected!"-style
-    # replies, plus a draft's own picker/pool messages) - not the roster
-    # embeds themselves, which already have their own
-    # roster_team1_message_id/roster_team2_message_id. All live in
-    # roster_channel_id, and all get deleted by recordResult once the
-    # game they were for is scored, the same cleanup roster_team1_message_id/
-    # roster_team2_message_id already get there.
+    # current roster: the "Teams created!" / "Captains selected!" replies,
+    # plus a draft's own picker/pool messages. Not the roster embeds
+    # themselves, which already have their own roster_team1_message_id/
+    # roster_team2_message_id. All of these live in roster_channel_id and
+    # get deleted by recordResult once the game is scored, the same cleanup
+    # roster_team1_message_id/roster_team2_message_id already get.
     ensure_column("servers", "make_teams_message_ids", "TEXT")
     # The matchup graphic's own message id (see _sendMatchupImage), posted
-    # right as the game starts; recordResult replies to it when it posts
-    # the result, so the two stay visually linked in the channel. NULL for
-    # a tournament match (sequential mode never posts this graphic at all,
+    # right as the game starts. recordResult replies to it when posting the
+    # result, so the two stay visually linked in the channel. NULL for a
+    # tournament match (sequential mode never posts this graphic at all,
     # see _handleReadyClick) or before /start's own matchup image goes out.
     ensure_column("servers", "matchup_message_id", "INTEGER")
 
@@ -294,24 +295,24 @@ cursor.execute(
     "guildId, userId, username, balance, wins, losses, gold_wagered, gold_won, last_daily, "
     "PRIMARY KEY(guildId, userId))"
 )
-# BUG-PRONE PATTERN AVOIDED: "CREATE TABLE IF NOT EXISTS" above is a no-op
-# on a database that already has an `economy` table from before these
-# columns existed; ensure_column() is what actually adds them on those.
+# "CREATE TABLE IF NOT EXISTS" above does nothing on a database that
+# already has an `economy` table from before these columns existed.
+# ensure_column() is what actually adds them there.
 ensure_column("economy", "gold_lost", "INTEGER", "0")
 ensure_column("economy", "game_wins", "INTEGER", "0")
 ensure_column("economy", "game_losses", "INTEGER", "0")
 ensure_column("economy", "elo", "INTEGER", str(helper.DEFAULT_ELO))
-# The RANKED subset of game_wins/game_losses (a casual game bumps
-# game_wins/game_losses but not these); /stats and /leaderboard use them
-# to break a player's record into casual vs ranked instead of just one
-# combined total.
+# The ranked-only subset of game_wins/game_losses (a casual game bumps
+# game_wins/game_losses but not these). /stats and /leaderboard use them to
+# break a player's record into casual vs. ranked instead of one combined
+# total.
 ensure_column("economy", "ranked_wins", "INTEGER", "0")
 ensure_column("economy", "ranked_losses", "INTEGER", "0")
-# Consecutive game wins right now, an achievement (see the "on_fire" key
-# in helper.py's CARD_ACHIEVEMENT_TITLES), not a pure additive delta like
-# every other economy column, so applyGameDeltas updates it with its own
-# extra UPDATE (increment on a win, reset to 0 on a loss) rather than
-# folding it into computeGameDeltas' own delta dict.
+# Consecutive game wins right now, backing the "on_fire" achievement (see
+# CARD_ACHIEVEMENT_TITLES in helper.py). Unlike every other economy column,
+# this isn't a simple additive delta, so applyGameDeltas updates it with
+# its own separate UPDATE (increment on a win, reset to 0 on a loss)
+# instead of folding it into computeGameDeltas' delta dict.
 ensure_column("economy", "current_win_streak", "INTEGER", "0")
 # Active bets for the game currently in progress in a guild. Cleared out
 # (paid out or refunded) by the time the game resolves.
@@ -320,27 +321,27 @@ cursor.execute(
     "guildId, userId, username, team, amount, "
     "PRIMARY KEY(guildId, userId))"
 )
-# Snapshot of the most recently resolved game per guild (wagers, rosters,
-# and the exact deltas applied), lets /set correct-winner undo a
+# A snapshot of the most recently resolved game per guild: wagers, rosters,
+# and the exact deltas applied. Lets /set correct-winner undo a
 # misreported result precisely instead of guessing at what to reverse.
 cursor.execute(
     "CREATE TABLE IF NOT EXISTS last_result(guildId PRIMARY KEY, data)"
 )
-# One row per active /wager against challenge; unlike the team-game
+# One row per active /wager against challenge. Unlike the team-game
 # `wagers` table above, several of these can be open at once per guild
-# (different pairs of players), so each is tracked by its own row/message
-# rather than a single column on `servers`.
+# (different pairs of players), so each is tracked by its own row and
+# message instead of a single column on `servers`.
 cursor.execute(
     "CREATE TABLE IF NOT EXISTS duels("
     "id INTEGER PRIMARY KEY AUTOINCREMENT, guildId, channelId, messageId, "
     "challengerId, challengerName, targetId, targetName, amount, state)"
 )
 # One row per posted /leaderboard message, tracking which page it's
-# currently showing so the paging buttons know what to re-render. cards/
-# cardShown are /team list's own cards:true toggle carried over here,
-# see the identically-named columns on team_list_views for what each one
-# means; LeaderboardPagingView reads both back the same way
-# TeamListPagingView does.
+# currently showing so the paging buttons know what to re-render. cards
+# and cardShown carry over /team list's own cards:true toggle. See the
+# identically-named columns on team_list_views for what each one means.
+# LeaderboardPagingView reads both back the same way TeamListPagingView
+# does.
 cursor.execute(
     "CREATE TABLE IF NOT EXISTS leaderboards("
     "messageId INTEGER PRIMARY KEY, guildId, channelId, filter, sort_order, page, "
@@ -348,145 +349,147 @@ cursor.execute(
 )
 ensure_column("leaderboards", "cards", "INTEGER", "0")
 ensure_column("leaderboards", "cardShown", "INTEGER", "0")
-# One row per posted /team lookup message, same paging idea as leaderboards
-# above, but scoped to a single caller (userId) rather than the whole
-# guild's stats, since each page here is one of THEIR teams, not a page of
-# many players.
+# One row per posted /team lookup message, same paging idea as
+# leaderboards above, but scoped to a single caller (userId) instead of the
+# whole guild's stats, since each page here is one of that player's own
+# teams, not a page of many players.
 cursor.execute(
     "CREATE TABLE IF NOT EXISTS my_team_views("
     "messageId INTEGER PRIMARY KEY, guildId, channelId, userId, page)"
 )
-# One row per posted /stats message, recognizes that a click landed on
-# a real /stats embed (see StatsView).
+# One row per posted /stats message, so we can recognize that a click
+# landed on a real /stats embed (see StatsView).
 cursor.execute(
     "CREATE TABLE IF NOT EXISTS stats_views(messageId INTEGER PRIMARY KEY, guildId)"
 )
-# "CREATE TABLE IF NOT EXISTS" above is a no-op on a database that already
-# has the table, so targetUserId/cardShown (added after stats_views
-# shipped, same story as economy/tournament_matches below) need
-# ensure_column to actually reach an existing server's table. targetUserId
-# is who to re-fetch the real avatar for when toggling back off the
-# placeholder; cardShown flips to 1 once the Card button is pressed; the
-# avatar toggle refuses to touch the message after that (see StatsView),
-# since a trading card isn't shaped like a normal /stats embed anymore and
-# toggling its thumbnail would just make a mess of it.
+# "CREATE TABLE IF NOT EXISTS" above does nothing on a database that
+# already has the table, so targetUserId and cardShown, added after
+# stats_views first shipped, need ensure_column to actually reach an
+# existing server's table. targetUserId is who to re-fetch the real avatar
+# for when toggling back off the placeholder. cardShown flips to 1 once
+# the Card button is pressed. After that, the avatar toggle refuses to
+# touch the message (see StatsView), since a trading card isn't shaped
+# like a normal /stats embed and toggling its thumbnail would just make a
+# mess of it.
 ensure_column("stats_views", "targetUserId")
 ensure_column("stats_views", "cardShown", "INTEGER", "0")
 # Which avatar the trading card is currently rendered with: 0 (default)
 # for this server's own profile picture, 1 for the regular account-wide
-# one. Only meaningful once cardShown=1; reset to 0 every time the card is
-# (re-)entered so it always starts on the server avatar, matching the
+# one. Only matters once cardShown=1. Reset to 0 every time the card is
+# (re-)entered, so it always starts on the server avatar, matching the
 # plain /stats embed's own default (see StatsView).
 ensure_column("stats_views", "cardAvatarGlobal", "INTEGER", "0")
 # A player's trading-card look (see /stats' Card button and
-# _renderTradingCardImage), one row per (guild, player), created with
-# Shockwave's own defaults the first time it's needed. Colors are stored as
-# "#RRGGBB" hex, font_style is a named preset _cardFontPaths knows how to
-# resolve: "Default" (Shockwave's own Chakra Petch/IBM Plex Sans pairing,
-# always available) or any of CARD_SHOP_FONT_STYLES' unlockable ones.
-# `customized` (see ensureCardSettings)
-# tracks whether a row still just reflects Shockwave's own defaults (0) or
-# was explicitly changed by something other than that self-healing insert
-# (1); there's no /card-customize command yet, so today every row is
-# always 0, and /stats keeps it in sync with CARD_DEFAULT_* on every call
-# rather than freezing at whatever they were the day the row was created.
+# _renderTradingCardImage). One row per (guild, player), created with
+# Shockwave's own defaults the first time it's needed. Colors are stored
+# as "#RRGGBB" hex. font_style is a named preset that _cardFontPaths
+# resolves: either "Default" (Shockwave's own Chakra Petch/IBM Plex Sans
+# pairing, always available) or one of CARD_SHOP_FONT_STYLES' unlockable
+# fonts. `customized` (see ensureCardSettings) tracks whether a row still
+# just reflects Shockwave's defaults (0) or was explicitly changed by
+# something other than that self-healing insert (1). There's no
+# /card-customize command yet, so every row is currently always 0, and
+# /stats keeps it in sync with CARD_DEFAULT_* on every call instead of
+# freezing at whatever the values were the day the row was created.
 cursor.execute(
     "CREATE TABLE IF NOT EXISTS trading_cards("
     "guildId, userId, title, accent_color, background_color, text_color, font_style, "
     "PRIMARY KEY(guildId, userId))"
 )
 ensure_column("trading_cards", "customized", "INTEGER", "0")
-# Which CARD_SHOP_COLOR_SCHEMES/tier-name a row's colors were last equipped
-# from via /card-set, or NULL for a hand-edited custom hex
-# value with nothing to track (see _resyncEquippedColorScheme). Lets an
-# already-equipped scheme keep following that scheme's current colors
-# instead of freezing at whatever they were the moment it was picked.
+# Which CARD_SHOP_COLOR_SCHEMES tier name a row's colors were last equipped
+# from via /card-set, or NULL for a hand-edited custom hex value with
+# nothing to track (see _resyncEquippedColorScheme). Lets an already-
+# equipped scheme keep following that scheme's current colors instead of
+# freezing at whatever they were the moment it was picked.
 ensure_column("trading_cards", "color_scheme_name")
-# Permanent record of which trading-card cosmetics (a title, a color
-# scheme, see CARD_TIER_REWARD_TITLES) each player has unlocked in each
-# guild, by reaching Diamond/Master/Grandmaster/Challenger at least once
-# (see _checkTierRewardUnlocks). Nothing ever deletes a row here, so a
-# reward stays unlocked even after the player deranks back below the tier
-# that earned it; itemKey is a tier name ("Diamond", ...), itemType is
-# "title" or "color_scheme" (both unlock together per tier, see
+# A permanent record of which trading-card cosmetics (a title, a color
+# scheme; see CARD_TIER_REWARD_TITLES) each player has unlocked in each
+# guild, by reaching Diamond, Master, Grandmaster, or Challenger at least
+# once (see _checkTierRewardUnlocks). Nothing ever deletes a row here, so
+# a reward stays unlocked even after the player deranks back below the
+# tier that earned it. itemKey is a tier name ("Diamond", etc.), itemType
+# is "title" or "color_scheme" (both unlock together per tier, see
 # _unlockCardReward), so the same key appears twice per reward.
 cursor.execute(
     "CREATE TABLE IF NOT EXISTS card_unlocks("
     "guildId, userId, itemType, itemKey, PRIMARY KEY(guildId, userId, itemType, itemKey))"
 )
-# One row per posted /team stats message, recognizes that a click
-# landed on a real /team stats embed (see TeamStatsView), same idea as
-# stats_views above but scoped to a team (teamId) rather than a player.
+# One row per posted /team stats message, so we can recognize that a click
+# landed on a real /team stats embed (see TeamStatsView). Same idea as
+# stats_views above, but scoped to a team (teamId) instead of a player.
 cursor.execute(
     "CREATE TABLE IF NOT EXISTS team_stats_views("
     "messageId INTEGER PRIMARY KEY, guildId, teamId, cardShown INTEGER DEFAULT 0)"
 )
 # One row per posted /team list message, same paging idea as leaderboards
-# above, plus the filter/sort options it was posted with, so a page flip
-# (_handleTeamListPageClick) re-applies the exact same view instead of
-# resetting to the unfiltered/default-sorted list.
+# above, plus the filter and sort options it was posted with. That way a
+# page flip (_handleTeamListPageClick) re-applies the exact same view
+# instead of resetting to the unfiltered, default-sorted list.
 cursor.execute(
     "CREATE TABLE IF NOT EXISTS team_list_views("
     "messageId INTEGER PRIMARY KEY, guildId, channelId, search, recruitingOnly, sort, sort_order, page, "
     "cards INTEGER DEFAULT 0, cardShown INTEGER DEFAULT 0, memberIds, memberNames)"
 )
-# 1 when a posted /team list message is in "cards" mode (one team's full
-# stats card per page, same shape as /team lookup, sourced from the same
-# filtered/sorted team list a plain /team list would show) rather than the
-# default summary-list mode; _handleTeamListPageClick reads this back to
-# know which of the two ways to re-render on a page flip. cardShown further
-# narrows cards mode: 0 for that team's plain stats card, 1 for its actual
-# trading card (see TeamListPagingView's own Card/Back toggle), carried
-# across a page flip so paging while looking at trading cards keeps
-# showing trading cards, not stats. memberIds (comma-separated user ids,
-# same "" for none / CSV otherwise shape servers.disliked_role_user_ids
-# uses) narrows the list to teams rostering every one of them;
-# memberNames is the same set's display names, captured once at post time
-# purely for the footer text so a page flip never needs to re-resolve
-# Discord members from bare ids. All reached by an existing database whose
-# team_list_views predates these columns; the CREATE TABLE above already
-# includes them for a fresh one.
+# cards is 1 when a posted /team list message is in "cards" mode: one
+# team's full stats card per page (same shape as /team lookup), sourced
+# from the same filtered/sorted team list a plain /team list would show,
+# instead of the default summary-list mode. _handleTeamListPageClick reads
+# this back to know which of the two ways to re-render on a page flip.
+# cardShown further narrows cards mode: 0 for that team's plain stats
+# card, 1 for its actual trading card (see TeamListPagingView's own
+# Card/Back toggle). It's carried across a page flip so paging while
+# looking at trading cards keeps showing trading cards, not stats.
+# memberIds is a comma-separated list of user ids (empty string for none,
+# the same shape servers.disliked_role_user_ids uses), narrowing the list
+# to teams that have every one of those members on the roster. memberNames
+# is the same set's display names, captured once at post time purely for
+# the footer text, so a page flip never needs to re-resolve Discord
+# members from bare ids. All four of these reach an existing database
+# whose team_list_views table predates them. The CREATE TABLE above
+# already includes them for a fresh install.
 ensure_column("team_list_views", "cards", "INTEGER", "0")
 ensure_column("team_list_views", "cardShown", "INTEGER", "0")
 ensure_column("team_list_views", "memberIds", "TEXT")
 ensure_column("team_list_views", "memberNames", "TEXT")
 # Every persistent team in a server. Distinct from the ephemeral team1/
-# team2 columns on `servers` (which hold whatever roster the last /make-
-# teams random or /make-teams draft produced); these are named teams a player can be
-# registered on ahead of a tournament. A player can be listed on more than
-# one row here; Tournament.register_team is what stops the same player
-# from being entered on two teams in one tournament.
+# team2 columns on `servers`, which hold whatever roster the last
+# /make-teams random or /make-teams draft produced. These are named teams
+# a player can be registered on ahead of a tournament. A player can be
+# listed on more than one row here. Tournament.register_team is what stops
+# the same player from being entered on two teams in one tournament.
 cursor.execute(
     "CREATE TABLE IF NOT EXISTS teams("
     "id INTEGER PRIMARY KEY AUTOINCREMENT, guildId, name, data)"
 )
-# One tournament per server; creating a new one while one already exists
-# requires confirmation (see ConfirmTournamentOverwriteView) since it
+# One tournament per server. Creating a new one while one already exists
+# requires confirmation (see ConfirmTournamentOverwriteView), since it
 # replaces this row outright. Columns mirror TourneyClasses.Tournament's
-# attributes directly; `teams` and `bracket` are JSON since they're
-# variable-length nested data.
+# attributes directly. `teams` and `bracket` are stored as JSON, since
+# they're variable-length nested data.
 cursor.execute(
     "CREATE TABLE IF NOT EXISTS tournaments("
     "guildId PRIMARY KEY, name, team_size, num_teams, double_elimination, teams, bracket)"
 )
-# Losers bracket for a double-elimination tournament, JSON, same reason
-# `bracket` above is: variable-length nested node-graph data. NULL for any
-# tournament created before this existed, or one that isn't double
-# elimination at all.
+# Losers bracket for a double-elimination tournament, stored as JSON for
+# the same reason `bracket` above is: it's variable-length, nested
+# node-graph data. NULL for any tournament created before this existed, or
+# one that isn't double elimination at all.
 ensure_column("tournaments", "losers_bracket", "TEXT")
-# One row per pending /team invite; several can be open at once (different
-# teams/invitees), so each is tracked by its own row/message like `duels`.
+# One row per pending /team invite. Several can be open at once (different
+# teams, different invitees), so each is tracked by its own row and
+# message, like `duels` above.
 cursor.execute(
     "CREATE TABLE IF NOT EXISTS team_invites("
     "id INTEGER PRIMARY KEY AUTOINCREMENT, guildId, channelId, messageId, "
     "teamId, teamName, inviterId, targetId, targetName)"
 )
-# One row per tournament match ever played; /tournament start creates a
-# batch of these per round (sequential: one at a time; simultaneous: all
-# at once), each keyed by its own id so /set correct-winner can target
-# a specific match. nodeIndex is the index into the tournament's bracket
-# list of one of the two paired nodes for this match (the other is that
-# node's .opponent); that's how a resolved match knows which bracket
+# One row per tournament match ever played. /tournament start creates a
+# batch of these per round (sequential mode: one at a time; simultaneous
+# mode: all at once), each keyed by its own id so /set correct-winner can
+# target a specific match. nodeIndex is the index into the tournament's
+# bracket list for one of the two paired nodes in this match (the other is
+# that node's .opponent). That's how a resolved match knows which bracket
 # node to advance the winner into.
 cursor.execute(
     "CREATE TABLE IF NOT EXISTS tournament_matches("
@@ -494,64 +497,67 @@ cursor.execute(
     "team1, team2, state, mode, messageId, channelId, winner)"
 )
 # 'winners', 'losers', or 'finals': which bracket this match belongs to.
-# Needed because roundIndex/nodeIndex are only unique WITHIN one bracket:
-# a double-elimination tournament's winners round 0 and losers round 0 are
+# Needed because roundIndex/nodeIndex are only unique within one bracket.
+# A double-elimination tournament's winners round 0 and losers round 0 are
 # two entirely different matches that happen to share the same numbers.
 ensure_column("tournament_matches", "bracketType", "TEXT", "'winners'")
 # Set once this match's own betting window (see
-# _openConcurrentTournamentBetting) has closed, separate from `state`,
-# since a match can still be unresolved (waiting on a report) after
-# betting on it has already closed.
+# _openConcurrentTournamentBetting) has closed. Kept separate from
+# `state`, since a match can still be unresolved (waiting on a report)
+# after betting on it has already closed.
 ensure_column("tournament_matches", "bettingClosed", "INTEGER", "0")
-# JSON snapshot of exactly which wagers _settleMatchWagers paid out for this
-# match (userId/username/team/amount); tournament_wagers rows themselves
-# get deleted once settled, so without this a later /set correct-winner
-# match_id correction would have no way to know who to reverse/repay.
-# NULL for a match nobody bet on, or one settled before this existed.
+# A JSON snapshot of exactly which wagers _settleMatchWagers paid out for
+# this match (userId, username, team, amount). tournament_wagers rows
+# themselves get deleted once settled, so without this snapshot, a later
+# /set correct-winner match_id correction would have no way to know who to
+# reverse or repay. NULL for a match nobody bet on, or one settled before
+# this existed.
 ensure_column("tournament_matches", "settledWagers", "TEXT")
-# The simultaneous-mode round this match belongs to shares one "Betting is
-# open on N matches"/"Betting is now closed" message pair (see
-# _openConcurrentTournamentBetting/_concurrentBettingTimer) across every
-# match in the round, so every one of that round's rows gets the SAME
-# value here rather than each match tracking its own. Read back (from
-# whichever row) and deleted once the round's last match resolves - see
-# _resolveTournamentMatch/_resolveLosersMatch/_resolveFinalsMatch. NULL
-# for sequential mode, which has no round-wide betting message at all.
+# Every match in a simultaneous-mode round shares one "Betting is open on
+# N matches" / "Betting is now closed" message pair (see
+# _openConcurrentTournamentBetting/_concurrentBettingTimer), so every row
+# for that round gets the SAME value here instead of each match tracking
+# its own. Read back from whichever row, and deleted once the round's last
+# match resolves. See _resolveTournamentMatch/_resolveLosersMatch/
+# _resolveFinalsMatch. NULL for sequential mode, which has no round-wide
+# betting message at all.
 ensure_column("tournament_matches", "roundBettingMessageId", "INTEGER")
 ensure_column("tournament_matches", "roundBettingClosedMessageId", "INTEGER")
-# Wagers on a SPECIFIC tournament match; unlike `wagers` above (one bet
-# per user per guild, tied to whatever single casual/ranked game or
+# Wagers on one specific tournament match. Unlike `wagers` above (one bet
+# per user per guild, tied to whichever single casual/ranked game or
 # sequential-mode tournament match is currently active), simultaneous-mode
-# tournament rounds can have several matches open at once, so bets here are
-# scoped per matchId instead: one bet per user per MATCH, not per guild.
+# tournament rounds can have several matches open at once. So bets here
+# are scoped per matchId instead: one bet per user per match, not per
+# guild.
 cursor.execute(
     "CREATE TABLE IF NOT EXISTS tournament_wagers("
     "matchId, guildId, userId, username, team, amount, "
     "PRIMARY KEY(matchId, userId))"
 )
 # /setup: each role a player has explicitly said they like or dislike
-# playing; `role` is one of SETUP_ROLE_NAMES, `preference` is 'like' or
+# playing. `role` is one of SETUP_ROLE_NAMES, `preference` is 'like' or
 # 'dislike'. The PRIMARY KEY includes `role` (not `preference`), so a role
-# can only ever have ONE stored preference per player at a time. A role
+# can only ever have one stored preference per player at a time. A role
 # picked in both the liked and disliked steps of the same /setup run never
-# reaches this table at all (see helper.py's _confirmSetupRoleStep; it's
-# left out of both sides instead, i.e. neutral), so nothing here has to
-# resolve that contradiction itself. Meant to feed a future role-aware elo
-# balance; for now it's read only to gate /make-teams' use_roles on
-# everyone in the voice channel having run /setup at least once.
+# reaches this table at all. It's left out of both sides instead, treated
+# as neutral (see helper.py's _confirmSetupRoleStep). So nothing here has
+# to resolve that contradiction. This is meant to feed a future role-aware
+# elo balance. For now it's only read to check that everyone in the voice
+# channel has run /setup at least once, gating /make-teams' use_roles.
 cursor.execute(
     "CREATE TABLE IF NOT EXISTS player_role_preferences("
     "guildId, userId, role, preference, PRIMARY KEY(guildId, userId, role))"
 )
-# /setup's own in-progress role-picker: one row per posted message while
-# the caller is still toggling/confirming, deleted once they finish (or
-# the view times out). `step` is 'liked' or 'disliked' (which round is
-# currently live); `selectedRoles` is a comma-separated snapshot of
-# whichever roles are CURRENTLY toggled on for that round, kept in sync by
-# _handleSetupRoleToggleClick as the caller presses each role's button;
-# `likedRoles` only gets filled in once the liked round is confirmed,
-# carrying that finished set forward so the disliked round's own confirm
-# can check both against each other.
+# /setup's own in-progress role picker: one row per posted message while
+# the caller is still toggling and confirming choices, deleted once they
+# finish (or the view times out). `step` is 'liked' or 'disliked',
+# tracking which round is currently live. `selectedRoles` is a
+# comma-separated snapshot of whichever roles are currently toggled on for
+# that round, kept in sync by _handleSetupRoleToggleClick as the caller
+# presses each role's button. `likedRoles` only gets filled in once the
+# liked round is confirmed, carrying that finished set forward so the
+# disliked round's own confirm step can check both sets against each
+# other.
 cursor.execute(
     "CREATE TABLE IF NOT EXISTS setup_role_sessions("
     "messageId INTEGER PRIMARY KEY, guildId, userId, step, selectedRoles, likedRoles)"
@@ -560,7 +566,8 @@ mainDB.commit()
 
 helperObj = helper.helpers(cursor, mainDB)
 
-# Hash Map
+# Role index -> display label, used wherever a roster needs to show which
+# of the 5 roles a player was assigned.
 roles = {
     0: "Top - ",
     1: "Jungle - ",
@@ -569,22 +576,24 @@ roles = {
     4: "Support - "
 }
 
-# A common "who/where" suffix for both the call and completion log lines
-# below; DM interactions have no guild, so that's spelled out rather than
-# crashing on interaction.guild.name.
+# A shared "who, where" suffix for both the call and completion log lines
+# below. DM interactions have no guild, so that case is spelled out
+# explicitly instead of crashing on interaction.guild.name.
 def _interactionLogContext(interaction):
     guild = interaction.guild
     guild_desc = f"{guild.name} ({guild.id})" if guild is not None else "DM"
     return f"user={interaction.user} ({interaction.user.id}) guild={guild_desc}"
 
 
-# Best-effort snapshot of the interaction an error was raised from, appended
-# to on_app_command_error's log line so a failure is diagnosable from the
-# log alone (which command, with what parameters, for whom) instead of
-# needing a live repro. interaction.command/.namespace run the same real
-# discord.py option-resolution machinery LoggingCommandTree.interaction_check
-# above has to guard against, wrapped the same way here so a dump failure
-# never swallows the actual error it was trying to add context to.
+# A best-effort snapshot of the interaction an error was raised from,
+# appended to on_app_command_error's log line. This makes a failure
+# diagnosable from the log alone (which command, with what parameters, for
+# whom), without needing to reproduce it live. interaction.command and
+# .namespace run the same real discord.py option-resolution machinery that
+# LoggingCommandTree.interaction_check below has to guard against, so this
+# is wrapped in a try/except the same way, to make sure a failure while
+# building this dump never swallows the real error it was meant to add
+# context to.
 def _errorVariableDump(interaction):
     try:
         command = interaction.command
@@ -596,34 +605,35 @@ def _errorVariableDump(interaction):
 
 
 # Logs every real command invocation (name, params, who, where) in one
-# place rather than instrumenting each of the ~40 @tree.command functions
-# individually; interaction_check is a global hook discord.py's own
-# CommandTree._call runs before dispatching ANY application command in the
-# tree. interaction.command/.namespace are independently-resolved cached
-# properties (see discord.py's Interaction class), so both are already
-# available here even though the tree hasn't actually invoked the command
-# yet. Only actual command invocations are logged, not every keystroke
-# into an autocomplete field; interaction_check also fires for those
-# (same InteractionType family), but InteractionType.application_command
-# excludes them. The default implementation this overrides just returns
-# True unconditionally, so returning True here (never blocking anything)
-# preserves that; per-command checks (e.g. /clear elo's has_permissions) still
-# run separately afterward and are unaffected by this.
+# place, instead of adding logging to each of the roughly 40 @tree.command
+# functions individually. interaction_check is a global hook that
+# discord.py's own CommandTree._call runs before dispatching any
+# application command in the tree. interaction.command and .namespace are
+# already resolved and cached by this point (see discord.py's Interaction
+# class), so both are available here even though the tree hasn't actually
+# invoked the command yet. Only real command invocations get logged, not
+# every keystroke into an autocomplete field: interaction_check also fires
+# for those (they're the same InteractionType family), but
+# InteractionType.application_command excludes them. The default
+# implementation this overrides just returns True unconditionally, so
+# always returning True here preserves that behavior and never blocks
+# anything. Per-command checks (like /clear elo's has_permissions) still
+# run separately afterward, unaffected by this.
 #
-# BUG FOUND IN PRODUCTION: interaction.command/.namespace run discord.py's
-# own real option-resolution machinery (Namespace.__init__ in particular
-# indexes each option's fields directly, not via .get()), which nothing in
-# tests.py can faithfully exercise; every test here goes through a plain
-# FakeInteraction with no real payload to resolve. Worse, CommandTree.
-# _from_interaction's own wrapper only catches AppCommandError around the
-# whole dispatch, so any OTHER exception raised in here (a logging-only
-# path with no business reason to ever fail) escaped uncaught, silently
-# killing the interaction before the command it was meant to observe ever
-# ran; Discord shows "This interaction failed" and nothing reaches
-# on_app_command_error or this file's own log at all. A try/except around
-# the entire body, unconditionally returning True either way, is what
-# makes this hook genuinely unable to take down the feature it's just
-# supposed to be watching.
+# A past production bug lives here as a cautionary note: interaction.
+# command and .namespace run discord.py's own real option-resolution code
+# (Namespace.__init__ in particular reads each option's fields directly,
+# not through .get()), and nothing in tests.py can faithfully exercise
+# that. Every test here goes through a plain FakeInteraction with no real
+# payload to resolve. Worse, CommandTree._from_interaction's own wrapper
+# only catches AppCommandError around the whole dispatch, so any other
+# exception raised in here (a logging-only path that has no real reason to
+# ever fail) went uncaught and silently killed the interaction before the
+# command it was meant to observe ever ran. Discord showed "This
+# interaction failed" and nothing reached on_app_command_error or this
+# file's own log at all. The try/except around the whole body below,
+# always returning True either way, is what makes this hook unable to
+# take down the very feature it's supposed to be watching.
 class LoggingCommandTree(app_commands.CommandTree):
     async def interaction_check(self, interaction):
         try:
@@ -648,15 +658,16 @@ client = discord.Client(intents=intents)
 tree = LoggingCommandTree(client)
 helperObj.client = client
 # _DraftPickSlotButton's callback (a DynamicItem, not a plain view button)
-# can't receive helperObj via a constructor the way every other view does,
-# since discord.py reconstructs it straight from a matched custom_id after
-# a restart; it reaches back through interaction.client.helperObj instead.
+# can't receive helperObj through a constructor the way every other view
+# does, because discord.py reconstructs it straight from a matched
+# custom_id after a restart. It reaches back through
+# interaction.client.helperObj instead.
 client.helperObj = helperObj
 
-# Pure personalization; the bot's Discord status cycles through these
+# Pure personalization: the bot's Discord status cycles through these
 # instead of sitting on one fixed line. Recalled from memory rather than
-# pulled from a script, so treat the exact wording as close-but-not-
-# necessarily-verbatim if that ever matters.
+# pulled from a script, so treat the exact wording as close, not
+# necessarily verbatim, if that ever matters.
 ORIANNA_QUOTES = [
     "Winding...",
     "Precision is everything.",
@@ -666,13 +677,13 @@ ORIANNA_QUOTES = [
 _orianna_quote_cycle = itertools.cycle(ORIANNA_QUOTES)
 
 
-# Runs immediately on .start() and then every 30 minutes after; a fixed
-# status never changes, and cycling it is purely cosmetic, so there's no
-# reason to update any faster than that. The try/except is deliberate: a
-# presence update can fail if the client's connection state isn't fully
-# settled yet (e.g. right after a reconnect, or, in tests, a Client that
-# was never actually connected at all), and this is purely cosmetic, so
-# there's nothing worth doing beyond letting the next scheduled tick retry.
+# Runs immediately on .start(), then every 30 minutes after. This is
+# purely cosmetic, so there's no reason to update any faster than that.
+# The try/except is deliberate: a presence update can fail if the
+# client's connection isn't fully settled yet (e.g. right after a
+# reconnect, or in tests, where the Client was never actually connected at
+# all). Since this is only cosmetic, there's nothing worth doing beyond
+# letting the next scheduled tick retry.
 @tasks.loop(minutes=30)
 async def rotateStatus():
     try:
@@ -682,15 +693,16 @@ async def rotateStatus():
 
 
 # Snapshots main.db into BACKUP_DIR and prunes anything older than
-# BACKUP_RETENTION_DAYS. Uses sqlite3's own backup() API rather than a
-# plain file copy; main.db is a live connection other code can be
-# reading/writing between event loop ticks, and copying the raw file
-# risks capturing it mid-write; backup() takes a proper point-in-time
-# snapshot instead. Runs on the event loop rather than a thread: mainDB
-# was opened with the default check_same_thread=True, so handing it to a
-# different thread (e.g. via asyncio.to_thread) would raise outright, and
-# a 100KB-scale database backs up in well under the time a trading-card
-# render already blocks the loop for.
+# BACKUP_RETENTION_DAYS. Uses sqlite3's own backup() API instead of a
+# plain file copy, since main.db is a live connection that other code can
+# be reading and writing between event loop ticks. Copying the raw file
+# risks capturing it mid-write. backup() takes a proper point-in-time
+# snapshot instead. This runs directly on the event loop rather than a
+# separate thread: mainDB was opened with the default
+# check_same_thread=True, so handing it to a different thread (e.g. via
+# asyncio.to_thread) would raise outright. A database at this scale
+# (around 100KB) backs up in well under the time a trading-card render
+# already blocks the loop for.
 def _backupDatabase():
     os.makedirs(BACKUP_DIR, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -708,8 +720,8 @@ def _backupDatabase():
             os.remove(entry_path)
 
 
-# Runs immediately on .start() (an on_ready right after boot always gets a
-# fresh snapshot) and then every 24 hours after.
+# Runs immediately on .start(), so an on_ready right after boot always
+# gets a fresh snapshot, then every 24 hours after.
 @tasks.loop(hours=24)
 async def backupDatabaseTask():
     try:
@@ -719,26 +731,26 @@ async def backupDatabaseTask():
         logger.exception("Database backup failed.")
 
 
-# Commands are registered on `tree` with no guild= at all (see every
-# @tree.command below), which makes them "global" command *definitions*;
-# copy_global_to() + a guild-scoped sync() is what actually publishes them
-# to a specific server. Doing it per-guild rather than a single
-# tree.sync() (truly global commands) is what keeps registration instant:
-# a real global sync can take up to an hour to show up for users.
+# Every @tree.command below is registered with no guild= at all, which
+# makes them "global" command *definitions*. copy_global_to() plus a
+# guild-scoped sync() is what actually publishes them to a specific
+# server. Doing it per-guild instead of one global tree.sync() is what
+# keeps registration instant: a real global sync can take up to an hour to
+# show up for users.
 async def syncCommandsToGuild(guild):
     tree.copy_global_to(guild=guild)
     await tree.sync(guild=guild)
 
 
-# The one place that inserts a `servers` row, check first, insert only if
-# missing, so it's safe to call from on_ready too (self-healing any guild
-# whose row never got created, or was lost to a wiped/restored database)
-# without ever creating a duplicate row for a guild that already has one
-# (servers.guildId has no UNIQUE constraint to lean on INSERT OR IGNORE
-# for). The positional INSERT below has to supply a value for every column
-# on `servers`, including the roster_* ones added later via ensure_column
-# above; falling out of sync with the table's actual column count throws
-# sqlite3.OperationalError.
+# The only place that inserts a `servers` row. It checks first and only
+# inserts if the row is missing, so it's safe to call from on_ready too,
+# self-healing any guild whose row never got created, or was lost to a
+# wiped or restored database, without ever creating a duplicate for a
+# guild that already has one (servers.guildId has no UNIQUE constraint to
+# lean on INSERT OR IGNORE for). The positional INSERT below has to supply
+# a value for every column on `servers`, including the roster_* ones added
+# later via ensure_column above. If that count ever falls out of sync with
+# the table's actual column count, this throws sqlite3.OperationalError.
 def ensure_guild_row(guild_id, guild_name):
     cursor.execute("SELECT 1 FROM servers WHERE guildId=?", (guild_id,))
     if cursor.fetchone() is not None:
@@ -766,12 +778,12 @@ async def on_ready():
     logger.info("Shockwave is ready, logged in as %s.", client.user)
 
 
-# Persistent views (every button has a fixed custom_id, timeout=None) need
-# registering exactly once per process so Discord keeps routing their
-# clicks to this bot even across a restart/redeploy; on_ready can fire
-# more than once (e.g. on reconnect), so this is guarded the same way
+# Persistent views (every button has a fixed custom_id and timeout=None)
+# need registering exactly once per process, so Discord keeps routing
+# their clicks to this bot even across a restart or redeploy. on_ready can
+# fire more than once (e.g. on reconnect), so this is guarded the same way
 # rotateStatus.is_running() above guards the status-rotation task from
-# being started twice.
+# starting twice.
 _persistent_views_registered = False
 
 
@@ -809,21 +821,21 @@ async def on_guild_remove(ctx):
 
 
 
-# Companion to LoggingCommandTree.interaction_check's "Command called" line;
-# discord.py dispatches this event itself (see CommandTree._call) only
-# once a command has actually run to completion without raising, so this
-# only ever logs a genuine success, never a command that errored out (that
-# path logs separately via on_app_command_error below) or one interaction_
-# check rejected before it ran at all.
+# Companion to LoggingCommandTree.interaction_check's "Command called"
+# line. discord.py dispatches this event itself (see CommandTree._call)
+# only once a command has actually run to completion without raising, so
+# this only ever logs a genuine success. It never logs a command that
+# errored out (that's on_app_command_error below) or one that
+# interaction_check rejected before it even ran.
 @client.event
 async def on_app_command_completion(interaction, command):
     # discord.py's own Client._run_event already keeps an exception here
-    # from propagating anywhere harmful (it's routed to on_error instead,
-    # and this fires only after the command it's about already fully
-    # succeeded and responded), caught explicitly anyway so a bug in this
+    # from causing real harm (it gets routed to on_error instead, and this
+    # only fires after the command it's about has already fully succeeded
+    # and responded). Caught explicitly anyway, so a bug in this
     # logging-only path still reaches this file's own log instead of only
-    # discord.py's default stderr-only on_error, matching interaction_check's
-    # own reasoning above.
+    # discord.py's default stderr-only on_error. Same reasoning as
+    # interaction_check above.
     try:
         logger.info("Command completed: /%s | %s", command.qualified_name, _interactionLogContext(interaction))
     except Exception:
@@ -831,14 +843,14 @@ async def on_app_command_completion(interaction, command):
 
 
 # Catch-all for every slash command's errors. discord.py calls this after
-# ANY command's own local .error handler runs too (CommandTree._dispatch_
-# error always calls both, not one or the other, see setBettingTimer_error/
-# reportCorrectWinner_error/clearAll_error below), so this only needs to
-# cover what those don't: everything without a local handler at all (most
-# commands), and re-raised errors from the ones that do. Without this, an
-# unhandled exception anywhere just leaves the user staring at "The
-# application did not respond" while the actual traceback only ever reaches
-# the console.
+# any command's own local .error handler runs too. CommandTree.
+# _dispatch_error always calls both, not one or the other. See
+# setBettingTimer_error/reportCorrectWinner_error/clearAll_error below.
+# So this only needs to cover what those don't: commands with no local
+# handler at all (most of them), and re-raised errors from the ones that
+# do have one. Without this, an unhandled exception anywhere would just
+# leave the user staring at "The application did not respond," while the
+# real traceback only ever reached the console.
 @tree.error
 async def on_app_command_error(interaction, error):
     if isinstance(error, app_commands.MissingPermissions):
@@ -851,9 +863,9 @@ async def on_app_command_error(interaction, error):
             exc_info=(type(error), error, error.__traceback__),
         )
 
-    # A local .error handler that already responded to this interaction
+    # If a local .error handler already responded to this interaction
     # (e.g. the MissingPermissions branch above, handled first by
-    # clearAll_error/etc.) means posting a second, generic message here
+    # clearAll_error and similar), posting a second, generic message here
     # would just stack on top of the specific one they already got.
     if interaction.response.is_done():
         return
@@ -867,13 +879,14 @@ async def on_app_command_error(interaction, error):
 # Commands
 
 
-# One subcommand per setting instead of a single command with 8 optional,
-# manually-paired parameters (team1/team2, member/elo): Discord enforces a
-# subcommand's own required parameters for you, so there's no longer a way
-# to submit half of a pair and only find out it's invalid after the fact.
-# The tradeoff is that changing several settings at once now takes several
-# calls instead of one combined "Updated X, Y, and Z." response; adminSetHelper
-# still accepts every field, each subcommand below just fills in only its own.
+# One subcommand per setting, instead of a single command with 8 optional,
+# manually-paired parameters (team1/team2, member/elo). Discord enforces a
+# subcommand's own required parameters for you, so there's no way to
+# submit half of a pair and only find out it's invalid after the fact. The
+# tradeoff is that changing several settings at once now takes several
+# calls instead of one combined "Updated X, Y, and Z." response.
+# adminSetHelper still accepts every field. Each subcommand below just
+# fills in its own.
 setGroup = app_commands.Group(
     name="set",
     description="Admin: change server settings"
@@ -992,8 +1005,8 @@ setCorrectWinner.error(_setAdminPermissionError)
 tree.add_command(setGroup)
 
 
-# /wager and /wager-against grouped under one /wager command instead of
-# two separate top-level ones, so typing /wager surfaces both the
+# /wager and /wager-against are grouped under one /wager command instead
+# of two separate top-level ones, so typing /wager surfaces both the
 # team-game bet and the 1-on-1 challenge together.
 wagerGroup = app_commands.Group(
     name="wager",
@@ -1001,18 +1014,18 @@ wagerGroup = app_commands.Group(
 )
 
 
-# team is free text (with autocomplete), not a static Choice, so the
-# picker can show the roster's own real team names instead of a generic
-# "Team 1"/"Team 2" disconnected from what's actually on screen. Always
-# suggests the CURRENT game's own names, not whichever match_id the
+# team is free text with autocomplete, not a static Choice, so the picker
+# can show the roster's own real team names instead of a generic "Team 1"
+# / "Team 2" disconnected from what's actually on screen. This always
+# suggests the current game's own names, not whichever match_id the
 # caller might also be filling in on the same command: discord.py's real
 # option-resolution for interaction.namespace can't be faithfully
-# exercised by this file's own FakeInteraction-based tests (see
-# LoggingCommandTree's own "BUG FOUND IN PRODUCTION" note above), and
-# match_id is filled in after team in the command's own param order
-# anyway, so it's rarely even set yet at this point. wagerHelper's own
-# server-side resolution still matches against the real match_id's own
-# team names when one is given; this is only the suggestion list.
+# exercised by this file's own FakeInteraction-based tests (see the
+# production-bug note on LoggingCommandTree above), and match_id comes
+# after team in the command's own parameter order anyway, so it's rarely
+# even set yet at this point. wagerHelper's own server-side resolution
+# still matches against the real match_id's team names when one is given.
+# This autocomplete only builds the suggestion list.
 async def wagerTeamAutocomplete(ctx, current: str):
     name1, name2 = helperObj.getWagerTeamNames(ctx.guild.id)
     current = current.lower()
@@ -1072,9 +1085,9 @@ async def stats(ctx, member: discord.Member = None):
     await helperObj.statsHelper(ctx, member)
 
 
-# The caller's own available titles only (CARD_DEFAULT_TITLE plus whatever
-# they've unlocked, see getAvailableCardTitles); unlike logoAutocomplete's
-# static list, this one depends on who's typing.
+# Only the caller's own available titles (CARD_DEFAULT_TITLE plus
+# whatever they've unlocked; see getAvailableCardTitles). Unlike
+# logoAutocomplete's static list below, this one depends on who's typing.
 async def cardTitleAutocomplete(ctx, current: str):
     current = current.lower()
     titles = helperObj.getAvailableCardTitles(ctx.guild.id, ctx.user.id)
@@ -1082,8 +1095,9 @@ async def cardTitleAutocomplete(ctx, current: str):
     return [app_commands.Choice(name=t, value=t) for t in matches[:25]]
 
 
-# Same shape as cardTitleAutocomplete above, the caller's own available
-# schemes only (CARD_DEFAULT_SCHEME_NAME plus whatever they've unlocked).
+# Same shape as cardTitleAutocomplete above: only the caller's own
+# available schemes (CARD_DEFAULT_SCHEME_NAME plus whatever they've
+# unlocked).
 async def cardColorSchemeAutocomplete(ctx, current: str):
     current = current.lower()
     schemes = helperObj.getAvailableCardColorSchemes(ctx.guild.id, ctx.user.id)
@@ -1091,8 +1105,8 @@ async def cardColorSchemeAutocomplete(ctx, current: str):
     return [app_commands.Choice(name=n, value=n) for n in matches[:25]]
 
 
-# Same shape as cardTitleAutocomplete/cardColorSchemeAutocomplete above -
-# the caller's own available font styles only.
+# Same shape as cardTitleAutocomplete/cardColorSchemeAutocomplete above:
+# only the caller's own available font styles.
 async def cardFontAutocomplete(ctx, current: str):
     current = current.lower()
     styles = helperObj.getAvailableCardFontStyles(ctx.guild.id, ctx.user.id)
@@ -1116,9 +1130,9 @@ async def cardSet(ctx, title: str = None, color_scheme: str = None, font_style: 
     await helperObj.cardSetHelper(ctx, title, color_scheme, font_style)
 
 
-# /preview, /shop, and /shop-buy grouped under one /shop command instead
-# of three separate top-level ones, so typing /shop surfaces browsing,
-# previewing, and buying together.
+# /preview, /shop, and /shop-buy are grouped under one /shop command
+# instead of three separate top-level ones, so typing /shop surfaces
+# browsing, previewing, and buying together.
 shopGroup = app_commands.Group(
     name="shop",
     description="Browse, preview, or buy trading-card cosmetics with gold"
@@ -1156,10 +1170,10 @@ async def achievements(ctx):
     await helperObj.achievementsHelper(ctx)
 
 
-# Unlike the three cardXAutocomplete functions above (which only ever
-# offer what's already unlocked), this one offers what's still buyable -
-# getShopCatalog's own "owned" flag is what filters an already-purchased
-# item out, so /shop buy never suggests something there's nothing left to
+# Unlike the three cardXAutocomplete functions above, which only ever
+# offer what's already unlocked, this one offers what's still buyable.
+# getShopCatalog's own "owned" flag filters out anything already
+# purchased, so /shop buy never suggests something there's nothing left to
 # do with.
 async def shopBuyAutocomplete(ctx, current: str):
     current = current.lower()
@@ -1219,9 +1233,9 @@ async def leaderboard(ctx, filter: app_commands.Choice[str] = None, order: app_c
 
 SITE_COMMANDS_URL = "https://addshockwave.com/commands.html"
 
-# Short descriptions for /help <command>. Kept separate from each command's
-# `description=` (which is what Discord's own command picker shows) since
-# that has to stay short enough to fit there; this can afford a real
+# Short descriptions for /help <command>. Kept separate from each
+# command's `description=` (what Discord's own command picker shows),
+# since that has to stay short enough to fit there. This can afford a real
 # sentence or two, closer to what commands.html says.
 COMMAND_HELP = {
     "set channels": "Sets the voice channel names teams get moved into (creates them if missing). Requires the Manage Server permission.",
@@ -1293,11 +1307,12 @@ async def helpCommandAutocomplete(ctx, current: str):
     return [app_commands.Choice(name=n, value=n) for n in names[:25]]
 
 
-# COMMAND_HELP is keyed by qualified name (e.g. "make-teams random" for a
-# group's subcommand, same shape app_commands.Command.qualified_name
-# already produces, plain "wager" for a command with no group); this walks
-# the tree the same way to resolve one back to its live Command object, for
-# pulling real parameter names/required-ness into the usage line below.
+# COMMAND_HELP is keyed by qualified name: "make-teams random" for a
+# group's subcommand (the same shape app_commands.Command.qualified_name
+# already produces), or plain "wager" for a command with no group. This
+# walks the tree the same way to resolve a name back to its live Command
+# object, so the usage line below can pull in the real parameter names and
+# whether each one is required.
 def _resolveCommand(name):
     parts = name.split(" ")
     command = discord.utils.get(tree.get_commands(), name=parts[0])
@@ -1340,10 +1355,11 @@ async def help(ctx, command: str = None):
 
 
 # All four ways to form a game's two teams (random split, captain draft,
-# loading two saved persistent teams, replaying the last game's teams)
+# loading two saved persistent teams, replaying the last game's teams) are
 # grouped under one /make-teams command instead of four separate top-level
-# ones, so typing /make-teams surfaces all of them together rather than
-# leaving a user to discover the old separate /captains, /team-use, and /reuse commands existed at all.
+# ones, so typing /make-teams surfaces all of them together. This
+# replaced what used to be separate /captains, /team-use, and /reuse
+# commands, which a user had to discover existed on their own.
 makeTeamsGroup = app_commands.Group(
     name="make-teams",
     description="Form a game's two teams: random split, captain draft, saved teams, or a repeat"
@@ -1366,13 +1382,13 @@ async def makeTeamsRandom(ctx, use_roles: bool = False, ranked: bool = False):
         return
 
     # Role-aware team formation needs every rostered player to have run
-    # /setup at least once (it's what /setup's liked/disliked roles feed
-    # into, both here and for rankedTeamHelper's own role balancing below),
-    # checked here, before anything about the current roster is touched,
-    # so an incomplete voice channel gets a clear "who's missing" message
-    # instead of forming plain (role-less) teams anyway or failing partway
-    # through. Bots can't run /setup, so they're excluded rather than
-    # permanently blocking the check.
+    # /setup at least once, since that's what feeds the liked/disliked
+    # roles used here and by rankedTeamHelper's own role balancing below.
+    # This check runs before anything about the current roster gets
+    # touched, so an incomplete voice channel gets a clear "who's missing"
+    # message instead of forming plain, role-less teams anyway, or failing
+    # partway through. Bots can't run /setup, so they're excluded from the
+    # check rather than permanently blocking it.
     if use_roles:
         not_setup = [
             member for member in ctx.user.voice.channel.members
@@ -1386,21 +1402,22 @@ async def makeTeamsRandom(ctx, use_roles: bool = False, ranked: bool = False):
             return
 
     if ranked:
-        # rankedTeamHelper handles its own response + team embeds (elo
-        # averages need per-player lookups it already has to do anyway),
-        # a completely separate flow from the random split below, which
-        # bot.py builds the response for itself.
+        # rankedTeamHelper handles its own response and team embeds, since
+        # computing elo averages needs per-player lookups it already has
+        # to do anyway. That makes this a completely separate flow from
+        # the random split below, where bot.py builds the response itself.
         await helperObj.rankedTeamHelper(ctx, use_roles)
         return
 
-    # `use_roles` (not `roles`, which would shadow the module-level `roles`
-    # dict above) is already a bool from the slash command's type
-    # annotation; comparing it to the string 'True' would always be False.
+    # `use_roles` is named that way, not `roles`, to avoid shadowing the
+    # module-level `roles` dict above. It's already a bool from the slash
+    # command's type annotation, so comparing it to the string 'True' would
+    # always be False.
     #
-    # This command only announces the teams; it used to optionally move
-    # everyone immediately (a `movevar` flag), but moving players and
-    # opening betting only happens once the posted roster's own Start
-    # button is clicked (see _finalizeRoster), so a roster can be
+    # This command only announces the teams. It used to optionally move
+    # everyone immediately, via a `movevar` flag, but moving players and
+    # opening betting now only happens once the posted roster's own Start
+    # button is clicked (see _finalizeRoster). That way a roster can be
     # announced and reviewed before anyone actually gets pulled into a
     # voice channel.
     await helperObj.randomizeTeamHelper(ctx)
@@ -1417,10 +1434,11 @@ async def makeTeamsRandom(ctx, use_roles: bool = False, ranked: bool = False):
     intro_messages = [await ctx.original_response()]
 
     # Roles (Top/Jungle/Mid/Bottom/Support) only make sense for a 5-player
-    # team; makeEmbedString() silently falls back to a plain roster for
-    # any other size, and _finalizeRoster silently skips the Random
-    # Roles/Balanced Roles buttons for the same reason. Explain that
-    # instead of leaving people wondering where the roles went.
+    # team. makeEmbedString() silently falls back to a plain roster for any
+    # other size, and _finalizeRoster silently skips the Random
+    # Roles/Balanced Roles buttons for the same reason. This message
+    # explains that instead of leaving people wondering where the roles
+    # went.
     if use_roles:
         unroled = [
             f"{team.get_name()} ({len(team.get_players())} players)"
@@ -1435,10 +1453,11 @@ async def makeTeamsRandom(ctx, use_roles: bool = False, ranked: bool = False):
 
     team1_message, team2_message = await helperObj.printEmbed(ctx, team1Obj, team2Obj, useRoles=use_roles)
 
-    # Posted last (after the rosters, bolded) rather than folded into the
-    # very first response message, which is easy to scroll past once the
-    # (visually much bigger) rosters land right after it; this puts it
-    # where people are actually looking once they're done reading the teams.
+    # Posted last, after the rosters, in bold, instead of folded into the
+    # very first response message. That first message is easy to scroll
+    # past once the much bigger roster embeds land right after it, so this
+    # puts the call to action where people are actually looking once
+    # they're done reading the teams.
     intro_messages.append(await ctx.channel.send(
         "📣 **Ready?** Press Start on the roster above to move everyone into their channels and open "
         "betting, or Start (no move) to open betting without moving anyone."
@@ -1467,13 +1486,14 @@ async def makeTeamsDraft(
     await startCaptainsDraft(ctx, captain_1, captain_2, use_random, ranked=ranked, snake=snake)
 
 
-# Shared by /make-teams draft regardless of its ranked flag, identical draft flow,
-# the only difference is whether the resulting game is marked ranked
-# (captainsHelper sets is_ranked accordingly, which gates whether recordResult later
-# touches anyone's elo).
+# Shared by /make-teams draft regardless of its ranked flag. The draft
+# flow itself is identical either way. The only difference is whether the
+# resulting game is marked ranked, which captainsHelper handles by setting
+# is_ranked accordingly, gating whether recordResult later touches
+# anyone's elo.
 async def startCaptainsDraft(ctx, captain_1, captain_2, use_random, ranked, snake=False):
-    # Named `use_random`, not `random`; that would shadow the `random`
-    # module imported at the top of this file.
+    # Named `use_random`, not `random`, since `random` would shadow the
+    # `random` module imported at the top of this file.
     if ctx.user.voice is None or ctx.user.voice.channel is None:
         await ctx.response.send_message(
             "You need to be in a voice channel to start a captains draft. Join one and try again."
@@ -1486,17 +1506,19 @@ async def startCaptainsDraft(ctx, captain_1, captain_2, use_random, ranked, snak
 
     if use_random:
         # sqlite3 can't bind a plain Python list as a query parameter, and
-        # getRandomMember() needs each player's id (to look the Member back
-        # up), not just their name; serialize into a Team, the same
-        # convention every other "players" column write in this file uses.
+        # getRandomMember() needs each player's id, to look the Member back
+        # up, not just their name. So this serializes into a Team, the
+        # same convention every other "players" column write in this file
+        # uses.
         players = Team()
         for player in ctx.user.voice.channel.members:
             players.add_player(Player(player.id, player.name))
         helperObj.update(ctx.guild.id, "players", players.serializeTeam())
 
-        # Loop on "still None OR same as captain1"; "AND" can never be
-        # True (a value can't be both None and equal to a non-None
-        # captain1), so it would never actually re-roll on a collision.
+        # This loops on "still None OR same as captain1", not "AND": a
+        # value can never be both None and equal to a non-None captain1 at
+        # the same time, so "AND" would never actually re-roll when the
+        # two picks collide.
         captain1 = await helperObj.getRandomMember(ctx)
         while captain1 is None:
             captain1 = await helperObj.getRandomMember(ctx)
@@ -1515,13 +1537,14 @@ async def startCaptainsDraft(ctx, captain_1, captain_2, use_random, ranked, snak
     await helperObj.captainsHelper(ctx, captain1, captain2, ranked=ranked, snake=snake)
 
 
-# One subcommand per independent reset instead of a single command with 6
-# unrelated boolean flags (some of which execute instantly, others of which
-# require a confirm click), so a single /clear call can't end up doing part
-# of its job immediately and leaving the rest pending on a button. Every
+# One subcommand per independent reset, instead of a single command with 6
+# unrelated boolean flags where some execute instantly and others require
+# a confirm click. That way a single /clear call can't end up doing part
+# of its job immediately while leaving the rest pending on a button. Every
 # subcommand still clears the current in-progress teams/draft first, the
-# same "start a fresh session" base behavior every reset needs;
-# /clear teams is that base behavior on its own, with nothing else attached.
+# same "start a fresh session" base behavior every reset needs.
+# /clear teams is that base behavior on its own, with nothing else
+# attached.
 clearGroup = app_commands.Group(
     name="clear",
     description="Admin: clear teams, tournament, or economy data"
@@ -1636,12 +1659,12 @@ clearCardUnlocks.error(_clearPermissionError)
 tree.add_command(clearGroup)
 
 
-# The caller's own captained teams only, for team-name params on commands
+# Only the caller's own captained teams, for team-name params on commands
 # that require being that team's captain. Same "only suggest what's
 # actually usable" idea cardTitleAutocomplete uses for card unlocks, just
-# scoped to captaincy (getTeamsCaptainedBy) instead. Doesn't stop someone
-# from typing a different name by hand (Discord's autocomplete is a
-# suggestion list, not a restriction to it); the backing helpers still do
+# scoped to captaincy (getTeamsCaptainedBy) instead. This doesn't stop
+# someone from typing a different name by hand: Discord's autocomplete is
+# a suggestion list, not a restriction, and the backing helpers still do
 # their own captain check either way. A member with Manage Server can act
 # on any team (see the helpers' own "or manage_guild" override), so they
 # get every team suggested here too, not just ones they happen to captain.
@@ -1656,10 +1679,11 @@ async def myCaptainedTeamAutocomplete(ctx, current: str):
 
 
 # Same shape as myCaptainedTeamAutocomplete, but for team-name params that
-# only read a team rather than requiring captaincy of it (/team stats,
-# /make-teams saved), every team the caller is rostered on at all (getTeamsForPlayer),
-# captain or not. Same Manage Server carve-out as myCaptainedTeamAutocomplete:
-# an admin sees every team in the guild here too, not just ones they're on.
+# only read a team instead of requiring captaincy of it (/team stats,
+# /make-teams saved). Suggests every team the caller is rostered on at all
+# (getTeamsForPlayer), captain or not. Same Manage Server carve-out as
+# myCaptainedTeamAutocomplete: an admin sees every team in the guild here
+# too, not just ones they're on.
 async def myTeamAutocomplete(ctx, current: str):
     current = current.lower()
     if ctx.user.guild_permissions.manage_guild:
@@ -1670,14 +1694,14 @@ async def myTeamAutocomplete(ctx, current: str):
     return [app_commands.Choice(name=n, value=n) for n in names[:25]]
 
 
-# /team stats works on any team in the guild by exact name (it's a lookup,
-# not an action you need to be rostered for), but suggesting literally
+# /team stats works on any team in the guild by exact name. It's a lookup,
+# not an action you need to be rostered for. But suggesting literally
 # every team in a large server the instant the param is focused would bury
 # the ones you actually belong to under everyone else's. So an empty box
 # still suggests just your own teams (myTeamAutocomplete's own behavior,
-# admin carve-out included); the moment you actually type something,
-# that's a deliberate search, so widen to every team in the guild
-# matching it, same as /team list's own search would.
+# admin carve-out included). The moment you actually type something,
+# that's a deliberate search, so this widens to every team in the guild
+# that matches it, the same as /team list's own search would.
 async def teamStatsAutocomplete(ctx, current: str):
     if not current:
         return await myTeamAutocomplete(ctx, current)
@@ -1687,9 +1711,9 @@ async def teamStatsAutocomplete(ctx, current: str):
     return [app_commands.Choice(name=n, value=n) for n in names[:25]]
 
 
-# Every tournament command grouped under one /tournament command instead of
-# five separate top-level ones, so the full create -> register -> build
-# bracket -> start sequence shows up together the moment a user types
+# Every tournament command is grouped under one /tournament command
+# instead of five separate top-level ones, so the full create, register,
+# build bracket, start sequence shows up together the moment a user types
 # /tournament, in roughly the order they'd actually run it.
 tournamentGroup = app_commands.Group(
     name="tournament",
@@ -1771,12 +1795,13 @@ async def tournamentStart(ctx, mode: app_commands.Choice[str]):
 tree.add_command(tournamentGroup)
 
 
-# Every persistent-team management/browsing command grouped under one
-# /team command instead of ten separate top-level ones (team-create,
+# Every persistent-team management and browsing command is grouped under
+# one /team command instead of ten separate top-level ones: team-create,
 # team-invite, team-leave, team-set, team-rename, team-delete,
-# team-transfer, team-stats, team-list, and my-teams, renamed here to
-# `mine`), all sharing the "team-" prefix already but otherwise scattered
-# across the top-level command list with no indication they're related.
+# team-transfer, team-stats, team-list, and my-teams (renamed here to
+# `mine`). They already shared a "team-" prefix, but were otherwise
+# scattered across the top-level command list with no indication they
+# were related.
 teamGroup = app_commands.Group(
     name="team",
     description="Manage your persistent teams: create, invite, leave, and more"
@@ -1844,9 +1869,10 @@ async def teamLeave(ctx, team: str):
     await helperObj.teamLeaveHelper(ctx, team)
 
 
-# Discord caps a slash command option at 25 static choices, and the built-in
-# logo set is bigger than that (see assets/clash-logos); autocomplete is
-# the only way to offer the full list, filtered live as the user types.
+# Discord caps a slash command option at 25 static choices, and the
+# built-in logo set is bigger than that (see assets/clash-logos).
+# Autocomplete is the only way to offer the full list, filtered live as
+# the user types.
 async def logoAutocomplete(ctx, current: str):
     current = current.lower()
     names = [n for n in helperObj.listAvailableLogos() if current in n.lower()]
@@ -2031,11 +2057,11 @@ async def notify(ctx, member: discord.Member = None, role: discord.Role = None, 
         )
         return
 
-    # notifyHelper DMs the target directly rather than responding to the
-    # interaction, so calling it once per role member in a loop is safe -
-    # ctx.response.send_message below still only ever fires once either way.
-    # A closed-DMs member (notifyHelper returns False) doesn't stop the
-    # rest of the batch from being invited.
+    # notifyHelper DMs the target directly instead of responding to the
+    # interaction, so calling it once per role member in a loop is safe.
+    # ctx.response.send_message below still only ever fires once either
+    # way. A member with closed DMs (notifyHelper returns False) doesn't
+    # stop the rest of the batch from being invited.
     targets = role.members if role is not None else [member]
     failures = 0
     for target in targets:
@@ -2083,33 +2109,38 @@ async def roll(ctx, *, num: int):
 
 # Runs the full test suite before connecting to Discord, so a broken
 # deploy shows up in the log immediately instead of only being noticed
-# once something breaks in production. Shelled out to `pytest -n auto` in
-# its own subprocess rather than run in-process with stdlib unittest the
-# way this used to work, for two reasons: pytest-xdist splits the ~900
-# tests across every CPU core instead of running them one at a time, and
-# a genuinely separate process means tests.py is that process's own real
-# entry point; its first nested `_import_bot_module()` call gets the
-# same inert, open()-mocked root log handler an ordinary `pytest tests.py`
-# run from a terminal always has (see readme.md), so none of the
-# thousands of test-fixture DB/asyncio-debug log lines a full run
-# produces can leak into this file's own real log the way they could
-# when the suite ran in-process here directly. That used to need
-# logger._suppress_db_logging plus temporarily raising the "asyncio"/
-# "discord" logger levels around the run, both gone now, since there's
-# nothing left in this process for them to protect against.
-# `--junitxml` gives back pytest-xdist's own already-stitched-across-
-# workers summary (total/failed counts plus one <testcase> per test) as
-# structured XML, rather than scraping worker-interleaved terminal
-# output. `cwd=BASE_DIR` and `sys.executable` keep this correct
-# regardless of the process's own working directory or which Python
-# environment is actually running the bot. Every run logs one info-level
-# summary line (how many passed out of how many, and how long the whole
-# subprocess took) regardless of outcome. A failing suite (or pytest
-# itself failing to launch or produce a report at all, e.g. a stale
-# install missing pytest-xdist) additionally logs a warning rather than
-# aborting startup: a real deploy should still come up and serve players
-# even if, say, a test itself is stale, rather than a self-test
-# regression taking the whole bot down.
+# once something breaks in production.
+#
+# This shells out to `pytest -n auto` in its own subprocess, rather than
+# running the tests in-process with stdlib unittest the way this used to
+# work, for two reasons. First, pytest-xdist splits the roughly 900 tests
+# across every CPU core instead of running them one at a time. Second, a
+# genuinely separate process means tests.py becomes that process's own
+# real entry point: its first nested `_import_bot_module()` call gets the
+# same inert, open()-mocked root log handler that an ordinary
+# `pytest tests.py` run from a terminal always has (see readme.md). That
+# keeps the thousands of test-fixture DB and asyncio-debug log lines a
+# full run produces out of this file's own real log, the way they used to
+# leak in when the suite ran in-process here directly. Running it
+# in-process used to need logger._suppress_db_logging plus temporarily
+# raising the "asyncio"/"discord" logger levels around the run. Both are
+# gone now, since there's nothing left in this process for them to
+# protect against.
+#
+# `--junitxml` gives back pytest-xdist's own already-stitched-together
+# summary (total/failed counts plus one <testcase> per test) as structured
+# XML, instead of having to scrape worker-interleaved terminal output.
+# `cwd=BASE_DIR` and `sys.executable` keep this correct no matter what the
+# process's own working directory is, or which Python environment is
+# actually running the bot.
+#
+# Every run logs one info-level summary line (how many passed out of how
+# many, and how long the whole subprocess took), regardless of outcome. A
+# failing suite, or pytest itself failing to launch or produce a report at
+# all (e.g. a stale install missing pytest-xdist), additionally logs a
+# warning rather than aborting startup: a real deploy should still come up
+# and serve players even if, say, a test itself is stale, rather than a
+# self-test regression taking the whole bot down.
 def _runStartupSelfTests():
     import subprocess
     import sys
@@ -2159,9 +2190,9 @@ def _runStartupSelfTests():
     )
 
 
-# Guarded so tests.py can import this module (to exercise command callbacks
-# and event handlers directly) without connecting to Discord as a side
-# effect of the import.
+# Guarded so tests.py can import this module, to exercise command
+# callbacks and event handlers directly, without connecting to Discord as
+# a side effect of the import.
 if __name__ == "__main__":
     _runStartupSelfTests()
     client.run(token)

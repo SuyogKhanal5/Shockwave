@@ -220,7 +220,7 @@ explanation if the caller isn't in a voice channel. `/make-teams draft`
 additionally needs at least two people in that channel.
 
 Each `Team`'s `.name` comes from `_rosterTeamNames(guild_id)`: an admin's
-configured `channel1`/`channel2` names (`/set`'s `team1`/`team2` params) if
+configured `channel1`/`channel2` names (`/set channels`' `team1`/`team2` params) if
 there are any, otherwise the generic "Team 1"/"Team 2" fallback. That name is
 what `printEmbed` titles the roster with, what `_renderMatchupImage` labels the
 matchup graphic with, and (threaded through
@@ -346,7 +346,7 @@ the roster's own players for whichever one is currently sitting in a voice
 channel (`_findRosterVoiceChannel`), rather than assuming the clicker
 themselves is in voice. Anyone can click it, not just someone at the table.
 
-`channel1`/`channel2` (set by `/set`'s `team1`/`team2` params, admin-only) are
+`channel1`/`channel2` (set by `/set channels`' `team1`/`team2` params, admin-only) are
 looked up next. If either is missing, `_ensureDefaultTeamChannels` self-heals
 onto `DEFAULT_TEAM_CHANNEL_NAMES` (`"Team-1"`/`"Team-2"`), creating whichever
 one doesn't already exist and writing them back to `channel1`/`channel2` so this
@@ -360,16 +360,39 @@ move) itself never sets `original_channel`, since `captainsHelper` captures the
 drafting caller's voice channel the moment a `/make-teams draft` draft starts,
 and a stale value from an earlier Start game is possible too.
 
-`roster_team2_message_id` is cleared synchronously, before any `await`, the
-moment the (Start-only) checks above it pass, the same "flip before doing
-anything async" shape `_handleWinnerReportPick`'s own `betting_message_id`
-clear uses. That's what stops two near-simultaneous Start/Start (no move)
-clicks from both passing the guard and starting the game twice.
+A dedicated `roster_starting` column on `servers` is flipped to `1` synchronously,
+before any `await`, the moment the checks above it pass, the same "flip before
+doing anything async" shape `_handleWinnerReportPick`'s own `betting_message_id`
+clear uses. `_handleRosterStartClick`'s own guard checks both the stored
+`roster_team2_message_id` and `roster_starting` together, so that's what stops
+two near-simultaneous Start/Start (no move) clicks from both passing the guard
+and starting the game twice. `roster_team2_message_id` itself is left intact
+rather than cleared: `recordResult`'s own end-of-game cleanup
+(`_deleteMakeTeamsMessages`) still needs it to find team2's roster message once
+the game actually resolves, so clearing it here would just make that later
+cleanup unable to find the message to delete. `_finalizeRoster` resets
+`roster_starting` back to `0` the next time it posts a fresh roster, so a new
+roster is clickable again from scratch.
 
 Once the moves are done (or skipped), it posts the same matchup graphic a
 tournament match gets (`_sendMatchupImage`, the tournament path's own
-`_renderMatchupImage`, just with no match id or tournament name in the subtitle)
-and calls `_openBetting`. Betting stays open for a configurable window while the
+`_renderMatchupImage`, just with no match id or tournament name in the subtitle).
+When the roster was formed with roles (`use_roles`), `_drawMatchupColumn` also
+draws each player's role icon just to the left of their name, switching that
+side's whole roster from `makeEmbedString`'s usual centered layout to a
+left-justified one so every row's icon lines up at the same x regardless of
+name length. `_roleIconImage` sources these from `assets/role-icons/`, one
+file per `SETUP_ROLE_NAMES` entry, trying a short list of filename variants
+per role (`ROLE_ICON_FILENAME_CANDIDATES`, e.g. `top.png` or `Top_icon.png`)
+so an icon set doesn't need renaming to match exactly. A missing icon file
+just degrades to no icon and no extra row width, the same "off until the
+assets exist" shape `TEAM_LOGO_DIR`/`ELO_BADGE_DIR` already use elsewhere.
+`/test-image` (admin/dev only) renders this same graphic against two dummy
+5-player teams with roles on, a way to preview role-icon or other rendering
+changes without needing a real 10-person voice channel; it touches no guild
+state at all.
+
+It then calls `_openBetting`. Betting stays open for a configurable window while the
 bot keeps responding to other commands, so the countdown runs as its own
 `asyncio.create_task` (`_bettingTimer`), tracked per-guild in
 `self.bettingTasks` so Cancel Game or a fresh Start/Start (no move) click can
@@ -477,16 +500,21 @@ result only has the heavier `/set correct-winner` as its way back, and a
 cancelled game (refunded bets, everyone moved) has no undo at all.
 
 Confirm on the winner-report side calls `recordResult` with the
-channel/guild from the button-click interaction itself. Confirm on the
-cancel side calls `_finishGameCancel`, which is just `cancelGameHelper` (the
-refund via `cancelBettingHelper`, also clearing `active_tournament_match_id`,
-so an abandoned tournament match's bracket-advance hook can't fire against
-whatever unrelated game starts next, plus the move back to the original
-channel) followed by stripping the original report message's own buttons.
-Both Confirm paths finish by calling `_clearMessageButtons` on the original
-report message (`view=None`), so a resolved or cancelled game stops showing
-a live Team 1/Team 2/Cancel Game row instead of leaving one a second click
-could still hit. Cancel and a timeout on either confirmation view instead
+channel/guild from the button-click interaction itself, then deletes both the
+original report message and the confirmation prompt itself outright
+(`ConfirmWinnerReportView.confirm` calling `_deleteMessageSafely` on each),
+rather than just stripping their buttons: `formatResultMessage`'s own result
+message is what the channel keeps instead, so there's no real reason for
+either the "betting is open"/report message or a "reported as the winner,
+confirm to finalize" prompt that's already been acted on to keep cluttering
+the channel. Confirm on the cancel side calls `_finishGameCancel`, which is
+just `cancelGameHelper` (the refund via `cancelBettingHelper`, also clearing
+`active_tournament_match_id`, so an abandoned tournament match's
+bracket-advance hook can't fire against whatever unrelated game starts next,
+plus the move back to the original channel) followed by stripping the
+original report message's own buttons via `_clearMessageButtons` (`view=None`)
+rather than deleting it, since "Game cancelled" still reads fine sitting
+alongside the now-buttonless original message. Cancel and a timeout on either confirmation view instead
 call `_restoreWinnerReportMessage`, which puts the original report message's
 id back into `betting_message_id` so its buttons work again, but only if
 nothing else has resolved the game a different way in the meantime
@@ -509,6 +537,25 @@ real winner. It stays `CLOSED` even if the report is later cancelled, the same
 out a stale unresolved round before a fresh one opens. That path never moves
 anyone, since clearing a stale round isn't the player-facing "the game was
 cancelled" event `cancelGameHelper` handles.
+
+Message cleanup happens at two other points in the same cycle, both scoped to a
+casual/ranked game formed through `/make-teams`
+(`recordResult`'s own `is_tournament_match` check skips all of it for a
+tournament match, which never posts a matchup graphic or a "Teams created!"
+intro in the first place, sequential mode included). Once a roster's Start
+button is clicked and the matchup graphic actually posts,
+`_handleRosterStartClick` calls `_deleteMakeTeamsIntroMessages` right after
+`_sendMatchupImage`, deleting the original "Teams created!"-style
+team-formation announcement (and, for a draft, its picker/pool messages): the
+graphic already shows both full rosters, so that earlier text reply has
+nothing left to say. Once the game's result is actually recorded,
+`recordResult` deletes the "Betting is now closed!" notice if `_bettingTimer`
+posted one (`betting_closed_message_id`) and the roster embeds themselves
+(`_deleteMakeTeamsMessages`), and replies to the matchup graphic message
+itself (`matchup_message_id`) when it sends `formatResultMessage`'s result
+text, so the result stays visually anchored to the graphic instead of just
+landing further down the channel; a best-effort reply, falling back to a plain
+send if the graphic message was itself somehow already deleted.
 
 The same flip-before-await-anything pattern shows up again in `_acceptDuel` and
 `_resolveDuel` for `/wager against`.
@@ -569,8 +616,8 @@ divisions each. Master and above show no division, matching League's switch to
 raw LP at that point.
 
 That 1000 is only the global fallback. An admin can move where new players start
-with `/set`'s `default_elo` param (`_defaultEloForGuild`), per guild. It only
-affects brand-new players (`ensureEconomyRow`) and `/clear`'s `clear_elo` reset,
+with `/set default-elo`'s `elo` param (`_defaultEloForGuild`), per guild. It only
+affects brand-new players (`ensureEconomyRow`) and `/clear elo`'s reset,
 never anyone's already-tracked rating.
 
 ### Correcting a misreported winner
@@ -658,7 +705,7 @@ Missing stats (a win rate with zero games played, for example) sort to the
 bottom regardless of ascending/descending order, rather than a `None`/0 value
 looking like the best or worst score on the board.
 
-### Redirecting where bets get posted (`/set`'s `wager_channel`)
+### Redirecting where bets get posted (`/set wager-channel`)
 
 By default every betting message (the combined open+report message, the closed
 notice, and either a reported result or a cancellation) goes to wherever a game,
@@ -674,52 +721,77 @@ redirecting at that one entry point is enough to redirect the whole thing.
 
 ### Admin resets and permissions
 
-`/clear` requires the Manage Server permission outright
-(`app_commands.checks.has_permissions`, same as `/set correct-winner`).
+`/clear` is a subcommand group, one independent command per reset
+(`clearGroup`, seven `@clearGroup.command`s: `teams`, `channels`, `tournament`,
+`elo`, `economy`, `achievements`, `card-unlocks`). Discord enforces each
+subcommand's own parameters, so there's no way to submit half of an intended
+combination and only find out it was invalid after the fact; the tradeoff is
+that clearing several unrelated things at once takes several separate calls
+instead of one combined response. Every subcommand requires the Manage Server
+permission outright (`app_commands.checks.has_permissions`, same as `/set
+correct-winner`), and every one of them requires confirmation before anything
+actually happens.
 
-Within it, `clear_elo`, `clear_economy`, `clear_achievements`, and
-`clear_card_unlocks` act on every player in the server, so none of them run the
-moment the command is invoked. `/clear` posts a `discord.ui.View` with "Confirm
-reset"/"Cancel" buttons (`ConfirmResetView`), and the reset only happens from
-inside that view's button callback. `interaction_check` on the view rejects
-anyone who isn't the member who ran `/clear`, and the view times out after 30
-seconds with nothing changed if it's ignored.
+`/clear teams`, `/clear channels`, and `/clear tournament` share
+`confirmClearActionHelper`, which posts a plain warning with "Confirm"/"Cancel"
+buttons (`ConfirmClearActionView`). `/clear teams` just clears the current
+teams/draft (cancelling, with a refund, any in-progress game built from them
+first, the same safety net `clearTeamsHelper` always applies). `/clear
+channels` does the same, plus forgets the saved `channel1`/`channel2` names.
+`/clear tournament` deletes the server's tournament outright (bracket,
+registrations, match history, via `deleteTournamentHelper`) alongside the same
+teams/draft clear; registered/persistent teams in the `teams` table aren't
+touched. All three only actually clear anything from inside the view's
+`confirm` button callback, which always calls `clearTeamsHelper` regardless of
+which of the three it's backing.
 
-All four flags can be requested together. `clear_economy` takes priority over
-`clear_elo` when both are set (the whole-row wipe already resets elo too), while
-`clear_achievements` and `clear_card_unlocks` are independent of both and of
-each other, each adding their own extra sentence to the warning/confirmation
-text.
+`/clear elo`, `/clear economy`, `/clear achievements`, and `/clear card-unlocks`
+instead clear the current teams/draft immediately, synchronously, the moment
+the command runs (`await helperObj.clearTeamsHelper(ctx)`, in `bot.py` itself,
+before the confirmation is ever shown) and only gate the actual player-data
+reset behind confirmation, since that part touches every player in the server
+(or one specific player, see below) rather than just the guild's own
+in-progress session. `confirmDestructiveClearHelper` posts that warning with
+"Confirm reset"/"Cancel" buttons (`ConfirmResetView`). `/clear elo` resets
+every player's elo back to this server's default (`/set default-elo`, 1000
+otherwise); `/clear economy` wipes balance, elo, game record, betting record,
+and gold wagered/won/lost for every player, superseding the narrower elo reset
+since the whole-row wipe already resets elo too.
 
-`resetAchievementsHelper` only deletes `card_unlocks` rows whose `itemKey` is a
-`CARD_ACHIEVEMENT_TITLES` key. Every other unlock (tier rewards, special grants,
-shop purchases) and the underlying `economy` stats those achievements were
-computed from (`game_wins`, `current_win_streak`, ...) are untouched, so a
-player who still qualifies simply earns them back the next time something
-self-heals. This is a "clear the trophies off the shelf" reset, not a "make
-everyone start over" one.
+`interaction_check` on both view classes rejects anyone who isn't the member
+who ran the command, and both time out after `CLEAR_CONFIRM_TIMEOUT_SECONDS`
+(30 seconds) with nothing changed if ignored, editing the message to
+"Confirmation expired. Run /clear again if you still want to do this."
 
-`resetCardUnlocksHelper`, backing `clear_card_unlocks`, goes further: it deletes
-every `card_unlocks` row regardless of `itemType` (tier rewards, special grants,
-shop purchases, and achievement titles alike) and resets the equipped
-`trading_cards` row back to Shockwave's own defaults, since leaving it pointed
-at a title/scheme/font that no longer resolves to anything would surface as a
-broken card the next time it renders.
+`resetAchievementsHelper` (backing `/clear achievements`) only deletes
+`card_unlocks` rows whose `itemKey` is a `CARD_ACHIEVEMENT_TITLES` key. Every
+other unlock (tier rewards, special grants, shop purchases) and the underlying
+`economy` stats those achievements were computed from (`game_wins`,
+`current_win_streak`, ...) are untouched, so a player who still qualifies
+simply earns them back the next time something self-heals. This is a "clear
+the trophies off the shelf" reset, not a "make everyone start over" one.
 
-`clear_achievements`/`clear_card_unlocks` each also take an optional `user`,
-narrowing either from "every player in the server" down to just that one member,
-still gated behind the exact same confirm/cancel view.
-`clear_elo`/`clear_economy` always stay whole-server regardless of `user`.
+`resetCardUnlocksHelper` (backing `/clear card-unlocks`) goes further: it
+deletes every `card_unlocks` row regardless of `itemType` (tier rewards,
+special grants, shop purchases, and achievement titles alike) and resets the
+equipped `trading_cards` row back to Shockwave's own defaults, since leaving it
+pointed at a title/scheme/font that no longer resolves to anything would
+surface as a broken card the next time it renders.
+
+`/clear achievements` and `/clear card-unlocks` each also take an optional
+`user` param, narrowing either from "every player in the server" down to just
+that one member, still gated behind the exact same confirm/cancel view.
+`/clear elo`/`/clear economy` take no such param and always stay whole-server.
 `resetAchievementsHelper(guild_id,
 user_id=None)`/`resetCardUnlocksHelper(guild_id, user_id=None)` carry that split
 down to the SQL: `user_id=None` deletes every row for the guild, a real one
 narrows the `DELETE` with an extra `AND userId=?`.
 
-Passing `user` without `clear_achievements` or `clear_card_unlocks` is rejected
-outright. `/tournament create` follows a narrower version of the same idea:
-creating a server's first tournament needs no permission at all, but overwriting
-an existing one checks `ctx.user.guild_permissions.manage_guild` before it will
-even show the confirmation view.
+`/tournament create` follows a narrower version of the same "confirm before
+overwriting" idea: creating a server's first tournament needs no permission at
+all, but overwriting an existing one checks
+`ctx.user.guild_permissions.manage_guild` before it will even show the
+confirmation view.
 
 ### Persistent teams
 
@@ -1103,7 +1175,7 @@ however many matches are open in the round simultaneously.
 `_openConcurrentTournamentBetting` opens one combined window covering every
 match `_startRound`/`_startLosersRound`/`_startGrandFinals` just queued for the
 round: the guild's configured per-match base (`_getBettingTimerSeconds`, backing
-`/set`'s `betting_timer` param) times how many matches are in the round, capped
+`/set betting-timer`'s `seconds` param) times how many matches are in the round, capped
 by `MAX_CONCURRENT_BETTING_SECONDS`.
 
 `/wager team` takes an optional `match_id` to say which concurrently-open match
@@ -1574,7 +1646,7 @@ round that never got a row as resolved once play has moved past it.
 | `wagers` | active team-game bets (singleton, one per guild/player) | cleared out (paid or refunded) once the game resolves |
 | `tournament_wagers` | active simultaneous-tournament-match bets (one per match/player) | cleared out once that specific match resolves |
 | `duels` | active `/wager against` challenges | one row per challenge, several can be open at once |
-| `leaderboards` | posted `/leaderboard` messages | which filter/order/page each message is currently showing, plus `cards`/`cardShown` for cards:true mode |
+| `leaderboards` | posted `/leaderboard` messages | which filter/order/page each message is currently showing, plus `cards`/`cardShown` for the Cards-button view |
 | `my_team_views` | posted `/team lookup` messages | which page (and whose team list) each message is currently showing |
 | `team_list_views` | posted `/team list` messages | which filter/sort/page each message is currently showing (`memberIds`/`memberNames` for the member filter), plus `cards`/`cardShown` for cards:true mode |
 | `last_result` | one row per guild | a snapshot of the most recently resolved game, for `/set correct-winner` |
