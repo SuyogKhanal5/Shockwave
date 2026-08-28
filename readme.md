@@ -51,27 +51,28 @@ commands. For that, see addshockwave.com.
 - Every `@tree.command` is registered with no `guild=` at all, making it a
   global command definition rather than one tied to a specific server.
   `syncCommandsToGuild` (`copy_global_to` plus a guild-scoped `sync`) is what
-  actually publishes those definitions to a real server, called for every guild
-  the bot is already in on `on_ready`, and again for whichever one it just
-  joined on `on_guild_join`. A single global `tree.sync()` with no guild
-  argument would work too, but can take up to an hour to propagate. Syncing
-  per-guild keeps registration effectively instant while still needing zero
-  server-specific configuration.
+  actually publishes those definitions to a real server. It's called for
+  every guild the bot is already in on `on_ready`, and again for whichever
+  guild it just joined on `on_guild_join`. A single global `tree.sync()` with
+  no guild argument would work too, but can take up to an hour to propagate.
+  Syncing per-guild keeps registration effectively instant while still
+  needing zero server-specific configuration.
 
 ### Logging and database backups
 
 `BASE_DIR` (`os.path.dirname(os.path.abspath(__file__))`) anchors every path
 `bot.py` touches (the log file, `main.db`, the backups folder, `token.txt`)
-to this file's own directory rather than the process's current working
-directory, matching how `helper.py`'s own asset paths already work (see
-`TEAM_LOGO_DIR`/`FONTS_DIR`/etc.). A relative path resolves against whatever
-directory the process happened to launch from: easy to get right on a dev
-machine (always `cd`-ing into the project folder first) and easy to get wrong
-under a service manager that doesn't set `WorkingDirectory` the same way.
-`token.txt` is also opened with `encoding="utf-8"` explicitly rather than
-whatever the platform's default text encoding happens to be (Windows' ANSI
-codepage vs. Linux's near-universal UTF-8), harmless for a plain-ASCII token
-today, but not left to chance either.
+to this file's own directory, not the process's current working directory.
+This matches how `helper.py`'s own asset paths already work (see
+`TEAM_LOGO_DIR`/`FONTS_DIR`/etc.). A relative path would instead resolve
+against whatever directory the process happened to launch from. That's easy
+to get right on a dev machine, since you're always `cd`-ing into the project
+folder first, but easy to get wrong under a service manager that doesn't set
+`WorkingDirectory` the same way. `token.txt` is also opened with
+`encoding="utf-8"` explicitly, rather than whatever the platform's default
+text encoding happens to be (Windows' ANSI codepage vs. Linux's
+near-universal UTF-8). That's harmless for a plain-ASCII token today, but
+it's not left to chance either.
 
 `bot.py` configures the root logger at import time: a custom
 `MaxLinesFileHandler` (`shockwave.log`) plus a plain console handler, both
@@ -82,44 +83,47 @@ just a `shockwave`-named one means discord.py's own internal logging
 reasoning as `main.db` itself.
 
 `MaxLinesFileHandler` caps the file at `LOG_FILE_MAX_LINES` (10,000) lines,
-dropping the oldest ones once it grows past that, a single,
-chronologically-ordered file instead of `logging.handlers.RotatingFileHandler`'s
-size-based rotation into separate `shockwave.log`/`.1`/`.2`/`.3` files. It
-seeds its own in-memory line count from whatever's already on disk once, at
-construction (a previous run's leftover log), rather than assuming an empty
-file, so a trim that's already overdue happens on the very first line this
-run emits rather than only once the file grows past the cap all over again.
-Trimming itself (`_trim`) closes the handler's own stream, rewrites the file
-with just the last `max_lines` lines kept, and reopens it; no locking of its
-own, since `logging.Handler.handle()` already wraps every `emit()` call (and
-so this, reached from inside one) in `self.acquire()`/`release()`.
+dropping the oldest ones once it grows past that. This keeps a single,
+chronologically-ordered file, instead of
+`logging.handlers.RotatingFileHandler`'s size-based rotation into separate
+`shockwave.log`/`.1`/`.2`/`.3` files. At construction it seeds its own
+in-memory line count from whatever's already on disk (a previous run's
+leftover log) rather than assuming an empty file. That way, if a trim is
+already overdue, it happens on the very first line this run emits, instead
+of waiting until the file grows past the cap all over again. Trimming itself
+(`_trim`) closes the handler's own stream, rewrites the file with just the
+last `max_lines` lines kept, and reopens it. It needs no locking of its own,
+since `logging.Handler.handle()` already wraps every `emit()` call, and so
+this call too, reached from inside one, in `self.acquire()`/`release()`.
 
-`backupDatabaseTask` (a `discord.ext.tasks.loop(hours=24)`, started from
-`on_ready` the same way `rotateStatus` is, and guarded against double-starting
-on a reconnect the same way) snapshots `main.db` into
+`backupDatabaseTask` is a `discord.ext.tasks.loop(hours=24)`, started from
+`on_ready` the same way `rotateStatus` is, and guarded against
+double-starting on a reconnect the same way. It snapshots `main.db` into
 `data/guildData/backups/` once a day, then deletes any backup older than
-`BACKUP_RETENTION_DAYS` (7). It uses `mainDB.backup(backup_conn)` (sqlite3's
-own point-in-time backup API) rather than a plain file copy, since `main.db`
-is a live connection other code can be reading/writing between event loop
-ticks and copying the raw file risks capturing it mid-write. It runs directly
-on the event loop rather than via `asyncio.to_thread`: `mainDB` was opened
-with the default `check_same_thread=True`, so handing it to a different
-thread would raise outright, and backing up a database this size finishes
-well within the time a trading-card render already blocks the loop for.
-`data/guildData/backups/` is gitignored, same reasoning as `main.db`.
+`BACKUP_RETENTION_DAYS` (7). It uses `mainDB.backup(backup_conn)`, sqlite3's
+own point-in-time backup API, rather than a plain file copy. That's because
+`main.db` is a live connection other code can be reading or writing between
+event loop ticks, so copying the raw file risks capturing it mid-write. It
+runs directly on the event loop rather than via `asyncio.to_thread`, for two
+reasons: `mainDB` was opened with the default `check_same_thread=True`, so
+handing it to a different thread would raise outright, and backing up a
+database this size finishes well within the time a trading-card render
+already blocks the loop for anyway. `data/guildData/backups/` is gitignored,
+for the same reason as `main.db` itself.
 
 `restore_backup.py`, run standalone (`python restore_backup.py`) with the bot
-stopped, is how a host reverts to one of those snapshots; no in-Discord
-command for it, since `main.db` is one shared database across every guild
-the bot serves, and a live restore triggered by one server's admin would
-silently roll back every other server's data too. It lists backups
-newest-first with their timestamp and size, restores whichever one is
-picked (by number or filename), and, before overwriting anything, copies
-the current live `main.db` into `data/guildData/backups/` as
+stopped, is how a host reverts to one of those snapshots. There's no
+in-Discord command for it, since `main.db` is one shared database across
+every guild the bot serves: a live restore triggered by one server's admin
+would silently roll back every other server's data too. It lists backups
+newest-first with their timestamp and size, and restores whichever one is
+picked, by number or filename. Before overwriting anything, it copies the
+current live `main.db` into `data/guildData/backups/` as
 `main-before-restore-<timestamp>.db`, so restoring the wrong backup, or
 restoring at all, is itself undoable the same way. The step-by-step version
-of this, aimed at whoever's actually hosting a copy of the bot rather than
-reading this file, lives on addshockwave.com's self-hosting guide.
+of this process, aimed at whoever's actually hosting a copy of the bot
+rather than reading this file, lives on addshockwave.com's self-hosting
+guide.
 
 `LOG_LINE_MAX_LENGTH` (500) caps any single log line. A serialized team
 roster or a command's own object-repr params can run long, and one oversized
@@ -128,86 +132,90 @@ helper that enforces it, used by the database, command, and completion
 logging below.
 
 Every database mutation is logged too, without needing to instrument each of
-the file's many individual `cursor.execute()` calls: `_logDatabaseStatement`
+the file's many individual `cursor.execute()` calls. `_logDatabaseStatement`
 is registered via `mainDB.set_trace_callback`, sqlite3's own hook that
 receives the text of every statement actually executed on the connection,
 with bound parameters already expanded inline rather than left as raw `?`
-placeholders. It filters to just `INSERT`/`UPDATE`/`DELETE`. A `SELECT`, or
+placeholders. It filters to just `INSERT`/`UPDATE`/`DELETE`: a `SELECT`, or
 the trace callback's own `"BEGIN "` for an implicit transaction, isn't a
-mutation worth a permanent record. It logs unconditionally: `tests.py`'s own
-`BotModuleTestCase`-based tests exercise this same trace callback against
-their own in-memory databases thousands of times over a full run, but
-`_import_bot_module()` (see below) reaches it through a root logger whose
-file handler was itself constructed with `open()` mocked out, so none of
-that ever reaches a real file.
+mutation worth a permanent record. It logs unconditionally, with no special
+case for tests. `tests.py`'s own `BotModuleTestCase`-based tests exercise
+this same trace callback against their own in-memory databases thousands of
+times over a full run, but `_import_bot_module()` (see below) reaches it
+through a root logger whose file handler was itself constructed with
+`open()` mocked out, so none of that ever reaches a real file.
 
 `LoggingCommandTree` (`bot.py`'s `tree`, subclassing `app_commands.CommandTree`)
-overrides `interaction_check` (a single global hook discord.py's own
+overrides `interaction_check`, a single global hook that discord.py's own
 `CommandTree._call` runs before dispatching *any* application command in the
-tree) to log every real command invocation (name, params, calling user,
+tree. This logs every real command invocation (name, params, calling user,
 guild) in one place, instead of instrumenting each of the ~40
 `@tree.command` functions individually. `interaction.command`/`.namespace`
 are independently-resolved cached properties on `Interaction`, so both are
-already available at this point even though the tree hasn't actually invoked
-the command yet. `interaction_check` also fires for autocomplete
-interactions (typing into a field with `@app_commands.autocomplete`), which
-would turn every keystroke into a logged "command called"; filtered out by
-checking `interaction.type is discord.InteractionType.application_command`.
-The override always returns `True` (matching the default implementation's
-behavior), so it never blocks anything; per-command checks like `/clear`'s
+already available at this point, even though the tree hasn't actually
+invoked the command yet. `interaction_check` also fires for autocomplete
+interactions, i.e. typing into a field with `@app_commands.autocomplete`,
+which would otherwise turn every keystroke into a logged "command called".
+That's filtered out by checking
+`interaction.type is discord.InteractionType.application_command`. The
+override always returns `True`, matching the default implementation's
+behavior, so it never blocks anything. Per-command checks like `/clear`'s
 `has_permissions` still run separately afterward, unaffected.
 
 The whole body is wrapped in its own `try`/`except Exception`, logging and
 swallowing rather than letting anything through. `interaction.command`/
-`.namespace` run discord.py's real option-resolution machinery (nothing a
-`FakeInteraction`-based test can faithfully exercise), and
+`.namespace` run discord.py's real option-resolution machinery, which is
+nothing a `FakeInteraction`-based test can faithfully exercise.
 `CommandTree._from_interaction`'s own wrapper only catches `AppCommandError`
 around the whole dispatch, so anything else raised here would otherwise
 escape uncaught: the interaction dies silently, Discord shows "This
 interaction failed", and neither `on_app_command_error` nor this file's own
-log sees it. A logging-only hook, with no business reason to ever fail,
+log sees it. A logging-only hook has no business reason to ever fail, so it
 needs to be structurally unable to take down the feature it's just supposed
 to be watching.
 
-A successful completion is logged separately, from `on_app_command_completion`
-- an event discord.py dispatches itself only once a command has actually run
-to completion without raising (see `CommandTree._call`), so it only ever
-fires for a genuine success, never a command that errored (that path goes
-through `on_app_command_error` instead) or one `interaction_check` rejected
+A successful completion is logged separately, from
+`on_app_command_completion`. This is an event discord.py dispatches itself
+only once a command has actually run to completion without raising (see
+`CommandTree._call`), so it only ever fires for a genuine success. It never
+fires for a command that errored, since that path goes through
+`on_app_command_error` instead, or for one that `interaction_check` rejected
 before it ran.
 
-`_runStartupSelfTests` runs the full `tests.py` suite before `client.run(token)`
-in the `if __name__ == "__main__":` guard, so a broken deploy shows up in the
-log immediately rather than only being noticed once something breaks in
-production. It shells out to `pytest -n auto tests.py` in its own subprocess
-(`subprocess.run([sys.executable, "-m", "pytest", ...], cwd=BASE_DIR, ...)`):
+`_runStartupSelfTests` runs the full `tests.py` suite before
+`client.run(token)` in the `if __name__ == "__main__":` guard. This way a
+broken deploy shows up in the log immediately, rather than only being
+noticed once something breaks in production. It shells out to
+`pytest -n auto tests.py` in its own subprocess
+(`subprocess.run([sys.executable, "-m", "pytest", ...], cwd=BASE_DIR, ...)`).
 pytest-xdist splits the suite's ~900 tests across every CPU core instead of
-running them one at a time, and a genuinely separate process means
+running them one at a time. A genuinely separate process also means
 `tests.py` is *that* process's own real entry point, so its first nested
 `_import_bot_module()` call gets the same inert, `open()`-mocked root log
-handler an ordinary `pytest tests.py` run from a terminal always has
+handler an ordinary `pytest tests.py` run from a terminal always has.
 (`_import_bot_module()` patches `builtins.open` for the duration of `import
 bot`, so `MaxLinesFileHandler`'s very first `_open()` call, the one
 `logging.basicConfig` latches onto for the rest of that process's life,
-returns a harmless mock stream, not a real file handle). None of the
-thousands of test-fixture DB-statement/asyncio-debug log lines a full run
-produces can leak into this file's own real log, because there's no shared
+returns a harmless mock stream, not a real file handle.) Because of that,
+none of the thousands of test-fixture DB-statement/asyncio-debug log lines a
+full run produces can leak into this file's own real log: there's no shared
 process for them to leak into in the first place.
 
 Results come back via `--junitxml=<path>`, pytest-xdist's own
-already-stitched-across-workers summary (one `<testsuite tests=... failures=...
-errors=... time=...>` with a `<testcase>` per test, `<failure>`/`<error>`
-children on whichever ones didn't pass), parsed with `xml.etree.ElementTree`
-rather than scraping worker-interleaved terminal output. Every run logs one
-info-level line off that summary (`967/967 passed in 24.1s.`), pass or fail.
-A failing suite additionally logs a warning naming exactly which tests
-failed (`classname.name`, read straight off the XML) plus the
-full subprocess output at debug level, rather than aborting startup: a real
+already-stitched-across-workers summary: one
+`<testsuite tests=... failures=... errors=... time=...>` with a `<testcase>`
+per test, and `<failure>`/`<error>` children on whichever ones didn't pass.
+This is parsed with `xml.etree.ElementTree` rather than scraping
+worker-interleaved terminal output. Every run logs one info-level line off
+that summary (`967/967 passed in 24.1s.`), pass or fail. A failing suite
+additionally logs a warning naming exactly which tests failed
+(`classname.name`, read straight off the XML), plus the full subprocess
+output at debug level, rather than aborting startup. The reasoning: a real
 deploy should still come up and serve players even if, say, a test itself is
-stale, rather than a self-test regression taking the whole bot down. The same
-reasoning covers pytest itself failing to launch, or running but never
-producing a report at all (e.g. a stale install missing `pytest-xdist`), both
-are caught and logged as a warning rather than raised.
+stale, rather than a self-test regression taking the whole bot down. The
+same reasoning covers pytest itself failing to launch, or running but never
+producing a report at all (e.g. a stale install missing `pytest-xdist`).
+Both cases are caught and logged as a warning rather than raised.
 
 ### Team formation
 
@@ -222,13 +230,13 @@ additionally needs at least two people in that channel.
 Each `Team`'s `.name` comes from `_rosterTeamNames(guild_id)`: an admin's
 configured `channel1`/`channel2` names (`/set channels`' `team1`/`team2` params) if
 there are any, otherwise the generic "Team 1"/"Team 2" fallback. That name is
-what `printEmbed` titles the roster with, what `_renderMatchupImage` labels the
-matchup graphic with, and (threaded through
+what `printEmbed` titles the roster with, and what `_renderMatchupImage`
+labels the matchup graphic with. It's also threaded through
 `computeGameDeltas`/`recordResult`/`saveLastResult` all the way to
-`formatResultMessage` and `reportCorrectWinnerHelper`) what the win
-announcement, the elo-change line, and a later correction all say too. A server
-that's named its channels "Red"/"Blue" sees "Red"/"Blue" everywhere a game
-touches, not a mix of that and "Team 1"/"Team 2".
+`formatResultMessage` and `reportCorrectWinnerHelper`, so the win
+announcement, the elo-change line, and a later correction all use it too. A
+server that's named its channels "Red"/"Blue" sees "Red"/"Blue" everywhere a
+game touches, not a mix of that and "Team 1"/"Team 2".
 
 `getRosterName(guild_id, column, fallback)` is the read-side counterpart.
 `recordResult` and `/wager`'s confirmation both use it to recover the currently
@@ -238,48 +246,54 @@ roster (with different names) has since been formed.
 
 `ranked:true` on either command does the same thing but calls
 `formBalancedTeams` first (for `/make-teams`, routing straight to
-`rankedTeamHelper` instead of the random/roles flow). Each player's elo gets a
-random ±100 nudge (`ELO_BALANCE_JITTER`), the jittered list is sorted, and
-players are handed out in a snake pattern (side A, B, B, A, B, B, A, ...), so
-the two sides land close in average elo without producing the exact same optimal
-matchup every time.
+`rankedTeamHelper` instead of the random/roles flow). Each player's elo gets
+a random ±100 nudge (`ELO_BALANCE_JITTER`), the jittered list is sorted, and
+players are handed out in a snake pattern (side A, B, B, A, B, B, A, ...).
+That way the two sides land close in average elo without producing the
+exact same optimal matchup every time.
 
 `/make-teams ranked:true use_roles:true` additionally assigns
 Top/Jungle/Mid/Bottom/Support, but only when the caller's voice channel holds
-exactly 10 people (`rankedTeamHelper` falls back to the plain
-`formBalancedTeams` split otherwise, with a note explaining why roles weren't
-applied). `formRoleBalancedTeams` drives it in two passes.
-`_assignRolesForBalance` walks the five roles jungle-first
-(`ROLE_BALANCE_FILL_ORDER`, since junglers are usually the scarcest genuine
-takers), filling each role's two slots from
-whoever likes it (per `getRolePreferences`, from `/setup`) before reaching for
-someone neutral on it, and only forcing in someone who marked it disliked if
-nobody else is left. A player playing a role they didn't like knocks 100 elo
-off their *effective* elo for balancing purposes only
-(`ROLE_BALANCE_OFF_ROLE_PENALTY`); a role they explicitly disliked knocks off
-200 (`ROLE_BALANCE_DISLIKED_ROLE_PENALTY`). Neither touches their real elo.
-`_refineRoleBalance` then hill-climbs on top of that first pass, trying
-pairwise role swaps between players and keeping any swap that lets
-`_splitRoleBalancedTeams` (a brute force over which of each role's two players
-lands on which side, 32 combinations) find a tighter effective-elo split than
-before, stopping once a full pass turns up no further improvement.
+exactly 10 people. (Otherwise `rankedTeamHelper` falls back to the plain
+`formBalancedTeams` split, with a note explaining why roles weren't applied.)
+`formRoleBalancedTeams` drives the role assignment in two passes.
 
-Unlike those two, `ROLE_BALANCE_DISLIKED_ROLE_WIN_ELO_MULTIPLIER` (1.5) *does*
-touch real elo: `rankedTeamHelper` records every user_id who ended up on a
-disliked role in that particular split (`servers.disliked_role_user_ids`, a
-plain comma-separated list, set alongside `team1`/`team2`, so it lives and
-clears with them the same way, including surviving a `/make-teams repeat`), and
-`computeGameDeltas` multiplies up a winning player's own elo delta if their
-id is in that set for the game just resolved. Only a win earns it. A loss on
-a disliked role gets no such break, just the plain team-average delta every
-teammate gets. It's a reward for actually pulling off a win on a less-wanted
-assignment, on top of whatever the normal team-average swing already gave
-that player; `formatResultMessage` lists who earned it and how much as its
-own "Disliked-role win bonus" line whenever `summary["disliked_role_bonus_players"]`
-isn't empty. The bonus is snapshotted into `last_result` too (see
-`saveLastResult`/`getLastResult`), so `/set correct-winner` recomputes it
-correctly for whoever the real winner turns out to be, no matter how much
-later the correction happens or what `team1`/`team2` have moved on to since.
+The first pass, `_assignRolesForBalance`, walks the five roles jungle-first
+(`ROLE_BALANCE_FILL_ORDER`, since junglers are usually the scarcest genuine
+takers). For each role it fills both slots from whoever likes that role
+first (per `getRolePreferences`, from `/setup`), then reaches for someone
+neutral on it, and only forces in someone who marked it disliked if nobody
+else is left. Playing a role you didn't list as liked knocks 100 elo off
+your *effective* elo for balancing purposes only
+(`ROLE_BALANCE_OFF_ROLE_PENALTY`); a role you explicitly disliked knocks off
+200 (`ROLE_BALANCE_DISLIKED_ROLE_PENALTY`). Neither penalty touches your
+real elo.
+
+The second pass, `_refineRoleBalance`, hill-climbs on top of the first. It
+tries pairwise role swaps between players and keeps any swap that lets
+`_splitRoleBalancedTeams`, a brute force over which of each role's two
+players lands on which side (32 combinations), find a tighter effective-elo
+split than before. It stops once a full pass turns up no further
+improvement.
+
+Unlike those two penalties, `ROLE_BALANCE_DISLIKED_ROLE_WIN_ELO_MULTIPLIER`
+(1.5) *does* touch real elo. `rankedTeamHelper` records every user_id who
+ended up on a disliked role in that particular split, in
+`servers.disliked_role_user_ids`, a plain comma-separated list set alongside
+`team1`/`team2` (so it lives and clears with them the same way, including
+surviving a `/make-teams repeat`). `computeGameDeltas` then multiplies up a
+winning player's own elo delta if their id is in that set for the game just
+resolved. Only a win earns it: a loss on a disliked role gets no such
+break, just the plain team-average delta every teammate gets. It's a reward
+for actually pulling off a win on a less-wanted assignment, on top of
+whatever the normal team-average swing already gave that player.
+`formatResultMessage` lists who earned it and how much as its own
+"Disliked-role win bonus" line whenever
+`summary["disliked_role_bonus_players"]` isn't empty. The bonus is
+snapshotted into `last_result` too (see `saveLastResult`/`getLastResult`),
+so `/set correct-winner` recomputes it correctly for whoever the real
+winner turns out to be, no matter how much later the correction happens or
+what `team1`/`team2` have moved on to since.
 
 Forming a roster through any of these always runs `clearTeamsHelper` first,
 which resets `is_ranked` to 0 among other things. Only `ranked:true` sets it
@@ -352,61 +366,65 @@ onto `DEFAULT_TEAM_CHANNEL_NAMES` (`"Team-1"`/`"Team-2"`), creating whichever
 one doesn't already exist and writing them back to `channel1`/`channel2` so this
 only happens once per guild.
 
-Start (no move) skips all of that (nobody has to be in a voice channel at all
-to click it) and explicitly clears `original_channel` back to `""`, so
-`moveMembersToOriginalChannel` no-ops once the game ends: nothing moved at the
-start, nothing to move back either. That clear matters even though Start (no
-move) itself never sets `original_channel`, since `captainsHelper` captures the
-drafting caller's voice channel the moment a `/make-teams draft` draft starts,
-and a stale value from an earlier Start game is possible too.
+Start (no move) skips all of that, since nobody has to be in a voice channel
+at all to click it. It also explicitly clears `original_channel` back to
+`""`, so `moveMembersToOriginalChannel` no-ops once the game ends: nothing
+moved at the start, nothing to move back either. That clear matters even
+though Start (no move) itself never sets `original_channel`.
+`captainsHelper` captures the drafting caller's voice channel the moment a
+`/make-teams draft` draft starts, so a stale value left over from an
+earlier Start game is possible too.
 
-A dedicated `roster_starting` column on `servers` is flipped to `1` synchronously,
-before any `await`, the moment the checks above it pass, the same "flip before
-doing anything async" shape `_handleWinnerReportPick`'s own `betting_message_id`
-clear uses. `_handleRosterStartClick`'s own guard checks both the stored
-`roster_team2_message_id` and `roster_starting` together, so that's what stops
-two near-simultaneous Start/Start (no move) clicks from both passing the guard
-and starting the game twice. `roster_team2_message_id` itself is left intact
-rather than cleared: `recordResult`'s own end-of-game cleanup
-(`_deleteMakeTeamsMessages`) still needs it to find team2's roster message once
-the game actually resolves, so clearing it here would just make that later
-cleanup unable to find the message to delete. `_finalizeRoster` resets
-`roster_starting` back to `0` the next time it posts a fresh roster, so a new
-roster is clickable again from scratch.
+A dedicated `roster_starting` column on `servers` is flipped to `1`
+synchronously, before any `await`, the moment the checks above it pass.
+This is the same "flip before doing anything async" shape
+`_handleWinnerReportPick`'s own `betting_message_id` clear uses.
+`_handleRosterStartClick`'s own guard checks both the stored
+`roster_team2_message_id` and `roster_starting` together, and that
+combination is what stops two near-simultaneous Start/Start (no move)
+clicks from both passing the guard and starting the game twice.
+`roster_team2_message_id` itself is left intact rather than cleared,
+because `recordResult`'s own end-of-game cleanup
+(`_deleteMakeTeamsMessages`) still needs it to find team2's roster message
+once the game actually resolves. Clearing it here would just make that
+later cleanup unable to find the message to delete. `_finalizeRoster`
+resets `roster_starting` back to `0` the next time it posts a fresh roster,
+so a new roster is clickable again from scratch.
 
 Once the moves are done (or skipped), it posts the same matchup graphic a
-tournament match gets (`_sendMatchupImage`, the tournament path's own
-`_renderMatchupImage`, just with no match id or tournament name in the subtitle).
-When the roster was formed with roles (`use_roles`), `_drawMatchupColumn` also
-draws each player's role icon just to the left of their name, switching that
-side's whole roster from `makeEmbedString`'s usual centered layout to a
-left-justified one so every row's icon lines up at the same x regardless of
-name length. `_roleIconImage` sources these from `assets/role-icons/`, one
-file per `SETUP_ROLE_NAMES` entry, trying a short list of filename variants
-per role (`ROLE_ICON_FILENAME_CANDIDATES`, e.g. `top.png` or `Top_icon.png`)
-so an icon set doesn't need renaming to match exactly. A missing icon file
-just degrades to no icon and no extra row width, the same "off until the
-assets exist" shape `TEAM_LOGO_DIR`/`ELO_BADGE_DIR` already use elsewhere.
+tournament match gets: `_sendMatchupImage` calls the tournament path's own
+`_renderMatchupImage`, just with no match id or tournament name in the
+subtitle. When the roster was formed with roles (`use_roles`),
+`_drawMatchupColumn` also draws each player's role icon just to the left of
+their name. That switches that side's whole roster from `makeEmbedString`'s
+usual centered layout to a left-justified one, so every row's icon lines up
+at the same x position regardless of name length. `_roleIconImage` sources
+these icons from `assets/role-icons/`, one file per `SETUP_ROLE_NAMES`
+entry, trying a short list of filename variants per role
+(`ROLE_ICON_FILENAME_CANDIDATES`, e.g. `top.png` or `Top_icon.png`) so an
+icon set doesn't need renaming to match exactly. A missing icon file just
+degrades to no icon and no extra row width, the same "off until the assets
+exist" shape `TEAM_LOGO_DIR`/`ELO_BADGE_DIR` already use elsewhere.
 `/test-image` (admin/dev only) renders this same graphic against two dummy
-5-player teams with roles on, a way to preview role-icon or other rendering
-changes without needing a real 10-person voice channel; it touches no guild
-state at all.
+5-player teams with roles on. It's a way to preview role-icon or other
+rendering changes without needing a real 10-person voice channel, and it
+touches no guild state at all.
 
-It then calls `_openBetting`. Betting stays open for a configurable window while the
-bot keeps responding to other commands, so the countdown runs as its own
-`asyncio.create_task` (`_bettingTimer`), tracked per-guild in
-`self.bettingTasks` so Cancel Game or a fresh Start/Start (no move) click can
-cancel it instead of leaving it to fire later against a game that no longer
-exists. `_openBetting` also stamps `betting_opened_at` (unix seconds) on the
-`servers` row. `self.bettingTasks` is only ever in-memory, lost on a genuine
-process restart (though not a mere gateway reconnect, where it's untouched).
-Without that timestamp, a guild that had `betting_state=OPEN` at the moment of
-a restart would stay `OPEN` forever, since nobody would ever flip it to
-`CLOSED` again. `reconcileStaleBettingWindows`, called once from `on_ready`,
-resumes any such window with whatever time it actually had left (or closes it
-outright if that time had already passed), skipping any guild that already
-has a live task tracked (the reconnect case) so it can't stomp a window that
-was never actually interrupted.
+It then calls `_openBetting`. Betting stays open for a configurable window
+while the bot keeps responding to other commands, so the countdown runs as
+its own `asyncio.create_task` (`_bettingTimer`), tracked per-guild in
+`self.bettingTasks`. That way Cancel Game or a fresh Start/Start (no move)
+click can cancel it, instead of leaving it to fire later against a game
+that no longer exists. `_openBetting` also stamps `betting_opened_at` (unix
+seconds) on the `servers` row. `self.bettingTasks` is only ever in-memory:
+it's lost on a genuine process restart, though not on a mere gateway
+reconnect, where it's untouched. Without that timestamp, a guild that had
+`betting_state=OPEN` at the moment of a restart would stay `OPEN` forever,
+since nobody would ever flip it to `CLOSED` again. `reconcileStaleBettingWindows`,
+called once from `on_ready`, resumes any such window with whatever time it
+actually had left, or closes it outright if that time had already passed.
+It skips any guild that already has a live task tracked (the reconnect
+case), so it can't stomp a window that was never actually interrupted.
 
 The headline text comes from whichever `mode` string
 (`"Normal"`/`"Ranked"`/`"Captains"`/`"Ranked Captains"`) the most recent
@@ -414,56 +432,60 @@ team-forming command left in `servers` (`_matchupLabelForMode`), so it reads
 correctly no matter how the two teams got there.
 
 Random Roles and Balanced Roles sit alongside Start/Start (no move) on that
-same message, but only when the roster actually qualifies: both teams landed
-at exactly 5, regardless of `use_roles` or whether the game is ranked at all,
-so roles can be bolted onto any 5v5 roster after the fact (a plain
-`/make-teams random` split included). Since `RosterActionView` is one shared
-persistent instance, it can't conditionally omit a button per message the way
-adding a reaction conditionally once could. Instead, `_finalizeRoster` builds
-the view with `include_role_buttons=size_eligible`, which genuinely removes
-both items from that specific message (a persistent view's registration only
-governs custom_id routing, not which buttons any one message actually shows).
-`roster_use_roles` itself still only starts `True` when the roster was posted
-with `use_roles` (i.e. ranked with roles); it only turns on for everyone else
-once one of these two buttons is actually clicked.
+same message, but only when the roster actually qualifies: both teams
+landed at exactly 5, regardless of `use_roles` or whether the game is
+ranked at all. That means roles can be bolted onto any 5v5 roster after the
+fact, including a plain `/make-teams random` split. Since `RosterActionView`
+is one shared persistent instance, it can't conditionally omit a button per
+message the way adding a reaction conditionally once could. Instead,
+`_finalizeRoster` builds the view with `include_role_buttons=size_eligible`,
+which genuinely removes both items from that specific message. (A
+persistent view's registration only governs custom_id routing, not which
+buttons any one message actually shows.) `roster_use_roles` itself still
+only starts `True` when the roster was posted with `use_roles` (i.e. ranked
+with roles). It only turns on for everyone else once one of these two
+buttons is actually clicked.
 
 Clicking Random Roles (`_rerollRoster`) shuffles both teams' player order,
-persists the shuffle back to `team1`/`team2`, and edits both posted messages
-in place with freshly role-labeled embeds; it's also how a roster that never
-had `use_roles` set gets roles turned on in the first place, not just a
-re-shuffle of an already-labeled one. Since a pure shuffle makes no preference
-claim about who lands where, it also clears `disliked_role_user_ids` (see
-above), so no stale bonus flag survives a reshuffle.
+persists the shuffle back to `team1`/`team2`, and edits both posted
+messages in place with freshly role-labeled embeds. This is also how a
+roster that never had `use_roles` set gets roles turned on in the first
+place, not just a re-shuffle of an already-labeled one. Since a pure
+shuffle makes no preference claim about who lands where, it also clears
+`disliked_role_user_ids` (see above), so no stale bonus flag survives a
+reshuffle.
 
 Clicking Balanced Roles (`_handleRosterBalanceRolesClick` →
-`_applyBalancedRolesToRoster`) runs the same elo+preference logic
+`_applyBalancedRolesToRoster`) runs the same elo-plus-preference logic
 `/make-teams ranked use_roles:true` uses, just adapted so team membership
-never moves: `_assignRolesForFixedTeams` runs `_assignRolesForBalance`
-(the same preference-first fill `formRoleBalancedTeams` uses, just
-`per_role=1` and scoped to one team's own five players instead of two per
-role across ten) independently for each side, then `_refineFixedTeamRoleBalance`
-hill-climbs pairwise role swaps *within* each team (never between them, since
-these two rosters are already fixed) to shrink the gap between the two teams'
-total effective elo, the same way `_refineRoleBalance` hill-climbs for ranked's
-own from-scratch split. The result is persisted back to `team1`/`team2` (same
-players, new role order), `disliked_role_user_ids` is recomputed from
-whichever assignment actually landed, and both posted embeds are edited in
-place with role labels showing.
+never moves. `_assignRolesForFixedTeams` runs `_assignRolesForBalance`
+independently for each side: the same preference-first fill
+`formRoleBalancedTeams` uses, just with `per_role=1` and scoped to one
+team's own five players instead of two per role across ten.
+`_refineFixedTeamRoleBalance` then hill-climbs pairwise role swaps *within*
+each team, never between them since these two rosters are already fixed, to
+shrink the gap between the two teams' total effective elo. This is the same
+way `_refineRoleBalance` hill-climbs for ranked's own from-scratch split.
+The result is persisted back to `team1`/`team2` (same players, new role
+order), `disliked_role_user_ids` is recomputed from whichever assignment
+actually landed, and both posted embeds are edited in place with role
+labels showing.
 
 ### Resolving a winner, or cancelling the game
 
 Betting state for a guild is a finite state machine stored in the
-`betting_state` column: `NONE → OPEN → CLOSED → NONE`. The winner-report message
-doesn't wait for betting to close. `_openBetting` posts it immediately, in the
-same message as "betting is open," with a `WinnerReportView` (Team 1/Team 2/
-Cancel Game buttons) attached right from the start, and stores that message's
-id before returning. Team 1/Team 2 aren't fixed labels. `_openBetting` reads
-the roster's own name back with `getRosterName(..., escape=False)` (the
-`escape=False` skips the markdown-escaping the same call does for message
-text, since a button label renders as plain text and would otherwise show a
-literal backslash) and builds each button's label from it
-(`_teamButtonLabel`, truncated to Discord's 80-character cap), so the buttons
-read the same team names the roster embed and matchup graphic already show.
+`betting_state` column: `NONE → OPEN → CLOSED → NONE`. The winner-report
+message doesn't wait for betting to close. `_openBetting` posts it
+immediately, in the same message as "betting is open," with a
+`WinnerReportView` (Team 1/Team 2/Cancel Game buttons) attached right from
+the start, and stores that message's id before returning. Team 1/Team 2
+aren't fixed labels: `_openBetting` reads the roster's own name back with
+`getRosterName(..., escape=False)` and builds each button's label from it
+(`_teamButtonLabel`, truncated to Discord's 80-character cap), so the
+buttons read the same team names the roster embed and matchup graphic
+already show. The `escape=False` matters because a button label renders as
+plain text; without it, the markdown-escaping the same call does for
+message text would show up as a literal backslash.
 
 `WinnerReportView` is persistent (fixed `custom_id`s, `timeout=None`,
 registered once via `client.add_view`), the same reasoning as
@@ -500,62 +522,71 @@ result only has the heavier `/set correct-winner` as its way back, and a
 cancelled game (refunded bets, everyone moved) has no undo at all.
 
 Confirm on the winner-report side calls `recordResult` with the
-channel/guild from the button-click interaction itself, then deletes both the
-original report message and the confirmation prompt itself outright
-(`ConfirmWinnerReportView.confirm` calling `_deleteMessageSafely` on each),
-rather than just stripping their buttons: `formatResultMessage`'s own result
+channel/guild from the button-click interaction itself, then deletes both
+the original report message and the confirmation prompt itself outright,
+rather than just stripping their buttons (`ConfirmWinnerReportView.confirm`
+calls `_deleteMessageSafely` on each). `formatResultMessage`'s own result
 message is what the channel keeps instead, so there's no real reason for
 either the "betting is open"/report message or a "reported as the winner,
 confirm to finalize" prompt that's already been acted on to keep cluttering
-the channel. Confirm on the cancel side calls `_finishGameCancel`, which is
-just `cancelGameHelper` (the refund via `cancelBettingHelper`, also clearing
-`active_tournament_match_id`, so an abandoned tournament match's
-bracket-advance hook can't fire against whatever unrelated game starts next,
-plus the move back to the original channel) followed by stripping the
-original report message's own buttons via `_clearMessageButtons` (`view=None`)
-rather than deleting it, since "Game cancelled" still reads fine sitting
-alongside the now-buttonless original message. Cancel and a timeout on either confirmation view instead
-call `_restoreWinnerReportMessage`, which puts the original report message's
-id back into `betting_message_id` so its buttons work again, but only if
-nothing else has resolved the game a different way in the meantime
-(`betting_state` still `OPEN`/`CLOSED`, and `betting_message_id` still unset)
-so a stale restore can't resurrect a game that the other path already
-cleaned up. Every one of these buttons is open to anyone to click, since
-there's no single "invoker" to restrict them to the way a slash-command's
-own confirm view has `ctx.user`.
+the channel.
+
+Confirm on the cancel side calls `_finishGameCancel`, which is just
+`cancelGameHelper`: the refund via `cancelBettingHelper`, also clearing
+`active_tournament_match_id` so an abandoned tournament match's
+bracket-advance hook can't fire against whatever unrelated game starts
+next, plus the move back to the original channel. That's followed by
+stripping the original report message's own buttons via
+`_clearMessageButtons` (`view=None`) rather than deleting it, since "Game
+cancelled" still reads fine sitting alongside the now-buttonless original
+message.
+
+Cancel and a timeout on either confirmation view instead call
+`_restoreWinnerReportMessage`, which puts the original report message's id
+back into `betting_message_id` so its buttons work again. It only does this
+if nothing else has resolved the game a different way in the meantime
+(`betting_state` still `OPEN`/`CLOSED`, and `betting_message_id` still
+unset), so a stale restore can't resurrect a game that the other path
+already cleaned up. Every one of these buttons is open to anyone to click,
+since there's no single "invoker" to restrict them to the way a
+slash-command's own confirm view has `ctx.user`.
 
 The report click also closes betting immediately, flipping `betting_state`
-from `OPEN` to `CLOSED` synchronously alongside the `betting_message_id` clear,
-before the confirmation ever posts. Without that, `/wager` would stay open for
-the whole confirmation window (nothing else touches `betting_state` until
-`recordResult` eventually clears every wager), letting someone place a brand
-new bet on whichever side just got reported before it's even confirmed as the
-real winner. It stays `CLOSED` even if the report is later cancelled, the same
-"once reported, betting's done" choice either way.
+from `OPEN` to `CLOSED` synchronously alongside the `betting_message_id`
+clear, before the confirmation ever posts. Without that, `/wager` would
+stay open for the whole confirmation window, since nothing else touches
+`betting_state` until `recordResult` eventually clears every wager. That
+would let someone place a brand new bet on whichever side just got reported
+before it's even confirmed as the real winner. It stays `CLOSED` even if
+the report is later cancelled: the same "once reported, betting's done"
+choice either way.
 
 `cancelBettingHelper` is also what `_openBetting` calls first, to silently clear
 out a stale unresolved round before a fresh one opens. That path never moves
 anyone, since clearing a stale round isn't the player-facing "the game was
 cancelled" event `cancelGameHelper` handles.
 
-Message cleanup happens at two other points in the same cycle, both scoped to a
-casual/ranked game formed through `/make-teams`
-(`recordResult`'s own `is_tournament_match` check skips all of it for a
-tournament match, which never posts a matchup graphic or a "Teams created!"
-intro in the first place, sequential mode included). Once a roster's Start
-button is clicked and the matchup graphic actually posts,
-`_handleRosterStartClick` calls `_deleteMakeTeamsIntroMessages` right after
-`_sendMatchupImage`, deleting the original "Teams created!"-style
-team-formation announcement (and, for a draft, its picker/pool messages): the
-graphic already shows both full rosters, so that earlier text reply has
-nothing left to say. Once the game's result is actually recorded,
-`recordResult` deletes the "Betting is now closed!" notice if `_bettingTimer`
-posted one (`betting_closed_message_id`) and the roster embeds themselves
-(`_deleteMakeTeamsMessages`), and replies to the matchup graphic message
-itself (`matchup_message_id`) when it sends `formatResultMessage`'s result
-text, so the result stays visually anchored to the graphic instead of just
-landing further down the channel; a best-effort reply, falling back to a plain
-send if the graphic message was itself somehow already deleted.
+Message cleanup happens at two other points in the same cycle, both scoped
+to a casual/ranked game formed through `/make-teams`. (`recordResult`'s own
+`is_tournament_match` check skips all of it for a tournament match, which
+never posts a matchup graphic or a "Teams created!" intro in the first
+place, sequential mode included.) Once a roster's Start button is clicked
+and the matchup graphic actually posts, `_handleRosterStartClick` calls
+`_deleteMakeTeamsIntroMessages` right after `_sendMatchupImage`. This
+deletes the original "Teams created!"-style team-formation announcement,
+and for a draft, its picker/pool messages too, since the graphic already
+shows both full rosters and that earlier text reply has nothing left to
+say.
+
+Once the game's result is actually recorded, `recordResult` deletes the
+"Betting is now closed!" notice if `_bettingTimer` posted one
+(`betting_closed_message_id`), and the roster embeds themselves
+(`_deleteMakeTeamsMessages`). It then replies to the matchup graphic
+message itself (`matchup_message_id`) when it sends `formatResultMessage`'s
+result text, so the result stays visually anchored to the graphic instead
+of just landing further down the channel. This is a best-effort reply,
+falling back to a plain send if the graphic message was itself somehow
+already deleted.
 
 The same flip-before-await-anything pattern shows up again in `_acceptDuel` and
 `_resolveDuel` for `/wager against`.
@@ -588,17 +619,17 @@ inflation `GAME_WIN_GOLD`/`GAME_LOSS_GOLD` introduce on their own. The same
 helper backs both `computeGameDeltas` (casual/ranked/sequential-tournament
 games) and `_matchWagerDeltas` (simultaneous-tournament match wagers).
 
-Separately from wagering, every rostered player gets gold just for finishing the
-game: `GAME_WIN_GOLD` (300) for the winning side, `GAME_LOSS_GOLD` (150) for the
-losing side, the moment a game resolves, ranked or casual, whether they bet on
-it or not. It's folded into the same `balance` delta `computeGameDeltas` already
-produces per player, right alongside `game_wins`/`game_losses`/`elo` in the
-roster loop, so it rides along for free with
-`applyGameDeltas`/`reportCorrectWinnerHelper`'s existing apply/reverse/reapply
-cycle. Undoing and correcting a misreported winner correctly flips which
-rostered players get the win amount vs. the loss amount along with everything
-else a correction re-derives. `gold_wagered`/`gold_won`/`gold_lost` stay
-wager-only and never see it.
+Separately from wagering, every rostered player gets gold just for
+finishing the game: `GAME_WIN_GOLD` (300) for the winning side,
+`GAME_LOSS_GOLD` (150) for the losing side. This happens the moment a game
+resolves, ranked or casual, whether they bet on it or not. It's folded into
+the same `balance` delta `computeGameDeltas` already produces per player,
+right alongside `game_wins`/`game_losses`/`elo` in the roster loop, so it
+rides along for free with `applyGameDeltas`/`reportCorrectWinnerHelper`'s
+existing apply/reverse/reapply cycle. Correcting a misreported winner
+correctly flips which rostered players get the win amount versus the loss
+amount, along with everything else a correction re-derives.
+`gold_wagered`/`gold_won`/`gold_lost` stay wager-only and never see it.
 
 ### Elo and ranked play
 
@@ -669,37 +700,41 @@ Nothing is escrowed at challenge time, only a balance sanity-check, so a
 challenge that's never accepted doesn't leave anyone's gold stuck. Both
 players' gold is only locked once the target presses Accept
 (`DuelAcceptView`), which also strips that Accept button via
-`_clearMessageButtons` right after `_acceptDuel` runs, at which point a second
-message goes out with a `DuelResultView` (Challenger Won/Target Won buttons).
-Picking a result posts a `ConfirmDuelResultView` rather than paying out
-immediately, the same two-step confirm shape the team-game winner report
-uses, for the same reason (a real gold transfer shouldn't hinge on one
-accidental click). Confirming there also strips the result message's own
-buttons, matching `ConfirmWinnerReportView`. Both `DuelAcceptView` and
-`DuelResultView` are persistent, same reasoning as `WinnerReportView`;
-`ConfirmDuelResultView` is a short-lived confirm view like
-`ConfirmWinnerReportView`.
+`_clearMessageButtons` right after `_acceptDuel` runs. At that point a
+second message goes out with a `DuelResultView` (Challenger Won/Target Won
+buttons). Picking a result posts a `ConfirmDuelResultView` rather than
+paying out immediately, the same two-step confirm shape the team-game
+winner report uses and for the same reason: a real gold transfer shouldn't
+hinge on one accidental click. Confirming there also strips the result
+message's own buttons, matching `ConfirmWinnerReportView`. Both
+`DuelAcceptView` and `DuelResultView` are persistent, for the same
+reasoning as `WinnerReportView`. `ConfirmDuelResultView` is a short-lived
+confirm view, like `ConfirmWinnerReportView`.
 
 ### Leaderboard paging
 
-`/leaderboard` builds the full sorted/filtered player list once, up front, then
-only ever sends one message. `getLeaderboardEntries` returns every player with
-an economy row; `_filterLeaderboardEntries` then drops anyone with a 0W-0L
-record in whichever category the selected stat is about (`LEADERBOARD_RECORD_KEYS`
-maps each stat to its relevant wins/losses pair, e.g. bet wins/losses for a bet
-stat, the combined game record for the elo-sorted overview), leaving stats with
-no wins/losses concept (balance, net gold, gold wagered) showing everyone.
-`LeaderboardPagingView`'s First/Prev/Next/Last
-buttons don't post anything new. `_handleLeaderboardPageClick` looks up the
-stored filter/order/page for that message id in the `leaderboards` table,
-recomputes the requested page, and edits the original message via
-`interaction.response.edit_message()`. `/team lookup` and `/team list` page the
-exact same way, through their own `MyTeamsPagingView`/`TeamListPagingView` and
-`my_team_views`/`team_list_views` tables; all three share a single
-`_computeNewPage(direction, page, total_pages)` helper for the First/Prev/
-Next/Last arithmetic itself, so that part can't drift out of sync between
-them. All three paging views are persistent too, for the same "shouldn't die
-across a restart" reasoning as everything else long-lived in this file.
+`/leaderboard` builds the full sorted/filtered player list once, up front,
+then only ever sends one message. `getLeaderboardEntries` returns every
+player with an economy row. `_filterLeaderboardEntries` then drops anyone
+with a 0W-0L record in whichever category the selected stat is about.
+(`LEADERBOARD_RECORD_KEYS` maps each stat to its relevant wins/losses pair,
+e.g. bet wins/losses for a bet stat, or the combined game record for the
+elo-sorted overview.) Stats with no wins/losses concept, like balance, net
+gold, or gold wagered, still show everyone.
+
+`LeaderboardPagingView`'s First/Prev/Next/Last buttons don't post anything
+new. `_handleLeaderboardPageClick` looks up the stored filter/order/page
+for that message id in the `leaderboards` table, recomputes the requested
+page, and edits the original message via
+`interaction.response.edit_message()`. `/team lookup` and `/team list` page
+the exact same way, through their own
+`MyTeamsPagingView`/`TeamListPagingView` and
+`my_team_views`/`team_list_views` tables. All three share a single
+`_computeNewPage(direction, page, total_pages)` helper for the
+First/Prev/Next/Last arithmetic itself, so that part can't drift out of
+sync between them. All three paging views are persistent too, for the same
+"shouldn't die across a restart" reasoning as everything else long-lived in
+this file.
 
 Missing stats (a win rate with zero games played, for example) sort to the
 bottom regardless of ascending/descending order, rather than a `None`/0 value
@@ -725,12 +760,12 @@ redirecting at that one entry point is enough to redirect the whole thing.
 (`clearGroup`, seven `@clearGroup.command`s: `teams`, `channels`, `tournament`,
 `elo`, `economy`, `achievements`, `card-unlocks`). Discord enforces each
 subcommand's own parameters, so there's no way to submit half of an intended
-combination and only find out it was invalid after the fact; the tradeoff is
-that clearing several unrelated things at once takes several separate calls
-instead of one combined response. Every subcommand requires the Manage Server
-permission outright (`app_commands.checks.has_permissions`, same as `/set
-correct-winner`), and every one of them requires confirmation before anything
-actually happens.
+combination and only find out it was invalid after the fact. The tradeoff
+is that clearing several unrelated things at once takes several separate
+calls instead of one combined response. Every subcommand requires the
+Manage Server permission outright (`app_commands.checks.has_permissions`,
+same as `/set correct-winner`), and every one of them requires confirmation
+before anything actually happens.
 
 `/clear teams`, `/clear channels`, and `/clear tournament` share
 `confirmClearActionHelper`, which posts a plain warning with "Confirm"/"Cancel"
@@ -739,24 +774,26 @@ teams/draft (cancelling, with a refund, any in-progress game built from them
 first, the same safety net `clearTeamsHelper` always applies). `/clear
 channels` does the same, plus forgets the saved `channel1`/`channel2` names.
 `/clear tournament` deletes the server's tournament outright (bracket,
-registrations, match history, via `deleteTournamentHelper`) alongside the same
-teams/draft clear; registered/persistent teams in the `teams` table aren't
-touched. All three only actually clear anything from inside the view's
+registrations, match history, via `deleteTournamentHelper`) alongside the
+same teams/draft clear. Registered, persistent teams in the `teams` table
+aren't touched. All three only actually clear anything from inside the view's
 `confirm` button callback, which always calls `clearTeamsHelper` regardless of
 which of the three it's backing.
 
-`/clear elo`, `/clear economy`, `/clear achievements`, and `/clear card-unlocks`
-instead clear the current teams/draft immediately, synchronously, the moment
-the command runs (`await helperObj.clearTeamsHelper(ctx)`, in `bot.py` itself,
-before the confirmation is ever shown) and only gate the actual player-data
-reset behind confirmation, since that part touches every player in the server
-(or one specific player, see below) rather than just the guild's own
-in-progress session. `confirmDestructiveClearHelper` posts that warning with
-"Confirm reset"/"Cancel" buttons (`ConfirmResetView`). `/clear elo` resets
-every player's elo back to this server's default (`/set default-elo`, 1000
-otherwise); `/clear economy` wipes balance, elo, game record, betting record,
-and gold wagered/won/lost for every player, superseding the narrower elo reset
-since the whole-row wipe already resets elo too.
+`/clear elo`, `/clear economy`, `/clear achievements`, and
+`/clear card-unlocks` instead clear the current teams/draft immediately and
+synchronously, the moment the command runs (`await
+helperObj.clearTeamsHelper(ctx)`, in `bot.py` itself, before the
+confirmation is ever shown). They only gate the actual player-data reset
+behind confirmation, since that part touches every player in the server (or
+one specific player, see below) rather than just the guild's own
+in-progress session. `confirmDestructiveClearHelper` posts that warning
+with "Confirm reset"/"Cancel" buttons (`ConfirmResetView`). `/clear elo`
+resets every player's elo back to this server's default (`/set
+default-elo`, 1000 otherwise). `/clear economy` wipes balance, elo, game
+record, betting record, and gold wagered/won/lost for every player,
+superseding the narrower elo reset since the whole-row wipe already resets
+elo too.
 
 `interaction_check` on both view classes rejects anyone who isn't the member
 who ran the command, and both time out after `CLEAR_CONFIRM_TIMEOUT_SECONDS`
@@ -806,16 +843,16 @@ member argument lets someone stand a team up on another player's behalf. When
 given, that member becomes the sole initial roster entry and captain instead of
 `ctx.user`.
 
-`/team save` builds one the same way, just pre-filled instead of empty: it
-copies whichever side (`team1`/`team2`, picked by its `team` choice param) of
-the guild's last completed game - the same ephemeral roster `/make-teams
-repeat` re-posts - into a brand new persistent team, with the caller as
-captain. `saveTeamHelper` only ever reads `team1`/`team2`, never writes them,
-so the source roster is untouched and still reusable/reportable afterward. A
-caller who wasn't actually rostered on the side they asked to save gets
-rejected outright, so a spectator can't claim a team they never played on; the
-new team's `team_size` is stamped to its current roster size, so it's saved
-already full rather than recruiting.
+`/team save` builds one the same way, just pre-filled instead of empty. It
+copies whichever side (`team1`/`team2`, picked by its `team` choice param)
+of the guild's last completed game, the same ephemeral roster
+`/make-teams repeat` re-posts, into a brand new persistent team, with the
+caller as captain. `saveTeamHelper` only ever reads `team1`/`team2`, never
+writes them, so the source roster is untouched and still reusable or
+reportable afterward. A caller who wasn't actually rostered on the side
+they asked to save gets rejected outright, so a spectator can't claim a
+team they never played on. The new team's `team_size` is stamped to its
+current roster size, so it's saved already full rather than recruiting.
 
 Team names are unique per guild case-insensitively. `getTeamRow` looks a team up
 with `name = ? COLLATE NOCASE`, so "red" finds "Red", and `/team create`'s (and
@@ -828,21 +865,23 @@ saved` compares its two team-name params the same case-insensitive way before
 ever calling `getTeamRow`, so picking "Red" and "red" is still caught as "the
 same team twice."
 
-`/team invite` uses the same press-to-accept pattern as everything else that
-needs a specific person's consent: a single `TeamInviteAcceptView` (one shared
-Accept button, persistent like `WinnerReportView`) posted once even when
-several people are invited in the same call, its own `team_invites` table
-keyed by message id with one row per invitee. Each invitee's own click only
-ever resolves their own row (`_handleTeamInviteAcceptClick` scopes its lookup
-to `targetId=interaction.user.id`), so several different people can accept off
-the same message independently. Its `force` param (Manage Server only, checked
-separately from and on top of the ordinary captain-or-admin gate every
-`/team invite` call still has to pass first) skips the whole press-to-accept
-dance. Every valid member goes straight onto the roster via the same
-`add_player`/`updateTeamData` pair `_handleTeamInviteAcceptClick` itself
-commits once a real invite is accepted, just run immediately instead of
-waiting on a click. No posted invite, no Accept button, no `team_invites` row
-for anyone to accept later.
+`/team invite` uses the same press-to-accept pattern as everything else
+that needs a specific person's consent. A single `TeamInviteAcceptView`
+(one shared Accept button, persistent like `WinnerReportView`) is posted
+once even when several people are invited in the same call, backed by its
+own `team_invites` table keyed by message id with one row per invitee. Each
+invitee's own click only ever resolves their own row, since
+`_handleTeamInviteAcceptClick` scopes its lookup to
+`targetId=interaction.user.id`. That means several different people can
+accept off the same message independently. Its `force` param (Manage
+Server only, checked separately from and on top of the ordinary
+captain-or-admin gate every `/team invite` call still has to pass first)
+skips the whole press-to-accept dance: every valid member goes straight
+onto the roster via the same `add_player`/`updateTeamData` pair
+`_handleTeamInviteAcceptClick` itself commits once a real invite is
+accepted, just run immediately instead of waiting on a click. With
+`force`, there's no posted invite, no Accept button, and no `team_invites`
+row for anyone to accept later.
 
 `/team leave` is the self-service opposite of `/team invite`. Removing yourself
 needs nobody else's permission, so it's the one team command with no
@@ -852,12 +891,12 @@ off the captaincy first or `/team delete` if they want the team gone
 entirely, rather than ever leaving a team with no one `isTeamCaptain`
 recognizes.
 
-`/team transfer` is that hand-off command: the team's captain, or anyone with
-Manage Server, points it at another player already on the roster and
-`team.set_captain(...)` swaps who holds it. `Team.set_captain` itself enforces
-"captain must be a roster player," so the new captain has to already be
-rostered - inviting them first with `/team invite` is on the caller, not
-something this does automatically.
+`/team transfer` is that hand-off command: the team's captain, or anyone
+with Manage Server, points it at another player already on the roster, and
+`team.set_captain(...)` swaps who holds it. `Team.set_captain` itself
+enforces "captain must be a roster player," so the new captain has to
+already be rostered. Inviting them first with `/team invite` is on the
+caller, not something this does automatically.
 
 `/make-teams saved` is the shortcut: it loads two persistent teams straight
 into `team1`/`team2` so a casual or ranked game can start immediately, without
@@ -879,12 +918,12 @@ and `/tournament register` are all captain-gated the same way
 Server permission through. That's `not isTeamCaptain(...) and not
 ctx.user.guild_permissions.manage_guild`, the same check repeated at each
 command, so a team whose captain has gone inactive, left the server, or just
-isn't around isn't stuck. An admin can rename it, change its voice channel/logo,
+isn't around isn't stuck. An admin can rename it, change its voice channel or logo,
 invite players, register it for a tournament, transfer its captaincy, or
-delete it without being on the roster first. `/team save` has no such gate at
-all, since it never touches an existing team's roster or captaincy - its only
-real check is that the caller was actually playing on the game roster it's
-copying.
+delete it without being on the roster first. `/team save` has no such gate
+at all, since it never touches an existing team's roster or captaincy. Its
+only real check is that the caller was actually playing on the game roster
+it's copying.
 
 `myCaptainedTeamAutocomplete` (the suggestion list backing all six of those
 commands' `team` param) checks the same permission and switches from
@@ -937,40 +976,41 @@ button. `setupHelper` posts the message with a fresh view (nothing selected
 yet) and inserts a `setup_role_sessions` row keyed by that message's id.
 
 Each `SetupRoleToggleButton` shows `primary` (highlighted) when its role is
-currently selected, `secondary` otherwise, so the live selection is visible at
-a glance. There's no separate "un-click" the way a reaction's remove event
-was; pressing an already-selected role's button toggles it off the exact same
-way pressing an unselected one toggles it on. `_handleSetupRoleToggleClick`
-flips that one role in the session's `selectedRoles` column (a plain
-`symmetric_difference_update`) and rebuilds a fresh `SetupRoleSelectionView`
-reflecting the new selection, since a button's style is derived fresh on every
-render rather than mutated in place. It ignores anyone other than whoever ran
-`/setup` (enforced by the view's own `interaction_check`, the same
-single-invoker guard every other confirm-style view in this file uses) and
-no-ops with a plain ephemeral note on a stale or expired session.
+currently selected, `secondary` otherwise, so the live selection is visible
+at a glance. There's no separate "un-click" the way a reaction's remove
+event was: pressing an already-selected role's button toggles it off the
+exact same way pressing an unselected one toggles it on.
+`_handleSetupRoleToggleClick` flips that one role in the session's
+`selectedRoles` column (a plain `symmetric_difference_update`) and rebuilds
+a fresh `SetupRoleSelectionView` reflecting the new selection, since a
+button's style is derived fresh on every render rather than mutated in
+place. It ignores anyone other than whoever ran `/setup`, enforced by the
+view's own `interaction_check` (the same single-invoker guard every other
+confirm-style view in this file uses), and no-ops with a plain ephemeral
+note on a stale or expired session.
 
 Pressing Confirm reads the session's current step and acts accordingly.
 During the liked-roles step, it snapshots `selectedRoles` as the confirmed
 liked set, flips the session to the disliked step, and edits the message in
-with a brand new `SetupRoleSelectionView` (`selected_roles=()`) for the second
-round, rather than reusing the same view instance the way
-`ConfirmResetView`/`ConfirmTeamDeleteView` reuse `self` in their own button
-callbacks; the disliked round has to start every button back at unselected,
-which a fresh instance gives for free. Which step is live is still read fresh
-from `setup_role_sessions` on every click either way, not tracked on the view
+with a brand new `SetupRoleSelectionView` (`selected_roles=()`) for the
+second round. This is different from `ConfirmResetView`/`ConfirmTeamDeleteView`,
+which reuse `self` in their own button callbacks, because the disliked
+round has to start every button back at unselected, and a fresh instance
+gives that for free. Which step is live is still read fresh from
+`setup_role_sessions` on every click either way, not tracked on the view
 itself.
 
-During the disliked-roles step, Confirm finalizes things: any role toggled in
-both steps is a contradiction, so it's left out of both the final liked and
-disliked sets entirely rather than being written either way, and the summary
-message names it and tells the caller to run `/setup` again if they'd like to
-fix it. `_applySetupRolePreferences` then replaces `player_role_preferences`
-for that player outright (a full `DELETE` then re-`INSERT`, not a per-role
-merge) with whatever survived, since the flow always walks both steps in full
-on every run. Running `/setup` for the first time
-unlocks the Onboarded achievement at this point too, and `hasCompletedSetup`
-reuses that same `card_unlocks` row as its signal rather than a separate
-completion table.
+During the disliked-roles step, Confirm finalizes things. Any role toggled
+in both steps is a contradiction, so it's left out of both the final liked
+and disliked sets entirely rather than being written either way, and the
+summary message names it and tells the caller to run `/setup` again if
+they'd like to fix it. `_applySetupRolePreferences` then replaces
+`player_role_preferences` for that player outright, a full `DELETE` then
+re-`INSERT` rather than a per-role merge, with whatever survived, since the
+flow always walks both steps in full on every run. Running `/setup` for the
+first time unlocks the Onboarded achievement at this point too.
+`hasCompletedSetup` reuses that same `card_unlocks` row as its signal,
+rather than a separate completion table.
 
 The view times out (`SETUP_ROLE_TIMEOUT_SECONDS`) if nobody presses Confirm,
 deleting the session row and editing the message to say so, the same
@@ -1047,21 +1087,23 @@ scale, so the drawing code itself never has to think about the scale factor.
 
 Every top-level render call (`renderBracketImages`, `_buildGrandFinalsImage`,
 `_renderMatchupImage`, `_renderTeamCardImage`, `_renderTradingCardImage`,
-`_renderPreviewImages`) is invoked via `asyncio.to_thread` from its own async
-caller, not called directly. Pillow's actual drawing work (many draw/text/
-paste calls per image) would otherwise block the event loop, and so every
-other guild's commands, for the whole time one image takes to render.
-`_imageToFile`'s own downscale is left on the main thread, a comparatively
-small cost next to the drawing itself. `_renderGrandFinalsImage` is the one
-render function that also reads from the database (which stage of Grand
-Finals has actually been played), genuinely unsafe to run from a different
-thread, since `self.cursor` was opened with sqlite3's default
-`check_same_thread=True`. It's split into `_grandFinalsRenderInputs` (the DB
-read, run on the calling thread) and `_buildGrandFinalsImage` (the pure
-drawing, the part that's actually offloaded) for exactly this reason -
-`_renderGrandFinalsImage` itself is a synchronous convenience wrapper around
-both, kept fully synchronous for callers (and tests) that don't need the
-split.
+`_renderPreviewImages`) is invoked via `asyncio.to_thread` from its own
+async caller, not called directly. Pillow's actual drawing work, many
+draw/text/paste calls per image, would otherwise block the event loop, and
+so every other guild's commands too, for the whole time one image takes to
+render. `_imageToFile`'s own downscale is left on the main thread, a
+comparatively small cost next to the drawing itself.
+
+`_renderGrandFinalsImage` is the one render function that also reads from
+the database, to check which stage of Grand Finals has actually been
+played, which makes it genuinely unsafe to run from a different thread
+since `self.cursor` was opened with sqlite3's default
+`check_same_thread=True`. It's split into `_grandFinalsRenderInputs` (the
+DB read, run on the calling thread) and `_buildGrandFinalsImage` (the pure
+drawing, the part that's actually offloaded) for exactly this reason.
+`_renderGrandFinalsImage` itself is a synchronous convenience wrapper
+around both, kept fully synchronous for callers (and tests) that don't
+need the split.
 
 A bracket 16+ teams deep (`BRACKET_TWO_SIDED_MIN_ROUNDS`) renders as two
 mirrored halves converging toward a champion in the center, the same layout a
@@ -1124,26 +1166,28 @@ through a second, match-scoped path (`_openConcurrentTournamentBetting`/
 uses.
 
 A team-button click on a simultaneous match doesn't resolve it right away
-either, the same reasoning `ConfirmWinnerReportView` has for a normal game. It
-posts a `ConfirmTournamentMatchReportView` instead
-(`_handleTournamentMatchReportClick`), first flipping the match's `state` from
-`AWAITING_RESULT` to a new `CONFIRMING` value and setting `bettingClosed=1` on
-it, both synchronously before anything `await`-based. `CONFIRMING` guards the
-same double-processing risk `AWAITING_RESULT` already needed a guard for (a
-second near-simultaneous click on the same match can't also pass the
-`state='AWAITING_RESULT'` check and post a second confirmation), and
-`bettingClosed=1` closes `/wager match_id:` on that match immediately, since
-otherwise it would stay open for the whole confirmation window and let someone
-bet on whichever side just got reported before it's even confirmed. Confirm
-calls `_resolveTournamentMatch` directly, then strips the original match
-message's own buttons via `_clearMessageButtons`, matching
+either, the same reasoning `ConfirmWinnerReportView` has for a normal game.
+It posts a `ConfirmTournamentMatchReportView` instead
+(`_handleTournamentMatchReportClick`), first flipping the match's `state`
+from `AWAITING_RESULT` to a new `CONFIRMING` value and setting
+`bettingClosed=1` on it, both synchronously before anything `await`-based.
+`CONFIRMING` guards the same double-processing risk `AWAITING_RESULT`
+already needed a guard for: a second near-simultaneous click on the same
+match can't also pass the `state='AWAITING_RESULT'` check and post a
+second confirmation. `bettingClosed=1` closes `/wager match_id:` on that
+match immediately, since otherwise it would stay open for the whole
+confirmation window and let someone bet on whichever side just got
+reported before it's even confirmed.
+
+Confirm calls `_resolveTournamentMatch` directly, then strips the original
+match message's own buttons via `_clearMessageButtons`, matching
 `ConfirmWinnerReportView`. Cancel or a timeout calls
-`_restoreTournamentMatchAwaitingResult`, a conditional `UPDATE ... WHERE id=?
-AND state='CONFIRMING'` that puts the match back to `AWAITING_RESULT` so its
-buttons work again, but only if nothing else has resolved it a different way
-in the meantime. `bettingClosed` is never un-set on cancel, the same "once
-reported, betting's done regardless of outcome" choice the normal game's own
-`betting_state` close makes.
+`_restoreTournamentMatchAwaitingResult`, a conditional
+`UPDATE ... WHERE id=? AND state='CONFIRMING'` that puts the match back to
+`AWAITING_RESULT` so its buttons work again, but only if nothing else has
+resolved it a different way in the meantime. `bettingClosed` is never
+un-set on cancel: the same "once reported, betting's done regardless of
+outcome" choice the normal game's own `betting_state` close makes.
 
 Either way, actually resolving a match funnels through the same
 `_resolveTournamentMatch`, only ever reached now once a report's been
@@ -1201,21 +1245,22 @@ first time it's touched rather than needing a one-off migration.
 Discord's `attachment://<filename>` scheme. The matchup graphic pastes it
 directly into the rendered image instead.
 
-`_ensureLogo` only ever runs for persistent teams, since it needs a `team_id`
-row to write the pick back to. The ad-hoc `Team` objects `/make-teams random`,
-`/make-teams draft`, and ranked team formation build on the fly for a casual
-game never go through it, so `team.get_logo_path()` is still `None` for them by the time
-▶️'s matchup graphic renders. `_drawMatchupColumn` picks a random built-in logo
-right at render time for those instead of drawing a bare accent-colored ring. It
-isn't persisted anywhere, so a re-render can land on a different one, which is
-fine for a team with no identity to keep consistent in the first place. It falls
-back to the ring only if the built-in set itself is unavailable.
+`_ensureLogo` only ever runs for persistent teams, since it needs a
+`team_id` row to write the pick back to. The ad-hoc `Team` objects
+`/make-teams random`, `/make-teams draft`, and ranked team formation build
+on the fly for a casual game never go through it, so `team.get_logo_path()`
+is still `None` for them by the time its matchup graphic renders.
+`_drawMatchupColumn` picks a random built-in logo right at render time for
+those instead, rather than drawing a bare accent-colored ring. It isn't
+persisted anywhere, so a re-render can land on a different one, which is
+fine for a team with no identity to keep consistent in the first place. It
+falls back to the ring only if the built-in set itself is unavailable.
 
 ### Trading cards
 
 `/stats` posts a `StatsView` alongside the embed: Avatar, Card, and (once the
 card is up) Back buttons. `StatsView` is persistent, same reasoning as
-`WinnerReportView`; nothing ever expires a `/stats` view on its own. Avatar
+`WinnerReportView`: nothing ever expires a `/stats` view on its own. Avatar
 toggles the thumbnail between this server's own profile picture for that
 player and their regular, account-wide one. `_resolveMemberAvatarUrl` handles
 the server half (`member.display_avatar`, which already resolves a per-server
@@ -1242,13 +1287,14 @@ dependency in production. `_eloBadgeImage` loads, resizes, and caches each
 tier's PNG the first time it's needed.
 
 Card doesn't apply anymore once the card is up, so `_handleStatsShowCardClick`
-re-renders with a fresh `StatsView(card_shown=True)`, which swaps Card out for
-Back (a persistent view's registered template covers every button shape it
-might need; which ones a given message actually shows is decided per-render,
-the same way `RosterActionView`'s own Reroll button is included or omitted).
-Pressing Back rebuilds the plain `/stats` embed (`_buildStatsEmbed`) via
-`_swapTradingCardForStats`, sets `stats_views.cardShown` back to 0, and swaps
-Back back out for Card, a real back-and-forth toggle.
+re-renders with a fresh `StatsView(card_shown=True)`, which swaps Card out
+for Back. (A persistent view's registered template covers every button
+shape it might need; which ones a given message actually shows is decided
+per-render, the same way `RosterActionView`'s own Reroll button is included
+or omitted.) Pressing Back rebuilds the plain `/stats` embed
+(`_buildStatsEmbed`) via `_swapTradingCardForStats`, sets
+`stats_views.cardShown` back to 0, and swaps Back back out for Card: a real
+back-and-forth toggle.
 
 Avatar isn't touched by either swap, since it applies on both sides of the
 embed/card divide. `_handleStatsAvatarToggleClick` branches on `cardShown`,

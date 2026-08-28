@@ -2062,6 +2062,35 @@ class CaptainsDraftPickTests(HelperTestCase):
         last_message = pick_ctx2.channel.send.call_args_list[-1].args[0]
         self.assertIn("Press Start", last_message)
 
+    # Regression test: clearTeamsHelper (called by captainsHelper itself,
+    # at the very start of every draft) used to hardcode team_size back to
+    # 5 unconditionally, silently discarding whatever /set team-size an
+    # admin had already configured before starting the draft. This is the
+    # realistic ordering (an admin runs /set team-size once, then starts
+    # drafts against it many times afterward), unlike
+    # test_prompts_start_once_teams_reach_team_size_even_with_spectators_left
+    # above, which sets team_size AFTER _draft_setup and so never actually
+    # exercised the reset.
+    async def test_configured_team_size_survives_starting_a_fresh_draft(self):
+        self.helperObj.update(GUILD_ID, "team_size", 2)
+
+        captain1, captain2, pool, ctx = await self._draft_setup(
+            [(501, "Pool1"), (502, "Pool2"), (503, "Pool3")]
+        )
+
+        pick_ctx1 = self._pick_ctx(captain1)
+        await self.helperObj._handleDraftPickSlotClick(pick_ctx1, 0)  # team1 now size 2
+
+        pick_ctx2 = self._pick_ctx(captain2)
+        await self.helperObj._handleDraftPickSlotClick(pick_ctx2, 0)  # team2 now size 2
+
+        team1 = self.deserialize_team("team1")
+        team2 = self.deserialize_team("team2")
+        players = self.deserialize_team("players")
+        self.assertEqual(len(team1.get_players()), 2)
+        self.assertEqual(len(team2.get_players()), 2)
+        self.assertEqual(len(players.get_players()), 1)  # one spectator still unpicked
+
     async def test_random_click_reports_when_pool_empty(self):
         self.helperObj.update(GUILD_ID, "players", Team().serializeTeam())
         self.helperObj.update(GUILD_ID, "captain1", Player(401, "Cap1").serializePlayer())
@@ -2155,10 +2184,24 @@ class ClearTeamsHelperTests(HelperTestCase):
         self.assertEqual(self.helperObj.get(GUILD_ID, "team1"), "")
         self.assertEqual(self.helperObj.get(GUILD_ID, "team2"), "")
         self.assertEqual(self.helperObj.get(GUILD_ID, "players"), "")
-        self.assertEqual(self.helperObj.get(GUILD_ID, "team_size"), 5)
         self.assertEqual(self.helperObj.get(GUILD_ID, "mode"), "Normal")
         self.assertEqual(self.helperObj.get(GUILD_ID, "turn"), 1)
         self.assertEqual(self.helperObj._dislikedRoleUserIds(GUILD_ID), frozenset())
+
+    # Regression test: clearTeamsHelper used to hardcode team_size back to 5
+    # on every call, silently discarding whatever /set team-size an admin
+    # had configured (the ONLY thing team_size is read for is
+    # _applyDraftPick's draft-stop condition, so this made /set team-size
+    # never actually take effect). Every other /set value (channels,
+    # betting-timer, wager-channel, elo, default-elo) already survives a
+    # fresh roster; team_size should too.
+    async def test_preserves_a_configured_team_size(self):
+        self.helperObj.update(GUILD_ID, "team_size", 6)
+
+        ctx = FakeInteraction(self.guild, FakeMember("Caller"))
+        await self.helperObj.clearTeamsHelper(ctx)
+
+        self.assertEqual(self.helperObj.get(GUILD_ID, "team_size"), 6)
 
     async def test_does_not_send_a_cancellation_when_no_game_is_active(self):
         ctx = FakeInteraction(self.guild, FakeMember("Caller"))

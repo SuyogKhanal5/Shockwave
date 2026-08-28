@@ -3671,7 +3671,6 @@ class helpers():
         self.update(guild_id, "team1", "")
         self.update(guild_id, "team2", "")
         self.update(guild_id, "players", "")
-        self.update(guild_id, "team_size", 5)
         self.update(guild_id, "mode", "Normal")
         self.update(guild_id, "turn", 1)
         # Goes stale the moment team1/team2 do (see rankedTeamHelper). A
