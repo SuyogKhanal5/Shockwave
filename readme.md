@@ -60,6 +60,25 @@ commands. For that, see addshockwave.com.
 
 ### Logging and database backups
 
+`mainDB` runs in WAL journal mode (`PRAGMA journal_mode=WAL`, set once right
+after connecting) rather than sqlite's default rollback journal, since every
+guild's data goes through this one connection/file. Under the default mode a
+writer holds an exclusive lock that blocks every reader too, not just other
+writers, so one guild's slow write (or the daily backup's own read pass, see
+below) could stall an unrelated command reading a completely different
+guild's row. WAL lets readers keep going against the last-committed snapshot
+while a write is in flight instead. `synchronous=NORMAL` is WAL's own
+recommended pairing (still fsyncs at checkpoints, just not on every single
+commit), and the connection's own `timeout` is raised from sqlite3's 5-second
+default to 30, so a command that does hit real lock contention waits it out
+rather than surfacing `OperationalError: database is locked` outright.
+`restore_backup.py`'s own safety copy (of the live database, taken right
+before overwriting it with a chosen backup) also copies `main.db-wal`/
+`main.db-shm` alongside `main.db` if either exists, since a clean shutdown
+checkpoints and removes them automatically but an unclean one wouldn't, and a
+raw file copy of `main.db` alone would then silently miss whatever commits
+were still sitting in the WAL.
+
 `BASE_DIR` (`os.path.dirname(os.path.abspath(__file__))`) anchors every path
 `bot.py` touches (the log file, `main.db`, the backups folder, `token.txt`)
 to this file's own directory, not the process's current working directory.
@@ -390,6 +409,16 @@ once the game actually resolves. Clearing it here would just make that
 later cleanup unable to find the message to delete. `_finalizeRoster`
 resets `roster_starting` back to `0` the next time it posts a fresh roster,
 so a new roster is clickable again from scratch.
+
+By default all four roster buttons (Start, Start (no move), Random Roles,
+Balanced Roles) are clickable by anyone who can see the message. `/set
+roster-permissions strict:true` narrows that to a rostered player or a
+Manage Server admin, the same `_isAdminOrInCurrentGame` gate the
+winner-report buttons already enforce. `_checkRosterPermission` is the
+shared check behind `strict`, called first thing inside
+`_handleRosterStartClick`/`_handleRosterRerollClick`/
+`_handleRosterBalanceRolesClick`; `strict:false` (the default) skips it
+entirely.
 
 Once the moves are done (or skipped), it posts the same matchup graphic a
 tournament match gets: `_sendMatchupImage` calls the tournament path's own
@@ -753,6 +782,24 @@ it in for the channel it was handed. Every later step in the cycle
 (`_bettingTimer`, `_handleWinnerReportPick`, `recordResult`,
 `cancelGameHelper`) just keeps using whatever channel it was given, so
 redirecting at that one entry point is enough to redirect the whole thing.
+
+### Capping and disabling wagers (`/set max-wager`, `/set betting`)
+
+`/set max-wager` caps how much gold a single `/wager team`, `/wager
+against`, or duel challenge can be (`servers.max_wager`, `NULL` by default,
+meaning no cap). `wagerHelper` and `challengeDuelHelper` both check it
+right after their existing amount-must-be-positive check, before doing
+anything else about the bet itself.
+
+`/set betting` (`servers.betting_enabled`, on by default) turns
+`/wager team`/`/wager against` off outright, without touching games, elo,
+or winner-reporting. The same posted message that opens betting also
+carries the winner-report buttons (`WinnerReportView`), so `_openBetting`
+still posts it either way; with betting disabled it just skips the
+"Betting is open" wording and the countdown timer, posting a report-only
+message instead and never creating a `_bettingTimer` task.
+`reconcileStaleBettingWindows` skips a betting-disabled guild the same
+way, since there's never a timer to resume for one.
 
 ### Admin resets and permissions
 

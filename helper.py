@@ -2627,7 +2627,7 @@ class helpers():
     # Anything else falls back to the same roleless formBalancedTeams
     # split everyone else gets, with a note explaining why roles weren't
     # applied.
-    async def rankedTeamHelper(self, ctx, use_roles=False):
+    async def rankedTeamHelper(self, ctx, use_roles=False, not_setup_note=None):
         await self.clearTeamsHelper(ctx)
 
         guild_id = ctx.guild.id
@@ -2692,6 +2692,11 @@ class helpers():
                 "Roles need exactly 10 players (5 a side) to assign, so no roles were assigned this "
                 "time. Showing the roster as normal instead. "
             )
+        elif role_split is not None and not_setup_note:
+            # Only relevant once roles actually got assigned; the
+            # exactly-10 fallback above already explains why nobody's
+            # preferences mattered this time.
+            message += f"{not_setup_note} "
         message += (
             "Press Start on the roster below when you're ready to move everyone and open betting, or "
             "Start (no move) to open betting without moving anyone."
@@ -2957,6 +2962,54 @@ class helpers():
             )
         await ctx.response.send_message(message)
 
+    # /set roster-permissions: whether Start/Start (no move)/Random Roles/
+    # Balanced Roles stay open to anyone who can see the roster message
+    # (the default) or get gated to a rostered player/Manage Server admin,
+    # the same _isAdminOrInCurrentGame check the winner-report buttons
+    # already use. See _handleRosterStartClick/_handleRosterRerollClick/
+    # _handleRosterBalanceRolesClick for where this actually gets enforced.
+    async def setRosterPermissionsHelper(self, ctx, strict):
+        self.update(ctx.guild.id, "roster_permissions_strict", 1 if strict else 0)
+        if strict:
+            message = (
+                "Roster buttons (Start, Start (no move), Random Roles, Balanced Roles) now require "
+                "being a rostered player or having the Manage Server permission."
+            )
+        else:
+            message = "Roster buttons are open to anyone who can see the roster message again."
+        await ctx.response.send_message(message)
+
+    # /set max-wager: caps a single /wager team or /wager against bet.
+    # Omitting `amount` clears the cap back to unlimited, the same
+    # "presence of the param is the signal" shape a single-purpose
+    # command can get away with, since there's no separate way to check
+    # the current value first.
+    async def setMaxWagerHelper(self, ctx, amount):
+        if amount is not None and amount <= 0:
+            await ctx.response.send_message("amount must be greater than 0.", ephemeral=True)
+            return
+        self.update(ctx.guild.id, "max_wager", amount)
+        if amount is not None:
+            message = f"A single wager can now be at most **{amount} gold**."
+        else:
+            message = "The wager cap has been removed; bets are limited only by balance again."
+        await ctx.response.send_message(message)
+
+    # /set betting: a hard on/off switch for the whole wagering layer
+    # (/wager team, /wager against), for a server that doesn't want
+    # anything gambling-adjacent even with fictional gold. Games, elo, and
+    # the winner-report flow all work exactly the same either way; see
+    # wagerHelper/challengeDuelHelper for where this actually gets
+    # enforced, and _openBetting/reconcileStaleBettingWindows for how the
+    # betting-open message and its timer adapt when this is off.
+    async def setBettingHelper(self, ctx, enabled):
+        self.update(ctx.guild.id, "betting_enabled", 1 if enabled else 0)
+        if enabled:
+            message = "Betting is enabled. /wager team and /wager against accept bets again."
+        else:
+            message = "Betting is disabled. /wager team and /wager against will no longer accept bets."
+        await ctx.response.send_message(message)
+
     # Turns a just-posted, actually-final roster (not a captains draft
     # still mid-pick) into a live control: Random Roles/Balanced Roles to
     # assign or reassign roles (only if the roster is exactly 5v5, see
@@ -3146,6 +3199,24 @@ class helpers():
     # (moveMembersToOriginalChannel simply no-ops for a game started this
     # way).
     # RosterActionView's Random Roles button callback.
+    # Shared by _handleRosterRerollClick/_handleRosterBalanceRolesClick/
+    # _handleRosterStartClick. A no-op (returns True) unless the guild has
+    # opted into /set roster-permissions strict mode; once it has, only a
+    # rostered player or a Manage Server admin can actually use these
+    # buttons, the same _isAdminOrInCurrentGame gate the winner-report
+    # buttons already enforce unconditionally.
+    async def _checkRosterPermission(self, interaction, guild_id):
+        if not self.get(guild_id, "roster_permissions_strict"):
+            return True
+        if self._isAdminOrInCurrentGame(interaction):
+            return True
+        await interaction.response.send_message(
+            "Only a player in this game, or a member with the Manage Server permission, can use the "
+            "roster buttons on this server.",
+            ephemeral=True,
+        )
+        return False
+
     async def _handleRosterRerollClick(self, interaction):
         guild_id = interaction.guild_id
         if guild_id is None:
@@ -3154,6 +3225,8 @@ class helpers():
         stored_message_id = self.get(guild_id, "roster_team2_message_id")
         if stored_message_id is None or int(stored_message_id) != interaction.message.id:
             await interaction.response.send_message("This roster is no longer live.", ephemeral=True)
+            return
+        if not await self._checkRosterPermission(interaction, guild_id):
             return
 
         await interaction.response.defer()
@@ -3172,6 +3245,8 @@ class helpers():
         stored_message_id = self.get(guild_id, "roster_team2_message_id")
         if stored_message_id is None or int(stored_message_id) != interaction.message.id:
             await interaction.response.send_message("This roster is no longer live.", ephemeral=True)
+            return
+        if not await self._checkRosterPermission(interaction, guild_id):
             return
 
         team1 = Team()
@@ -3204,6 +3279,8 @@ class helpers():
         already_starting = bool(self.get(guild_id, "roster_starting"))
         if stored_message_id is None or int(stored_message_id) != interaction.message.id or already_starting:
             await interaction.response.send_message("This roster is no longer live.", ephemeral=True)
+            return
+        if not await self._checkRosterPermission(interaction, guild_id):
             return
 
         guild = interaction.guild
@@ -8981,8 +9058,25 @@ class helpers():
         guild_id = ctx.guild.id
         user_id = ctx.user.id
 
+        # /set betting: a hard off-switch for the whole wagering layer,
+        # checked before anything else here so it applies uniformly to a
+        # singleton game's own bet and a tournament match's (match_id is
+        # not None below), not just one of the two.
+        if not self.get(guild_id, "betting_enabled"):
+            await ctx.response.send_message("Betting is disabled on this server.", ephemeral=True)
+            return
+
         if amount <= 0:
             await ctx.response.send_message("Wager amount must be greater than 0.", ephemeral=True)
+            return
+
+        # /set max-wager: NULL (the default) means no cap, same as before
+        # this existed.
+        max_wager = self.get(guild_id, "max_wager")
+        if max_wager is not None and amount > max_wager:
+            await ctx.response.send_message(
+                f"A single wager can't be more than {max_wager} gold on this server.", ephemeral=True
+            )
             return
 
         if match_id is not None:
@@ -9150,16 +9244,32 @@ class helpers():
         team1_name = self.getRosterName(guild_id, "team1", "Team 1", escape=False)
         team2_name = self.getRosterName(guild_id, "team2", "Team 2", escape=False)
 
+        # /set betting: with wagering off, there's nothing for a timer to
+        # close, and inviting people to a /wager command that's just going
+        # to reject them would be confusing. The winner-report message and
+        # its buttons (this is the same message) still go out exactly the
+        # same either way; reporting a winner never depended on betting
+        # being enabled.
+        betting_enabled = bool(self.get(guild_id, "betting_enabled"))
         duration = self._getBettingTimerSeconds(guild_id)
-        msg = await channel.send(
-            f"🎲 Betting is open! Use `/wager team <amount> <team>` to bet on this game (closes in "
-            f"{duration} seconds). Once the game ends, press the winning team's button below to "
-            f"report it (you'll be asked to confirm before it's recorded and bets are paid out), or "
-            f"Cancel Game to cancel the game.",
-            view=WinnerReportView(self, team1_name, team2_name),
-        )
+        if betting_enabled:
+            content = (
+                f"🎲 Betting is open! Use `/wager team <amount> <team>` to bet on this game (closes in "
+                f"{duration} seconds). Once the game ends, press the winning team's button below to "
+                f"report it (you'll be asked to confirm before it's recorded and bets are paid out), or "
+                f"Cancel Game to cancel the game."
+            )
+        else:
+            content = (
+                "🎮 Game started! Once it ends, press the winning team's button below to report it "
+                "(you'll be asked to confirm before it's recorded), or Cancel Game to cancel the game."
+            )
+        msg = await channel.send(content, view=WinnerReportView(self, team1_name, team2_name))
 
         self.update(guild_id, "betting_message_id", msg.id)
+
+        if not betting_enabled:
+            return
 
         # BUG-PRONE PATTERN AVOIDED: awaiting asyncio.sleep() directly
         # inside this command handler would still (technically) let
@@ -9232,6 +9342,15 @@ class helpers():
         rows = self.cursor.fetchall()
         for guild_id, channel_id, opened_at in rows:
             if guild_id in self.bettingTasks:
+                continue
+            if not self.get(guild_id, "betting_enabled"):
+                # _openBetting never started a timer for this guild in the
+                # first place (see its own betting_enabled check), so
+                # there's nothing to resume, and closing it now would post
+                # a "Betting is now closed!" notice for wagering that was
+                # never actually open. betting_state stays OPEN either way
+                # (reporting a winner still works fine); it's just never
+                # this function's job to touch a betting-disabled guild.
                 continue
             channel = client.get_channel(channel_id) if channel_id is not None else None
             if channel is None:
@@ -9620,6 +9739,13 @@ class helpers():
         guild_id = ctx.guild.id
         challenger = ctx.user
 
+        # /set betting: same hard off-switch wagerHelper's own checks
+        # enforce, since a heads-up duel is just as much "betting" as a
+        # team-game wager is.
+        if not self.get(guild_id, "betting_enabled"):
+            await ctx.response.send_message("Betting is disabled on this server.", ephemeral=True)
+            return
+
         if member.id == challenger.id:
             await ctx.response.send_message("You can't wager against yourself!", ephemeral=True)
             return
@@ -9630,6 +9756,13 @@ class helpers():
 
         if amount <= 0:
             await ctx.response.send_message("Wager amount must be greater than 0.", ephemeral=True)
+            return
+
+        max_wager = self.get(guild_id, "max_wager")
+        if max_wager is not None and amount > max_wager:
+            await ctx.response.send_message(
+                f"A single wager can't be more than {max_wager} gold on this server.", ephemeral=True
+            )
             return
 
         self.ensureEconomyRow(guild_id, challenger.id, challenger.name)

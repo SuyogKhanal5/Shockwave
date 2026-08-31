@@ -107,8 +107,25 @@ dbpath = os.path.join(dataFolder, "main.db")
 os.makedirs(dataFolder, exist_ok=True)
 db_already_existed = path.isfile(dbpath)
 
-mainDB = sqlite3.connect(dbpath)
+mainDB = sqlite3.connect(dbpath, timeout=30)
 cursor = mainDB.cursor()
+
+# Every guild's writes go through this one connection/file, so under real
+# concurrent load (several servers' games resolving around the same
+# moment) sqlite's default rollback-journal mode would have a writer hold
+# an exclusive lock that blocks every reader too, not just other writers.
+# WAL mode lets readers keep going against the last-committed snapshot
+# while a write is in flight, so a slow write on one guild's row doesn't
+# stall an unrelated command reading a different guild's. synchronous=
+# NORMAL is WAL's own recommended pairing: still fsyncs at WAL checkpoints
+# (crash-safe), just not on every single commit the way the default FULL
+# setting does. `timeout=30` above is the sqlite3 module's own "keep
+# retrying a busy lock for this many seconds before raising
+# OperationalError" setting (the 5-second default), given some headroom
+# since a real command failing outright on lock contention is a worse
+# outcome than it taking a little longer.
+cursor.execute("PRAGMA journal_mode=WAL")
+cursor.execute("PRAGMA synchronous=NORMAL")
 
 # Caps how long a single logged line can get. A row update (a serialized
 # team roster especially) can run to thousands of characters once its
@@ -181,7 +198,7 @@ if not db_already_existed:
         "roster_team1_message_id, roster_team2_message_id, roster_channel_id, roster_use_roles, "
         "default_elo, betting_opened_at, disliked_role_user_ids, draft_pick_page, "
         "draft_players_message_id, draft_snake, betting_closed_message_id, make_teams_message_ids, "
-        "matchup_message_id, roster_starting)"
+        "matchup_message_id, roster_starting, roster_permissions_strict, max_wager, betting_enabled)"
     )
     mainDB.commit()
 else:
@@ -287,6 +304,21 @@ else:
     # tournament match (sequential mode never posts this graphic at all,
     # see _handleReadyClick) or before /start's own matchup image goes out.
     ensure_column("servers", "matchup_message_id", "INTEGER")
+    # /set roster-permissions: whether Start/Start (no move)/Random Roles/
+    # Balanced Roles are open to anyone who can see the roster message
+    # (0, the default) or gated to a rostered player/Manage Server admin
+    # like the winner-report buttons already are (1). See
+    # _isAdminOrInCurrentGame.
+    ensure_column("servers", "roster_permissions_strict", "INTEGER", "0")
+    # /set max-wager: caps a single /wager team or /wager against bet.
+    # NULL (the default) means no cap, same as today.
+    ensure_column("servers", "max_wager", "INTEGER")
+    # /set betting: whether /wager team and /wager against actually accept
+    # bets at all. Games, elo, and the winner-report flow all work exactly
+    # the same either way; this only gates the wagering layer on top of
+    # them, for a server that doesn't want anything gambling-adjacent even
+    # with fictional gold. Defaults to 1 (enabled), today's behavior.
+    ensure_column("servers", "betting_enabled", "INTEGER", "1")
 
 # Per-member currency: gold balance plus win/loss and wagering stats, one
 # row per (guild, user).
@@ -758,7 +790,7 @@ def ensure_guild_row(guild_id, guild_name):
     cursor.execute(
         "INSERT INTO servers VALUES(?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, "
         "NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'NONE', NULL, NULL, 0, NULL, NULL, ?, "
-        "NULL, NULL, NULL, 0, NULL, NULL, NULL, 0, NULL, 0, NULL, NULL, NULL, 0)",
+        "NULL, NULL, NULL, 0, NULL, NULL, NULL, 0, NULL, 0, NULL, NULL, NULL, 0, 0, NULL, 1)",
         (guild_id, guild_name, helper.BETTING_DURATION_SECONDS)
     )
     mainDB.commit()
@@ -1000,6 +1032,45 @@ async def setCorrectWinner(
     await helperObj.reportCorrectWinnerHelper(ctx, team_value, match_id, invalidate)
 
 setCorrectWinner.error(_setAdminPermissionError)
+
+
+@setGroup.command(
+    name="roster-permissions",
+    description="Admin: restrict Start/Random Roles/Balanced Roles to rostered players and admins"
+)
+@app_commands.describe(
+    strict="True: only a rostered player or Manage Server admin can use the roster buttons. "
+           "False: anyone who can see the message can (the default)."
+)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def setRosterPermissions(ctx, strict: bool):
+    await helperObj.setRosterPermissionsHelper(ctx, strict)
+
+setRosterPermissions.error(_setAdminPermissionError)
+
+
+@setGroup.command(
+    name="max-wager",
+    description="Admin: cap how much gold a single /wager can be"
+)
+@app_commands.describe(amount="Max gold for a single wager; omit to remove the cap")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def setMaxWager(ctx, amount: int = None):
+    await helperObj.setMaxWagerHelper(ctx, amount)
+
+setMaxWager.error(_setAdminPermissionError)
+
+
+@setGroup.command(
+    name="betting",
+    description="Admin: turn /wager team and /wager against on or off for this server"
+)
+@app_commands.describe(enabled="True: bets are accepted (the default). False: /wager rejects outright.")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def setBetting(ctx, enabled: bool):
+    await helperObj.setBettingHelper(ctx, enabled)
+
+setBetting.error(_setAdminPermissionError)
 
 
 tree.add_command(setGroup)
@@ -1245,6 +1316,9 @@ COMMAND_HELP = {
     "set elo": "Sets a player's elo directly to an exact value (still credits any Diamond+ tier reward the new elo qualifies for). Requires the Manage Server permission.",
     "set default-elo": "Sets what a brand new player in this server starts at (1000 by default); doesn't touch anyone's existing elo, use /clear elo to reset current players to it. Requires the Manage Server permission.",
     "set correct-winner": "Fixes a misreported winner: undoes and reapplies the payouts, records, and elo. invalidate undoes the last game entirely instead (bets refunded, nothing reapplied), as if it never happened. Requires Manage Server.",
+    "set roster-permissions": "Controls who can use the Start/Start (no move)/Random Roles/Balanced Roles buttons on a posted roster. strict:true restricts them to a rostered player or a Manage Server admin, matching how the winner-report buttons already work; strict:false (the default) leaves them open to anyone who can see the message. Requires the Manage Server permission.",
+    "set max-wager": "Caps how much gold a single /wager team or /wager against bet can be. Omit amount to remove the cap. Requires the Manage Server permission.",
+    "set betting": "Turns /wager team and /wager against on or off for this server. Games, elo, and reporting a winner all still work the same either way; this only gates the wagering layer on top of them. Requires the Manage Server permission.",
     "clear teams": "Wipes the current teams/draft so you can start a fresh session. Requires the Manage Server permission.",
     "clear channels": "Wipes the current teams/draft, and also forgets the saved team channel names. Requires the Manage Server permission.",
     "clear tournament": "Wipes the current teams/draft, and deletes this server's tournament entirely: bracket, registrations, match history. Can't be undone. Requires the Manage Server permission.",
@@ -1381,14 +1455,18 @@ async def makeTeamsRandom(ctx, use_roles: bool = False, ranked: bool = False):
         )
         return
 
-    # Role-aware team formation needs every rostered player to have run
-    # /setup at least once, since that's what feeds the liked/disliked
-    # roles used here and by rankedTeamHelper's own role balancing below.
-    # This check runs before anything about the current roster gets
-    # touched, so an incomplete voice channel gets a clear "who's missing"
-    # message instead of forming plain, role-less teams anyway, or failing
-    # partway through. Bots can't run /setup, so they're excluded from the
-    # check rather than permanently blocking it.
+    # getRolePreferences already treats a player with no submitted rows as
+    # neutral on every role (see _roleTier), the same tier as someone who
+    # ran /setup and genuinely marked every role neutral, so role-aware
+    # team formation doesn't actually need everyone to have run /setup
+    # first - it just balances a little worse for whoever hasn't, the same
+    # as it would for anyone else sitting neutral on everything. Rather
+    # than blocking the whole command over it (locking role-based
+    # matchmaking behind every single voice-channel member's own
+    # /setup), whoever's missing it is just named in the response so it's
+    # clear why they weren't weighted toward a liked lane. Bots can't run
+    # /setup, so they're excluded from the check entirely.
+    not_setup_note = None
     if use_roles:
         not_setup = [
             member for member in ctx.user.voice.channel.members
@@ -1396,17 +1474,15 @@ async def makeTeamsRandom(ctx, use_roles: bool = False, ranked: bool = False):
         ]
         if not_setup:
             mentions = ", ".join(member.mention for member in not_setup)
-            await ctx.response.send_message(
-                f"Everyone needs to run /setup before role-based teams can be formed. Still missing: {mentions}."
-            )
-            return
+            verb = "hasn't" if len(not_setup) == 1 else "haven't"
+            not_setup_note = f"{mentions} {verb} run /setup, so they'll be treated as having no role preference."
 
     if ranked:
         # rankedTeamHelper handles its own response and team embeds, since
         # computing elo averages needs per-player lookups it already has
         # to do anyway. That makes this a completely separate flow from
         # the random split below, where bot.py builds the response itself.
-        await helperObj.rankedTeamHelper(ctx, use_roles)
+        await helperObj.rankedTeamHelper(ctx, use_roles, not_setup_note=not_setup_note)
         return
 
     # `use_roles` is named that way, not `roles`, to avoid shadowing the
@@ -1450,6 +1526,11 @@ async def makeTeamsRandom(ctx, use_roles: bool = False, ranked: bool = False):
                 "Roles need exactly 5 players on a team to assign, so no roles were "
                 f"assigned for: {', '.join(unroled)}. Showing the roster as normal instead."
             ))
+        elif not_setup_note:
+            # Only relevant once roles actually got assigned (both teams
+            # landed at 5); the unroled case above already explains why
+            # nobody's preferences mattered this time.
+            intro_messages.append(await ctx.channel.send(not_setup_note))
 
     team1_message, team2_message = await helperObj.printEmbed(ctx, team1Obj, team2Obj, useRoles=use_roles)
 

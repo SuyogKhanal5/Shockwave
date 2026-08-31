@@ -96,6 +96,17 @@ def main():
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         safety_path = os.path.join(BACKUP_DIR, f"main-before-restore-{timestamp}.db")
         shutil.copy2(DB_PATH, safety_path)
+        # main.db runs in WAL mode (see bot.py), which keeps recent commits
+        # in main.db-wal until a checkpoint folds them back in - a clean
+        # bot shutdown does that automatically, but a crash or a forgotten
+        # "stop the bot first" wouldn't, and a raw copy of main.db alone
+        # would then silently miss whatever's still sitting in the WAL.
+        # Copying these alongside it (when they exist) keeps this safety
+        # copy complete either way.
+        for suffix in ("-wal", "-shm"):
+            sidecar = DB_PATH + suffix
+            if os.path.isfile(sidecar):
+                shutil.copy2(sidecar, safety_path + suffix)
         print(f"Current database saved to {safety_path} before restoring.")
 
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)

@@ -72,7 +72,8 @@ SERVERS_SCHEMA = (
     "roster_team1_message_id, roster_team2_message_id, roster_channel_id, "
     "roster_use_roles DEFAULT 0, default_elo, betting_opened_at, disliked_role_user_ids, "
     "draft_pick_page DEFAULT 0, draft_players_message_id, draft_snake DEFAULT 0, "
-    "betting_closed_message_id, make_teams_message_ids, matchup_message_id, roster_starting DEFAULT 0)"
+    "betting_closed_message_id, make_teams_message_ids, matchup_message_id, roster_starting DEFAULT 0, "
+    "roster_permissions_strict DEFAULT 0, max_wager, betting_enabled DEFAULT 1)"
 )
 ECONOMY_SCHEMA = (
     "CREATE TABLE economy(guildId, userId, username, balance, wins, losses, "
@@ -176,7 +177,7 @@ def insert_guild_row(cursor, db, guild_id=GUILD_ID, name="Test Guild"):
     cursor.execute(
         "INSERT INTO servers VALUES(?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, "
         "NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'NONE', NULL, NULL, 0, NULL, NULL, ?, "
-        "NULL, NULL, NULL, 0, NULL, NULL, NULL, 0, NULL, 0, NULL, NULL, NULL, 0)",
+        "NULL, NULL, NULL, 0, NULL, NULL, NULL, 0, NULL, 0, NULL, NULL, NULL, 0, 0, NULL, 1)",
         (guild_id, name, helper_module.BETTING_DURATION_SECONDS),
     )
     db.commit()
@@ -1115,6 +1116,65 @@ class RosterActionViewTests(HelperTestCase):
         self.assertEqual({p.get_id() for p in args[2].get_players()}, {300, 301, 302, 303, 304})
         self.assertEqual({p.get_id() for p in args[3].get_players()}, {400, 401, 402, 403, 404})
 
+    # roster_permissions_strict gating (see _checkRosterPermission), applied
+    # identically to all three roster buttons.
+    async def test_strict_off_lets_a_bystander_start(self):
+        with patch.object(self.helperObj, "_openBetting", AsyncMock()), \
+             patch.object(self.helperObj, "_sendMatchupImage", AsyncMock()):
+            click = self._click(user_id=999)  # bystander, not on either roster
+            click.user.guild_permissions.manage_guild = False
+            await self.helperObj._handleRosterStartClick(click, move=True)
+
+        self.member1.move_to.assert_awaited_once()
+
+    async def test_strict_on_rejects_a_bystander_start(self):
+        self.helperObj.update(GUILD_ID, "roster_permissions_strict", 1)
+        click = self._click(user_id=999)
+        click.user.guild_permissions.manage_guild = False
+        await self.helperObj._handleRosterStartClick(click, move=True)
+
+        self.member1.move_to.assert_not_awaited()
+        click.response.send_message.assert_awaited_once()
+        self.assertIn("roster buttons", click.response.send_message.call_args.args[0])
+        self.assertTrue(click.response.send_message.call_args.kwargs.get("ephemeral"))
+
+    async def test_strict_on_allows_an_admin_start(self):
+        self.helperObj.update(GUILD_ID, "roster_permissions_strict", 1)
+        with patch.object(self.helperObj, "_openBetting", AsyncMock()), \
+             patch.object(self.helperObj, "_sendMatchupImage", AsyncMock()):
+            click = self._click(user_id=999)  # manage_guild=True by default
+            await self.helperObj._handleRosterStartClick(click, move=True)
+
+        self.member1.move_to.assert_awaited_once()
+
+    async def test_strict_on_allows_a_rostered_player_start(self):
+        self.helperObj.update(GUILD_ID, "roster_permissions_strict", 1)
+        with patch.object(self.helperObj, "_openBetting", AsyncMock()), \
+             patch.object(self.helperObj, "_sendMatchupImage", AsyncMock()):
+            click = self._click(user_id=101, name="Alice")  # on team1's roster
+            click.user.guild_permissions.manage_guild = False
+            await self.helperObj._handleRosterStartClick(click, move=True)
+
+        self.member1.move_to.assert_awaited_once()
+
+    async def test_strict_on_rejects_a_bystander_reroll(self):
+        self.helperObj.update(GUILD_ID, "roster_permissions_strict", 1)
+        with patch.object(self.helperObj, "_rerollRoster", AsyncMock()) as reroll:
+            click = self._click(user_id=999)
+            click.user.guild_permissions.manage_guild = False
+            await self.helperObj._handleRosterRerollClick(click)
+        reroll.assert_not_awaited()
+        self.assertTrue(click.response.send_message.call_args.kwargs.get("ephemeral"))
+
+    async def test_strict_on_rejects_a_bystander_balance_roles(self):
+        self.helperObj.update(GUILD_ID, "roster_permissions_strict", 1)
+        with patch.object(self.helperObj, "_applyBalancedRolesToRoster", AsyncMock()) as balance:
+            click = self._click(user_id=999)
+            click.user.guild_permissions.manage_guild = False
+            await self.helperObj._handleRosterBalanceRolesClick(click)
+        balance.assert_not_awaited()
+        self.assertTrue(click.response.send_message.call_args.kwargs.get("ephemeral"))
+
 
 class RandomizeTeamHelperTests(HelperTestCase):
     async def test_splits_members_evenly(self):
@@ -1227,6 +1287,39 @@ class RankedTeamHelperTests(HelperTestCase):
         team2 = self.deserialize_team("team2")
         self.assertEqual(team1.get_name(), "Red")
         self.assertEqual(team2.get_name(), "Blue")
+
+    async def test_not_setup_note_appended_once_roles_actually_apply(self):
+        members = [FakeMember(f"P{i}", id=300 + i) for i in range(10)]
+        voice_channel = FakeChannel("Lobby", members=members)
+        user = FakeMember("Caller")
+        user.voice = FakeVoiceState(voice_channel)
+        ctx = FakeInteraction(self.guild, user)
+
+        await self.helperObj.rankedTeamHelper(
+            ctx, use_roles=True, not_setup_note="P3 hasn't run /setup, so they'll be treated as having no role preference."
+        )
+
+        message = ctx.response.send_message.call_args.args[0]
+        self.assertIn("P3 hasn't run /setup", message)
+
+    async def test_not_setup_note_omitted_when_roles_did_not_apply(self):
+        # Exactly-10 fallback: roles aren't assigned at all here, so the
+        # note (about preferences that were never even consulted) has
+        # nothing to add and shouldn't show up alongside the "no roles
+        # assigned" explanation.
+        members = [FakeMember(f"P{i}", id=300 + i) for i in range(7)]
+        voice_channel = FakeChannel("Lobby", members=members)
+        user = FakeMember("Caller")
+        user.voice = FakeVoiceState(voice_channel)
+        ctx = FakeInteraction(self.guild, user)
+
+        await self.helperObj.rankedTeamHelper(
+            ctx, use_roles=True, not_setup_note="P3 hasn't run /setup, so they'll be treated as having no role preference."
+        )
+
+        message = ctx.response.send_message.call_args.args[0]
+        self.assertNotIn("/setup", message)
+        self.assertIn("Roles need exactly 10 players", message)
 
     async def test_creates_economy_rows_at_default_elo_for_new_players(self):
         members = [FakeMember("New1", id=401), FakeMember("New2", id=402)]
@@ -8201,6 +8294,72 @@ class AdminSetHelperTests(HelperTestCase):
         ctx.response.send_message.assert_awaited_once()
 
 
+class RosterPermissionsHelperTests(HelperTestCase):
+    def _ctx(self):
+        return FakeInteraction(self.guild, FakeMember("Caller"))
+
+    async def test_strict_true_sets_the_column_and_confirms(self):
+        ctx = self._ctx()
+        await self.helperObj.setRosterPermissionsHelper(ctx, True)
+        self.assertEqual(self.helperObj.get(GUILD_ID, "roster_permissions_strict"), 1)
+        message = ctx.response.send_message.call_args.args[0]
+        self.assertIn("rostered player", message)
+
+    async def test_strict_false_clears_the_column_and_confirms(self):
+        self.helperObj.update(GUILD_ID, "roster_permissions_strict", 1)
+        ctx = self._ctx()
+        await self.helperObj.setRosterPermissionsHelper(ctx, False)
+        self.assertEqual(self.helperObj.get(GUILD_ID, "roster_permissions_strict"), 0)
+        message = ctx.response.send_message.call_args.args[0]
+        self.assertIn("anyone", message)
+
+
+class MaxWagerHelperTests(HelperTestCase):
+    def _ctx(self):
+        return FakeInteraction(self.guild, FakeMember("Caller"))
+
+    async def test_sets_the_cap(self):
+        ctx = self._ctx()
+        await self.helperObj.setMaxWagerHelper(ctx, 500)
+        self.assertEqual(self.helperObj.get(GUILD_ID, "max_wager"), 500)
+        message = ctx.response.send_message.call_args.args[0]
+        self.assertIn("500", message)
+
+    async def test_omitting_amount_clears_the_cap(self):
+        self.helperObj.update(GUILD_ID, "max_wager", 500)
+        ctx = self._ctx()
+        await self.helperObj.setMaxWagerHelper(ctx, None)
+        self.assertIsNone(self.helperObj.get(GUILD_ID, "max_wager"))
+        message = ctx.response.send_message.call_args.args[0]
+        self.assertIn("removed", message)
+
+    async def test_rejects_zero_or_negative(self):
+        ctx = self._ctx()
+        await self.helperObj.setMaxWagerHelper(ctx, 0)
+        ctx.response.send_message.assert_awaited_once_with("amount must be greater than 0.", ephemeral=True)
+        self.assertIsNone(self.helperObj.get(GUILD_ID, "max_wager"))
+
+
+class BettingHelperTests(HelperTestCase):
+    def _ctx(self):
+        return FakeInteraction(self.guild, FakeMember("Caller"))
+
+    async def test_disabling_sets_the_column_and_confirms(self):
+        ctx = self._ctx()
+        await self.helperObj.setBettingHelper(ctx, False)
+        self.assertEqual(self.helperObj.get(GUILD_ID, "betting_enabled"), 0)
+        message = ctx.response.send_message.call_args.args[0]
+        self.assertIn("disabled", message)
+
+    async def test_enabling_sets_the_column_and_confirms(self):
+        self.helperObj.update(GUILD_ID, "betting_enabled", 0)
+        ctx = self._ctx()
+        await self.helperObj.setBettingHelper(ctx, True)
+        self.assertEqual(self.helperObj.get(GUILD_ID, "betting_enabled"), 1)
+        message = ctx.response.send_message.call_args.args[0]
+        self.assertIn("enabled", message)
+
+
 class NotifyHelperTests(HelperTestCase):
     async def test_sends_dm_with_invite_and_default_message(self):
         voice_channel = FakeChannel("Lobby")
@@ -8474,6 +8633,47 @@ class WagerHelperTests(HelperTestCase):
         ctx.response.send_message.assert_awaited_once_with(
             "Wager amount must be greater than 0.", ephemeral=True
         )
+
+    async def test_rejects_when_betting_disabled(self):
+        self.helperObj.update(GUILD_ID, "betting_enabled", 0)
+        self.helperObj.update(GUILD_ID, "betting_state", "OPEN")
+        ctx = self._ctx()
+        await self.helperObj.wagerHelper(ctx, 100, 1)
+        ctx.response.send_message.assert_awaited_once_with(
+            "Betting is disabled on this server.", ephemeral=True
+        )
+
+    async def test_rejects_amount_over_the_max_wager_cap(self):
+        self.helperObj.update(GUILD_ID, "betting_state", "OPEN")
+        self.helperObj.update(GUILD_ID, "max_wager", 100)
+        ctx = self._ctx()
+        await self.helperObj.wagerHelper(ctx, 150, 1)
+        ctx.response.send_message.assert_awaited_once_with(
+            "A single wager can't be more than 100 gold on this server.", ephemeral=True
+        )
+
+    async def test_allows_amount_at_exactly_the_max_wager_cap(self):
+        self.helperObj.update(GUILD_ID, "betting_state", "OPEN")
+        self.helperObj.update(GUILD_ID, "max_wager", 100)
+        self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.cursor.execute(
+            "UPDATE economy SET balance=1000 WHERE guildId=? AND userId=?", (GUILD_ID, 901)
+        )
+        self.db.commit()
+        ctx = self._ctx()
+        await self.helperObj.wagerHelper(ctx, 100, 1)
+        ctx.response.send_message.assert_awaited_once_with("You wagered 100 gold on **Team 1**!")
+
+    async def test_no_cap_set_allows_any_amount(self):
+        self.helperObj.update(GUILD_ID, "betting_state", "OPEN")
+        self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.cursor.execute(
+            "UPDATE economy SET balance=100000 WHERE guildId=? AND userId=?", (GUILD_ID, 901)
+        )
+        self.db.commit()
+        ctx = self._ctx()
+        await self.helperObj.wagerHelper(ctx, 50000, 1)
+        ctx.response.send_message.assert_awaited_once_with("You wagered 50000 gold on **Team 1**!")
 
     async def test_rejects_when_betting_not_open(self):
         ctx = self._ctx()
@@ -11863,6 +12063,23 @@ class OpenBettingTests(HelperTestCase):
         second_task.cancel()
         await asyncio.wait([second_task])
 
+    async def test_betting_disabled_posts_a_report_only_message_and_skips_the_timer(self):
+        self.helperObj.update(GUILD_ID, "betting_enabled", 0)
+        channel = FakeChannel("game-chat")
+        channel.send = AsyncMock(return_value=FakeMessage(id=12345))
+
+        await self.helperObj._openBetting(GUILD_ID, channel)
+
+        self.assertEqual(self.helperObj.get(GUILD_ID, "betting_state"), "OPEN")
+        self.assertEqual(self.helperObj.get(GUILD_ID, "betting_message_id"), 12345)
+        self.assertNotIn(GUILD_ID, self.helperObj.bettingTasks)
+        message_text = channel.send.call_args.args[0]
+        self.assertNotIn("Betting is open", message_text)
+        self.assertIn("winning team's button", message_text)
+
+        view = channel.send.call_args.kwargs["view"]
+        self.assertIsInstance(view, helper_module.WinnerReportView)
+
 
 class ReconcileStaleBettingWindowsTests(HelperTestCase):
     def setUp(self):
@@ -11960,6 +12177,19 @@ class ReconcileStaleBettingWindowsTests(HelperTestCase):
         self.assertEqual(self.helperObj.get(GUILD_ID + 1, "betting_state"), "OPEN")
         self.assertIn(GUILD_ID + 1, self.helperObj.bettingTasks)
         await self._cleanup_task(GUILD_ID + 1)
+
+    async def test_skips_a_guild_with_betting_disabled(self):
+        # _openBetting never starts a timer for a betting-disabled guild in
+        # the first place, so there's nothing to resume, and closing it now
+        # would post a false "Betting is now closed!" notice.
+        self.helperObj.update(GUILD_ID, "betting_enabled", 0)
+        self.helperObj.update(GUILD_ID, "betting_opened_at", int(time.time()) - 120)
+
+        await self.helperObj.reconcileStaleBettingWindows(self.helperObj.client)
+
+        self.assertNotIn(GUILD_ID, self.helperObj.bettingTasks)
+        self.assertEqual(self.helperObj.get(GUILD_ID, "betting_state"), "OPEN")
+        self.channel.send.assert_not_awaited()
 
 
 class GetBettingTimerSecondsTests(HelperTestCase):
@@ -12671,6 +12901,24 @@ class RestoreWinnerReportMessageTests(HelperTestCase):
 class ChallengeDuelHelperTests(HelperTestCase):
     def _ctx(self, user_id=901, name="Alice", channel=None):
         return FakeInteraction(self.guild, FakeMember(name, id=user_id), channel=channel)
+
+    async def test_rejects_when_betting_disabled(self):
+        self.helperObj.update(GUILD_ID, "betting_enabled", 0)
+        ctx = self._ctx()
+        target = FakeMember("Bob", id=902)
+        await self.helperObj.challengeDuelHelper(ctx, target, 100)
+        ctx.response.send_message.assert_awaited_once_with(
+            "Betting is disabled on this server.", ephemeral=True
+        )
+
+    async def test_rejects_amount_over_the_max_wager_cap(self):
+        self.helperObj.update(GUILD_ID, "max_wager", 100)
+        ctx = self._ctx()
+        target = FakeMember("Bob", id=902)
+        await self.helperObj.challengeDuelHelper(ctx, target, 150)
+        ctx.response.send_message.assert_awaited_once_with(
+            "A single wager can't be more than 100 gold on this server.", ephemeral=True
+        )
 
     async def test_rejects_challenging_yourself(self):
         ctx = self._ctx()
@@ -14218,7 +14466,10 @@ class CommandRegistrationTests(BotModuleTestCase):
         names = {c.name for c in self._command("set").commands}
         self.assertEqual(
             names,
-            {"channels", "team-size", "betting-timer", "wager-channel", "elo", "default-elo", "correct-winner"},
+            {
+                "channels", "team-size", "betting-timer", "wager-channel", "elo", "default-elo",
+                "correct-winner", "roster-permissions", "max-wager", "betting",
+            },
         )
 
     def test_clear_group_has_the_expected_subcommands(self):
@@ -15488,7 +15739,10 @@ class HelpCommandAutocompleteTests(BotModuleTestCase):
 
 
 class AdminSetCommandTests(BotModuleTestCase):
-    SET_SUBCOMMANDS = ["channels", "team-size", "betting-timer", "wager-channel", "elo", "default-elo"]
+    SET_SUBCOMMANDS = [
+        "channels", "team-size", "betting-timer", "wager-channel", "elo", "default-elo",
+        "roster-permissions", "max-wager", "betting",
+    ]
 
     def test_every_subcommand_requires_manage_guild_permission(self):
         denied = SimpleNamespace(permissions=discord.Permissions.none())
@@ -15572,6 +15826,38 @@ class AdminSetCommandTests(BotModuleTestCase):
         self.assertEqual(self.bot.helperObj.get(guild_id, "team_size"), 4)
         message = ctx.response.send_message.call_args.args[0]
         self.assertIn("4", message)
+
+    async def test_roster_permissions_delegates_strict(self):
+        ctx = self._ctx()
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "setRosterPermissionsHelper", mock):
+            await self._command("set roster-permissions").callback(ctx, strict=True)
+        mock.assert_awaited_once_with(ctx, True)
+
+    async def test_max_wager_delegates_amount(self):
+        ctx = self._ctx()
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "setMaxWagerHelper", mock):
+            await self._command("set max-wager").callback(ctx, amount=500)
+        mock.assert_awaited_once_with(ctx, 500)
+
+    async def test_betting_delegates_enabled(self):
+        ctx = self._ctx()
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "setBettingHelper", mock):
+            await self._command("set betting").callback(ctx, enabled=False)
+        mock.assert_awaited_once_with(ctx, False)
+
+    async def test_max_wager_updates_end_to_end(self):
+        guild_id = 903
+        await self._insert_guild_row(guild_id)
+        ctx = self._ctx(guild_id=guild_id)
+
+        await self._command("set max-wager").callback(ctx, amount=750)
+
+        self.assertEqual(self.bot.helperObj.get(guild_id, "max_wager"), 750)
+        message = ctx.response.send_message.call_args.args[0]
+        self.assertIn("750", message)
 
 
 class RollCommandTests(BotModuleTestCase):
@@ -16209,9 +16495,23 @@ class MakeTeamsCommandTests(BotModuleTestCase):
         self.assertNotIn("Roles need", ctx.channel.send.call_args.args[0])
         self.assertIn("Press Start", ctx.channel.send.call_args.args[0])
 
-    async def test_use_roles_blocks_when_a_voice_member_has_not_run_setup(self):
-        guild_id = 914
+    async def _setup_five_a_side_teams(self, guild_id):
         await self._insert_guild_row(guild_id)
+        team1 = Team(); team1.set_id(1); team1.name = "Team 1"
+        team2 = Team(); team2.set_id(2); team2.name = "Team 2"
+        for i in range(5):
+            team1.add_player(Player(100 + i, f"A{i}"))
+            team2.add_player(Player(200 + i, f"B{i}"))
+        self.bot.helperObj.update(guild_id, "team1", team1.serializeTeam())
+        self.bot.helperObj.update(guild_id, "team2", team2.serializeTeam())
+
+    async def test_use_roles_proceeds_and_notes_who_has_not_run_setup(self):
+        # getRolePreferences already treats a player with no rows as
+        # neutral on every role, the same as someone who ran /setup and
+        # marked everything neutral, so this doesn't block team formation
+        # - it just names whoever's missing it in the response.
+        guild_id = 914
+        await self._setup_five_a_side_teams(guild_id)
         ctx = self._ctx_in_voice(guild_id=guild_id)
         setup_member = FakeMember("Ready", id=950)
         not_setup_member = FakeMember("NotReady", id=951)
@@ -16219,15 +16519,19 @@ class MakeTeamsCommandTests(BotModuleTestCase):
 
         with patch.object(
             self.bot.helperObj, "hasCompletedSetup", side_effect=lambda gid, uid: uid == 950
-        ), patch.object(self.bot.helperObj, "randomizeTeamHelper", AsyncMock()) as randomize_mock:
+        ), patch.object(self.bot.helperObj, "randomizeTeamHelper", AsyncMock()) as randomize_mock, \
+             patch.object(
+                 self.bot.helperObj, "printEmbed", AsyncMock(return_value=(FakeMessage(), FakeMessage()))
+             ), \
+             patch.object(self.bot.helperObj, "_finalizeRoster", AsyncMock()):
             await self._command("make-teams random").callback(ctx, use_roles=True)
 
-        randomize_mock.assert_not_awaited()
-        ctx.response.send_message.assert_awaited_once()
-        text = ctx.response.send_message.call_args.args[0]
-        self.assertIn("/setup", text)
-        self.assertIn(not_setup_member.mention, text)
-        self.assertNotIn(setup_member.mention, text)
+        randomize_mock.assert_awaited_once()
+        note_calls = [c.args[0] for c in ctx.channel.send.call_args_list if c.args]
+        note = next((m for m in note_calls if "/setup" in m), None)
+        self.assertIsNotNone(note)
+        self.assertIn(not_setup_member.mention, note)
+        self.assertNotIn(setup_member.mention, note)
 
     async def test_use_roles_allows_when_everyone_in_voice_has_run_setup(self):
         guild_id = 915
@@ -16284,21 +16588,29 @@ class RankedCommandTests(BotModuleTestCase):
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "rankedTeamHelper", mock):
             await self._command("make-teams random").callback(ctx, use_roles=False, ranked=True)
-        mock.assert_awaited_once_with(ctx, False)
+        # use_roles=False skips the not_setup check entirely, so the note
+        # is deterministically None here.
+        mock.assert_awaited_once_with(ctx, False, not_setup_note=None)
 
     async def test_make_teams_ranked_passes_use_roles_through(self):
         # ranked=True short-circuits before the random-split flow even
         # runs (randomizeTeamHelper must never be touched). use_roles is
-        # now forwarded into rankedTeamHelper instead of being dropped.
+        # forwarded into rankedTeamHelper instead of being dropped; whatever
+        # not_setup_note comes along with it isn't this test's concern.
         ctx = self._ctx_in_voice()
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "rankedTeamHelper", mock), \
              patch.object(self.bot.helperObj, "randomizeTeamHelper", AsyncMock()) as random_mock:
             await self._command("make-teams random").callback(ctx, use_roles=True, ranked=True)
         random_mock.assert_not_awaited()
-        mock.assert_awaited_once_with(ctx, True)
+        mock.assert_awaited_once()
+        self.assertEqual(mock.call_args.args, (ctx, True))
 
-    async def test_ranked_use_roles_still_blocks_when_a_voice_member_has_not_run_setup(self):
+    async def test_ranked_use_roles_proceeds_and_notes_who_has_not_run_setup(self):
+        # Same "note, don't block" behavior as the random-split path (see
+        # test_use_roles_proceeds_and_notes_who_has_not_run_setup) - roles
+        # just balance a little worse for whoever hasn't run /setup,
+        # rather than the whole command refusing to run.
         guild_id = 918
         await self._insert_guild_row(guild_id)
         ctx = self._ctx_in_voice(guild_id=guild_id)
@@ -16309,10 +16621,11 @@ class RankedCommandTests(BotModuleTestCase):
              patch.object(self.bot.helperObj, "rankedTeamHelper", AsyncMock()) as ranked_mock:
             await self._command("make-teams random").callback(ctx, use_roles=True, ranked=True)
 
-        ranked_mock.assert_not_awaited()
-        text = ctx.response.send_message.call_args.args[0]
-        self.assertIn("/setup", text)
-        self.assertIn(not_setup_member.mention, text)
+        ranked_mock.assert_awaited_once()
+        note = ranked_mock.call_args.kwargs.get("not_setup_note")
+        self.assertIsNotNone(note)
+        self.assertIn("/setup", note)
+        self.assertIn(not_setup_member.mention, note)
 
 
 class CaptainsCommandTests(BotModuleTestCase):
