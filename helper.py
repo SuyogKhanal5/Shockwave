@@ -1438,14 +1438,17 @@ class ConfirmCancelGameView(discord.ui.View):
 
     @discord.ui.button(label="Confirm", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction, button):
-        self._disable_buttons()
         self.stop()
-        await interaction.response.edit_message(
-            content="Cancellation confirmed, cancelling the game...", view=self
-        )
+        await interaction.response.defer()
         await self.helperObj._finishGameCancel(
             self.guild_id, interaction.channel, interaction.guild, self.report_message
         )
+        # Both the original report message and this confirmation prompt
+        # itself are done saying anything useful once the game's actually
+        # cancelled. cancelGameHelper's own "Game cancelled." message is
+        # what the channel keeps instead, matching how
+        # ConfirmWinnerReportView cleans up its own two messages.
+        await self.helperObj._deleteMessageSafely(interaction.message)
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction, button):
@@ -9278,6 +9281,37 @@ class helpers():
             return None
         return resolved
 
+    # A jump-to-message link for whichever matchup graphic this guild's
+    # CURRENT game/match is actually showing, for _openBetting's "betting
+    # is open" text to point at. A casual/ranked game has one via
+    # _sendMatchupImage (matchup_message_id) - report_channel is exactly
+    # where that graphic itself was posted (see _openBetting, which
+    # resolves matchup_channel for both). A sequential tournament match
+    # has no separate matchup_message_id at all (see recordResult's own
+    # comment on that); active_tournament_match_id (already set by
+    # _handleReadyClick before it calls _openBetting) points at the
+    # match's own row, whose messageId/channelId is the ready-check
+    # message _postReadyCheck posted, graphic included. None if neither
+    # is resolvable, so the caller can just skip the line.
+    def _matchupGraphicLink(self, guild_id, report_channel):
+        active_match_id = self.get(guild_id, "active_tournament_match_id")
+        if active_match_id is not None:
+            self.cursor.execute(
+                "SELECT messageId, channelId FROM tournament_matches WHERE id=?", (active_match_id,)
+            )
+            row = self.cursor.fetchone()
+            if row is None or row[0] is None:
+                return None
+            message_id, channel_id = row
+            if channel_id is None:
+                channel_id = report_channel.id
+            return f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
+
+        message_id = self.get(guild_id, "matchup_message_id")
+        if message_id is None:
+            return None
+        return f"https://discord.com/channels/{guild_id}/{report_channel.id}/{message_id}"
+
     # Core of the above, taking guild_id/channel directly rather than a
     # full Interaction. /tournament start's sequential mode calls this
     # too, from a reaction handler that has no ctx to hand it. Cancels
@@ -9328,10 +9362,14 @@ class helpers():
         betting_enabled = bool(self.get(guild_id, "betting_enabled"))
         duration = self._getBettingTimerSeconds(guild_id)
         if betting_enabled:
-            await wager_channel.send(
-                f"🎲 Betting is open! Use `/wager team <amount> <team>` to bet on this game "
-                f"(closes in {duration} seconds)."
+            open_content = (
+                f"🎲 Betting is open on **{team1_name}** vs **{team2_name}**! Use "
+                f"`/wager team <amount> <team>` to bet on this game (closes in {duration} seconds)."
             )
+            graphic_link = self._matchupGraphicLink(guild_id, report_channel)
+            if graphic_link is not None:
+                open_content += f"\n{graphic_link}"
+            await wager_channel.send(open_content)
             report_content = (
                 "🎮 Once the game ends, press the winning team's button below to report it (you'll "
                 "be asked to confirm before it's recorded and bets are paid out), or Cancel Game to "
@@ -9699,11 +9737,13 @@ class helpers():
 
     # ConfirmCancelGameView's Confirm button callback, refunds any open
     # bets and moves everyone back to the original channel (the same two
-    # things the old /return command did), then strips the original
-    # report message's own buttons via _clearMessageButtons.
+    # things the old /return command did), then deletes the original
+    # report message outright - it has nothing left to say once the game
+    # it was reporting on is gone. (ConfirmCancelGameView.confirm itself
+    # deletes the confirmation prompt.)
     async def _finishGameCancel(self, guild_id, channel, guild, report_message=None):
         await self.cancelGameHelper(guild_id, channel, guild)
-        await self._clearMessageButtons(report_message)
+        await self._deleteMessageSafely(report_message)
 
     # cancelGameHelper: refunds any open bets and moves everyone back to
     # the original channel. `cancelBettingHelper` handles the

@@ -12182,6 +12182,73 @@ class OpenBettingTests(HelperTestCase):
         task.cancel()
         await asyncio.wait([task])
 
+    async def test_open_message_names_both_teams(self):
+        team1 = Team(); team1.name = "Red Wolves"
+        team2 = Team(); team2.name = "Blue Hawks"
+        self.helperObj.update(GUILD_ID, "team1", team1.serializeTeam())
+        self.helperObj.update(GUILD_ID, "team2", team2.serializeTeam())
+        channel = FakeChannel("game-chat")
+
+        await self.helperObj._openBetting(GUILD_ID, channel)
+
+        open_text = channel.send.call_args_list[0].args[0]
+        self.assertIn("Red Wolves", open_text)
+        self.assertIn("Blue Hawks", open_text)
+
+        task = self.helperObj.bettingTasks[GUILD_ID]
+        task.cancel()
+        await asyncio.wait([task])
+
+    async def test_open_message_links_to_the_matchup_graphic(self):
+        channel = FakeChannel("game-chat")
+        self.helperObj.client = FakeClient(channels=[channel], guilds=[self.guild])
+        self.helperObj.update(GUILD_ID, "matchup_message_id", 7777)
+
+        await self.helperObj._openBetting(GUILD_ID, channel)
+
+        open_text = channel.send.call_args_list[0].args[0]
+        self.assertIn(f"https://discord.com/channels/{GUILD_ID}/{channel.id}/7777", open_text)
+
+        task = self.helperObj.bettingTasks[GUILD_ID]
+        task.cancel()
+        await asyncio.wait([task])
+
+    async def test_open_message_omits_the_link_when_no_matchup_graphic_is_tracked(self):
+        channel = FakeChannel("game-chat")
+
+        await self.helperObj._openBetting(GUILD_ID, channel)
+
+        open_text = channel.send.call_args_list[0].args[0]
+        self.assertNotIn("discord.com/channels", open_text)
+
+        task = self.helperObj.bettingTasks[GUILD_ID]
+        task.cancel()
+        await asyncio.wait([task])
+
+    async def test_open_message_links_to_the_sequential_ready_check_message_for_a_tournament_match(self):
+        channel = FakeChannel("game-chat")
+        self.cursor.execute(
+            "INSERT INTO tournament_matches(id, guildId, roundIndex, nodeIndex, team1, team2, state, "
+            "mode, messageId, channelId, winner, bracketType) "
+            "VALUES(9, ?, 0, 0, '', '', 'AWAITING_RESULT', 'sequential', 8888, ?, NULL, 'winners')",
+            (GUILD_ID, channel.id)
+        )
+        self.db.commit()
+        self.helperObj.update(GUILD_ID, "active_tournament_match_id", 9)
+        # A stale matchup_message_id from an earlier, unrelated casual
+        # game must not win out over the tournament match's own message.
+        self.helperObj.update(GUILD_ID, "matchup_message_id", 12345)
+
+        await self.helperObj._openBetting(GUILD_ID, channel)
+
+        open_text = channel.send.call_args_list[0].args[0]
+        self.assertIn(f"https://discord.com/channels/{GUILD_ID}/{channel.id}/8888", open_text)
+        self.assertNotIn("12345", open_text)
+
+        task = self.helperObj.bettingTasks[GUILD_ID]
+        task.cancel()
+        await asyncio.wait([task])
+
     async def test_records_when_betting_opened(self):
         channel = FakeChannel("game-chat")
         before = int(time.time())
@@ -13042,23 +13109,24 @@ class ConfirmCancelGameViewTests(HelperTestCase):
         super().setUp()
         self.helperObj.update(GUILD_ID, "betting_state", "OPEN")
 
-    async def test_confirm_cancels_the_game_and_disables_the_buttons(self):
+    async def test_confirm_cancels_the_game_and_deletes_both_messages(self):
         report_message = FakeMessage(id=555)
         view = helper_module.ConfirmCancelGameView(self.helperObj, GUILD_ID, 555, report_message=report_message)
         channel = FakeChannel("game-chat")
-        click = self._click(channel=channel)
+        confirmation_prompt = FakeMessage(id=666)
+        click = FakeInteraction(self.guild, FakeMember("Alice", id=901), channel=channel, message=confirmation_prompt)
 
         with patch.object(self.helperObj, "cancelGameHelper", AsyncMock()) as mock:
             await view.confirm.callback(click)
 
         mock.assert_awaited_once_with(GUILD_ID, channel, self.guild)
-        click.response.edit_message.assert_awaited_once()
-        self.assertIn("confirmed", click.response.edit_message.call_args.kwargs["content"])
-        for item in view.children:
-            self.assertTrue(item.disabled)
-        # Same as a confirmed winner report; the original message's own
-        # buttons are stripped once the game is actually cancelled.
-        report_message.edit.assert_awaited_once_with(view=None)
+        click.response.defer.assert_awaited_once()
+        # Same as a confirmed winner report: the original report message
+        # and this confirmation prompt itself are both deleted outright
+        # once the game is actually cancelled, nothing left to strip
+        # buttons from or edit in place.
+        report_message.delete.assert_awaited_once()
+        confirmation_prompt.delete.assert_awaited_once()
 
     async def test_confirm_with_no_report_message_does_not_crash(self):
         view = helper_module.ConfirmCancelGameView(self.helperObj, GUILD_ID, 555)

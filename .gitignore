@@ -6,6 +6,8 @@ __pycache__/
 .vscode/
 .claude/
 data/guildData/serverInfo/main.db
+data/guildData/serverInfo/main.db-wal
+data/guildData/serverInfo/main.db-shm
 data/guildData/backups/
 shockwave-site/
 assets/previews/

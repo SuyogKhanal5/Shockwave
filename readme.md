@@ -565,10 +565,12 @@ Confirm on the cancel side calls `_finishGameCancel`, which is just
 `active_tournament_match_id` so an abandoned tournament match's
 bracket-advance hook can't fire against whatever unrelated game starts
 next, plus the move back to the original channel. That's followed by
-stripping the original report message's own buttons via
-`_clearMessageButtons` (`view=None`) rather than deleting it, since "Game
-cancelled" still reads fine sitting alongside the now-buttonless original
-message.
+deleting the original report message outright (`_deleteMessageSafely`),
+the same "nothing left to say" treatment the winner-report side gives it;
+`ConfirmCancelGameView.confirm` itself then deletes the confirmation
+prompt too, mirroring `ConfirmWinnerReportView.confirm` exactly.
+`cancelGameHelper`'s own "Game cancelled." message is what the channel
+keeps instead.
 
 Cancel and a timeout on either confirmation view instead call
 `_restoreWinnerReportMessage`, which puts the original report message's id
@@ -786,8 +788,19 @@ channel it was handed if unset or no longer resolvable. It then posts two
 separate messages instead of one: the "betting is open" text (only when
 `/set betting` is on) goes to the wager channel, and the winner-report
 message (Team 1/Team 2/Cancel Game buttons, always posted regardless of
-whether betting's on) goes to the matchup channel. `betting_channel_id`
-tracks only the wager side, read back by `_bettingTimer`'s closed notice
+whether betting's on) goes to the matchup channel. The open text names
+both teams and, when the matchup graphic is resolvable
+(`_matchupGraphicLink`), ends with a plain jump-to-message link to it -
+handy specifically because the two can now be sitting in different
+channels. `_matchupGraphicLink` reads `matchup_message_id` for a
+casual/ranked game, or (`active_tournament_match_id`, already set by
+`_handleReadyClick` before it calls `_openBetting`) a sequential
+tournament match's own `tournament_matches.messageId`/`channelId`, the
+ready-check message `_postReadyCheck` posted; `active_tournament_match_id`
+being set is also what stops a stale `matchup_message_id` left over from
+an earlier, unrelated casual game from winning out for a tournament match.
+`betting_channel_id` tracks only the wager side, read back by
+`_bettingTimer`'s closed notice
 and `reconcileStaleBettingWindows`. The report message needs no such
 tracking: every later step that touches it (`_handleWinnerReportPick`,
 `recordResult`) already works off `interaction.channel`, which is
