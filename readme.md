@@ -560,6 +560,29 @@ either the "betting is open"/report message or a "reported as the winner,
 confirm to finalize" prompt that's already been acted on to keep cluttering
 the channel.
 
+That result message replies to whichever matchup graphic the game/match it's
+for actually has, so it stays visually anchored to it instead of just
+landing further down the channel (handy specifically once `/set
+matchup-channel` can put the graphic somewhere other than a plain scroll
+away). `_matchupMessageLocation(guild_id, match_id=None)` is the shared
+lookup: a casual/ranked game's own via `matchup_message_id`
+(`_sendMatchupImage`), or, given an explicit tournament `match_id` (or
+implicitly via `active_tournament_match_id` when one isn't given), that
+match's own `tournament_matches.messageId`/`channelId` - whichever of
+`_postReadyCheck`'s ready-check message or `_postMatchReport`'s report
+message posted it. `_fetchMatchupMessage` wraps that with the actual
+`fetch_message` call, best-effort (`None` on anything unresolvable or
+already deleted); `_matchupGraphicLink` wraps it into a jump-to-message URL
+instead, for `_openBetting`'s "betting is open" text (see below).
+`_postReadyCheck`/`_postMatchReport` write `channelId` on every post (not
+just `messageId`), so this stays accurate even once `/set matchup-channel`
+moves the graphic somewhere other than wherever the round itself started.
+Every tournament match-resolution path's own result line
+(`_resolveTournamentMatch`, `_resolveLosersMatch`, `_resolveFinalsMatch`)
+replies the same way, passing its own `match_id` explicitly since none of
+those run through `recordResult`/`active_tournament_match_id` at all for
+simultaneous mode.
+
 Confirm on the cancel side calls `_finishGameCancel`, which is just
 `cancelGameHelper`: the refund via `cancelBettingHelper`, also clearing
 `active_tournament_match_id` so an abandoned tournament match's
@@ -789,16 +812,12 @@ separate messages instead of one: the "betting is open" text (only when
 `/set betting` is on) goes to the wager channel, and the winner-report
 message (Team 1/Team 2/Cancel Game buttons, always posted regardless of
 whether betting's on) goes to the matchup channel. The open text names
-both teams and, when the matchup graphic is resolvable
-(`_matchupGraphicLink`), ends with a plain jump-to-message link to it -
-handy specifically because the two can now be sitting in different
-channels. `_matchupGraphicLink` reads `matchup_message_id` for a
-casual/ranked game, or (`active_tournament_match_id`, already set by
-`_handleReadyClick` before it calls `_openBetting`) a sequential
-tournament match's own `tournament_matches.messageId`/`channelId`, the
-ready-check message `_postReadyCheck` posted; `active_tournament_match_id`
-being set is also what stops a stale `matchup_message_id` left over from
-an earlier, unrelated casual game from winning out for a tournament match.
+both teams and, when the matchup graphic is resolvable, ends with a plain
+jump-to-message link to it (`_matchupGraphicLink`, see "Resolving a
+winner, or cancelling the game" above for the shared
+`_matchupMessageLocation` lookup it and `recordResult`'s own
+reply-to-graphic both build on) - handy specifically because the two can
+now be sitting in different channels.
 `betting_channel_id` tracks only the wager side, read back by
 `_bettingTimer`'s closed notice
 and `reconcileStaleBettingWindows`. The report message needs no such

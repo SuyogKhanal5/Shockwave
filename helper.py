@@ -5861,7 +5861,8 @@ class helpers():
         )
 
         self.cursor.execute(
-            "UPDATE tournament_matches SET state='PENDING_READY', messageId=? WHERE id=?", (msg.id, match_id)
+            "UPDATE tournament_matches SET state='PENDING_READY', messageId=?, channelId=? WHERE id=?",
+            (msg.id, channel.id, match_id)
         )
         self.db.commit()
 
@@ -5899,7 +5900,8 @@ class helpers():
         )
 
         self.cursor.execute(
-            "UPDATE tournament_matches SET state='AWAITING_RESULT', messageId=? WHERE id=?", (msg.id, match_id)
+            "UPDATE tournament_matches SET state='AWAITING_RESULT', messageId=?, channelId=? WHERE id=?",
+            (msg.id, channel.id, match_id)
         )
         self.db.commit()
 
@@ -6672,7 +6674,10 @@ class helpers():
         self.saveTournament(guild_id, tournament)
         self._recordMatchResult(guild_id, winner_node.team, loser_node.team)
 
-        await channel.send(f"**Match #{match_id} result:** {winner_node.team.get_name()} wins!")
+        matchup_message = await self._fetchMatchupMessage(guild_id, channel, match_id=match_id)
+        await channel.send(
+            f"**Match #{match_id} result:** {winner_node.team.get_name()} wins!", reference=matchup_message
+        )
         await self._settleMatchWagers(guild_id, match_id, winning_team, channel)
         await self._sendBracketText(channel, tournament, guild_id)
 
@@ -6728,7 +6733,11 @@ class helpers():
         self.saveTournament(guild_id, tournament)
         self._recordMatchResult(guild_id, winner_node.team, loser_node.team)
 
-        await channel.send(f"**Match #{match_id} result (losers bracket):** {winner_node.team.get_name()} wins!")
+        matchup_message = await self._fetchMatchupMessage(guild_id, channel, match_id=match_id)
+        await channel.send(
+            f"**Match #{match_id} result (losers bracket):** {winner_node.team.get_name()} wins!",
+            reference=matchup_message,
+        )
         await self._settleMatchWagers(guild_id, match_id, winning_team, channel)
         await self._sendBracketText(channel, tournament, guild_id)
 
@@ -6780,6 +6789,8 @@ class helpers():
         # match, so it's fully resolved the moment it is.
         await self._deleteRoundBettingMessages(guild_id, round_index, "finals", channel)
 
+        matchup_message = await self._fetchMatchupMessage(guild_id, channel, match_id=match_id)
+
         if round_index == 0:
             # Compared by name, not id, see _tournamentChampionName.
             wb_rounds = self._bracketRounds(tournament.get_bracket())
@@ -6787,13 +6798,15 @@ class helpers():
             if wb_champion is not None and winner.get_name() != wb_champion.get_name():
                 await channel.send(
                     f"**Grand Finals result:** {winner.get_name()} wins! Since the winners-bracket "
-                    f"champion has now lost once too, one final decider match settles the tournament."
+                    f"champion has now lost once too, one final decider match settles the tournament.",
+                    reference=matchup_message,
                 )
                 await self._startGrandFinals(guild_id, tournament, mode, channel, reset=True)
                 return
 
         await channel.send(
-            f"\U0001f3c6 **{tournament.get_name()}** is complete! Champion: **{winner.get_name()}**"
+            f"\U0001f3c6 **{tournament.get_name()}** is complete! Champion: **{winner.get_name()}**",
+            reference=matchup_message,
         )
         # Every other match-resolution path (_resolveTournamentMatch,
         # _resolveLosersMatch) reprints the bracket after it updates.
@@ -9281,36 +9294,74 @@ class helpers():
             return None
         return resolved
 
-    # A jump-to-message link for whichever matchup graphic this guild's
-    # CURRENT game/match is actually showing, for _openBetting's "betting
-    # is open" text to point at. A casual/ranked game has one via
-    # _sendMatchupImage (matchup_message_id) - report_channel is exactly
-    # where that graphic itself was posted (see _openBetting, which
-    # resolves matchup_channel for both). A sequential tournament match
-    # has no separate matchup_message_id at all (see recordResult's own
-    # comment on that); active_tournament_match_id (already set by
-    # _handleReadyClick before it calls _openBetting) points at the
-    # match's own row, whose messageId/channelId is the ready-check
-    # message _postReadyCheck posted, graphic included. None if neither
-    # is resolvable, so the caller can just skip the line.
-    def _matchupGraphicLink(self, guild_id, report_channel):
-        active_match_id = self.get(guild_id, "active_tournament_match_id")
-        if active_match_id is not None:
+    # Where whichever matchup graphic this guild's CURRENT game, or a
+    # specific tournament `match_id`, is actually showing lives:
+    # (channel_id, message_id), channel_id None when the caller's own
+    # fallback channel is the right one.
+    #
+    # An explicit match_id (a simultaneous-mode match, resolved directly
+    # from a report click rather than through recordResult/
+    # active_tournament_match_id) looks up that match's own row, whose
+    # messageId/channelId is whichever of _postReadyCheck's ready-check
+    # message or _postMatchReport's report message posted it.
+    #
+    # Without one, this falls back to guild_id's CURRENT game:
+    # active_tournament_match_id (already set by _handleReadyClick before
+    # it calls _openBetting, and still set when recordResult later
+    # resolves that same game) means a sequential tournament match, same
+    # per-match row lookup as above. Otherwise it's a casual/ranked game,
+    # which has no channel of its own tracked for matchup_message_id -
+    # it's always wherever /set matchup-channel most recently resolved
+    # to, the same place a caller of this already has on hand.
+    #
+    # None from any of these paths if nothing's actually resolvable.
+    def _matchupMessageLocation(self, guild_id, match_id=None):
+        if match_id is None:
+            match_id = self.get(guild_id, "active_tournament_match_id")
+
+        if match_id is not None:
             self.cursor.execute(
-                "SELECT messageId, channelId FROM tournament_matches WHERE id=?", (active_match_id,)
+                "SELECT messageId, channelId FROM tournament_matches WHERE id=?", (match_id,)
             )
             row = self.cursor.fetchone()
             if row is None or row[0] is None:
                 return None
             message_id, channel_id = row
-            if channel_id is None:
-                channel_id = report_channel.id
-            return f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
+            return channel_id, message_id
 
         message_id = self.get(guild_id, "matchup_message_id")
         if message_id is None:
             return None
-        return f"https://discord.com/channels/{guild_id}/{report_channel.id}/{message_id}"
+        return None, message_id
+
+    # A jump-to-message link for _matchupMessageLocation's target, for
+    # _openBetting's "betting is open" text to point at.
+    def _matchupGraphicLink(self, guild_id, report_channel):
+        location = self._matchupMessageLocation(guild_id)
+        if location is None:
+            return None
+        channel_id, message_id = location
+        if channel_id is None:
+            channel_id = report_channel.id
+        return f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
+
+    # The matchup graphic message itself (not just a link), for a caller
+    # that wants to reply to it directly (recordResult, and every
+    # tournament match-resolution path's own result line). Best-effort:
+    # None if nothing's tracked, the channel can't be resolved, or the
+    # message was already deleted.
+    async def _fetchMatchupMessage(self, guild_id, fallback_channel, match_id=None):
+        location = self._matchupMessageLocation(guild_id, match_id)
+        if location is None:
+            return None
+        channel_id, message_id = location
+        channel = fallback_channel
+        if channel_id is not None:
+            channel = await self._resolveChannelId(channel_id) or fallback_channel
+        try:
+            return await channel.fetch_message(int(message_id))
+        except discord.HTTPException:
+            return None
 
     # Core of the above, taking guild_id/channel directly rather than a
     # full Interaction. /tournament start's sequential mode calls this
@@ -9806,22 +9857,15 @@ class helpers():
             disliked_role_user_ids=disliked_role_user_ids,
         )
 
-        # Replies to /start's own matchup graphic (see
-        # _sendMatchupImage) when there is one, so the result stays
-        # visually anchored to the game it's for instead of just
-        # landing further down the channel. Never set for a tournament
-        # match (sequential mode has no matchup graphic at all, see
-        # _handleReadyClick), and best-effort even for a real one: an
-        # already-deleted message just falls back to a plain,
+        # Replies to the game/match's own matchup graphic (_sendMatchupImage
+        # for a casual/ranked game, _postReadyCheck's ready-check message
+        # for a sequential tournament match - see _matchupMessageLocation)
+        # when there is one, so the result stays visually anchored to it
+        # instead of just landing further down the channel. Best-effort:
+        # an already-deleted message just falls back to a plain,
         # un-replied send.
-        matchup_message = None
+        matchup_message = await self._fetchMatchupMessage(guild_id, channel)
         if not is_tournament_match:
-            matchup_message_id = self.get(guild_id, "matchup_message_id")
-            if matchup_message_id is not None:
-                try:
-                    matchup_message = await channel.fetch_message(int(matchup_message_id))
-                except discord.HTTPException:
-                    matchup_message = None
             self.update(guild_id, "matchup_message_id", None)
 
         await channel.send(self.formatResultMessage(winning_team, summary), reference=matchup_message)

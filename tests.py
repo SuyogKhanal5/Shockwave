@@ -9352,13 +9352,19 @@ class RecordResultTests(HelperTestCase):
         self.assertIsNone(result_call.kwargs.get("reference"))
 
     async def test_does_not_reply_to_a_stale_matchup_graphic_for_a_tournament_match(self):
-        # A tournament match never posts a matchup graphic at all (see
-        # _handleReadyClick), so matchup_message_id here would just be a
-        # stale leftover from some earlier, unrelated casual game.
+        # active_tournament_match_id being set means recordResult looks up
+        # THAT match's own row instead (see _matchupMessageLocation), so a
+        # matchup_message_id left over from some earlier, unrelated casual
+        # game never wins out - even though it's left untouched, since
+        # it's not this function's own message to manage when the game it
+        # belongs to was never even a real match.
         channel = FakeChannel("game-chat")
         stale_matchup = FakeMessage(id=3002, channel=channel)
         channel._sent_messages[stale_matchup.id] = stale_matchup
         self.helperObj.update(GUILD_ID, "matchup_message_id", stale_matchup.id)
+        # No tournament_matches row for id 555 in this test's DB, so the
+        # match's own graphic isn't resolvable either - reference is None,
+        # not stale_matchup.
         self.helperObj.update(GUILD_ID, "active_tournament_match_id", 555)
 
         with patch.object(self.helperObj, "_resolveTournamentMatch", AsyncMock()):
@@ -9366,9 +9372,29 @@ class RecordResultTests(HelperTestCase):
 
         result_call = next(c for c in channel.send.call_args_list if c.args and "wins!" in c.args[0])
         self.assertIsNone(result_call.kwargs.get("reference"))
-        # Left alone too, since it's not this function's own message to
-        # manage when the game it belongs to was never even a real match.
         self.assertEqual(self.helperObj.get(GUILD_ID, "matchup_message_id"), stale_matchup.id)
+
+    async def test_replies_to_a_sequential_tournament_matchs_own_ready_check_message(self):
+        channel = FakeChannel("game-chat")
+        ready_check_message = FakeMessage(id=4001, channel=channel)
+        channel._sent_messages[ready_check_message.id] = ready_check_message
+        self.cursor.execute(
+            "INSERT INTO tournament_matches(id, guildId, roundIndex, nodeIndex, team1, team2, state, "
+            "mode, messageId, channelId, winner, bracketType) "
+            "VALUES(777, ?, 0, 0, '', '', 'AWAITING_RESULT', 'sequential', ?, ?, NULL, 'winners')",
+            (GUILD_ID, ready_check_message.id, channel.id)
+        )
+        self.db.commit()
+        self.helperObj.update(GUILD_ID, "active_tournament_match_id", 777)
+        # A stale matchup_message_id from an earlier, unrelated casual
+        # game must not win out over the match's own ready-check message.
+        self.helperObj.update(GUILD_ID, "matchup_message_id", 9999)
+
+        with patch.object(self.helperObj, "_resolveTournamentMatch", AsyncMock()):
+            await self.helperObj.recordResult(GUILD_ID, 1, channel)
+
+        result_call = next(c for c in channel.send.call_args_list if c.args and "wins!" in c.args[0])
+        self.assertIs(result_call.kwargs.get("reference"), ready_check_message)
 
 
 class ImbalanceRakeFractionTests(HelperTestCase):
@@ -12461,6 +12487,70 @@ class GetBettingTimerSecondsTests(HelperTestCase):
             self.helperObj._getBettingTimerSeconds(999999),
             helper_module.BETTING_DURATION_SECONDS,
         )
+
+
+class ResolveTournamentMatchReplyTests(HelperTestCase):
+    def setUp(self):
+        super().setUp()
+        self.channel = FakeChannel("bracket-chat", guild=self.guild)
+        self.channel.send = AsyncMock(side_effect=lambda *a, **k: FakeMessage())
+        self.helperObj.client = FakeClient(channels=[self.channel], guilds=[self.guild])
+
+    async def test_result_replies_to_the_matchs_own_report_message(self):
+        red = _captained_team("Red", 901, "Alice")
+        blue = _captained_team("Blue", 902, "Bob")
+        tournament = Tournament("Cup", 1, 2)
+        tournament.register_team(red)
+        tournament.register_team(blue)
+        tournament.set_bracket(self.helperObj.buildBracket([red, blue]))
+        self.helperObj.saveTournament(GUILD_ID, tournament)
+
+        await self.helperObj.startTournamentHelper(
+            FakeInteraction(self.guild, FakeMember("Alice", id=901), channel=self.channel), "simultaneous"
+        )
+        self.cursor.execute("SELECT id, messageId FROM tournament_matches WHERE guildId=?", (GUILD_ID,))
+        match_id, message_id = self.cursor.fetchone()
+        self.assertIsNotNone(message_id)
+
+        self.channel.send.reset_mock()
+        await self.helperObj._resolveTournamentMatch(GUILD_ID, match_id, 1, self.channel.id)
+
+        result_call = next(c for c in self.channel.send.call_args_list if c.args and "result" in c.args[0])
+        self.assertEqual(result_call.kwargs["reference"].id, message_id)
+
+    async def test_result_replies_to_the_report_message_in_the_configured_matchup_channel(self):
+        matchup_channel = FakeChannel("results", kind="text", guild=self.guild)
+        self.guild.channels.append(matchup_channel)
+        matchup_channel.send = AsyncMock(side_effect=lambda *a, **k: FakeMessage())
+        self.helperObj.client = FakeClient(channels=[self.channel, matchup_channel], guilds=[self.guild])
+        self.helperObj.update(GUILD_ID, "matchup_channel", "results")
+
+        red = _captained_team("Red", 901, "Alice")
+        blue = _captained_team("Blue", 902, "Bob")
+        tournament = Tournament("Cup", 1, 2)
+        tournament.register_team(red)
+        tournament.register_team(blue)
+        tournament.set_bracket(self.helperObj.buildBracket([red, blue]))
+        self.helperObj.saveTournament(GUILD_ID, tournament)
+
+        await self.helperObj.startTournamentHelper(
+            FakeInteraction(self.guild, FakeMember("Alice", id=901), channel=self.channel), "simultaneous"
+        )
+        self.cursor.execute("SELECT id, messageId, channelId FROM tournament_matches WHERE guildId=?", (GUILD_ID,))
+        match_id, message_id, channel_id = self.cursor.fetchone()
+        # The report message (and so its own channelId) landed in the
+        # matchup channel, not the channel the round itself started in.
+        self.assertEqual(channel_id, matchup_channel.id)
+
+        # Mirrors reality: the report click that reaches
+        # _resolveTournamentMatch comes from interaction.channel_id,
+        # wherever the report message (and so its buttons) actually is.
+        await self.helperObj._resolveTournamentMatch(GUILD_ID, match_id, 1, matchup_channel.id)
+
+        result_call = next(
+            c for c in matchup_channel.send.call_args_list if c.args and "result" in c.args[0]
+        )
+        self.assertEqual(result_call.kwargs["reference"].id, message_id)
 
 
 class OpenConcurrentTournamentBettingTests(HelperTestCase):
