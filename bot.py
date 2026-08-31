@@ -198,7 +198,8 @@ if not db_already_existed:
         "roster_team1_message_id, roster_team2_message_id, roster_channel_id, roster_use_roles, "
         "default_elo, betting_opened_at, disliked_role_user_ids, draft_pick_page, "
         "draft_players_message_id, draft_snake, betting_closed_message_id, make_teams_message_ids, "
-        "matchup_message_id, roster_starting, roster_permissions_strict, max_wager, betting_enabled)"
+        "matchup_message_id, roster_starting, roster_permissions_strict, max_wager, betting_enabled, "
+        "matchup_channel)"
     )
     mainDB.commit()
 else:
@@ -319,6 +320,13 @@ else:
     # them, for a server that doesn't want anything gambling-adjacent even
     # with fictional gold. Defaults to 1 (enabled), today's behavior.
     ensure_column("servers", "betting_enabled", "INTEGER", "1")
+    # /set matchup-channel: when set, the matchup graphic (both /start's
+    # own and a tournament match's ready-check/report graphic) and the
+    # winner-report message (with its buttons) go here instead of
+    # wherever the roster or match happened to start. Independent of
+    # /set wager-channel, which still redirects only the betting-open/
+    # closed notices - the two can point at different channels.
+    ensure_column("servers", "matchup_channel", "TEXT")
 
 # Per-member currency: gold balance plus win/loss and wagering stats, one
 # row per (guild, user).
@@ -790,7 +798,7 @@ def ensure_guild_row(guild_id, guild_name):
     cursor.execute(
         "INSERT INTO servers VALUES(?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, "
         "NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'NONE', NULL, NULL, 0, NULL, NULL, ?, "
-        "NULL, NULL, NULL, 0, NULL, NULL, NULL, 0, NULL, 0, NULL, NULL, NULL, 0, 0, NULL, 1)",
+        "NULL, NULL, NULL, 0, NULL, NULL, NULL, 0, NULL, 0, NULL, NULL, NULL, 0, 0, NULL, 1, NULL)",
         (guild_id, guild_name, helper.BETTING_DURATION_SECONDS)
     )
     mainDB.commit()
@@ -1073,6 +1081,18 @@ async def setBetting(ctx, enabled: bool):
 setBetting.error(_setAdminPermissionError)
 
 
+@setGroup.command(
+    name="matchup-channel",
+    description="Admin: redirect every matchup graphic and winner-report message to one text channel"
+)
+@app_commands.describe(channel="Name of the text channel; created if it doesn't exist")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def setMatchupChannel(ctx, channel: str):
+    await helperObj.setMatchupChannelHelper(ctx, channel)
+
+setMatchupChannel.error(_setAdminPermissionError)
+
+
 tree.add_command(setGroup)
 
 
@@ -1319,6 +1339,7 @@ COMMAND_HELP = {
     "set roster-permissions": "Controls who can use the Start/Start (no move)/Random Roles/Balanced Roles buttons on a posted roster. strict:true restricts them to a rostered player or a Manage Server admin, matching how the winner-report buttons already work; strict:false (the default) leaves them open to anyone who can see the message. Requires the Manage Server permission.",
     "set max-wager": "Caps how much gold a single /wager team or /wager against bet can be. Omit amount to remove the cap. Requires the Manage Server permission.",
     "set betting": "Turns /wager team and /wager against on or off for this server. Games, elo, and reporting a winner all still work the same either way; this only gates the wagering layer on top of them. Requires the Manage Server permission.",
+    "set matchup-channel": "Redirects every matchup graphic (a game's own, and a tournament match's ready-check/report graphic) and the winner-report message to one specific text channel, no matter where the roster or match actually started. Independent of set wager-channel, which only redirects the betting-open/closed notices; the two can point at different channels. Requires the Manage Server permission.",
     "clear teams": "Wipes the current teams/draft so you can start a fresh session. Requires the Manage Server permission.",
     "clear channels": "Wipes the current teams/draft, and also forgets the saved team channel names. Requires the Manage Server permission.",
     "clear tournament": "Wipes the current teams/draft, and deletes this server's tournament entirely: bracket, registrations, match history. Can't be undone. Requires the Manage Server permission.",

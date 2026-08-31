@@ -73,7 +73,7 @@ SERVERS_SCHEMA = (
     "roster_use_roles DEFAULT 0, default_elo, betting_opened_at, disliked_role_user_ids, "
     "draft_pick_page DEFAULT 0, draft_players_message_id, draft_snake DEFAULT 0, "
     "betting_closed_message_id, make_teams_message_ids, matchup_message_id, roster_starting DEFAULT 0, "
-    "roster_permissions_strict DEFAULT 0, max_wager, betting_enabled DEFAULT 1)"
+    "roster_permissions_strict DEFAULT 0, max_wager, betting_enabled DEFAULT 1, matchup_channel)"
 )
 ECONOMY_SCHEMA = (
     "CREATE TABLE economy(guildId, userId, username, balance, wins, losses, "
@@ -177,7 +177,7 @@ def insert_guild_row(cursor, db, guild_id=GUILD_ID, name="Test Guild"):
     cursor.execute(
         "INSERT INTO servers VALUES(?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, "
         "NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'NONE', NULL, NULL, 0, NULL, NULL, ?, "
-        "NULL, NULL, NULL, 0, NULL, NULL, NULL, 0, NULL, 0, NULL, NULL, NULL, 0, 0, NULL, 1)",
+        "NULL, NULL, NULL, 0, NULL, NULL, NULL, 0, NULL, 0, NULL, NULL, NULL, 0, 0, NULL, 1, NULL)",
         (guild_id, name, helper_module.BETTING_DURATION_SECONDS),
     )
     db.commit()
@@ -884,16 +884,16 @@ class RosterActionViewTests(HelperTestCase):
         self.assertEqual(self.helperObj.get(GUILD_ID, "roster_starting"), 1)
         self.assertEqual(self.helperObj.get(GUILD_ID, "original_channel"), "Lobby")
 
-    # roster_team2_message_id itself stays intact, not cleared, so
-    # recordResult's own cleanup can still find team2's roster message by
-    # it once the game actually ends. roster_starting is the real
-    # anti-double-click mutex instead.
-    async def test_does_not_clear_team2_message_id_and_sets_roster_starting_instead(self):
+    # roster_starting, not roster_team2_message_id, is the real
+    # anti-double-click mutex: a fresh click still can't match a stale
+    # message id once a new roster overwrites it, but roster_starting is
+    # what actually blocks a second near-simultaneous click on the SAME
+    # still-live message from also passing the guard.
+    async def test_sets_roster_starting_as_the_anti_double_click_mutex(self):
         with patch.object(self.helperObj, "_openBetting", AsyncMock()), \
              patch.object(self.helperObj, "_sendMatchupImage", AsyncMock()):
             await self.helperObj._handleRosterStartClick(self._click(message_id=112), move=True)
 
-        self.assertEqual(self.helperObj.get(GUILD_ID, "roster_team2_message_id"), 112)
         self.assertEqual(self.helperObj.get(GUILD_ID, "roster_starting"), 1)
 
     async def test_a_second_start_click_while_the_first_is_still_running_is_rejected(self):
@@ -905,16 +905,18 @@ class RosterActionViewTests(HelperTestCase):
         click.response.send_message.assert_awaited_once_with("This roster is no longer live.", ephemeral=True)
         self.member1.move_to.assert_not_awaited()
 
-    async def test_deletes_the_make_teams_intro_message_once_the_graphic_posts(self):
+    async def test_deletes_the_make_teams_intro_message_and_roster_embeds_once_the_graphic_posts(self):
         # The matchup graphic (posted right before this) already shows
         # both full rosters, so the original "Teams created!"-style text
-        # reply has nothing left to say. It's deleted now instead of
-        # waiting for the whole game to finish (see recordResult's own,
-        # later, roster-embed cleanup).
+        # reply, and the roster embeds themselves, have nothing left to
+        # say. Both are deleted now instead of waiting for the whole game
+        # to finish.
         intro_message = FakeMessage(id=113, channel=self.channel)
         self.channel._sent_messages[intro_message.id] = intro_message
         team1_message = FakeMessage(id=114, channel=self.channel)
         self.channel._sent_messages[team1_message.id] = team1_message
+        team2_message = FakeMessage(id=112, channel=self.channel)
+        self.channel._sent_messages[team2_message.id] = team2_message
         self.helperObj.update(GUILD_ID, "roster_channel_id", self.channel.id)
         self.helperObj.update(GUILD_ID, "roster_team1_message_id", team1_message.id)
         self.helperObj.update(GUILD_ID, "make_teams_message_ids", "113")
@@ -925,18 +927,25 @@ class RosterActionViewTests(HelperTestCase):
 
         intro_message.delete.assert_awaited_once()
         self.assertIsNone(self.helperObj.get(GUILD_ID, "make_teams_message_ids"))
-        # The roster embeds themselves are a different cleanup, still owed
-        # to recordResult once the game actually ends, not here.
-        team1_message.delete.assert_not_awaited()
-        self.assertEqual(self.helperObj.get(GUILD_ID, "roster_team1_message_id"), team1_message.id)
+        team1_message.delete.assert_awaited_once()
+        team2_message.delete.assert_awaited_once()
+        self.assertIsNone(self.helperObj.get(GUILD_ID, "roster_team1_message_id"))
+        self.assertIsNone(self.helperObj.get(GUILD_ID, "roster_team2_message_id"))
 
-    async def test_clears_the_view_on_the_roster_message_afterward(self):
+    async def test_deletes_the_roster_message_the_button_was_clicked_on(self):
+        # interaction.message is team2's own roster embed (Start lives on
+        # it), always deleted alongside team1's as part of the same
+        # post-graphic embed cleanup, so there's no separate need to
+        # strip its view first.
+        click = self._click()
+        self.channel._sent_messages[click.message.id] = click.message
+        self.helperObj.update(GUILD_ID, "roster_channel_id", self.channel.id)
         with patch.object(self.helperObj, "_openBetting", AsyncMock()), \
              patch.object(self.helperObj, "_sendMatchupImage", AsyncMock()):
-            click = self._click()
             await self.helperObj._handleRosterStartClick(click, move=True)
 
-        click.message.edit.assert_awaited_once_with(view=None)
+        click.message.delete.assert_awaited_once()
+        click.message.edit.assert_not_awaited()
 
     async def test_passes_roster_use_roles_through_to_the_matchup_image(self):
         self.helperObj.update(GUILD_ID, "roster_use_roles", 1)
@@ -6496,6 +6505,63 @@ class ImageRenderThreadOffloadTests(HelperTestCase):
         await self.helperObj._sendMatchupImage(self.channel, team1, team2, "Normal")
         self.assertIsNone(self.helperObj.get(GUILD_ID, "matchup_message_id"))
 
+    async def test_redirects_to_the_configured_matchup_channel(self):
+        matchup_channel = FakeChannel("results", kind="text", guild=self.guild)
+        matchup_channel.send = AsyncMock(return_value=FakeMessage(id=5001))
+        self.guild.channels.append(matchup_channel)
+        self.helperObj.update(GUILD_ID, "matchup_channel", "results")
+        team1, team2 = self._team("Red"), self._team("Blue")
+
+        await self.helperObj._sendMatchupImage(self.channel, team1, team2, "Normal", guild_id=GUILD_ID)
+
+        self.channel.send.assert_not_awaited()
+        matchup_channel.send.assert_awaited_once()
+        self.assertEqual(self.helperObj.get(GUILD_ID, "matchup_message_id"), 5001)
+
+    async def test_ready_check_redirects_to_the_configured_matchup_channel(self):
+        matchup_channel = FakeChannel("results", kind="text", guild=self.guild)
+        self.guild.channels.append(matchup_channel)
+        self.helperObj.update(GUILD_ID, "matchup_channel", "results")
+
+        red = _captained_team("Red", 901, "Alice")
+        blue = _captained_team("Blue", 902, "Bob")
+        tournament = Tournament("Cup", 1, 2)
+        tournament.register_team(red)
+        tournament.register_team(blue)
+        tournament.set_bracket(self.helperObj.buildBracket([red, blue]))
+        self.helperObj.saveTournament(GUILD_ID, tournament)
+
+        await self.helperObj.startTournamentHelper(
+            FakeInteraction(self.guild, FakeMember("Alice", id=901), channel=self.channel), "sequential"
+        )
+
+        matchup_channel.send.assert_awaited_once()
+        self.assertIn("press Ready below", matchup_channel.send.call_args.args[0])
+        self.assertIsInstance(matchup_channel.send.call_args.kwargs["view"], helper_module.TournamentReadyView)
+
+    async def test_match_report_redirects_to_the_configured_matchup_channel(self):
+        matchup_channel = FakeChannel("results", kind="text", guild=self.guild)
+        self.guild.channels.append(matchup_channel)
+        self.helperObj.update(GUILD_ID, "matchup_channel", "results")
+
+        red = _captained_team("Red", 901, "Alice")
+        blue = _captained_team("Blue", 902, "Bob")
+        tournament = Tournament("Cup", 1, 2)
+        tournament.register_team(red)
+        tournament.register_team(blue)
+        tournament.set_bracket(self.helperObj.buildBracket([red, blue]))
+        self.helperObj.saveTournament(GUILD_ID, tournament)
+
+        await self.helperObj.startTournamentHelper(
+            FakeInteraction(self.guild, FakeMember("Alice", id=901), channel=self.channel), "simultaneous"
+        )
+
+        matchup_channel.send.assert_awaited_once()
+        self.assertIn("winning team's own button", matchup_channel.send.call_args.args[0])
+        self.assertIsInstance(
+            matchup_channel.send.call_args.kwargs["view"], helper_module.TournamentMatchReportView
+        )
+
     async def test_sequential_ready_check_matchup_image_is_offloaded(self):
         red = _captained_team("Red", 901, "Alice")
         blue = _captained_team("Blue", 902, "Bob")
@@ -8360,6 +8426,41 @@ class BettingHelperTests(HelperTestCase):
         self.assertIn("enabled", message)
 
 
+class MatchupChannelHelperTests(HelperTestCase):
+    def _ctx(self):
+        return FakeInteraction(self.guild, FakeMember("Caller"))
+
+    async def test_creates_the_channel_when_missing(self):
+        ctx = self._ctx()
+        await self.helperObj.setMatchupChannelHelper(ctx, "results")
+
+        created = [c for c in self.guild.channels if c.name == "results"]
+        self.assertEqual(len(created), 1)
+        self.assertEqual(created[0].kind, "text")
+        self.assertEqual(self.helperObj.get(GUILD_ID, "matchup_channel"), "results")
+        self.assertIn(created[0].mention, ctx.response.send_message.call_args.args[0])
+
+    async def test_reuses_an_existing_text_channel(self):
+        existing = FakeChannel("results", kind="text")
+        self.guild.channels.append(existing)
+        ctx = self._ctx()
+
+        await self.helperObj.setMatchupChannelHelper(ctx, "results")
+
+        text_channels = [c for c in self.guild.channels if c.name == "results" and c.kind == "text"]
+        self.assertEqual(len(text_channels), 1)
+        self.assertEqual(self.helperObj.get(GUILD_ID, "matchup_channel"), "results")
+
+    async def test_ignores_a_same_named_voice_channel(self):
+        self.guild.channels.append(FakeChannel("results", kind="voice"))
+        ctx = self._ctx()
+
+        await self.helperObj.setMatchupChannelHelper(ctx, "results")
+
+        text_channels = [c for c in self.guild.channels if c.kind == "text"]
+        self.assertEqual(len(text_channels), 1)
+
+
 class NotifyHelperTests(HelperTestCase):
     async def test_sends_dm_with_invite_and_default_message(self):
         voice_channel = FakeChannel("Lobby")
@@ -9155,6 +9256,26 @@ class RecordResultTests(HelperTestCase):
         await self.helperObj.recordResult(GUILD_ID, 1, channel)
 
         closed_notice.delete.assert_awaited_once()
+        self.assertIsNone(self.helperObj.get(GUILD_ID, "betting_closed_message_id"))
+
+    async def test_deletes_the_betting_closed_notice_from_the_wager_channel_not_the_report_channel(self):
+        # /set matchup-channel can leave the report message (and so
+        # `channel`, recordResult's own param, since it comes from that
+        # message's interaction) in a different channel than
+        # betting_channel_id, where _closeBettingWindow actually posted
+        # the closed notice (/set wager-channel).
+        report_channel = FakeChannel("results")
+        wager_channel = FakeChannel("bets")
+        self.helperObj.client = FakeClient(channels=[report_channel, wager_channel], guilds=[self.guild])
+        closed_notice = FakeMessage(id=4243, channel=wager_channel)
+        wager_channel._sent_messages[closed_notice.id] = closed_notice
+        self.helperObj.update(GUILD_ID, "betting_closed_message_id", closed_notice.id)
+        self.helperObj.update(GUILD_ID, "betting_channel_id", wager_channel.id)
+
+        await self.helperObj.recordResult(GUILD_ID, 1, report_channel)
+
+        closed_notice.delete.assert_awaited_once()
+        report_channel.fetch_message.assert_not_awaited()
         self.assertIsNone(self.helperObj.get(GUILD_ID, "betting_closed_message_id"))
 
     async def test_no_betting_closed_notice_to_delete_does_not_crash(self):
@@ -11924,16 +12045,23 @@ class OpenBettingTests(HelperTestCase):
         self.assertEqual(self.helperObj.get(GUILD_ID, "betting_state"), "OPEN")
         self.assertEqual(self.helperObj.get(GUILD_ID, "betting_message_id"), 12345)
         self.assertIn(GUILD_ID, self.helperObj.bettingTasks)
-        channel.send.assert_awaited_once()
-        message_text = channel.send.call_args.args[0]
-        self.assertIn("Betting is open", message_text)
-        self.assertIn("winning team's button", message_text)
-        self.assertIn("cancel the game", message_text)
+
+        # Neither /set wager-channel nor /set matchup-channel is
+        # configured here, so both messages land in the same origin
+        # channel, but as two separate sends: the "betting is open" text
+        # first, then the winner-report message with its buttons.
+        self.assertEqual(channel.send.await_count, 2)
+        open_text = channel.send.call_args_list[0].args[0]
+        self.assertIn("Betting is open", open_text)
+        report_call = channel.send.call_args_list[1]
+        report_text = report_call.args[0]
+        self.assertIn("winning team's button", report_text)
+        self.assertIn("cancel the game", report_text)
 
         # The winner-report/cancel buttons go out immediately alongside the
         # "betting is open" message, no waiting on the timer to close
         # betting first before anyone can report a winner or cancel.
-        view = channel.send.call_args.kwargs["view"]
+        view = report_call.kwargs["view"]
         self.assertIsInstance(view, helper_module.WinnerReportView)
         # No persistent teams involved here (a plain random-split roster),
         # so the buttons fall back to the generic "Team 1"/"Team 2" labels.
@@ -11962,7 +12090,7 @@ class OpenBettingTests(HelperTestCase):
         channel.send = AsyncMock(return_value=FakeMessage(id=12345))
         await self.helperObj._openBetting(GUILD_ID, channel)
 
-        view = channel.send.call_args.kwargs["view"]
+        view = channel.send.call_args_list[1].kwargs["view"]
         self.assertEqual(view.team1.label, "Red Wolves 🔵")
         self.assertEqual(view.team2.label, "Blue Hawks 🔴")
 
@@ -11970,7 +12098,10 @@ class OpenBettingTests(HelperTestCase):
         task.cancel()
         await asyncio.wait([task])
 
-    async def test_redirects_to_the_configured_wager_channel(self):
+    async def test_redirects_the_open_notice_to_the_configured_wager_channel(self):
+        # matchup_channel isn't set here, so the report message still
+        # falls back to the origin channel; only the "betting is open"
+        # text moves to the wager channel.
         origin_channel = FakeChannel("game-chat")
         wager_channel = FakeChannel("bets", kind="text")
         self.guild.channels.append(wager_channel)
@@ -11979,9 +12110,58 @@ class OpenBettingTests(HelperTestCase):
 
         await self.helperObj._openBetting(GUILD_ID, origin_channel)
 
+        wager_channel.send.assert_awaited_once()
+        self.assertIn("Betting is open", wager_channel.send.call_args.args[0])
+        origin_channel.send.assert_awaited_once()
+        self.assertIn("winning team's button", origin_channel.send.call_args.args[0])
+        self.assertEqual(self.helperObj.get(GUILD_ID, "betting_channel_id"), wager_channel.id)
+
+        task = self.helperObj.bettingTasks[GUILD_ID]
+        task.cancel()
+        await asyncio.wait([task])
+
+    async def test_redirects_the_report_message_to_the_configured_matchup_channel(self):
+        # wager_channel isn't set here, so the "betting is open" text
+        # still falls back to the origin channel; only the report
+        # message (with its buttons) moves to the matchup channel.
+        origin_channel = FakeChannel("game-chat")
+        matchup_channel = FakeChannel("results", kind="text")
+        self.guild.channels.append(matchup_channel)
+        self.helperObj.client = FakeClient(guilds=[self.guild])
+        self.helperObj.update(GUILD_ID, "matchup_channel", "results")
+
+        await self.helperObj._openBetting(GUILD_ID, origin_channel)
+
+        origin_channel.send.assert_awaited_once()
+        self.assertIn("Betting is open", origin_channel.send.call_args.args[0])
+        matchup_channel.send.assert_awaited_once()
+        report_call = matchup_channel.send.call_args
+        self.assertIn("winning team's button", report_call.args[0])
+        self.assertIsInstance(report_call.kwargs["view"], helper_module.WinnerReportView)
+        # betting_channel_id tracks the wager side only, unaffected by
+        # where the report message itself ended up.
+        self.assertEqual(self.helperObj.get(GUILD_ID, "betting_channel_id"), origin_channel.id)
+
+        task = self.helperObj.bettingTasks[GUILD_ID]
+        task.cancel()
+        await asyncio.wait([task])
+
+    async def test_wager_channel_and_matchup_channel_can_point_at_two_different_channels(self):
+        origin_channel = FakeChannel("game-chat")
+        wager_channel = FakeChannel("bets", kind="text")
+        matchup_channel = FakeChannel("results", kind="text")
+        self.guild.channels.extend([wager_channel, matchup_channel])
+        self.helperObj.client = FakeClient(guilds=[self.guild])
+        self.helperObj.update(GUILD_ID, "wager_channel", "bets")
+        self.helperObj.update(GUILD_ID, "matchup_channel", "results")
+
+        await self.helperObj._openBetting(GUILD_ID, origin_channel)
+
         origin_channel.send.assert_not_awaited()
         wager_channel.send.assert_awaited_once()
-        self.assertEqual(self.helperObj.get(GUILD_ID, "betting_channel_id"), wager_channel.id)
+        self.assertIn("Betting is open", wager_channel.send.call_args.args[0])
+        matchup_channel.send.assert_awaited_once()
+        self.assertIn("winning team's button", matchup_channel.send.call_args.args[0])
 
         task = self.helperObj.bettingTasks[GUILD_ID]
         task.cancel()
@@ -11994,7 +12174,9 @@ class OpenBettingTests(HelperTestCase):
 
         await self.helperObj._openBetting(GUILD_ID, origin_channel)
 
-        origin_channel.send.assert_awaited_once()
+        # Both messages fall back to the origin channel: the wager
+        # redirect failed to resolve, and matchup_channel isn't set at all.
+        self.assertEqual(origin_channel.send.await_count, 2)
 
         task = self.helperObj.bettingTasks[GUILD_ID]
         task.cancel()
@@ -12028,7 +12210,7 @@ class OpenBettingTests(HelperTestCase):
         # doesn't post or replace anything report-related.
         self.assertEqual(self.helperObj.get(GUILD_ID, "betting_state"), "CLOSED")
         self.assertEqual(self.helperObj.get(GUILD_ID, "betting_message_id"), 12345)
-        self.assertEqual(channel.send.await_count, 2)  # open+report combined, then closed
+        self.assertEqual(channel.send.await_count, 3)  # open, report, then closed
         self.assertIn("closed", channel.send.call_args.args[0])
         self.assertNotIn(GUILD_ID, self.helperObj.bettingTasks)
 
@@ -12253,6 +12435,19 @@ class OpenConcurrentTournamentBettingTests(HelperTestCase):
         message = channel.send.call_args.args[0]
         self.assertIn("1 match ", message)
 
+    async def test_redirects_to_the_configured_wager_channel(self):
+        origin_channel = FakeChannel("bracket-chat")
+        wager_channel = FakeChannel("bets", kind="text")
+        self.guild.channels.append(wager_channel)
+        self.helperObj.client = FakeClient(guilds=[self.guild])
+
+        self.helperObj.update(GUILD_ID, "wager_channel", "bets")
+
+        await self.helperObj._openConcurrentTournamentBetting(GUILD_ID, [7], origin_channel)
+
+        origin_channel.send.assert_not_awaited()
+        wager_channel.send.assert_awaited_once()
+
     async def test_timer_closes_betting_on_the_listed_matches(self):
         self.helperObj.update(GUILD_ID, "betting_timer_seconds", 0)
         channel = FakeChannel("bracket-chat")
@@ -12266,6 +12461,64 @@ class OpenConcurrentTournamentBettingTests(HelperTestCase):
         self.cursor.execute("SELECT bettingClosed FROM tournament_matches WHERE id=1")
         self.assertEqual(self.cursor.fetchone()[0], 1)
         self.assertEqual(channel.send.await_count, 2)  # open, then closed
+
+
+class DeleteRoundBettingMessagesTests(HelperTestCase):
+    def _insert_match(self, match_id, open_id, closed_id):
+        self.cursor.execute(
+            "INSERT INTO tournament_matches(id, guildId, roundIndex, nodeIndex, team1, team2, state, "
+            "mode, messageId, channelId, winner, bracketType, roundBettingMessageId, "
+            "roundBettingClosedMessageId) "
+            "VALUES(?, ?, 0, 0, '', '', 'RESOLVED', 'simultaneous', NULL, NULL, 1, 'winners', ?, ?)",
+            (match_id, GUILD_ID, open_id, closed_id)
+        )
+        self.db.commit()
+
+    async def test_deletes_from_the_channel_it_was_given_by_default(self):
+        channel = FakeChannel("bracket-chat")
+        open_msg = FakeMessage(id=101, channel=channel)
+        closed_msg = FakeMessage(id=102, channel=channel)
+        channel._sent_messages[open_msg.id] = open_msg
+        channel._sent_messages[closed_msg.id] = closed_msg
+        self._insert_match(1, open_msg.id, closed_msg.id)
+
+        await self.helperObj._deleteRoundBettingMessages(GUILD_ID, 0, "winners", channel)
+
+        open_msg.delete.assert_awaited_once()
+        closed_msg.delete.assert_awaited_once()
+        self.cursor.execute("SELECT roundBettingMessageId, roundBettingClosedMessageId FROM tournament_matches WHERE id=1")
+        self.assertEqual(self.cursor.fetchone(), (None, None))
+
+    async def test_deletes_from_the_configured_wager_channel_instead_of_the_passed_channel(self):
+        # _openConcurrentTournamentBetting posts these messages wherever
+        # /set wager-channel points, which /set matchup-channel can now
+        # leave different from the match/round's own thread channel this
+        # is called with.
+        round_channel = FakeChannel("bracket-chat")
+        wager_channel = FakeChannel("bets", kind="text")
+        self.guild.channels.append(wager_channel)
+        self.helperObj.client = FakeClient(guilds=[self.guild])
+        self.helperObj.update(GUILD_ID, "wager_channel", "bets")
+
+        open_msg = FakeMessage(id=201, channel=wager_channel)
+        closed_msg = FakeMessage(id=202, channel=wager_channel)
+        wager_channel._sent_messages[open_msg.id] = open_msg
+        wager_channel._sent_messages[closed_msg.id] = closed_msg
+        self._insert_match(2, open_msg.id, closed_msg.id)
+
+        await self.helperObj._deleteRoundBettingMessages(GUILD_ID, 0, "winners", round_channel)
+
+        open_msg.delete.assert_awaited_once()
+        closed_msg.delete.assert_awaited_once()
+        round_channel.fetch_message.assert_not_awaited()
+
+    async def test_noop_when_the_round_never_had_betting_messages(self):
+        self._insert_match(3, None, None)
+        channel = FakeChannel("bracket-chat")
+
+        await self.helperObj._deleteRoundBettingMessages(GUILD_ID, 0, "winners", channel)
+
+        channel.fetch_message.assert_not_awaited()
 
 
 class WagerTeamNameResolutionTests(HelperTestCase):
@@ -14468,7 +14721,7 @@ class CommandRegistrationTests(BotModuleTestCase):
             names,
             {
                 "channels", "team-size", "betting-timer", "wager-channel", "elo", "default-elo",
-                "correct-winner", "roster-permissions", "max-wager", "betting",
+                "correct-winner", "roster-permissions", "max-wager", "betting", "matchup-channel",
             },
         )
 
@@ -15741,7 +15994,7 @@ class HelpCommandAutocompleteTests(BotModuleTestCase):
 class AdminSetCommandTests(BotModuleTestCase):
     SET_SUBCOMMANDS = [
         "channels", "team-size", "betting-timer", "wager-channel", "elo", "default-elo",
-        "roster-permissions", "max-wager", "betting",
+        "roster-permissions", "max-wager", "betting", "matchup-channel",
     ]
 
     def test_every_subcommand_requires_manage_guild_permission(self):
@@ -15858,6 +16111,13 @@ class AdminSetCommandTests(BotModuleTestCase):
         self.assertEqual(self.bot.helperObj.get(guild_id, "max_wager"), 750)
         message = ctx.response.send_message.call_args.args[0]
         self.assertIn("750", message)
+
+    async def test_matchup_channel_delegates_channel(self):
+        ctx = self._ctx()
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "setMatchupChannelHelper", mock):
+            await self._command("set matchup-channel").callback(ctx, channel="results")
+        mock.assert_awaited_once_with(ctx, "results")
 
 
 class RollCommandTests(BotModuleTestCase):

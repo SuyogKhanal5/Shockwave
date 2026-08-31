@@ -60,7 +60,7 @@ BRACKET_BORDER_RADIUS = 14 * BRACKET_SUPERSAMPLE
 # instead of staying full-width on a now-bigger canvas.
 BRACKET_LINE_WIDTH = 2 * BRACKET_SUPERSAMPLE
 BRACKET_RULE_WIDTH = 1 * BRACKET_SUPERSAMPLE
-BRACKET_LOGO_PATH = os.path.join(os.path.dirname(__file__), "shockwave-site", "assets", "img", "logo-mark.png")
+BRACKET_LOGO_PATH = os.path.join(os.path.dirname(__file__), "assets", "logo-mark.png")
 # Built-in Clash faction/region logos a team can pick from (see
 # /team set and _ensureLogo). One file per available logo, named after
 # it (e.g. "Demacia.png"), no subfolders.
@@ -3010,6 +3010,22 @@ class helpers():
             message = "Betting is disabled. /wager team and /wager against will no longer accept bets."
         await ctx.response.send_message(message)
 
+    # Points every future matchup graphic and winner-report message
+    # (_sendMatchupImage, _openBetting's report half, _postReadyCheck,
+    # _postMatchReport) at one specific text channel instead of wherever
+    # the roster or tournament match happens to run. Independent of /set
+    # wager-channel, which only redirects the betting-open/closed
+    # notices; the two can point at different channels.
+    async def setMatchupChannelHelper(self, ctx, channel_name):
+        guild = ctx.guild
+        channel = discord.utils.get(guild.text_channels, name=channel_name)
+        if channel is None:
+            channel = await guild.create_text_channel(channel_name)
+        self.update(guild.id, "matchup_channel", channel.name)
+        await ctx.response.send_message(
+            f"Matchup graphics and winner-report messages will now go to {channel.mention}."
+        )
+
     # Turns a just-posted, actually-final roster (not a captains draft
     # still mid-pick) into a live control: Random Roles/Balanced Roles to
     # assign or reassign roles (only if the roster is exactly 5v5, see
@@ -3361,13 +3377,11 @@ class helpers():
         # original "Teams created!"-style text reply (and, for a draft,
         # its picker/pool messages) has nothing left to say. Gone now
         # rather than waiting for the whole game to finish.
+        # Deletes both roster embeds, interaction.message (team2's, the
+        # one Start lives on) included, so there's no separate need to
+        # strip its view afterward the way editing it would.
         await self._deleteMakeTeamsIntroMessages(guild_id)
         await self._openBetting(guild_id, channel)
-
-        try:
-            await interaction.message.edit(view=None)
-        except discord.HTTPException:
-            pass
 
     async def captainsHelper(self, ctx, captain_1, captain_2, ranked=False, snake=False):
         # Checked before clearTeamsHelper and before building
@@ -4438,10 +4452,10 @@ class helpers():
 
     # Shockwave's own logo mark, resized once to BRACKET_LOGO_HEIGHT tall
     # and cached at module scope, see _bracket_logo_cache. None if the
-    # asset couldn't be loaded (e.g. a self-hosted deploy missing the
-    # shockwave-site/ folder). Every caller treats that as "skip the
-    # logo" rather than letting a missing file take bracket rendering
-    # down with it.
+    # asset couldn't be loaded (e.g. a self-hosted deploy that dropped
+    # assets/logo-mark.png). Every caller treats that as "skip the logo"
+    # rather than letting a missing file take bracket rendering down
+    # with it.
     def _loadBracketLogo(self):
         global _bracket_logo_cache
         if _bracket_logo_cache is None:
@@ -5637,6 +5651,10 @@ class helpers():
     # (_renderMatchupImage), just with no match id or tournament name to
     # put in the subtitle.
     async def _sendMatchupImage(self, channel, team1, team2, label, use_roles=False, guild_id=None):
+        # /set matchup-channel redirects the graphic there instead of
+        # wherever the roster's Start button was clicked.
+        if guild_id is not None:
+            channel = self._resolveConfiguredChannel(guild_id, "matchup_channel", channel)
         guild_name = channel.guild.name if channel.guild is not None else None
         image = await asyncio.to_thread(
             self._renderMatchupImage, None, team1, team2, label, None, guild_name, use_roles
@@ -5818,6 +5836,13 @@ class helpers():
         team1.deserializeTeam(team1_ser)
         team2.deserializeTeam(team2_ser)
 
+        # /set matchup-channel redirects this graphic (and, since every
+        # later step in this match's own life - the ready click, the
+        # betting/report cycle, the bracket update - is threaded through
+        # wherever the ready-check interaction itself came from) the rest
+        # of the match's own postings too, there instead of wherever the
+        # round happened to start.
+        channel = self._resolveConfiguredChannel(guild_id, "matchup_channel", channel)
         tournament = self.getTournament(guild_id)
         round_label = self._matchRoundLabel(tournament, round_index, bracket_type)
         guild_name = channel.guild.name if channel.guild is not None else None
@@ -5851,6 +5876,11 @@ class helpers():
         team1.deserializeTeam(team1_ser)
         team2.deserializeTeam(team2_ser)
 
+        # /set matchup-channel redirects this graphic there instead of
+        # wherever the round happened to start; _resolveTournamentMatch
+        # (reached from the report click on this same message) then just
+        # follows the same channel through for the match's own result.
+        channel = self._resolveConfiguredChannel(guild_id, "matchup_channel", channel)
         tournament = self.getTournament(guild_id)
         round_label = self._matchRoundLabel(tournament, round_index, bracket_type)
         guild_name = channel.guild.name if channel.guild is not None else None
@@ -5882,6 +5912,14 @@ class helpers():
     # a big bracket's first round can't leave betting open for an
     # unreasonable stretch.
     async def _openConcurrentTournamentBetting(self, guild_id, match_ids, channel):
+        # /set wager-channel redirects this round-wide notice (and the
+        # "now closed" one below) there instead of wherever the round
+        # happened to start - independent of /set matchup-channel, which
+        # only affects each match's own graphic/report message
+        # (_postMatchReport). Resolved once here and threaded through to
+        # _concurrentBettingTimer so the open/closed pair always lands in
+        # the same channel as each other.
+        channel = self._resolveConfiguredChannel(guild_id, "wager_channel", channel)
         base = self._getBettingTimerSeconds(guild_id)
         duration = min(base * len(match_ids), MAX_CONCURRENT_BETTING_SECONDS)
         match_list = ", ".join(f"#{match_id}" for match_id in match_ids)
@@ -5942,8 +5980,14 @@ class helpers():
         if row is None:
             return
         open_id, closed_id = row
-        await self._deleteMessageIdSafely(channel, open_id)
-        await self._deleteMessageIdSafely(channel, closed_id)
+        # These messages live wherever _openConcurrentTournamentBetting
+        # actually posted them (the wager-channel-resolved channel, which
+        # /set matchup-channel can now leave pointed somewhere other than
+        # `channel`, the match/round's own thread), not necessarily
+        # `channel` itself.
+        betting_channel = self._resolveConfiguredChannel(guild_id, "wager_channel", channel)
+        await self._deleteMessageIdSafely(betting_channel, open_id)
+        await self._deleteMessageIdSafely(betting_channel, closed_id)
         self.cursor.execute(
             "UPDATE tournament_matches SET roundBettingMessageId=NULL, roundBettingClosedMessageId=NULL "
             "WHERE guildId=? AND roundIndex=? AND bracketType=?",
@@ -9200,6 +9244,40 @@ class helpers():
             return BETTING_DURATION_SECONDS
         return int(row[0])
 
+    # Resolves an admin-configured channel-name column (wager_channel,
+    # matchup_channel) to an actual channel, falling back to `fallback`
+    # (wherever the game/match actually happened to run) if the column is
+    # unset or no longer resolves to a real channel. Shared by every
+    # "redirect this family of postings elsewhere" setting.
+    def _resolveConfiguredChannel(self, guild_id, column, fallback):
+        name = self.get(guild_id, column)
+        if not name:
+            return fallback
+        guild = self.client.get_guild(guild_id) if self.client is not None else None
+        if guild is None:
+            return fallback
+        resolved = discord.utils.get(guild.channels, name=name)
+        return resolved if resolved is not None else fallback
+
+    # Resolves a stored channel id (betting_channel_id, the wager-channel-
+    # resolved channel a betting round's open/closed notices actually
+    # live in) back to a channel object, best-effort. Needed wherever a
+    # caller only has the id on hand rather than the channel the
+    # interaction itself came from - e.g. recordResult, whose own
+    # `channel` param now follows /set matchup-channel instead, a
+    # possibly different channel than where the betting-closed notice
+    # this deletes was actually posted.
+    async def _resolveChannelId(self, channel_id):
+        if channel_id is None or self.client is None:
+            return None
+        try:
+            resolved = self.client.get_channel(int(channel_id))
+            if resolved is None:
+                resolved = await self.client.fetch_channel(int(channel_id))
+        except discord.HTTPException:
+            return None
+        return resolved
+
     # Core of the above, taking guild_id/channel directly rather than a
     # full Interaction. /tournament start's sequential mode calls this
     # too, from a reaction handler that has no ctx to hand it. Cancels
@@ -9217,24 +9295,23 @@ class helpers():
     # or CLOSED, so a fast game can be reported before the window even
     # closes.
     async def _openBetting(self, guild_id, channel):
-        # /set wager-channel's param redirects the whole cycle
-        # (open/closed/report) there instead of wherever the roster's
-        # ▶️ reaction (or a tournament match) ran. Once
-        # betting_channel_id below points at it, everything downstream
-        # (the timer, the winner report, recordResult) just follows the
-        # same channel through naturally.
-        wager_channel_name = self.get(guild_id, "wager_channel")
-        if wager_channel_name:
-            guild = self.client.get_guild(guild_id) if self.client is not None else None
-            if guild is not None:
-                resolved = discord.utils.get(guild.channels, name=wager_channel_name)
-                if resolved is not None:
-                    channel = resolved
+        # /set wager-channel redirects the betting-open/closed notices to
+        # one channel. /set matchup-channel redirects the winner-report
+        # message (with its Team 1/Team 2/Cancel Game buttons) to another,
+        # independently - these can point at two different channels now.
+        # Once betting_channel_id below points at the wager one,
+        # everything downstream that's about the WAGER side (the timer,
+        # the closed notice, reconcileStaleBettingWindows) just follows it
+        # through naturally. The report message needs no such tracking:
+        # every later step that touches it (_handleWinnerReportPick,
+        # recordResult) already works off interaction.channel instead.
+        wager_channel = self._resolveConfiguredChannel(guild_id, "wager_channel", channel)
+        report_channel = self._resolveConfiguredChannel(guild_id, "matchup_channel", channel)
 
-        await self.cancelBettingHelper(guild_id, channel)
+        await self.cancelBettingHelper(guild_id, wager_channel)
 
         self.update(guild_id, "betting_state", "OPEN")
-        self.update(guild_id, "betting_channel_id", channel.id)
+        self.update(guild_id, "betting_channel_id", wager_channel.id)
         # Read back by reconcileStaleBettingWindows (called from on_ready)
         # to work out how much of the window was actually left if the bot
         # restarts mid-window; the in-memory timer task below doesn't
@@ -9246,25 +9323,26 @@ class helpers():
 
         # /set betting: with wagering off, there's nothing for a timer to
         # close, and inviting people to a /wager command that's just going
-        # to reject them would be confusing. The winner-report message and
-        # its buttons (this is the same message) still go out exactly the
-        # same either way; reporting a winner never depended on betting
-        # being enabled.
+        # to reject them would be confusing, so there's no separate
+        # "betting is open" message at all, just the report message below.
         betting_enabled = bool(self.get(guild_id, "betting_enabled"))
         duration = self._getBettingTimerSeconds(guild_id)
         if betting_enabled:
-            content = (
-                f"🎲 Betting is open! Use `/wager team <amount> <team>` to bet on this game (closes in "
-                f"{duration} seconds). Once the game ends, press the winning team's button below to "
-                f"report it (you'll be asked to confirm before it's recorded and bets are paid out), or "
-                f"Cancel Game to cancel the game."
+            await wager_channel.send(
+                f"🎲 Betting is open! Use `/wager team <amount> <team>` to bet on this game "
+                f"(closes in {duration} seconds)."
+            )
+            report_content = (
+                "🎮 Once the game ends, press the winning team's button below to report it (you'll "
+                "be asked to confirm before it's recorded and bets are paid out), or Cancel Game to "
+                "cancel the game."
             )
         else:
-            content = (
+            report_content = (
                 "🎮 Game started! Once it ends, press the winning team's button below to report it "
                 "(you'll be asked to confirm before it's recorded), or Cancel Game to cancel the game."
             )
-        msg = await channel.send(content, view=WinnerReportView(self, team1_name, team2_name))
+        msg = await report_channel.send(report_content, view=WinnerReportView(self, team1_name, team2_name))
 
         self.update(guild_id, "betting_message_id", msg.id)
 
@@ -9279,7 +9357,7 @@ class helpers():
         # (CANCEL_GAME_EMOJI) would have no way to stop it from firing
         # later. Running it as its own Task makes both of those explicit
         # and lets cancelBettingHelper cancel it.
-        task = asyncio.create_task(self._bettingTimer(guild_id, channel, duration))
+        task = asyncio.create_task(self._bettingTimer(guild_id, wager_channel, duration))
         self.bettingTasks[guild_id] = task
 
     # The actual "close it" side effect a betting window's own expiry
@@ -9451,15 +9529,14 @@ class helpers():
             return None
         return channel
 
-    # The "make teams" INTRO text message(s) for the CURRENT roster (the
-    # "Teams created!"-style reply, plus a draft's own
-    # picker/pool/"Both teams are set!" messages, see
-    # make_teams_message_ids). Called by _handleRosterStartClick right
-    # after /start's own matchup graphic posts, since the graphic has
-    # already said everything that intro text did by then. NOT the
-    # roster embeds themselves (roster_team1_message_id/
-    # roster_team2_message_id). Those stay up as a live reference until
-    # the game actually ends (see _deleteMakeTeamsMessages).
+    # The "make teams" INTRO text message(s) (the "Teams created!"-style
+    # reply, plus a draft's own picker/pool/"Both teams are set!"
+    # messages, see make_teams_message_ids) AND the roster embeds
+    # themselves (roster_team1_message_id/roster_team2_message_id) for the
+    # CURRENT roster. Called by _handleRosterStartClick right after
+    # /start's own matchup graphic posts, since the graphic already shows
+    # both full rosters and none of these have anything left to say by
+    # then.
     async def _deleteMakeTeamsIntroMessages(self, guild_id):
         channel = await self._resolveRosterChannel(guild_id)
         if channel is None:
@@ -9471,13 +9548,20 @@ class helpers():
                     await self._deleteMessageIdSafely(channel, int(message_id))
         self.update(guild_id, "make_teams_message_ids", None)
 
+        for column in ("roster_team1_message_id", "roster_team2_message_id"):
+            message_id = self.get(guild_id, column)
+            if message_id is not None:
+                await self._deleteMessageIdSafely(channel, int(message_id))
+            self.update(guild_id, column, None)
+
     # The roster embeds (team1/team2) for the JUST-RESOLVED game, now
     # that recordResult is done with them. Called once the game they
     # were for is actually scored, never for a tournament match (which
     # never goes through /make-teams at all, so these columns would
     # just be stale leftovers from an unrelated earlier game).
-    # make_teams_message_ids is normally already empty by this point
-    # (see _deleteMakeTeamsIntroMessages), but is swept here too in case
+    # roster_team1_message_id/roster_team2_message_id and
+    # make_teams_message_ids are normally already empty by this point
+    # (see _deleteMakeTeamsIntroMessages), but are swept here too in case
     # a game somehow ended without ever going through a Start click.
     async def _deleteMakeTeamsMessages(self, guild_id):
         channel = await self._resolveRosterChannel(guild_id)
@@ -9706,12 +9790,16 @@ class helpers():
         if guild is not None and await self.moveMembersToOriginalChannel(guild):
             await channel.send("Moved everyone back to the original channel!")
 
-        # The betting-open/winner-report message itself is deleted by
-        # whichever Confirm view called into this (it's the one holding
-        # that message, not this function). This is just the separate
+        # The winner-report message itself is deleted by whichever
+        # Confirm view called into this (it's the one holding that
+        # message, not this function). This is just the separate
         # "Betting is now closed!" notice _closeBettingWindow may have
-        # posted after it, if the timer beat the report to it.
-        await self._deleteMessageIdSafely(channel, self.get(guild_id, "betting_closed_message_id"))
+        # posted after it, if the timer beat the report to it - in the
+        # wager-channel-resolved channel (betting_channel_id), which
+        # /set matchup-channel can now leave pointed somewhere other than
+        # `channel` (the report message's own channel) above.
+        betting_channel = await self._resolveChannelId(self.get(guild_id, "betting_channel_id"))
+        await self._deleteMessageIdSafely(betting_channel or channel, self.get(guild_id, "betting_closed_message_id"))
         self.update(guild_id, "betting_closed_message_id", None)
 
         if not is_tournament_match:

@@ -769,19 +769,46 @@ Missing stats (a win rate with zero games played, for example) sort to the
 bottom regardless of ascending/descending order, rather than a `None`/0 value
 looking like the best or worst score on the board.
 
-### Redirecting where bets get posted (`/set wager-channel`)
+### Redirecting where things get posted (`/set wager-channel`, `/set matchup-channel`)
 
-By default every betting message (the combined open+report message, the closed
-notice, and either a reported result or a cancellation) goes to wherever a game,
-or a tournament match, happened to start.
+By default every posting (the matchup graphic, the "betting is open" text,
+the winner-report message with its buttons, the closed notice, a reported
+result or a cancellation) goes to wherever a game, or a tournament match,
+happened to start. Two independent settings redirect different slices of
+that: `/set wager-channel` for the wagering side, `/set matchup-channel`
+for the graphic/report side, and they can point at two different channels.
 
-Setting a wager channel changes that. `_openBetting` (the shared core both
-`RosterActionView`'s Start button and a sequential tournament match call)
-resolves `servers.wager_channel` by name right before anything else, and swaps
-it in for the channel it was handed. Every later step in the cycle
-(`_bettingTimer`, `_handleWinnerReportPick`, `recordResult`,
-`cancelGameHelper`) just keeps using whatever channel it was given, so
-redirecting at that one entry point is enough to redirect the whole thing.
+`_openBetting` (the shared core both `RosterActionView`'s Start button and
+a sequential tournament match call) resolves both `servers.wager_channel`
+and `servers.matchup_channel` by name right before anything else, via the
+shared `_resolveConfiguredChannel` helper, each falling back to the
+channel it was handed if unset or no longer resolvable. It then posts two
+separate messages instead of one: the "betting is open" text (only when
+`/set betting` is on) goes to the wager channel, and the winner-report
+message (Team 1/Team 2/Cancel Game buttons, always posted regardless of
+whether betting's on) goes to the matchup channel. `betting_channel_id`
+tracks only the wager side, read back by `_bettingTimer`'s closed notice
+and `reconcileStaleBettingWindows`. The report message needs no such
+tracking: every later step that touches it (`_handleWinnerReportPick`,
+`recordResult`) already works off `interaction.channel`, which is
+whichever channel the click actually happened in.
+
+`/set matchup-channel` also redirects `_sendMatchupImage` (a casual/ranked
+game's own graphic) and, for tournament matches, `_postReadyCheck`
+(sequential mode's ready-check-plus-graphic message) and `_postMatchReport`
+(simultaneous mode's per-match report-plus-graphic message). Since a
+tournament match's whole later chain (`_resolveTournamentMatch` and
+friends: the match result line, the bracket update, the next match or
+round) is threaded through wherever that match's own ready/report
+interaction came from, redirecting just those two posting points is
+enough to carry the whole match through to the matchup channel too.
+Simultaneous mode's round-wide betting notices
+(`_openConcurrentTournamentBetting`/`_concurrentBettingTimer`) resolve
+`wager_channel` independently, the tournament equivalent of `_openBetting`'s
+own split. `recordResult`'s betting-closed-notice cleanup and
+`_deleteRoundBettingMessages` both resolve the wager channel explicitly
+too, rather than trusting whatever channel they were handed, since that's
+now the matchup channel more often than not.
 
 ### Capping and disabling wagers (`/set max-wager`, `/set betting`)
 
@@ -793,13 +820,11 @@ anything else about the bet itself.
 
 `/set betting` (`servers.betting_enabled`, on by default) turns
 `/wager team`/`/wager against` off outright, without touching games, elo,
-or winner-reporting. The same posted message that opens betting also
-carries the winner-report buttons (`WinnerReportView`), so `_openBetting`
-still posts it either way; with betting disabled it just skips the
-"Betting is open" wording and the countdown timer, posting a report-only
-message instead and never creating a `_bettingTimer` task.
-`reconcileStaleBettingWindows` skips a betting-disabled guild the same
-way, since there's never a timer to resume for one.
+or winner-reporting. `_openBetting` always posts the winner-report message
+either way; with betting disabled it just skips the separate "betting is
+open" message and the countdown timer, never creating a `_bettingTimer`
+task. `reconcileStaleBettingWindows` skips a betting-disabled guild the
+same way, since there's never a timer to resume for one.
 
 ### Admin resets and permissions
 
