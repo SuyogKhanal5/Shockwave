@@ -434,10 +434,6 @@ entry, trying a short list of filename variants per role
 icon set doesn't need renaming to match exactly. A missing icon file just
 degrades to no icon and no extra row width, the same "off until the assets
 exist" shape `TEAM_LOGO_DIR`/`ELO_BADGE_DIR` already use elsewhere.
-`/test-image` (admin/dev only) renders this same graphic against two dummy
-5-player teams with roles on. It's a way to preview role-icon or other
-rendering changes without needing a real 10-person voice channel, and it
-touches no guild state at all.
 
 It then calls `_openBetting`. Betting stays open for a configurable window
 while the bot keeps responding to other commands, so the countdown runs as
@@ -702,8 +698,98 @@ raw LP at that point.
 
 That 1000 is only the global fallback. An admin can move where new players start
 with `/set default-elo`'s `elo` param (`_defaultEloForGuild`), per guild. It only
-affects brand-new players (`ensureEconomyRow`) and `/clear elo`'s reset,
-never anyone's already-tracked rating.
+affects brand-new players (`ensureGameStatsRow`) and `/clear elo`'s reset,
+never anyone's already-tracked rating. Unlike elo itself, `default_elo` isn't
+split per game - every game a server plays starts new players at the same
+configured value.
+
+### Multiple games (`/set game`)
+
+Elo and game-record stats (`game_wins`/`game_losses`/`ranked_wins`/
+`ranked_losses`/`current_win_streak`) are tracked per game, not just per
+player: a `game_stats` table, one row per `(guildId, userId, game)`,
+separate from `economy`, which stays the single shared gold/bet ledger a
+player carries across every game a server plays (balance, bet wins/losses,
+gold wagered/won/lost, the daily-claim cooldown). An elo rating or win
+streak from one game would mean nothing mixed into another's; gold, on
+the other hand, reads fine as one pool regardless of which game it was
+earned in.
+
+`servers.current_game` is the admin-configured "what's next" setting,
+defaulting to `"League"` (the only game this bot tracked before this
+existed, and the one every pre-existing server's history was migrated
+into - see bot.py's one-time `game_stats` backfill, keyed off whether that
+table already existed at startup). `/set game` (`setGameHelper`) updates
+it and registers the name into `guild_games` (one row per `(guildId,
+game)`, seeded with `"League"` for every guild) so it shows up in future
+autocomplete suggestions - typing something not already in that list is
+still accepted outright, `gameAutocomplete` is a convenience, not a
+restriction.
+
+Switching `current_game` only affects the *next* roster formed, not
+whatever's already in progress. Every team-forming path
+(`randomizeTeamHelper`, `rankedTeamHelper`, `captainsHelper`,
+`useTeamsHelper`, `_handleReadyClick` for a sequential tournament match)
+stamps a separate `servers.game` column from `current_game` at the moment
+it forms, the same "capture once, read later" shape `mode`/`is_ranked`
+already use. `_activeGame(guild_id)` (`servers.game`, falling back to
+`current_game` if unset) is what `recordResult` and friends read at
+resolution time, so an admin running `/set game` mid-draft can't
+retroactively change which game's ladder the in-progress game affects.
+`clearTeamsHelper` resets `game` back to `NULL` alongside `team1`/`team2`,
+so a stale value can't leak into whatever forms next.
+
+`computeGameDeltas`'s delta-dict shape didn't need to change at all -
+`applyGameDeltas(guild_id, deltas, game=None, sign=1)` (defaulting to
+`_currentGame` when not given) is what actually splits a delta at apply
+time: `balance`/`wins`/`losses`/`gold_wagered`/`gold_won`/`gold_lost` go to
+`economy` as before, `game_wins`/`game_losses`/`ranked_wins`/
+`ranked_losses`/`elo`/`current_win_streak` go to the resolved game's
+`game_stats` row instead (skipped entirely for a pure bettor with no
+roster delta, so betting on a game never seeds a stats row for it).
+`_checkTierRewardUnlocks`/`_checkAchievements` read from that same
+resolved row, so a tier reward or the veteran/on-fire ladders reflect
+whichever game the result was actually for.
+
+`saveLastResult`'s snapshot carries a `game` key (defaulting to
+`_currentGame` if not given; an older snapshot from before this existed
+reads back as `"League"`, via `getLastResult`'s own `setdefault`), so
+`/set correct-winner`'s reverse-and-reapply cycle
+(`reportCorrectWinnerHelper`/`_invalidateLastResult`) always resolves
+against the SAME game a result was originally for, never whatever
+`current_game` happens to be by the time someone corrects it.
+`/set elo`/`/clear elo` (`adminSetHelper`/`resetEloHelper`) both operate
+on the current game only, not every game a player's ever touched;
+`/clear economy` still wipes every game's `game_stats` rows outright
+(`resetEconomyHelper`), matching its own "wipe everything" scope.
+
+`getLeaderboardEntries`/`_buildStatsEmbed` both scope to `_currentGame`,
+LEFT JOINing `game_stats` onto `economy` (so a player who's only ever bet,
+or only played a different game, still shows up with 0s/defaults rather
+than being excluded outright) rather than requiring a `game_stats` row to
+already exist. `/stats`' embed title and `/leaderboard`'s own title both
+say which game they're for.
+
+Role-based team balancing (Random Roles/Balanced Roles, role icons on the
+matchup graphic, `use_roles`) is League-only - simpler to link it to the
+active game directly (`_gameSupportsRoles(game): return game == "League"`)
+than maintain a separate per-game flag. Team-forming code checks this
+against `_currentGame` (the roster being formed hasn't stamped its own
+`game` yet); anything about an already-formed roster (the buttons,
+`_handleRosterStartClick`'s own matchup image) checks it against
+`_activeGame` instead. `_finalizeRoster` folds this into `roles_eligible`
+(`size_eligible and _gameSupportsRoles(...)`), which gates both whether
+`use_roles` is honored at all and whether the Random Roles/Balanced Roles
+buttons even show up on the message - not just whether they're clickable.
+The button handlers (`_handleRosterRerollClick`/
+`_handleRosterBalanceRolesClick`) still re-check it themselves too, the
+same defense-in-depth the 5v5 size check already had, for a stale message
+whose buttons were already posted before the game changed.
+
+The matchup graphic's headline includes the game name:
+`_matchupLabelForMode(mode, game)` prepends it for a casual/ranked game
+(`"League Ranked Match"`), and `_postReadyCheck`/`_postMatchReport` do the
+same for a tournament match's own round label.
 
 ### Correcting a misreported winner
 
@@ -1791,8 +1877,10 @@ round that never got a row as resolved once play has moved past it.
 
 | Table | Scope | Holds |
 |---|---|---|
-| `servers` | one row per guild | current team rosters, channel names, betting state, `is_ranked`, `wager_channel`, `active_tournament_match_id`, `betting_timer_seconds` (all admin-configurable via `/set`) |
-| `economy` | one row per (guild, player) | balance, elo, bet and game win/loss counts, gold wagered/won/lost |
+| `servers` | one row per guild | current team rosters, channel names, betting state, `is_ranked`, `wager_channel`, `active_tournament_match_id`, `betting_timer_seconds`, `current_game`/`game` (all admin-configurable via `/set`) |
+| `economy` | one row per (guild, player) | balance, bet win/loss counts, gold wagered/won/lost - shared across every game a server plays (see `/set game`) |
+| `game_stats` | one row per (guild, player, game) | elo, game win/loss counts, ranked win/loss counts, current win streak - split from `economy` since these mean nothing mixed across different games |
+| `guild_games` | one row per (guild, game) | every game name a server has ever run `/set game` to, for its autocomplete suggestions; always seeded with `"League"` |
 | `wagers` | active team-game bets (singleton, one per guild/player) | cleared out (paid or refunded) once the game resolves |
 | `tournament_wagers` | active simultaneous-tournament-match bets (one per match/player) | cleared out once that specific match resolves |
 | `duels` | active `/wager against` challenges | one row per challenge, several can be open at once |
