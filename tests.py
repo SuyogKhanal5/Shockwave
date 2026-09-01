@@ -1348,6 +1348,7 @@ class RankedTeamHelperTests(HelperTestCase):
         message = ctx.response.send_message.call_args.args[0]
         self.assertIn("avg elo", message)
         self.assertIn("Press Start", message)
+        self.assertIn("Playing **League**", message)
 
     async def test_uses_the_guilds_configured_team_names(self):
         self.helperObj.update(GUILD_ID, "channel1", "Red")
@@ -1705,6 +1706,24 @@ class ApplyBalancedRolesToRosterTests(HelperTestCase):
         disliked = self.helperObj._dislikedRoleUserIds(GUILD_ID)
         self.assertEqual(disliked, {p.get_id() for p in team1.get_players()})
 
+    # Regression: this used to read economy.elo directly, which is now a
+    # frozen/unused column (see /set game) rather than the live per-game
+    # rating - reading it here would silently balance roles off stale
+    # elo, never updated by a real result again.
+    async def test_reads_elo_from_the_active_games_game_stats_not_economy(self):
+        team1, team2 = self._seed_roster()
+
+        with patch.object(
+            self.helperObj, "getGameStat", wraps=self.helperObj.getGameStat
+        ) as get_game_stat, patch.object(self.helperObj, "getEconomy", wraps=self.helperObj.getEconomy) as get_economy:
+            await self.helperObj._applyBalancedRolesToRoster(GUILD_ID, self.channel, team1, team2)
+
+        elo_calls = [c for c in get_game_stat.call_args_list if c.args[-1] == "elo"]
+        self.assertEqual(len(elo_calls), 10)  # once per rostered player
+        for call in elo_calls:
+            self.assertEqual(call.args[2], "League")  # the active game, not hardcoded
+        self.assertFalse(any(c.args[-1] == "elo" for c in get_economy.call_args_list))
+
 
 class RankedTeamHelperUseRolesTests(HelperTestCase):
     def _members(self, n=10, start_id=850):
@@ -1807,7 +1826,7 @@ class CaptainsHelperTests(HelperTestCase):
         self.assertEqual([p.get_id() for p in team2.get_players()], [302])
         self.assertEqual({p.get_id() for p in players.get_players()}, {303, 304})
         self.assertEqual(self.helperObj.get(GUILD_ID, "mode"), "Captains")
-        ctx.response.send_message.assert_awaited_with("Captains selected!")
+        self.assertIn("Captains selected!", ctx.response.send_message.call_args.args[0])
         # no /set team1/team2 configured for this guild -> generic fallback
         self.assertEqual(team1.get_name(), "Team 1")
         self.assertEqual(team2.get_name(), "Team 2")
@@ -1855,7 +1874,7 @@ class CaptainsHelperTests(HelperTestCase):
         await self.helperObj.captainsHelper(ctx, captain1, captain2)
 
         self.assertEqual(self.helperObj.get(GUILD_ID, "draft_snake"), 0)
-        ctx.response.send_message.assert_awaited_with("Captains selected!")
+        self.assertIn("Captains selected!", ctx.response.send_message.call_args.args[0])
 
     async def test_snake_true_persists_the_flag_and_notes_it_in_the_message(self):
         captain1 = FakeMember("Cap1", id=301)
@@ -5242,6 +5261,7 @@ class UseTeamsHelperTests(HelperTestCase):
         self.assertEqual(team2.get_name(), "Blue")
         ctx.response.send_message.assert_awaited_once()
         self.assertIn("Press Start", ctx.response.send_message.call_args.args[0])
+        self.assertIn("Playing **League**", ctx.response.send_message.call_args.args[0])
 
     async def test_loads_teams_ranked_and_sets_is_ranked(self):
         await self.helperObj.createTeamHelper(self._ctx(901, "Alice"), "Red", 5)
@@ -5310,6 +5330,19 @@ class ReuseTeamsHelperTests(HelperTestCase):
         team1.deserializeTeam(self.helperObj.get(GUILD_ID, "team1"))
         self.assertEqual(team1.get_name(), "Red")
         self.assertEqual([p.get_id() for p in team1.get_players()], [901])
+
+    async def test_keeps_announcing_the_original_game_even_after_current_game_changes(self):
+        await self.helperObj.createTeamHelper(self._ctx(901, "Alice"), "Red", 2)
+        await self.helperObj.createTeamHelper(self._ctx(902, "Bob"), "Blue", 2)
+        await self.helperObj.useTeamsHelper(self._ctx(), "Red", "Blue", False)  # formed under League
+
+        await self.helperObj.setGameHelper(self._ctx(), "Valorant")
+
+        ctx = self._ctx()
+        await self.helperObj.reuseTeamsHelper(ctx)
+
+        text = ctx.response.send_message.call_args.args[0]
+        self.assertIn("Playing **League**", text)
 
     async def test_posts_a_fresh_roster_ready_for_new_reactions(self):
         await self.helperObj.createTeamHelper(self._ctx(901, "Alice"), "Red", 2)
@@ -8592,6 +8625,27 @@ class SetGameHelperTests(HelperTestCase):
         await self.helperObj.setGameHelper(ctx2, "League")
         message = ctx2.response.send_message.call_args.args[0]
         self.assertNotIn("League-only", message)
+
+
+class GameNoteTests(HelperTestCase):
+    def test_defaults_to_league(self):
+        note = self.helperObj._gameNote(GUILD_ID)
+        self.assertIn("League", note)
+        self.assertIn("/set game", note)
+
+    def test_reflects_current_game_when_no_roster_has_formed_yet(self):
+        self.helperObj.update(GUILD_ID, "current_game", "Valorant")
+        note = self.helperObj._gameNote(GUILD_ID)
+        self.assertIn("Valorant", note)
+
+    def test_reflects_the_stamped_roster_game_over_a_since_changed_current_game(self):
+        # servers.game (stamped when a roster forms) wins over
+        # current_game once they diverge - see reuseTeamsHelper, which
+        # deliberately never re-stamps it.
+        self.helperObj.update(GUILD_ID, "game", "Valorant")
+        self.helperObj.update(GUILD_ID, "current_game", "League")
+        note = self.helperObj._gameNote(GUILD_ID)
+        self.assertIn("Valorant", note)
 
 
 class NotifyHelperTests(HelperTestCase):
@@ -17121,12 +17175,28 @@ class MakeTeamsCommandTests(BotModuleTestCase):
         # Moving/betting only happens once the posted roster's own ▶️
         # reaction is clicked (see _finalizeRoster) now.
         finalize_mock.assert_awaited_once()
-        ctx.response.send_message.assert_awaited_once_with("Teams created!")
+        ctx.response.send_message.assert_awaited_once()
+        self.assertIn("Teams created!", ctx.response.send_message.call_args.args[0])
         # Regression: the ready reminder used to be folded into the very
         # first response, which posts *before* the team embeds and is
         # easy to miss. It's the last message sent now, after the rosters.
         ctx.channel.send.assert_awaited_once()
         self.assertIn("Press Start", ctx.channel.send.call_args.args[0])
+
+    async def test_random_split_announces_the_active_game(self):
+        guild_id = 908
+        await self._insert_guild_row(guild_id)
+        await self.bot.helperObj.setGameHelper(self._ctx(guild_id=guild_id), "Valorant")
+        ctx = self._ctx_in_voice(guild_id=guild_id)
+
+        with patch.object(
+            self.bot.helperObj, "printEmbed", AsyncMock(return_value=(FakeMessage(), FakeMessage()))
+        ), patch.object(self.bot.helperObj, "_finalizeRoster", AsyncMock()):
+            await self._command("make-teams random").callback(ctx, use_roles=False)
+
+        message = ctx.response.send_message.call_args.args[0]
+        self.assertIn("Playing **Valorant**", message)
+        self.assertIn("/set game", message)
 
     async def test_rejects_when_not_in_a_voice_channel(self):
         ctx = self._ctx()  # ctx.user.voice is None by default

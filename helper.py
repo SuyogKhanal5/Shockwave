@@ -2713,8 +2713,9 @@ class helpers():
             message += f"{not_setup_note} "
         message += (
             "Press Start on the roster below when you're ready to move everyone and open betting, or "
-            "Start (no move) to open betting without moving anyone."
+            "Start (no move) to open betting without moving anyone.\n"
         )
+        message += self._gameNote(guild_id)
         await ctx.response.send_message(message)
         intro_message = await ctx.original_response()
         team1_message, team2_message, _ = await self.printEmbed(ctx, team1, team2, useRoles=role_split is not None)
@@ -3174,12 +3175,13 @@ class helpers():
     # exactly 5 players.
     async def _applyBalancedRolesToRoster(self, guild_id, channel, team1, team2):
         default_elo = self._defaultEloForGuild(guild_id)
+        game = self._activeGame(guild_id)
 
         def _withElo(players):
             entries = []
             for player in players:
-                self.ensureEconomyRow(guild_id, player.get_id(), player.get_name())
-                elo = self.getEconomy(guild_id, player.get_id(), "elo")
+                self.ensureGameStatsRow(guild_id, player.get_id(), player.get_name(), game)
+                elo = self.getGameStat(guild_id, player.get_id(), game, "elo")
                 entries.append((player, elo if elo is not None else default_elo))
             return entries
 
@@ -3472,6 +3474,7 @@ class helpers():
                 " Snake draft: pick order reverses every 2 picks (1,2,2,1,1,2,...) instead of "
                 "alternating every pick."
             )
+        message += f"\n{self._gameNote(ctx.guild.id)}"
         await ctx.response.send_message(message)
         intro_message = await ctx.original_response()
         # _applyDraftPick appends the picker/pool messages onto this once
@@ -3872,6 +3875,18 @@ class helpers():
     # before this column existed.
     def _activeGame(self, guild_id):
         return self.get(guild_id, "game") or self._currentGame(guild_id)
+
+    # Appended to every team-forming command's own confirmation message
+    # (randomizeTeamHelper/rankedTeamHelper/captainsHelper/
+    # useTeamsHelper/reuseTeamsHelper), so it's always visible which game
+    # a just-formed roster's elo/stats will actually count toward, and how
+    # to change it, without needing to check /set game separately. Reads
+    # _activeGame rather than _currentGame: every caller but
+    # reuseTeamsHelper has already stamped servers.game by the time this
+    # runs, and reuseTeamsHelper deliberately never re-stamps it (a reused
+    # roster keeps whatever game it originally formed under).
+    def _gameNote(self, guild_id):
+        return f"\U0001f3ae Playing **{self._activeGame(guild_id)}**. Use `/set game` to switch."
 
     # Only "League" gets role-based team balancing/role icons - simpler to
     # link this to the game itself than maintain a separate per-game flag.
@@ -8931,7 +8946,8 @@ class helpers():
             f"**{discord.utils.escape_markdown(team1.get_name())}** vs "
             f"**{discord.utils.escape_markdown(team2.get_name())}** loaded{ranked_note}. "
             "Press Start on the roster below when you're ready to move everyone and open betting, or "
-            "Start (no move) to open betting without moving anyone."
+            "Start (no move) to open betting without moving anyone.\n"
+            f"{self._gameNote(guild_id)}"
         )
         intro_message = await ctx.original_response()
         team1_message, team2_message, _ = await self.printEmbed(ctx, team1, team2)
@@ -8989,7 +9005,8 @@ class helpers():
             f"Reusing **{discord.utils.escape_markdown(team1.get_name())}** vs "
             f"**{discord.utils.escape_markdown(team2.get_name())}**{ranked_note}. "
             "Press Start on the roster below when you're ready to move everyone and open betting, or "
-            "Start (no move) to open betting without moving anyone."
+            "Start (no move) to open betting without moving anyone.\n"
+            f"{self._gameNote(guild_id)}"
         )
         intro_message = await ctx.original_response()
         team1_message, team2_message, _ = await self.printEmbed(ctx, team1, team2, useRoles=use_roles)

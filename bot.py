@@ -1605,7 +1605,7 @@ async def makeTeamsRandom(ctx, use_roles: bool = False, ranked: bool = False):
     team2Obj = Team()
     team2Obj.deserializeTeam(team2)
 
-    await ctx.response.send_message("Teams created!")
+    await ctx.response.send_message(f"Teams created!\n{helperObj._gameNote(ctx.guild.id)}")
     intro_messages = [await ctx.original_response()]
 
     # Role-based team balancing is League-only (see /set game). Gated

@@ -736,6 +736,18 @@ already use. `_activeGame(guild_id)` (`servers.game`, falling back to
 `current_game` if unset) is what `recordResult` and friends read at
 resolution time, so an admin running `/set game` mid-draft can't
 retroactively change which game's ladder the in-progress game affects.
+Every team-forming command's own confirmation message ends with a line
+from `_gameNote(guild_id)` (`"🎮 Playing **{game}**. Use /set game to
+switch."`), so it's always visible which game a just-formed roster's
+elo/stats count toward without checking `/set game` separately.
+`randomizeTeamHelper`/`rankedTeamHelper`/`captainsHelper`/
+`useTeamsHelper` read `_activeGame` after they've already stamped
+`servers.game` for the roster being formed; `reuseTeamsHelper`, which
+deliberately never re-stamps it, reads whatever the original roster
+was actually formed under instead - so repeating a game after
+`/set game` has since moved on still correctly announces the game it's
+really for.
+
 `clearTeamsHelper` resets `game` back to `NULL` alongside `team1`/`team2`,
 so a stale value can't leak into whatever forms next.
 
