@@ -73,7 +73,8 @@ SERVERS_SCHEMA = (
     "roster_use_roles DEFAULT 0, default_elo, betting_opened_at, disliked_role_user_ids, "
     "draft_pick_page DEFAULT 0, draft_players_message_id, draft_snake DEFAULT 0, "
     "betting_closed_message_id, make_teams_message_ids, matchup_message_id, roster_starting DEFAULT 0, "
-    "roster_permissions_strict DEFAULT 0, max_wager, betting_enabled DEFAULT 1, matchup_channel)"
+    "roster_permissions_strict DEFAULT 0, max_wager, betting_enabled DEFAULT 1, matchup_channel, "
+    "current_game DEFAULT 'League', game)"
 )
 ECONOMY_SCHEMA = (
     "CREATE TABLE economy(guildId, userId, username, balance, wins, losses, "
@@ -81,6 +82,11 @@ ECONOMY_SCHEMA = (
     "ranked_wins DEFAULT 0, ranked_losses DEFAULT 0, current_win_streak DEFAULT 0, "
     "PRIMARY KEY(guildId, userId))"
 )
+GAME_STATS_SCHEMA = (
+    "CREATE TABLE game_stats(guildId, userId, game, username, elo, game_wins, game_losses, "
+    "ranked_wins, ranked_losses, current_win_streak, PRIMARY KEY(guildId, userId, game))"
+)
+GUILD_GAMES_SCHEMA = "CREATE TABLE guild_games(guildId, game, PRIMARY KEY(guildId, game))"
 WAGERS_SCHEMA = (
     "CREATE TABLE wagers(guildId, userId, username, team, amount, "
     "PRIMARY KEY(guildId, userId))"
@@ -152,6 +158,8 @@ def make_db():
     cursor = db.cursor()
     cursor.execute(SERVERS_SCHEMA)
     cursor.execute(ECONOMY_SCHEMA)
+    cursor.execute(GAME_STATS_SCHEMA)
+    cursor.execute(GUILD_GAMES_SCHEMA)
     cursor.execute(WAGERS_SCHEMA)
     cursor.execute(LAST_RESULT_SCHEMA)
     cursor.execute(DUELS_SCHEMA)
@@ -177,9 +185,11 @@ def insert_guild_row(cursor, db, guild_id=GUILD_ID, name="Test Guild"):
     cursor.execute(
         "INSERT INTO servers VALUES(?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, "
         "NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'NONE', NULL, NULL, 0, NULL, NULL, ?, "
-        "NULL, NULL, NULL, 0, NULL, NULL, NULL, 0, NULL, 0, NULL, NULL, NULL, 0, 0, NULL, 1, NULL)",
+        "NULL, NULL, NULL, 0, NULL, NULL, NULL, 0, NULL, 0, NULL, NULL, NULL, 0, 0, NULL, 1, NULL, "
+        "'League', NULL)",
         (guild_id, name, helper_module.BETTING_DURATION_SECONDS),
     )
+    cursor.execute("INSERT OR IGNORE INTO guild_games(guildId, game) VALUES(?, 'League')", (guild_id,))
     db.commit()
 
 
@@ -695,6 +705,25 @@ class FinalizeRosterTests(HelperTestCase):
         self.assertIn(view.startNoMove, view.children)
         self.assertEqual(self.helperObj.get(GUILD_ID, "roster_use_roles"), 1)
 
+    async def test_omits_role_buttons_for_a_five_a_side_non_league_roster(self):
+        # Role-based team balancing is League-only (see /set game); a
+        # non-League 5v5 roster shouldn't even offer the buttons, not
+        # just reject clicking them.
+        self.helperObj.update(GUILD_ID, "game", "Valorant")
+        channel = FakeChannel("game-chat")
+        team1_message = FakeMessage()
+        team2_message = FakeMessage()
+        team2_message.channel = channel
+        team1 = self._team("Team 1", 5)
+        team2 = self._team("Team 2", 5, start_id=400)
+
+        await self.helperObj._finalizeRoster(GUILD_ID, team1_message, team2_message, team1, team2, True)
+
+        view = team2_message.edit.call_args.kwargs["view"]
+        self.assertNotIn(view.reroll, view.children)
+        self.assertNotIn(view.balanceRoles, view.children)
+        self.assertEqual(self.helperObj.get(GUILD_ID, "roster_use_roles"), 0)
+
     # A plain (non-ranked) 5v5 split never had use_roles=True to begin
     # with, but the role buttons must still show so it can be turned on
     # after the fact; the embeds themselves stay roleless until one of
@@ -955,6 +984,15 @@ class RosterActionViewTests(HelperTestCase):
 
         self.assertTrue(matchup.call_args.kwargs.get("use_roles"))
 
+    async def test_matchup_image_label_includes_the_active_game(self):
+        self.helperObj.update(GUILD_ID, "current_game", "Valorant")
+        with patch.object(self.helperObj, "_openBetting", AsyncMock()), \
+             patch.object(self.helperObj, "_sendMatchupImage", AsyncMock()) as matchup:
+            await self.helperObj._handleRosterStartClick(self._click(), move=True)
+
+        label = matchup.call_args.args[3]
+        self.assertTrue(label.startswith("Valorant "))
+
     async def test_no_roles_used_passes_false_to_the_matchup_image(self):
         self.helperObj.update(GUILD_ID, "roster_use_roles", 0)
         with patch.object(self.helperObj, "_openBetting", AsyncMock()), \
@@ -1184,6 +1222,36 @@ class RosterActionViewTests(HelperTestCase):
         balance.assert_not_awaited()
         self.assertTrue(click.response.send_message.call_args.kwargs.get("ephemeral"))
 
+    # Defense in depth: _finalizeRoster already omits these buttons
+    # entirely for a non-League roster (see FinalizeRosterTests), but a
+    # stale/cached button should still be rejected rather than silently
+    # turning roles on for a game that doesn't support them.
+    async def test_reroll_rejected_for_a_non_league_roster(self):
+        self.helperObj.update(GUILD_ID, "game", "Valorant")
+        with patch.object(self.helperObj, "_rerollRoster", AsyncMock()) as reroll:
+            click = self._click()
+            await self.helperObj._handleRosterRerollClick(click)
+        reroll.assert_not_awaited()
+        self.assertIn("League-only", click.response.send_message.call_args.args[0])
+        self.assertTrue(click.response.send_message.call_args.kwargs.get("ephemeral"))
+
+    async def test_balance_roles_rejected_for_a_non_league_roster(self):
+        self.helperObj.update(GUILD_ID, "game", "Valorant")
+        team1 = Team()
+        for i in range(5):
+            team1.add_player(Player(300 + i, f"A{i}"))
+        team2 = Team()
+        for i in range(5):
+            team2.add_player(Player(400 + i, f"B{i}"))
+        self.helperObj.update(GUILD_ID, "team1", team1.serializeTeam())
+        self.helperObj.update(GUILD_ID, "team2", team2.serializeTeam())
+
+        with patch.object(self.helperObj, "_applyBalancedRolesToRoster", AsyncMock()) as balance:
+            click = self._click()
+            await self.helperObj._handleRosterBalanceRolesClick(click)
+        balance.assert_not_awaited()
+        self.assertIn("League-only", click.response.send_message.call_args.args[0])
+
 
 class RandomizeTeamHelperTests(HelperTestCase):
     async def test_splits_members_evenly(self):
@@ -1280,6 +1348,7 @@ class RankedTeamHelperTests(HelperTestCase):
         message = ctx.response.send_message.call_args.args[0]
         self.assertIn("avg elo", message)
         self.assertIn("Press Start", message)
+        self.assertIn("Playing **League**", message)
 
     async def test_uses_the_guilds_configured_team_names(self):
         self.helperObj.update(GUILD_ID, "channel1", "Red")
@@ -1339,8 +1408,8 @@ class RankedTeamHelperTests(HelperTestCase):
 
         await self.helperObj.rankedTeamHelper(ctx)
 
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 401, "elo"), helper_module.DEFAULT_ELO)
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 402, "elo"), helper_module.DEFAULT_ELO)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 401, "League", "elo"), helper_module.DEFAULT_ELO)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 402, "League", "elo"), helper_module.DEFAULT_ELO)
 
     async def test_use_roles_persists_who_got_a_disliked_role(self):
         members = [FakeMember(f"P{i}", id=800 + i) for i in range(10)]
@@ -1637,6 +1706,24 @@ class ApplyBalancedRolesToRosterTests(HelperTestCase):
         disliked = self.helperObj._dislikedRoleUserIds(GUILD_ID)
         self.assertEqual(disliked, {p.get_id() for p in team1.get_players()})
 
+    # Regression: this used to read economy.elo directly, which is now a
+    # frozen/unused column (see /set game) rather than the live per-game
+    # rating - reading it here would silently balance roles off stale
+    # elo, never updated by a real result again.
+    async def test_reads_elo_from_the_active_games_game_stats_not_economy(self):
+        team1, team2 = self._seed_roster()
+
+        with patch.object(
+            self.helperObj, "getGameStat", wraps=self.helperObj.getGameStat
+        ) as get_game_stat, patch.object(self.helperObj, "getEconomy", wraps=self.helperObj.getEconomy) as get_economy:
+            await self.helperObj._applyBalancedRolesToRoster(GUILD_ID, self.channel, team1, team2)
+
+        elo_calls = [c for c in get_game_stat.call_args_list if c.args[-1] == "elo"]
+        self.assertEqual(len(elo_calls), 10)  # once per rostered player
+        for call in elo_calls:
+            self.assertEqual(call.args[2], "League")  # the active game, not hardcoded
+        self.assertFalse(any(c.args[-1] == "elo" for c in get_economy.call_args_list))
+
 
 class RankedTeamHelperUseRolesTests(HelperTestCase):
     def _members(self, n=10, start_id=850):
@@ -1676,6 +1763,21 @@ class RankedTeamHelperUseRolesTests(HelperTestCase):
 
         message = ctx.response.send_message.call_args.args[0]
         self.assertNotIn("no roles were assigned", message)
+
+    async def test_use_roles_is_off_for_a_non_league_game(self):
+        self.helperObj.update(GUILD_ID, "current_game", "Valorant")
+        members = self._members()
+        ctx = self._ctx(members)
+
+        await self.helperObj.rankedTeamHelper(ctx, use_roles=True)
+
+        team1 = self.deserialize_team("team1")
+        team2 = self.deserialize_team("team2")
+        self.assertEqual(len(team1.get_players()), 5)
+        self.assertEqual(len(team2.get_players()), 5)
+        self.assertEqual(self.helperObj.get(GUILD_ID, "roster_use_roles"), 0)
+        message = ctx.response.send_message.call_args.args[0]
+        self.assertIn("League-only", message)
 
     async def test_use_roles_falls_back_without_exactly_ten_players(self):
         members = self._members(n=6)
@@ -1724,7 +1826,7 @@ class CaptainsHelperTests(HelperTestCase):
         self.assertEqual([p.get_id() for p in team2.get_players()], [302])
         self.assertEqual({p.get_id() for p in players.get_players()}, {303, 304})
         self.assertEqual(self.helperObj.get(GUILD_ID, "mode"), "Captains")
-        ctx.response.send_message.assert_awaited_with("Captains selected!")
+        self.assertIn("Captains selected!", ctx.response.send_message.call_args.args[0])
         # no /set team1/team2 configured for this guild -> generic fallback
         self.assertEqual(team1.get_name(), "Team 1")
         self.assertEqual(team2.get_name(), "Team 2")
@@ -1772,7 +1874,7 @@ class CaptainsHelperTests(HelperTestCase):
         await self.helperObj.captainsHelper(ctx, captain1, captain2)
 
         self.assertEqual(self.helperObj.get(GUILD_ID, "draft_snake"), 0)
-        ctx.response.send_message.assert_awaited_with("Captains selected!")
+        self.assertIn("Captains selected!", ctx.response.send_message.call_args.args[0])
 
     async def test_snake_true_persists_the_flag_and_notes_it_in_the_message(self):
         captain1 = FakeMember("Cap1", id=301)
@@ -2237,42 +2339,6 @@ class CaptainsDraftPickTests(HelperTestCase):
         pick_ctx.response.edit_message.assert_not_awaited()
 
 
-class TestImageHelperTests(HelperTestCase):
-    def _ctx(self, user=None):
-        user = user if user is not None else FakeMember("Tester", id=901)
-        return FakeInteraction(self.guild, user)
-
-    async def test_posts_a_rendered_matchup_image(self):
-        ctx = self._ctx()
-
-        await self.helperObj.testImageHelper(ctx)
-
-        ctx.response.send_message.assert_awaited_once()
-        file = ctx.response.send_message.call_args.kwargs["file"]
-        self.assertIsInstance(file, discord.File)
-
-    async def test_renders_with_roles_showing(self):
-        ctx = self._ctx()
-
-        with patch.object(
-            self.helperObj, "_renderMatchupImage", wraps=self.helperObj._renderMatchupImage
-        ) as render:
-            await self.helperObj.testImageHelper(ctx)
-
-        self.assertTrue(render.call_args.args[-1])  # use_roles positional arg
-
-    async def test_does_not_touch_any_guild_state(self):
-        # Purely a render preview. Nothing here is a real roster, so
-        # unlike every real team-formation path this must not write team1/
-        # team2 (or anything else) to the guild's own row.
-        ctx = self._ctx()
-
-        await self.helperObj.testImageHelper(ctx)
-
-        self.assertIsNone(self.helperObj.get(GUILD_ID, "team1"))
-        self.assertIsNone(self.helperObj.get(GUILD_ID, "team2"))
-
-
 class ClearTeamsHelperTests(HelperTestCase):
     async def test_resets_fields_to_defaults(self):
         self.helperObj.update(GUILD_ID, "team1", "stale-data")
@@ -2397,12 +2463,18 @@ class ResetEloHelperTests(HelperTestCase):
     async def test_resets_elo_only_for_the_guild_leaving_other_stats_alone(self):
         self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
         self.helperObj.ensureEconomyRow(GUILD_ID, 902, "Bob")
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 901, "Alice", "League")
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 902, "Bob", "League")
         self.cursor.execute(
-            "UPDATE economy SET elo=1400, balance=500, wins=3 WHERE guildId=? AND userId=?",
+            "UPDATE economy SET balance=500, wins=3 WHERE guildId=? AND userId=?",
             (GUILD_ID, 901),
         )
         self.cursor.execute(
-            "UPDATE economy SET elo=700 WHERE guildId=? AND userId=?",
+            "UPDATE game_stats SET elo=1400 WHERE guildId=? AND userId=? AND game='League'",
+            (GUILD_ID, 901),
+        )
+        self.cursor.execute(
+            "UPDATE game_stats SET elo=700 WHERE guildId=? AND userId=? AND game='League'",
             (GUILD_ID, 902),
         )
         self.db.commit()
@@ -2410,33 +2482,35 @@ class ResetEloHelperTests(HelperTestCase):
         other_guild_id = GUILD_ID + 1
         insert_guild_row(self.cursor, self.db, guild_id=other_guild_id)
         self.helperObj.ensureEconomyRow(other_guild_id, 901, "Alice")
+        self.helperObj.ensureGameStatsRow(other_guild_id, 901, "Alice", "League")
         self.cursor.execute(
-            "UPDATE economy SET elo=1600 WHERE guildId=? AND userId=?",
+            "UPDATE game_stats SET elo=1600 WHERE guildId=? AND userId=? AND game='League'",
             (other_guild_id, 901),
         )
         self.db.commit()
 
         self.helperObj.resetEloHelper(GUILD_ID)
 
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "elo"), helper_module.DEFAULT_ELO)
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 902, "elo"), helper_module.DEFAULT_ELO)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 901, "League", "elo"), helper_module.DEFAULT_ELO)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 902, "League", "elo"), helper_module.DEFAULT_ELO)
         # balance/wins are untouched; only elo resets
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "balance"), 500)
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "wins"), 3)
         # other guild's elo is untouched
-        self.assertEqual(self.helperObj.getEconomy(other_guild_id, 901, "elo"), 1600)
+        self.assertEqual(self.helperObj.getGameStat(other_guild_id, 901, "League", "elo"), 1600)
 
     async def test_resets_to_the_guilds_configured_default_elo(self):
         self.helperObj.update(GUILD_ID, "default_elo", 1200)
         self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 901, "Alice", "League")
         self.cursor.execute(
-            "UPDATE economy SET elo=1400 WHERE guildId=? AND userId=?", (GUILD_ID, 901)
+            "UPDATE game_stats SET elo=1400 WHERE guildId=? AND userId=? AND game='League'", (GUILD_ID, 901)
         )
         self.db.commit()
 
         self.helperObj.resetEloHelper(GUILD_ID)
 
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "elo"), 1200)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 901, "League", "elo"), 1200)
 
 
 class DefaultEloForGuildTests(HelperTestCase):
@@ -2447,10 +2521,10 @@ class DefaultEloForGuildTests(HelperTestCase):
         self.helperObj.update(GUILD_ID, "default_elo", 1200)
         self.assertEqual(self.helperObj._defaultEloForGuild(GUILD_ID), 1200)
 
-    def test_ensure_economy_row_uses_the_configured_default(self):
+    def test_ensure_game_stats_row_uses_the_configured_default(self):
         self.helperObj.update(GUILD_ID, "default_elo", 1200)
-        self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "elo"), 1200)
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 901, "Alice", "League")
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 901, "League", "elo"), 1200)
 
     def test_get_elo_lookup_falls_back_to_the_configured_default_for_unranked_players(self):
         self.helperObj.update(GUILD_ID, "default_elo", 1200)
@@ -2464,7 +2538,10 @@ class ConfirmDestructiveClearHelperTests(HelperTestCase):
 
     async def test_posts_a_followup_confirmation_not_an_immediate_reset(self):
         self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
-        self.cursor.execute("UPDATE economy SET elo=1400 WHERE guildId=? AND userId=?", (GUILD_ID, 901))
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 901, "Alice", "League")
+        self.cursor.execute(
+            "UPDATE game_stats SET elo=1400 WHERE guildId=? AND userId=? AND game='League'", (GUILD_ID, 901)
+        )
         self.db.commit()
         ctx = self._ctx()
         posted = FakeMessage(id=7001)
@@ -2478,11 +2555,14 @@ class ConfirmDestructiveClearHelperTests(HelperTestCase):
         self.assertIsInstance(view, helper_module.ConfirmResetView)
         self.assertIs(view.message, posted)
         # not actually reset yet; only queued behind confirmation
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "elo"), 1400)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 901, "League", "elo"), 1400)
 
     async def test_confirming_applies_the_reset(self):
         self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
-        self.cursor.execute("UPDATE economy SET elo=1400 WHERE guildId=? AND userId=?", (GUILD_ID, 901))
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 901, "Alice", "League")
+        self.cursor.execute(
+            "UPDATE game_stats SET elo=1400 WHERE guildId=? AND userId=? AND game='League'", (GUILD_ID, 901)
+        )
         self.db.commit()
         ctx = self._ctx()
         await self.helperObj.confirmDestructiveClearHelper(ctx, False, True, False, False, None)
@@ -2492,13 +2572,16 @@ class ConfirmDestructiveClearHelperTests(HelperTestCase):
         await view.confirm.callback(click)
 
         self.assertEqual(
-            self.helperObj.getEconomy(GUILD_ID, 901, "elo"), self.helperObj._defaultEloForGuild(GUILD_ID)
+            self.helperObj.getGameStat(GUILD_ID, 901, "League", "elo"), self.helperObj._defaultEloForGuild(GUILD_ID)
         )
         click.response.edit_message.assert_awaited_once()
 
     async def test_cancelling_leaves_data_untouched(self):
         self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
-        self.cursor.execute("UPDATE economy SET elo=1400 WHERE guildId=? AND userId=?", (GUILD_ID, 901))
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 901, "Alice", "League")
+        self.cursor.execute(
+            "UPDATE game_stats SET elo=1400 WHERE guildId=? AND userId=? AND game='League'", (GUILD_ID, 901)
+        )
         self.db.commit()
         ctx = self._ctx()
         await self.helperObj.confirmDestructiveClearHelper(ctx, False, True, False, False, None)
@@ -2507,7 +2590,7 @@ class ConfirmDestructiveClearHelperTests(HelperTestCase):
         click = self._ctx()
         await view.cancel.callback(click)
 
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "elo"), 1400)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 901, "League", "elo"), 1400)
         click.response.edit_message.assert_awaited_once()
 
     async def test_confirmation_rejects_a_click_from_someone_other_than_whoever_ran_clear(self):
@@ -2516,7 +2599,10 @@ class ConfirmDestructiveClearHelperTests(HelperTestCase):
         # anyone but the /clear invoker must be rejected here, not just
         # left to the callback to somehow notice.
         self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
-        self.cursor.execute("UPDATE economy SET elo=1400 WHERE guildId=? AND userId=?", (GUILD_ID, 901))
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 901, "Alice", "League")
+        self.cursor.execute(
+            "UPDATE game_stats SET elo=1400 WHERE guildId=? AND userId=? AND game='League'", (GUILD_ID, 901)
+        )
         self.db.commit()
         ctx = self._ctx()
         await self.helperObj.confirmDestructiveClearHelper(ctx, False, True, False, False, None)
@@ -2528,11 +2614,14 @@ class ConfirmDestructiveClearHelperTests(HelperTestCase):
         self.assertFalse(allowed)
         stranger.response.send_message.assert_awaited_once()
         self.assertTrue(stranger.response.send_message.call_args.kwargs.get("ephemeral"))
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "elo"), 1400)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 901, "League", "elo"), 1400)
 
     async def test_timeout_marks_the_prompt_expired(self):
         self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
-        self.cursor.execute("UPDATE economy SET elo=1400 WHERE guildId=? AND userId=?", (GUILD_ID, 901))
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 901, "Alice", "League")
+        self.cursor.execute(
+            "UPDATE game_stats SET elo=1400 WHERE guildId=? AND userId=? AND game='League'", (GUILD_ID, 901)
+        )
         self.db.commit()
         ctx = self._ctx()
         posted = FakeMessage(id=7002)
@@ -2543,7 +2632,7 @@ class ConfirmDestructiveClearHelperTests(HelperTestCase):
 
         await view.on_timeout()
 
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "elo"), 1400)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 901, "League", "elo"), 1400)
         posted.edit.assert_awaited_once()
         self.assertIn("expired", posted.edit.call_args.kwargs["content"])
         self.assertTrue(view.confirm.disabled)
@@ -5172,6 +5261,7 @@ class UseTeamsHelperTests(HelperTestCase):
         self.assertEqual(team2.get_name(), "Blue")
         ctx.response.send_message.assert_awaited_once()
         self.assertIn("Press Start", ctx.response.send_message.call_args.args[0])
+        self.assertIn("Playing **League**", ctx.response.send_message.call_args.args[0])
 
     async def test_loads_teams_ranked_and_sets_is_ranked(self):
         await self.helperObj.createTeamHelper(self._ctx(901, "Alice"), "Red", 5)
@@ -5240,6 +5330,19 @@ class ReuseTeamsHelperTests(HelperTestCase):
         team1.deserializeTeam(self.helperObj.get(GUILD_ID, "team1"))
         self.assertEqual(team1.get_name(), "Red")
         self.assertEqual([p.get_id() for p in team1.get_players()], [901])
+
+    async def test_keeps_announcing_the_original_game_even_after_current_game_changes(self):
+        await self.helperObj.createTeamHelper(self._ctx(901, "Alice"), "Red", 2)
+        await self.helperObj.createTeamHelper(self._ctx(902, "Bob"), "Blue", 2)
+        await self.helperObj.useTeamsHelper(self._ctx(), "Red", "Blue", False)  # formed under League
+
+        await self.helperObj.setGameHelper(self._ctx(), "Valorant")
+
+        ctx = self._ctx()
+        await self.helperObj.reuseTeamsHelper(ctx)
+
+        text = ctx.response.send_message.call_args.args[0]
+        self.assertIn("Playing **League**", text)
 
     async def test_posts_a_fresh_roster_ready_for_new_reactions(self):
         await self.helperObj.createTeamHelper(self._ctx(901, "Alice"), "Red", 2)
@@ -5672,6 +5775,15 @@ class BracketRoundsAndLabelTests(HelperTestCase):
 
     def test_node_label_is_tbd_for_an_undecided_later_round(self):
         self.assertEqual(self.helperObj._bracketNodeLabel(BracketNode(), round_index=1), "TBD")
+
+
+class MatchupLabelForModeTests(HelperTestCase):
+    def test_prepends_the_given_game_name(self):
+        self.assertEqual(self.helperObj._matchupLabelForMode("Ranked", "League"), "League Ranked Match")
+        self.assertEqual(self.helperObj._matchupLabelForMode("Normal", "Valorant"), "Valorant Casual Match")
+
+    def test_unknown_mode_falls_back_to_plain_match(self):
+        self.assertEqual(self.helperObj._matchupLabelForMode("Something Else", "League"), "League Match")
 
 
 class RenderBracketTextTests(HelperTestCase):
@@ -8291,7 +8403,7 @@ class AdminSetHelperTests(HelperTestCase):
         ctx = self._ctx()
         await self._set(ctx, member=target, elo=1500)
 
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 555, "elo"), 1500)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 555, "League", "elo"), 1500)
         message = ctx.response.send_message.call_args.args[0]
         self.assertIn("1500", message)
         self.assertIn(target.mention, message)
@@ -8300,17 +8412,20 @@ class AdminSetHelperTests(HelperTestCase):
         target = FakeMember("NeverPlayed", id=556)
         ctx = self._ctx()
         await self._set(ctx, member=target, elo=800)
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 556, "elo"), 800)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 556, "League", "elo"), 800)
 
     async def test_setting_elo_overwrites_an_existing_value(self):
         target = FakeMember("Target", id=555)
         self.helperObj.ensureEconomyRow(GUILD_ID, 555, "Target")
-        self.cursor.execute("UPDATE economy SET elo=1200 WHERE guildId=? AND userId=?", (GUILD_ID, 555))
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 555, "Target", "League")
+        self.cursor.execute(
+            "UPDATE game_stats SET elo=1200 WHERE guildId=? AND userId=? AND game='League'", (GUILD_ID, 555)
+        )
         self.db.commit()
 
         ctx = self._ctx()
         await self._set(ctx, member=target, elo=300)
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 555, "elo"), 300)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 555, "League", "elo"), 300)
 
     async def test_setting_a_qualifying_elo_credits_the_tier_reward(self):
         target = FakeMember("Target", id=555)
@@ -8331,16 +8446,16 @@ class AdminSetHelperTests(HelperTestCase):
         self.assertIn("1200", message)
 
     async def test_default_elo_does_not_change_existing_players(self):
-        self.helperObj.ensureEconomyRow(GUILD_ID, 555, "Target")
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 555, "Target", "League")
         ctx = self._ctx()
         await self._set(ctx, default_elo=1200)
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 555, "elo"), helper_module.DEFAULT_ELO)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 555, "League", "elo"), helper_module.DEFAULT_ELO)
 
     async def test_default_elo_applies_to_brand_new_players(self):
         ctx = self._ctx()
         await self._set(ctx, default_elo=1200)
-        self.helperObj.ensureEconomyRow(GUILD_ID, 556, "NewPlayer")
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 556, "elo"), 1200)
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 556, "NewPlayer", "League")
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 556, "League", "elo"), 1200)
 
     async def test_applies_every_field_together_in_one_call(self):
         target = FakeMember("Target", id=555)
@@ -8355,7 +8470,7 @@ class AdminSetHelperTests(HelperTestCase):
         self.assertEqual(self.helperObj.get(GUILD_ID, "team_size"), 4)
         self.assertEqual(self.helperObj.get(GUILD_ID, "betting_timer_seconds"), 30)
         self.assertEqual(self.helperObj.get(GUILD_ID, "wager_channel"), "bets")
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 555, "elo"), 1500)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 555, "League", "elo"), 1500)
         self.assertEqual(self.helperObj.get(GUILD_ID, "default_elo"), 1200)
         ctx.response.send_message.assert_awaited_once()
 
@@ -8459,6 +8574,78 @@ class MatchupChannelHelperTests(HelperTestCase):
 
         text_channels = [c for c in self.guild.channels if c.kind == "text"]
         self.assertEqual(len(text_channels), 1)
+
+
+class SetGameHelperTests(HelperTestCase):
+    def _ctx(self):
+        return FakeInteraction(self.guild, FakeMember("Caller"))
+
+    async def test_switching_to_a_new_game_updates_current_game(self):
+        ctx = self._ctx()
+        await self.helperObj.setGameHelper(ctx, "Valorant")
+        self.assertEqual(self.helperObj._currentGame(GUILD_ID), "Valorant")
+        message = ctx.response.send_message.call_args.args[0]
+        self.assertIn("Valorant", message)
+
+    async def test_switching_to_a_new_game_registers_it_as_known(self):
+        ctx = self._ctx()
+        await self.helperObj.setGameHelper(ctx, "Valorant")
+        self.assertIn("Valorant", self.helperObj.listKnownGames(GUILD_ID))
+        # League, the default, is still known too.
+        self.assertIn("League", self.helperObj.listKnownGames(GUILD_ID))
+
+    async def test_switching_back_to_an_already_known_game_does_not_duplicate_it(self):
+        ctx = self._ctx()
+        await self.helperObj.setGameHelper(ctx, "Valorant")
+        await self.helperObj.setGameHelper(ctx, "League")
+        await self.helperObj.setGameHelper(ctx, "Valorant")
+        self.assertEqual(self.helperObj.listKnownGames(GUILD_ID).count("Valorant"), 1)
+
+    async def test_rejects_a_blank_game_name(self):
+        ctx = self._ctx()
+        await self.helperObj.setGameHelper(ctx, "   ")
+        ctx.response.send_message.assert_awaited_once_with("Give a game name.", ephemeral=True)
+        self.assertEqual(self.helperObj._currentGame(GUILD_ID), "League")
+
+    async def test_strips_surrounding_whitespace(self):
+        ctx = self._ctx()
+        await self.helperObj.setGameHelper(ctx, "  Valorant  ")
+        self.assertEqual(self.helperObj._currentGame(GUILD_ID), "Valorant")
+
+    async def test_switching_to_a_non_league_game_notes_roles_are_off(self):
+        ctx = self._ctx()
+        await self.helperObj.setGameHelper(ctx, "Valorant")
+        message = ctx.response.send_message.call_args.args[0]
+        self.assertIn("League-only", message)
+
+    async def test_switching_to_league_does_not_mention_roles(self):
+        ctx = self._ctx()
+        await self.helperObj.setGameHelper(ctx, "Valorant")
+        ctx2 = self._ctx()
+        await self.helperObj.setGameHelper(ctx2, "League")
+        message = ctx2.response.send_message.call_args.args[0]
+        self.assertNotIn("League-only", message)
+
+
+class GameNoteTests(HelperTestCase):
+    def test_defaults_to_league(self):
+        note = self.helperObj._gameNote(GUILD_ID)
+        self.assertIn("League", note)
+        self.assertIn("/set game", note)
+
+    def test_reflects_current_game_when_no_roster_has_formed_yet(self):
+        self.helperObj.update(GUILD_ID, "current_game", "Valorant")
+        note = self.helperObj._gameNote(GUILD_ID)
+        self.assertIn("Valorant", note)
+
+    def test_reflects_the_stamped_roster_game_over_a_since_changed_current_game(self):
+        # servers.game (stamped when a roster forms) wins over
+        # current_game once they diverge - see reuseTeamsHelper, which
+        # deliberately never re-stamps it.
+        self.helperObj.update(GUILD_ID, "game", "Valorant")
+        self.helperObj.update(GUILD_ID, "current_game", "League")
+        note = self.helperObj._gameNote(GUILD_ID)
+        self.assertIn("Valorant", note)
 
 
 class NotifyHelperTests(HelperTestCase):
@@ -8598,8 +8785,8 @@ class CancelGameHelperTests(HelperTestCase):
         self.assertEqual(self.cursor.fetchone()[0], 0)
 
         # rostered players never touched at all, no economy row even exists
-        self.assertIsNone(self.helperObj.getEconomy(GUILD_ID, 701, "elo"))
-        self.assertIsNone(self.helperObj.getEconomy(GUILD_ID, 702, "elo"))
+        self.assertIsNone(self.helperObj.getGameStat(GUILD_ID, 701, "League", "elo"))
+        self.assertIsNone(self.helperObj.getGameStat(GUILD_ID, 702, "League", "elo"))
 
     async def test_no_original_channel_still_cancels_without_a_move(self):
         # A sequential tournament match deliberately blanks original_channel
@@ -8922,6 +9109,45 @@ class WagerHelperTests(HelperTestCase):
 
 
 class RecordResultTests(HelperTestCase):
+    async def test_elo_and_game_record_are_isolated_per_game(self):
+        # See /set game: switching games shouldn't mix one game's elo/
+        # record into another's.
+        team1 = Team(); team1.name = "Team 1"
+        team1.add_player(Player(701, "P1"))
+        team2 = Team(); team2.name = "Team 2"
+        team2.add_player(Player(702, "P2"))
+        self.helperObj.update(GUILD_ID, "team1", team1.serializeTeam())
+        self.helperObj.update(GUILD_ID, "team2", team2.serializeTeam())
+        self.helperObj.update(GUILD_ID, "is_ranked", 1)
+        self.helperObj.update(GUILD_ID, "game", "League")
+
+        channel = FakeChannel("game-chat")
+        await self.helperObj.recordResult(GUILD_ID, 1, channel)  # P1's team wins under League
+
+        league_elo = self.helperObj.getGameStat(GUILD_ID, 701, "League", "elo")
+        self.assertGreater(league_elo, helper_module.DEFAULT_ELO)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 701, "League", "game_wins"), 1)
+
+        # A new game re-forms, this time for Valorant.
+        ctx = FakeInteraction(self.guild, FakeMember("Admin"))
+        await self.helperObj.setGameHelper(ctx, "Valorant")
+        self.helperObj.update(GUILD_ID, "team1", team1.serializeTeam())
+        self.helperObj.update(GUILD_ID, "team2", team2.serializeTeam())
+        self.helperObj.update(GUILD_ID, "is_ranked", 1)
+        self.helperObj.update(GUILD_ID, "game", "Valorant")
+
+        await self.helperObj.recordResult(GUILD_ID, 2, channel)  # P1's team loses under Valorant
+
+        # League's own numbers, from the earlier game, are untouched.
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 701, "League", "elo"), league_elo)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 701, "League", "game_wins"), 1)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 701, "League", "game_losses"), 0)
+
+        # Valorant has its own independent, fresh record.
+        self.assertLess(self.helperObj.getGameStat(GUILD_ID, 701, "Valorant", "elo"), helper_module.DEFAULT_ELO)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 701, "Valorant", "game_wins"), 0)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 701, "Valorant", "game_losses"), 1)
+
     def _place_bet(self, user_id, name, team, amount, starting_balance=1000):
         self.helperObj.ensureEconomyRow(GUILD_ID, user_id, name)
         self.cursor.execute(
@@ -9080,12 +9306,12 @@ class RecordResultTests(HelperTestCase):
         await self.helperObj.recordResult(GUILD_ID, 1, channel)
 
         # equal starting elo (1000 each) -> a 50/50 upset, K=32 -> +/-16
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 701, "game_wins"), 1)
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 701, "game_losses"), 0)
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 701, "elo"), 1016)
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 702, "game_wins"), 0)
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 702, "game_losses"), 1)
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 702, "elo"), 984)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 701, "League", "game_wins"), 1)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 701, "League", "game_losses"), 0)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 701, "League", "elo"), 1016)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 702, "League", "game_wins"), 0)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 702, "League", "game_losses"), 1)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 702, "League", "elo"), 984)
 
         # P1's first-ever win also earns the "First Blood" achievement,
         # which posts its own announcement. This checks every message sent
@@ -9113,8 +9339,8 @@ class RecordResultTests(HelperTestCase):
         # disliked role and won, so ROLE_BALANCE_DISLIKED_ROLE_WIN_ELO_MULTIPLIER
         # applies on top of that.
         boosted = round(16 * helper_module.ROLE_BALANCE_DISLIKED_ROLE_WIN_ELO_MULTIPLIER)
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 701, "elo"), 1000 + boosted)
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 702, "elo"), 984)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 701, "League", "elo"), 1000 + boosted)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 702, "League", "elo"), 984)
 
         messages = [c.args[0] for c in channel.send.call_args_list]
         self.assertTrue(any("Disliked-role win bonus: P1" in m for m in messages))
@@ -9132,7 +9358,7 @@ class RecordResultTests(HelperTestCase):
         channel = FakeChannel("game-chat")
         await self.helperObj.recordResult(GUILD_ID, 2, channel)  # P1's team loses
 
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 701, "elo"), 984)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 701, "League", "elo"), 984)
         messages = [c.args[0] for c in channel.send.call_args_list]
         self.assertFalse(any("Disliked-role win bonus" in m for m in messages))
 
@@ -9146,18 +9372,20 @@ class RecordResultTests(HelperTestCase):
         self.helperObj.update(GUILD_ID, "is_ranked", 1)
         self.helperObj.ensureEconomyRow(GUILD_ID, 701, "Underdog")
         self.helperObj.ensureEconomyRow(GUILD_ID, 702, "Favorite")
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 701, "Underdog", "League")
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 702, "Favorite", "League")
         self.cursor.execute(
-            "UPDATE economy SET elo=800 WHERE guildId=? AND userId=?", (GUILD_ID, 701)
+            "UPDATE game_stats SET elo=800 WHERE guildId=? AND userId=? AND game='League'", (GUILD_ID, 701)
         )
         self.cursor.execute(
-            "UPDATE economy SET elo=1200 WHERE guildId=? AND userId=?", (GUILD_ID, 702)
+            "UPDATE game_stats SET elo=1200 WHERE guildId=? AND userId=? AND game='League'", (GUILD_ID, 702)
         )
         self.db.commit()
 
         channel = FakeChannel("game-chat")
         await self.helperObj.recordResult(GUILD_ID, 1, channel)  # the 800-elo side wins
 
-        underdog_gain = self.helperObj.getEconomy(GUILD_ID, 701, "elo") - 800
+        underdog_gain = self.helperObj.getGameStat(GUILD_ID, 701, "League", "elo") - 800
         self.assertGreater(underdog_gain, 16)  # more than the equal-elo baseline gain
 
     async def test_no_roster_no_elo_line_in_message(self):
@@ -9183,16 +9411,16 @@ class RecordResultTests(HelperTestCase):
         channel = FakeChannel("game-chat")
         await self.helperObj.recordResult(GUILD_ID, 1, channel)
 
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 701, "elo"), helper_module.DEFAULT_ELO)
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 702, "elo"), helper_module.DEFAULT_ELO)
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 701, "game_wins"), 1)
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 702, "game_losses"), 1)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 701, "League", "elo"), helper_module.DEFAULT_ELO)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 702, "League", "elo"), helper_module.DEFAULT_ELO)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 701, "League", "game_wins"), 1)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 702, "League", "game_losses"), 1)
         self.assertNotIn("Elo:", channel.send.call_args.args[0])
         # a casual game bumps the combined game_wins/game_losses total but
         # never the ranked-only subset, see getLeaderboardEntries's
         # casual = game_wins - ranked_wins derivation.
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 701, "ranked_wins"), 0)
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 702, "ranked_losses"), 0)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 701, "League", "ranked_wins"), 0)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 702, "League", "ranked_losses"), 0)
 
     async def test_ranked_game_bumps_both_the_combined_and_ranked_only_record(self):
         team1 = Team(); team1.name = "Team 1"
@@ -9206,10 +9434,10 @@ class RecordResultTests(HelperTestCase):
         channel = FakeChannel("game-chat")
         await self.helperObj.recordResult(GUILD_ID, 1, channel)
 
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 701, "game_wins"), 1)
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 701, "ranked_wins"), 1)
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 702, "game_losses"), 1)
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 702, "ranked_losses"), 1)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 701, "League", "game_wins"), 1)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 701, "League", "ranked_wins"), 1)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 702, "League", "game_losses"), 1)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 702, "League", "ranked_losses"), 1)
 
     async def test_rostered_players_get_win_or_loss_gold_accordingly(self):
         team1 = Team(); team1.name = "Team 1"
@@ -9542,20 +9770,32 @@ class ComputeGameDeltasTests(HelperTestCase):
 
         for user_id, name in [(901, "Alice"), (902, "Bob"), (701, "P1"), (702, "P2")]:
             self.helperObj.ensureEconomyRow(GUILD_ID, user_id, name)
+        for user_id, name in [(701, "P1"), (702, "P2")]:
+            self.helperObj.ensureGameStatsRow(GUILD_ID, user_id, name, "League")
         self.cursor.execute("UPDATE economy SET balance=1000 WHERE guildId=? AND userId=?", (GUILD_ID, 901))
         self.cursor.execute("UPDATE economy SET balance=1000 WHERE guildId=? AND userId=?", (GUILD_ID, 902))
-        self.cursor.execute("UPDATE economy SET elo=1050 WHERE guildId=? AND userId=?", (GUILD_ID, 701))
-        self.cursor.execute("UPDATE economy SET elo=950 WHERE guildId=? AND userId=?", (GUILD_ID, 702))
+        self.cursor.execute(
+            "UPDATE game_stats SET elo=1050 WHERE guildId=? AND userId=? AND game='League'", (GUILD_ID, 701)
+        )
+        self.cursor.execute(
+            "UPDATE game_stats SET elo=950 WHERE guildId=? AND userId=? AND game='League'", (GUILD_ID, 702)
+        )
         self.db.commit()
 
         def snapshot():
             self.cursor.execute(
-                "SELECT userId, balance, wins, losses, gold_wagered, gold_won, gold_lost, "
-                "game_wins, game_losses, ranked_wins, ranked_losses, elo FROM economy "
-                "WHERE guildId=? ORDER BY userId",
+                "SELECT userId, balance, wins, losses, gold_wagered, gold_won, gold_lost "
+                "FROM economy WHERE guildId=? ORDER BY userId",
                 (GUILD_ID,),
             )
-            return self.cursor.fetchall()
+            economy_rows = self.cursor.fetchall()
+            self.cursor.execute(
+                "SELECT userId, game_wins, game_losses, ranked_wins, ranked_losses, elo "
+                "FROM game_stats WHERE guildId=? AND game='League' ORDER BY userId",
+                (GUILD_ID,),
+            )
+            game_rows = self.cursor.fetchall()
+            return economy_rows, game_rows
 
         before = snapshot()
 
@@ -9570,8 +9810,9 @@ class ComputeGameDeltasTests(HelperTestCase):
 
     def test_applying_deltas_that_cross_into_diamond_unlocks_the_reward(self):
         self.helperObj.ensureEconomyRow(GUILD_ID, 701, "P1")
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 701, "P1", "League")
         self.cursor.execute(
-            "UPDATE economy SET elo=? WHERE guildId=? AND userId=?",
+            "UPDATE game_stats SET elo=? WHERE guildId=? AND userId=? AND game='League'",
             (helper_module.ELO_TIER_THRESHOLDS["Diamond"] - 10, GUILD_ID, 701)
         )
         self.db.commit()
@@ -9593,8 +9834,9 @@ class ComputeGameDeltasTests(HelperTestCase):
         # against the corrected winner that follows calls back in with
         # sign=1, which is what actually re-checks properly.
         self.helperObj.ensureEconomyRow(GUILD_ID, 701, "P1")
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 701, "P1", "League")
         self.cursor.execute(
-            "UPDATE economy SET elo=? WHERE guildId=? AND userId=?",
+            "UPDATE game_stats SET elo=? WHERE guildId=? AND userId=? AND game='League'",
             (helper_module.ELO_TIER_THRESHOLDS["Diamond"] + 50, GUILD_ID, 701)
         )
         self.db.commit()
@@ -9779,6 +10021,34 @@ class SaveGetLastResultTests(HelperTestCase):
         self.assertEqual(loaded["team1_name"], "Red")
         self.assertEqual(loaded["team2_name"], "Blue")
 
+    def test_round_trips_the_given_game(self):
+        self.helperObj.saveLastResult(
+            GUILD_ID, winning_team=1, wagers=[], team1_roster=[], team2_roster=[], deltas={}, game="Valorant",
+        )
+        loaded = self.helperObj.getLastResult(GUILD_ID)
+        self.assertEqual(loaded["game"], "Valorant")
+
+    def test_defaults_to_the_servers_current_game_when_not_given(self):
+        self.helperObj.update(GUILD_ID, "current_game", "Valorant")
+        self.helperObj.saveLastResult(
+            GUILD_ID, winning_team=1, wagers=[], team1_roster=[], team2_roster=[], deltas={},
+        )
+        loaded = self.helperObj.getLastResult(GUILD_ID)
+        self.assertEqual(loaded["game"], "Valorant")
+
+    def test_an_older_snapshot_without_game_defaults_to_league(self):
+        # Forward-compat: a snapshot saved before /set game existed has
+        # no "game" key in its stored JSON at all.
+        self.cursor.execute(
+            "INSERT OR REPLACE INTO last_result(guildId, data) VALUES(?, ?)",
+            (GUILD_ID, helper_module.json.dumps({
+                "winning_team": 1, "wagers": [], "team1_roster": [], "team2_roster": [], "deltas": {},
+            })),
+        )
+        self.db.commit()
+        loaded = self.helperObj.getLastResult(GUILD_ID)
+        self.assertEqual(loaded["game"], "League")
+
     def test_returns_none_when_nothing_recorded(self):
         self.assertIsNone(self.helperObj.getLastResult(GUILD_ID))
 
@@ -9870,7 +10140,7 @@ class ReportCorrectWinnerHelperTests(HelperTestCase):
 
         channel = FakeChannel("game-chat")
         await self.helperObj.recordResult(GUILD_ID, 2, channel)  # misreported: P1's team "loses"
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 701, "elo"), 984)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 701, "League", "elo"), 984)
 
         ctx = FakeInteraction(self.guild, FakeMember("Admin"))
         await self.helperObj.reportCorrectWinnerHelper(ctx, 1)  # actually won
@@ -9880,7 +10150,7 @@ class ReportCorrectWinnerHelperTests(HelperTestCase):
         # snapshot rather than losing track of who was on a disliked role
         # once team1/team2 may have already moved on to a new roster.
         boosted = round(16 * helper_module.ROLE_BALANCE_DISLIKED_ROLE_WIN_ELO_MULTIPLIER)
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 701, "elo"), 1000 + boosted)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 701, "League", "elo"), 1000 + boosted)
         # Not necessarily the last message: P1's first-ever recorded win
         # also earns the "First Blood" achievement, announced separately
         # right after (see _announceAchievements). This scans every
@@ -9906,12 +10176,12 @@ class ReportCorrectWinnerHelperTests(HelperTestCase):
 
         # teams started at equal elo, so correcting the winner should land
         # on the exact mirror image of the original (wrong) result
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 701, "elo"), 984)
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 701, "game_wins"), 0)
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 701, "game_losses"), 1)
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 702, "elo"), 1016)
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 702, "game_wins"), 1)
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 702, "game_losses"), 0)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 701, "League", "elo"), 984)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 701, "League", "game_wins"), 0)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 701, "League", "game_losses"), 1)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 702, "League", "elo"), 1016)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 702, "League", "game_wins"), 1)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 702, "League", "game_losses"), 0)
 
     async def test_invalidate_rejects_when_team_also_given(self):
         ctx = FakeInteraction(self.guild, FakeMember("Admin"))
@@ -9963,7 +10233,7 @@ class ReportCorrectWinnerHelperTests(HelperTestCase):
         await self.helperObj.recordResult(GUILD_ID, 1, channel)
 
         # sanity: something actually happened before invalidating
-        self.assertNotEqual(self.helperObj.getEconomy(GUILD_ID, 701, "elo"), 1000)
+        self.assertNotEqual(self.helperObj.getGameStat(GUILD_ID, 701, "League", "elo"), 1000)
         self.assertNotEqual(self.helperObj.getEconomy(GUILD_ID, 901, "balance"), 1000)
 
         ctx = FakeInteraction(self.guild, FakeMember("Admin"))
@@ -9977,11 +10247,11 @@ class ReportCorrectWinnerHelperTests(HelperTestCase):
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 902, "losses"), 0)
 
         # rostered players' elo/game record/win-loss gold all undone
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 701, "elo"), 1000)
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 701, "game_wins"), 0)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 701, "League", "elo"), 1000)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 701, "League", "game_wins"), 0)
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 701, "balance"), 0)
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 702, "elo"), 1000)
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 702, "game_losses"), 0)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 702, "League", "elo"), 1000)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 702, "League", "game_losses"), 0)
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 702, "balance"), 0)
 
         ctx.response.send_message.assert_awaited_once()
@@ -10011,11 +10281,15 @@ class StatsHelperTests(HelperTestCase):
 
     async def test_reports_populated_stats(self):
         self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 901, "Alice", "League")
         self.cursor.execute(
             "UPDATE economy SET balance=500, wins=2, losses=1, gold_wagered=300, "
-            "gold_won=150, gold_lost=50, game_wins=7, game_losses=3, "
-            "ranked_wins=4, ranked_losses=1, elo=1123 "
-            "WHERE guildId=? AND userId=?",
+            "gold_won=150, gold_lost=50 WHERE guildId=? AND userId=?",
+            (GUILD_ID, 901),
+        )
+        self.cursor.execute(
+            "UPDATE game_stats SET game_wins=7, game_losses=3, ranked_wins=4, ranked_losses=1, elo=1123 "
+            "WHERE guildId=? AND userId=? AND game='League'",
             (GUILD_ID, 901),
         )
         self.db.commit()
@@ -10101,8 +10375,9 @@ class StatsHelperTests(HelperTestCase):
     async def test_looks_up_another_members_stats(self):
         other = FakeMember("Bob", id=902)
         self.helperObj.ensureEconomyRow(GUILD_ID, 902, "Bob")
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 902, "Bob", "League")
         self.cursor.execute(
-            "UPDATE economy SET elo=1200 WHERE guildId=? AND userId=?", (GUILD_ID, 902)
+            "UPDATE game_stats SET elo=1200 WHERE guildId=? AND userId=? AND game='League'", (GUILD_ID, 902)
         )
         self.db.commit()
 
@@ -10179,8 +10454,9 @@ class StatsHelperTests(HelperTestCase):
         # result passing through applyGameDeltas) still gets credited
         # the next time anything looks at their stats, not never.
         self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 901, "Alice", "League")
         self.cursor.execute(
-            "UPDATE economy SET elo=? WHERE guildId=? AND userId=?",
+            "UPDATE game_stats SET elo=? WHERE guildId=? AND userId=? AND game='League'",
             (helper_module.ELO_TIER_THRESHOLDS["Master"], GUILD_ID, 901)
         )
         self.db.commit()
@@ -10534,7 +10810,8 @@ class CountShopPurchasesTests(HelperTestCase):
 class CheckAchievementsTests(HelperTestCase):
     def test_first_win_unlocks_first_blood(self):
         self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
-        self.cursor.execute("UPDATE economy SET game_wins=1 WHERE guildId=? AND userId=?", (GUILD_ID, 901))
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 901, "Alice", "League")
+        self.cursor.execute("UPDATE game_stats SET game_wins=1 WHERE guildId=? AND userId=? AND game='League'", (GUILD_ID, 901))
         self.db.commit()
 
         newly = self.helperObj._checkAchievements(GUILD_ID, 901)
@@ -10542,15 +10819,16 @@ class CheckAchievementsTests(HelperTestCase):
 
     def test_veteran_requires_the_configured_win_count(self):
         self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 901, "Alice", "League")
         self.cursor.execute(
-            "UPDATE economy SET game_wins=? WHERE guildId=? AND userId=?",
+            "UPDATE game_stats SET game_wins=? WHERE guildId=? AND userId=? AND game='League'",
             (helper_module.CARD_ACHIEVEMENT_VETERAN_WINS - 1, GUILD_ID, 901)
         )
         self.db.commit()
         self.assertNotIn("veteran", self.helperObj._checkAchievements(GUILD_ID, 901))
 
         self.cursor.execute(
-            "UPDATE economy SET game_wins=? WHERE guildId=? AND userId=?",
+            "UPDATE game_stats SET game_wins=? WHERE guildId=? AND userId=? AND game='League'",
             (helper_module.CARD_ACHIEVEMENT_VETERAN_WINS, GUILD_ID, 901)
         )
         self.db.commit()
@@ -10558,8 +10836,9 @@ class CheckAchievementsTests(HelperTestCase):
 
     def test_on_fire_requires_the_configured_streak(self):
         self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 901, "Alice", "League")
         self.cursor.execute(
-            "UPDATE economy SET current_win_streak=? WHERE guildId=? AND userId=?",
+            "UPDATE game_stats SET current_win_streak=? WHERE guildId=? AND userId=? AND game='League'",
             (helper_module.CARD_ACHIEVEMENT_ON_FIRE_STREAK, GUILD_ID, 901)
         )
         self.db.commit()
@@ -10570,10 +10849,12 @@ class CheckAchievementsTests(HelperTestCase):
             ctx = FakeInteraction(self.guild, FakeMember("Alice", id=901))
             await self.helperObj.createTeamHelper(ctx, f"Team{i}", 5)
         self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 901, "Alice", "League")
         self.assertIn("team_player", self.helperObj._checkAchievements(GUILD_ID, 901))
 
     def test_veteran_ladder_unlocks_each_distinct_tier_in_order(self):
         self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 901, "Alice", "League")
         ladder = [
             (helper_module.CARD_ACHIEVEMENT_VETERAN_WINS, "veteran"),
             (helper_module.CARD_ACHIEVEMENT_VETERAN_ELITE_WINS, "veteran_elite"),
@@ -10582,13 +10863,13 @@ class CheckAchievementsTests(HelperTestCase):
         ]
         for threshold, key in ladder:
             self.cursor.execute(
-                "UPDATE economy SET game_wins=? WHERE guildId=? AND userId=?", (threshold - 1, GUILD_ID, 901)
+                "UPDATE game_stats SET game_wins=? WHERE guildId=? AND userId=? AND game='League'", (threshold - 1, GUILD_ID, 901)
             )
             self.db.commit()
             self.assertNotIn(key, self.helperObj._checkAchievements(GUILD_ID, 901))
 
             self.cursor.execute(
-                "UPDATE economy SET game_wins=? WHERE guildId=? AND userId=?", (threshold, GUILD_ID, 901)
+                "UPDATE game_stats SET game_wins=? WHERE guildId=? AND userId=? AND game='League'", (threshold, GUILD_ID, 901)
             )
             self.db.commit()
             self.assertIn(key, self.helperObj._checkAchievements(GUILD_ID, 901))
@@ -10602,8 +10883,9 @@ class CheckAchievementsTests(HelperTestCase):
 
     def test_on_fire_ladder_unlocks_each_distinct_tier(self):
         self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 901, "Alice", "League")
         self.cursor.execute(
-            "UPDATE economy SET current_win_streak=? WHERE guildId=? AND userId=?",
+            "UPDATE game_stats SET current_win_streak=? WHERE guildId=? AND userId=? AND game='League'",
             (helper_module.CARD_ACHIEVEMENT_ON_FIRE_UNTOUCHABLE_STREAK, GUILD_ID, 901)
         )
         self.db.commit()
@@ -10615,8 +10897,9 @@ class CheckAchievementsTests(HelperTestCase):
 
     def test_on_fire_untouchable_requires_its_own_higher_streak(self):
         self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 901, "Alice", "League")
         self.cursor.execute(
-            "UPDATE economy SET current_win_streak=? WHERE guildId=? AND userId=?",
+            "UPDATE game_stats SET current_win_streak=? WHERE guildId=? AND userId=? AND game='League'",
             (helper_module.CARD_ACHIEVEMENT_ON_FIRE_UNSTOPPABLE_STREAK, GUILD_ID, 901)
         )
         self.db.commit()
@@ -10627,15 +10910,16 @@ class CheckAchievementsTests(HelperTestCase):
 
     def test_iron_will_requires_the_configured_loss_count(self):
         self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 901, "Alice", "League")
         self.cursor.execute(
-            "UPDATE economy SET game_losses=? WHERE guildId=? AND userId=?",
+            "UPDATE game_stats SET game_losses=? WHERE guildId=? AND userId=? AND game='League'",
             (helper_module.CARD_ACHIEVEMENT_IRON_WILL_LOSSES - 1, GUILD_ID, 901)
         )
         self.db.commit()
         self.assertNotIn("iron_will", self.helperObj._checkAchievements(GUILD_ID, 901))
 
         self.cursor.execute(
-            "UPDATE economy SET game_losses=? WHERE guildId=? AND userId=?",
+            "UPDATE game_stats SET game_losses=? WHERE guildId=? AND userId=? AND game='League'",
             (helper_module.CARD_ACHIEVEMENT_IRON_WILL_LOSSES, GUILD_ID, 901)
         )
         self.db.commit()
@@ -10643,6 +10927,7 @@ class CheckAchievementsTests(HelperTestCase):
 
     def test_gambler_counts_total_bet_wins_and_losses_together(self):
         self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 901, "Alice", "League")
         half = helper_module.CARD_ACHIEVEMENT_GAMBLER_BETS // 2
         remainder = helper_module.CARD_ACHIEVEMENT_GAMBLER_BETS - half
         self.cursor.execute(
@@ -10669,6 +10954,7 @@ class CheckAchievementsTests(HelperTestCase):
         self.helperObj._saveNewTeam(GUILD_ID, team)
 
         self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 901, "Alice", "League")
         self.assertNotIn("captain", self.helperObj._checkAchievements(GUILD_ID, 901))
 
         team_id, persisted_team = self.helperObj.getTeamRow(GUILD_ID, "NotCaptainTeam")
@@ -10679,7 +10965,8 @@ class CheckAchievementsTests(HelperTestCase):
 
     def test_repeat_calls_do_not_re_unlock_the_same_achievement(self):
         self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
-        self.cursor.execute("UPDATE economy SET game_wins=1 WHERE guildId=? AND userId=?", (GUILD_ID, 901))
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 901, "Alice", "League")
+        self.cursor.execute("UPDATE game_stats SET game_wins=1 WHERE guildId=? AND userId=? AND game='League'", (GUILD_ID, 901))
         self.db.commit()
 
         first = self.helperObj._checkAchievements(GUILD_ID, 901)
@@ -10713,10 +11000,10 @@ class ApplyGameDeltasAchievementTests(HelperTestCase):
     def test_a_win_extends_the_streak_and_a_loss_resets_it(self):
         self.helperObj.applyGameDeltas(GUILD_ID, self._win_deltas(901))
         self.helperObj.applyGameDeltas(GUILD_ID, self._win_deltas(901))
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "current_win_streak"), 2)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 901, "League", "current_win_streak"), 2)
 
         self.helperObj.applyGameDeltas(GUILD_ID, self._loss_deltas(901))
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "current_win_streak"), 0)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 901, "League", "current_win_streak"), 0)
 
     def test_reaching_the_streak_threshold_unlocks_on_fire(self):
         newly_unlocked = []
@@ -10764,14 +11051,14 @@ class ApplyGameDeltasAchievementTests(HelperTestCase):
 
     def test_reversal_never_unlocks_or_touches_the_streak(self):
         self.helperObj.applyGameDeltas(GUILD_ID, self._win_deltas(901))
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "current_win_streak"), 1)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 901, "League", "current_win_streak"), 1)
 
         newly_unlocked = self.helperObj.applyGameDeltas(GUILD_ID, self._win_deltas(901), sign=-1)
         self.assertEqual(newly_unlocked, [])
         # Reversing a win delta subtracts game_wins back to 0, but the
         # streak counter itself is untouched by a reversal. Same
         # reasoning the elo-tier check already skips on sign<0 for.
-        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "current_win_streak"), 1)
+        self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 901, "League", "current_win_streak"), 1)
 
 
 class AnnounceAchievementsTests(HelperTestCase):
@@ -10850,7 +11137,10 @@ class AchievementsHelperTests(HelperTestCase):
 
     async def test_self_heals_already_qualifying_achievements(self):
         self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
-        self.cursor.execute("UPDATE economy SET game_wins=1 WHERE guildId=? AND userId=?", (GUILD_ID, 901))
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 901, "Alice", "League")
+        self.cursor.execute(
+            "UPDATE game_stats SET game_wins=1 WHERE guildId=? AND userId=? AND game='League'", (GUILD_ID, 901)
+        )
         self.db.commit()
 
         ctx = self._ctx()
@@ -13682,19 +13972,31 @@ class LeaderboardHelperTests(HelperTestCase):
         self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
         self.helperObj.ensureEconomyRow(GUILD_ID, 902, "Bob")
         self.helperObj.ensureEconomyRow(GUILD_ID, 903, "Cleo")
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 901, "Alice", "League")
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 902, "Bob", "League")
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 903, "Cleo", "League")
         self.cursor.execute(
-            "UPDATE economy SET elo=1300, balance=500, wins=3, losses=1, "
-            "game_wins=5, game_losses=2, gold_won=300, gold_lost=100, gold_wagered=400 "
-            "WHERE guildId=? AND userId=901", (GUILD_ID,)
+            "UPDATE economy SET balance=500, wins=3, losses=1, "
+            "gold_won=300, gold_lost=100, gold_wagered=400 WHERE guildId=? AND userId=901", (GUILD_ID,)
         )
         self.cursor.execute(
-            "UPDATE economy SET elo=900, balance=1500, wins=1, losses=4, "
-            "game_wins=1, game_losses=6, gold_won=50, gold_lost=200, gold_wagered=250 "
-            "WHERE guildId=? AND userId=902", (GUILD_ID,)
+            "UPDATE game_stats SET elo=1300, game_wins=5, game_losses=2 "
+            "WHERE guildId=? AND userId=901 AND game='League'", (GUILD_ID,)
+        )
+        self.cursor.execute(
+            "UPDATE economy SET balance=1500, wins=1, losses=4, "
+            "gold_won=50, gold_lost=200, gold_wagered=250 WHERE guildId=? AND userId=902", (GUILD_ID,)
+        )
+        self.cursor.execute(
+            "UPDATE game_stats SET elo=900, game_wins=1, game_losses=6 "
+            "WHERE guildId=? AND userId=902 AND game='League'", (GUILD_ID,)
         )
         # Cleo has no bets/games played yet; her win rates should be None.
         self.cursor.execute(
-            "UPDATE economy SET elo=1000, balance=0 WHERE guildId=? AND userId=903", (GUILD_ID,)
+            "UPDATE economy SET balance=0 WHERE guildId=? AND userId=903", (GUILD_ID,)
+        )
+        self.cursor.execute(
+            "UPDATE game_stats SET elo=1000 WHERE guildId=? AND userId=903 AND game='League'", (GUILD_ID,)
         )
         self.db.commit()
 
@@ -13729,9 +14031,10 @@ class LeaderboardHelperTests(HelperTestCase):
 
     def test_get_leaderboard_entries_splits_ranked_from_casual(self):
         self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 901, "Alice", "League")
         self.cursor.execute(
-            "UPDATE economy SET game_wins=5, game_losses=2, ranked_wins=3, ranked_losses=1 "
-            "WHERE guildId=? AND userId=901", (GUILD_ID,)
+            "UPDATE game_stats SET game_wins=5, game_losses=2, ranked_wins=3, ranked_losses=1 "
+            "WHERE guildId=? AND userId=901 AND game='League'", (GUILD_ID,)
         )
         self.db.commit()
 
@@ -13884,13 +14187,15 @@ class LeaderboardCardsModeTests(HelperTestCase):
     def _seed_players(self):
         self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
         self.helperObj.ensureEconomyRow(GUILD_ID, 902, "Bob")
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 901, "Alice", "League")
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 902, "Bob", "League")
         self.cursor.execute(
-            "UPDATE economy SET elo=1300, game_wins=3, game_losses=1 "
-            "WHERE guildId=? AND userId=901", (GUILD_ID,)
+            "UPDATE game_stats SET elo=1300, game_wins=3, game_losses=1 "
+            "WHERE guildId=? AND userId=901 AND game='League'", (GUILD_ID,)
         )
         self.cursor.execute(
-            "UPDATE economy SET elo=900, game_wins=1, game_losses=3 "
-            "WHERE guildId=? AND userId=902", (GUILD_ID,)
+            "UPDATE game_stats SET elo=900, game_wins=1, game_losses=3 "
+            "WHERE guildId=? AND userId=902 AND game='League'", (GUILD_ID,)
         )
         self.db.commit()
 
@@ -13914,7 +14219,7 @@ class LeaderboardCardsModeTests(HelperTestCase):
 
         kwargs = posted.edit.call_args.kwargs
         embed = kwargs["embed"]
-        self.assertEqual(embed.title, "Alice's Stats")  # highest elo, descending
+        self.assertEqual(embed.title, "Alice's Stats - League")  # highest elo, descending
         self.assertIn("Player 1/2", embed.footer.text)
         self.assertIsInstance(kwargs["view"], helper_module.LeaderboardPagingView)
 
@@ -13925,7 +14230,7 @@ class LeaderboardCardsModeTests(HelperTestCase):
         posted = await self._enter_cards_mode(ctx, "elo", "asc", 7102)
 
         embed = posted.edit.call_args.kwargs["embed"]
-        self.assertEqual(embed.title, "Bob's Stats")  # lowest elo, ascending
+        self.assertEqual(embed.title, "Bob's Stats - League")  # lowest elo, ascending
 
     async def test_stores_the_cards_flag_alongside_the_rest_of_the_view_state(self):
         self._seed_players()
@@ -13998,8 +14303,10 @@ class LeaderboardPagingViewCardsModeTests(HelperTestCase):
 
         for user_id, name, elo in ((901, "Alice", 1300), (902, "Bob", 1200), (903, "Charlie", 1100)):
             self.helperObj.ensureEconomyRow(GUILD_ID, user_id, name)
+            self.helperObj.ensureGameStatsRow(GUILD_ID, user_id, name, "League")
             self.cursor.execute(
-                "UPDATE economy SET elo=?, game_wins=1, game_losses=1 WHERE guildId=? AND userId=?",
+                "UPDATE game_stats SET elo=?, game_wins=1, game_losses=1 "
+                "WHERE guildId=? AND userId=? AND game='League'",
                 (elo, GUILD_ID, user_id)
             )
         self.db.commit()
@@ -14053,7 +14360,7 @@ class LeaderboardPagingViewCardsModeTests(HelperTestCase):
 
         self.message.edit.assert_awaited_once()
         new_embed = self.message.edit.call_args.kwargs["embed"]
-        self.assertEqual(new_embed.title, "Alice's Stats")
+        self.assertEqual(new_embed.title, "Alice's Stats - League")
         self.assertIn("Player 1/3", new_embed.footer.text)
         new_view = self.message.edit.call_args.kwargs["view"]
         self.assertIn(new_view.showCard, new_view.children)
@@ -14091,7 +14398,7 @@ class LeaderboardPagingViewCardsModeTests(HelperTestCase):
         await view.next.callback(click)
 
         new_embed = click.response.edit_message.call_args.kwargs["embed"]
-        self.assertEqual(new_embed.title, "Bob's Stats")
+        self.assertEqual(new_embed.title, "Bob's Stats - League")
 
     async def test_ascending_button_re_sorts_and_resets_to_page_zero(self):
         self.cursor.execute("UPDATE leaderboards SET page=1 WHERE messageId=8181")
@@ -14102,7 +14409,7 @@ class LeaderboardPagingViewCardsModeTests(HelperTestCase):
         await view.ascending.callback(click)
 
         new_embed = click.response.edit_message.call_args.kwargs["embed"]
-        self.assertEqual(new_embed.title, "Charlie's Stats")  # lowest elo, now ascending
+        self.assertEqual(new_embed.title, "Charlie's Stats - League")  # lowest elo, now ascending
         self.cursor.execute("SELECT sort_order, page FROM leaderboards WHERE messageId=8181")
         self.assertEqual(self.cursor.fetchone(), ("asc", 0))
 
@@ -14397,8 +14704,10 @@ class LeaderboardPagingViewTests(HelperTestCase):
         for i in range(25):
             user_id = 1000 + i
             self.helperObj.ensureEconomyRow(GUILD_ID, user_id, f"Player{i:02d}")
+            self.helperObj.ensureGameStatsRow(GUILD_ID, user_id, f"Player{i:02d}", "League")
             self.cursor.execute(
-                "UPDATE economy SET elo=?, game_wins=1, game_losses=1 WHERE guildId=? AND userId=?",
+                "UPDATE game_stats SET elo=?, game_wins=1, game_losses=1 "
+                "WHERE guildId=? AND userId=? AND game='League'",
                 (1000 + i, GUILD_ID, user_id)
             )
         self.db.commit()
@@ -14847,7 +15156,7 @@ class CommandRegistrationTests(BotModuleTestCase):
             "leaderboard", "help", "make-teams",
             "clear", "notify",
             "roll", "team", "tournament",
-            "setup", "test-image",
+            "setup",
         }
         self.assertEqual(names, expected)
 
@@ -14879,7 +15188,7 @@ class CommandRegistrationTests(BotModuleTestCase):
             names,
             {
                 "channels", "team-size", "betting-timer", "wager-channel", "elo", "default-elo",
-                "correct-winner", "roster-permissions", "max-wager", "betting", "matchup-channel",
+                "correct-winner", "roster-permissions", "max-wager", "betting", "matchup-channel", "game",
             },
         )
 
@@ -16152,7 +16461,7 @@ class HelpCommandAutocompleteTests(BotModuleTestCase):
 class AdminSetCommandTests(BotModuleTestCase):
     SET_SUBCOMMANDS = [
         "channels", "team-size", "betting-timer", "wager-channel", "elo", "default-elo",
-        "roster-permissions", "max-wager", "betting", "matchup-channel",
+        "roster-permissions", "max-wager", "betting", "matchup-channel", "game",
     ]
 
     def test_every_subcommand_requires_manage_guild_permission(self):
@@ -16276,6 +16585,50 @@ class AdminSetCommandTests(BotModuleTestCase):
         with patch.object(self.bot.helperObj, "setMatchupChannelHelper", mock):
             await self._command("set matchup-channel").callback(ctx, channel="results")
         mock.assert_awaited_once_with(ctx, "results")
+
+    async def test_game_delegates_game_name(self):
+        ctx = self._ctx()
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "setGameHelper", mock):
+            await self._command("set game").callback(ctx, game="Valorant")
+        mock.assert_awaited_once_with(ctx, "Valorant")
+
+    async def test_game_updates_end_to_end(self):
+        guild_id = 903
+        await self._insert_guild_row(guild_id)
+        ctx = self._ctx(guild_id=guild_id)
+
+        await self._command("set game").callback(ctx, game="Valorant")
+
+        self.assertEqual(self.bot.helperObj._currentGame(guild_id), "Valorant")
+        message = ctx.response.send_message.call_args.args[0]
+        self.assertIn("Valorant", message)
+
+
+class GameAutocompleteTests(BotModuleTestCase):
+    async def asyncSetUp(self):
+        await self._insert_guild_row(GUILD_ID)
+
+    async def test_suggests_known_games_matching_the_typed_prefix(self):
+        ctx = self._ctx()
+        await self.bot.helperObj.setGameHelper(ctx, "Valorant")
+
+        choices = await self.bot.gameAutocomplete(ctx, "val")
+
+        self.assertEqual([c.value for c in choices], ["Valorant"])
+
+    async def test_league_is_always_suggested_by_default(self):
+        ctx = self._ctx()
+        choices = await self.bot.gameAutocomplete(ctx, "")
+        self.assertIn("League", [c.value for c in choices])
+
+    async def test_case_insensitive(self):
+        ctx = self._ctx()
+        await self.bot.helperObj.setGameHelper(ctx, "Valorant")
+
+        choices = await self.bot.gameAutocomplete(ctx, "VALO")
+
+        self.assertEqual([c.value for c in choices], ["Valorant"])
 
 
 class RollCommandTests(BotModuleTestCase):
@@ -16493,8 +16846,12 @@ class ClearCommandTests(BotModuleTestCase):
         guild_id = 9035
         await self._insert_guild_row(guild_id)
         self.bot.helperObj.ensureEconomyRow(guild_id, 901, "Alice")
+        self.bot.helperObj.ensureGameStatsRow(guild_id, 901, "Alice", "League")
         self.bot.cursor.execute(
-            "UPDATE economy SET elo=1500, balance=250 WHERE guildId=? AND userId=?", (guild_id, 901)
+            "UPDATE game_stats SET elo=1500 WHERE guildId=? AND userId=? AND game='League'", (guild_id, 901)
+        )
+        self.bot.cursor.execute(
+            "UPDATE economy SET balance=250 WHERE guildId=? AND userId=?", (guild_id, 901)
         )
         self.bot.mainDB.commit()
         ctx = self._ctx(guild_id=guild_id)
@@ -16502,14 +16859,14 @@ class ClearCommandTests(BotModuleTestCase):
         await self._command("clear elo").callback(ctx)
 
         # real per-player elo doesn't change until the reset is confirmed.
-        self.assertEqual(self.bot.helperObj.getEconomy(guild_id, 901, "elo"), 1500)
+        self.assertEqual(self.bot.helperObj.getGameStat(guild_id, 901, "League", "elo"), 1500)
 
         view = ctx.followup.send.call_args.kwargs["view"]
         click = self._ctx(guild_id=guild_id)
         await view.confirm.callback(click)
 
         self.assertEqual(
-            self.bot.helperObj.getEconomy(guild_id, 901, "elo"), helper_module.DEFAULT_ELO
+            self.bot.helperObj.getGameStat(guild_id, 901, "League", "elo"), helper_module.DEFAULT_ELO
         )
         # balance is untouched; clear elo only resets elo
         self.assertEqual(self.bot.helperObj.getEconomy(guild_id, 901, "balance"), 250)
@@ -16518,8 +16875,9 @@ class ClearCommandTests(BotModuleTestCase):
         guild_id = 9036
         await self._insert_guild_row(guild_id)
         self.bot.helperObj.ensureEconomyRow(guild_id, 901, "Alice")
+        self.bot.helperObj.ensureGameStatsRow(guild_id, 901, "Alice", "League")
         self.bot.cursor.execute(
-            "UPDATE economy SET elo=1500 WHERE guildId=? AND userId=?", (guild_id, 901)
+            "UPDATE game_stats SET elo=1500 WHERE guildId=? AND userId=? AND game='League'", (guild_id, 901)
         )
         self.bot.mainDB.commit()
         ctx = self._ctx(guild_id=guild_id)
@@ -16530,7 +16888,7 @@ class ClearCommandTests(BotModuleTestCase):
         click = self._ctx(guild_id=guild_id)
         await view.cancel.callback(click)
 
-        self.assertEqual(self.bot.helperObj.getEconomy(guild_id, 901, "elo"), 1500)
+        self.assertEqual(self.bot.helperObj.getGameStat(guild_id, 901, "League", "elo"), 1500)
         click.response.edit_message.assert_awaited_once_with(
             content="Cancelled. Nothing was reset.", view=view
         )
@@ -16817,12 +17175,28 @@ class MakeTeamsCommandTests(BotModuleTestCase):
         # Moving/betting only happens once the posted roster's own ▶️
         # reaction is clicked (see _finalizeRoster) now.
         finalize_mock.assert_awaited_once()
-        ctx.response.send_message.assert_awaited_once_with("Teams created!")
+        ctx.response.send_message.assert_awaited_once()
+        self.assertIn("Teams created!", ctx.response.send_message.call_args.args[0])
         # Regression: the ready reminder used to be folded into the very
         # first response, which posts *before* the team embeds and is
         # easy to miss. It's the last message sent now, after the rosters.
         ctx.channel.send.assert_awaited_once()
         self.assertIn("Press Start", ctx.channel.send.call_args.args[0])
+
+    async def test_random_split_announces_the_active_game(self):
+        guild_id = 908
+        await self._insert_guild_row(guild_id)
+        await self.bot.helperObj.setGameHelper(self._ctx(guild_id=guild_id), "Valorant")
+        ctx = self._ctx_in_voice(guild_id=guild_id)
+
+        with patch.object(
+            self.bot.helperObj, "printEmbed", AsyncMock(return_value=(FakeMessage(), FakeMessage()))
+        ), patch.object(self.bot.helperObj, "_finalizeRoster", AsyncMock()):
+            await self._command("make-teams random").callback(ctx, use_roles=False)
+
+        message = ctx.response.send_message.call_args.args[0]
+        self.assertIn("Playing **Valorant**", message)
+        self.assertIn("/set game", message)
 
     async def test_rejects_when_not_in_a_voice_channel(self):
         ctx = self._ctx()  # ctx.user.voice is None by default
@@ -17278,46 +17652,6 @@ class SetCorrectWinnerCommandTests(BotModuleTestCase):
 
     async def test_error_handler_reraises_unrelated_errors(self):
         cmd = self._command("set correct-winner")
-        ctx = self._ctx()
-
-        with self.assertRaises(RuntimeError):
-            await cmd.on_error(ctx, RuntimeError("boom"))
-
-
-class TestImageCommandTests(BotModuleTestCase):
-    async def test_delegates(self):
-        ctx = self._ctx()
-        mock = AsyncMock()
-        with patch.object(self.bot.helperObj, "testImageHelper", mock):
-            await self._command("test-image").callback(ctx)
-        mock.assert_awaited_once_with(ctx)
-
-    def test_requires_manage_guild_permission(self):
-        cmd = self._command("test-image")
-        denied = SimpleNamespace(permissions=discord.Permissions.none())
-
-        with self.assertRaises(app_commands.MissingPermissions):
-            for check in cmd.checks:
-                check(denied)
-
-    def test_manage_guild_permission_is_sufficient(self):
-        cmd = self._command("test-image")
-        allowed = SimpleNamespace(permissions=discord.Permissions(manage_guild=True))
-
-        for check in cmd.checks:
-            self.assertTrue(check(allowed))
-
-    async def test_error_handler_gives_a_friendly_denial_message(self):
-        cmd = self._command("test-image")
-        ctx = self._ctx()
-
-        await cmd.on_error(ctx, app_commands.MissingPermissions(["manage_guild"]))
-
-        ctx.response.send_message.assert_awaited_once()
-        self.assertIn("Manage Server", ctx.response.send_message.call_args.args[0])
-
-    async def test_error_handler_reraises_unrelated_errors(self):
-        cmd = self._command("test-image")
         ctx = self._ctx()
 
         with self.assertRaises(RuntimeError):

@@ -199,7 +199,7 @@ if not db_already_existed:
         "default_elo, betting_opened_at, disliked_role_user_ids, draft_pick_page, "
         "draft_players_message_id, draft_snake, betting_closed_message_id, make_teams_message_ids, "
         "matchup_message_id, roster_starting, roster_permissions_strict, max_wager, betting_enabled, "
-        "matchup_channel)"
+        "matchup_channel, current_game, game)"
     )
     mainDB.commit()
 else:
@@ -327,9 +327,24 @@ else:
     # /set wager-channel, which still redirects only the betting-open/
     # closed notices - the two can point at different channels.
     ensure_column("servers", "matchup_channel", "TEXT")
+    # /set game: which game (League, Valorant, any free-text name an admin
+    # types) new rosters get formed for going forward. NULL treated as
+    # "League" everywhere this is read (see _currentGame), so an existing
+    # server that's never touched this still behaves exactly as before.
+    ensure_column("servers", "current_game", "TEXT", "'League'")
+    # The game the CURRENT team1/team2 roster was actually formed for,
+    # stamped alongside `mode`/`is_ranked` by every team-forming path
+    # (randomizeTeamHelper, rankedTeamHelper, captainsHelper,
+    # useTeamsHelper, _handleReadyClick) from current_game at the moment
+    # it forms, and cleared by clearTeamsHelper. Read by recordResult (via
+    # _activeGame) so switching current_game mid-game doesn't retroactively
+    # change which game's elo/stats an already-in-progress game affects -
+    # /set game only ever applies to the NEXT roster formed after it runs.
+    ensure_column("servers", "game", "TEXT")
 
 # Per-member currency: gold balance plus win/loss and wagering stats, one
-# row per (guild, user).
+# row per (guild, user). Shared across every game a server plays - elo and
+# game-record stats are NOT here, see game_stats below.
 cursor.execute(
     "CREATE TABLE IF NOT EXISTS economy("
     "guildId, userId, username, balance, wins, losses, gold_wagered, gold_won, last_daily, "
@@ -354,6 +369,46 @@ ensure_column("economy", "ranked_losses", "INTEGER", "0")
 # its own separate UPDATE (increment on a win, reset to 0 on a loss)
 # instead of folding it into computeGameDeltas' delta dict.
 ensure_column("economy", "current_win_streak", "INTEGER", "0")
+# elo/game_wins/game_losses/ranked_wins/ranked_losses/current_win_streak
+# above are unused now (nothing reads or writes them going forward) - see
+# game_stats below, the per-game replacement. Kept, like result1/result2,
+# only so an older database's schema still matches, and as the one-time
+# migration source right below.
+
+# Elo and game-record stats, one row per (guild, user, game) - see /set
+# game. Split out of `economy` (which stays the single shared gold/bet
+# ledger regardless of which game is current) since an elo rating or win
+# streak from one game means nothing mixed into another's.
+_game_stats_already_existed = cursor.execute(
+    "SELECT name FROM sqlite_master WHERE type='table' AND name='game_stats'"
+).fetchone() is not None
+cursor.execute(
+    "CREATE TABLE IF NOT EXISTS game_stats("
+    "guildId, userId, game, username, elo, game_wins, game_losses, ranked_wins, ranked_losses, "
+    "current_win_streak, PRIMARY KEY(guildId, userId, game))"
+)
+if not _game_stats_already_existed:
+    # One-time backfill: every existing player's economy-side elo/record
+    # becomes their "League" stats, since League was the only game this
+    # bot ever tracked before /set game existed.
+    cursor.execute(
+        "INSERT INTO game_stats(guildId, userId, game, username, elo, game_wins, game_losses, "
+        "ranked_wins, ranked_losses, current_win_streak) "
+        "SELECT guildId, userId, 'League', username, elo, game_wins, game_losses, ranked_wins, "
+        "ranked_losses, current_win_streak FROM economy"
+    )
+    mainDB.commit()
+
+# Which game names /set game's autocomplete offers for a server, beyond
+# typing a brand new one: every game that server has ever set itself to.
+# Seeded with 'League' for every guild below so it's never empty, even for
+# a server that's never run /set game at all.
+cursor.execute(
+    "CREATE TABLE IF NOT EXISTS guild_games(guildId, game, PRIMARY KEY(guildId, game))"
+)
+cursor.execute("INSERT OR IGNORE INTO guild_games(guildId, game) SELECT guildId, 'League' FROM servers")
+mainDB.commit()
+
 # Active bets for the game currently in progress in a guild. Cleared out
 # (paid out or refunded) by the time the game resolves.
 cursor.execute(
@@ -798,9 +853,11 @@ def ensure_guild_row(guild_id, guild_name):
     cursor.execute(
         "INSERT INTO servers VALUES(?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, "
         "NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'NONE', NULL, NULL, 0, NULL, NULL, ?, "
-        "NULL, NULL, NULL, 0, NULL, NULL, NULL, 0, NULL, 0, NULL, NULL, NULL, 0, 0, NULL, 1, NULL)",
+        "NULL, NULL, NULL, 0, NULL, NULL, NULL, 0, NULL, 0, NULL, NULL, NULL, 0, 0, NULL, 1, NULL, "
+        "'League', NULL)",
         (guild_id, guild_name, helper.BETTING_DURATION_SECONDS)
     )
+    cursor.execute("INSERT OR IGNORE INTO guild_games(guildId, game) VALUES(?, 'League')", (guild_id,))
     mainDB.commit()
 
 
@@ -1093,6 +1150,27 @@ async def setMatchupChannel(ctx, channel: str):
 setMatchupChannel.error(_setAdminPermissionError)
 
 
+async def gameAutocomplete(ctx, current: str):
+    current = current.lower()
+    names = [n for n in helperObj.listKnownGames(ctx.guild.id) if current in n.lower()]
+    return [app_commands.Choice(name=n, value=n) for n in names[:25]]
+
+
+@setGroup.command(
+    name="game",
+    description="Admin: set which game this server's next roster tracks elo/stats for"
+)
+@app_commands.describe(
+    game="A saved game from the list, or type a new name to start tracking it"
+)
+@app_commands.autocomplete(game=gameAutocomplete)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def setGame(ctx, game: str):
+    await helperObj.setGameHelper(ctx, game)
+
+setGame.error(_setAdminPermissionError)
+
+
 tree.add_command(setGroup)
 
 
@@ -1340,6 +1418,7 @@ COMMAND_HELP = {
     "set max-wager": "Caps how much gold a single /wager team or /wager against bet can be. Omit amount to remove the cap. Requires the Manage Server permission.",
     "set betting": "Turns /wager team and /wager against on or off for this server. Games, elo, and reporting a winner all still work the same either way; this only gates the wagering layer on top of them. Requires the Manage Server permission.",
     "set matchup-channel": "Redirects every matchup graphic (a game's own, and a tournament match's ready-check/report graphic) and the winner-report message to one specific text channel, no matter where the roster or match actually started. Independent of set wager-channel, which only redirects the betting-open/closed notices; the two can point at different channels. Requires the Manage Server permission.",
+    "set game": "Sets which game this server's next roster tracks elo and stats for. Type a brand new name to start tracking it, or pick a previously-used one from the autocomplete list. Elo, game record, and ranked record are all tracked per game, so switching games doesn't touch another game's numbers. Only affects the next roster formed; whatever's currently in progress keeps resolving under whichever game it actually started as. League is the default, and the only game with role-based team balancing. Requires the Manage Server permission.",
     "clear teams": "Wipes the current teams/draft so you can start a fresh session. Requires the Manage Server permission.",
     "clear channels": "Wipes the current teams/draft, and also forgets the saved team channel names. Requires the Manage Server permission.",
     "clear tournament": "Wipes the current teams/draft, and deletes this server's tournament entirely: bracket, registrations, match history. Can't be undone. Requires the Manage Server permission.",
@@ -1351,7 +1430,6 @@ COMMAND_HELP = {
     "make-teams draft": "Starts a live captain draft. Name two captains, or use_random to pick two automatically; everyone else lands in a pool the captains draft from using the buttons on the posted picker (blue for Team 1's turn, red for Team 2's, plus a Random pick and paging once the pool is too big for one page). Once both teams are set, press Start on the roster to move everyone and open betting, or Start (no move) to open betting without moving anyone. ranked:true tracks elo for the resulting game. snake:true reverses pick order every 2 picks (1,2,2,1,1,2,...) instead of alternating every single pick, so neither captain always drafts right after seeing the other's pick.",
     "make-teams saved": "Loads two persistent teams straight into a casual or ranked game, skipping the random-split-or-draft step. Posts a roster with the same Start/Start (no move) buttons as /make-teams random to start it.",
     "make-teams repeat": "Re-posts the exact same two teams from whichever of /make-teams random, /make-teams draft, or /make-teams saved ran last, instead of drawing a fresh random split or captains draft. Stays ranked if the last game was ranked, casual if it was casual. Cancels an actively in-progress game from those same teams first (refund + move back) if there is one.",
-    "test-image": "Admin/dev tool: renders the matchup graphic (with role icons) against two dummy 5-player teams and posts it, so you can preview image changes without needing a real 10-player roster. Requires the Manage Server permission.",
     "notify": "DMs a one-time invite link to your voice channel, to one member, or to everyone holding a given role. message optionally replaces the default invite text; either way it's signed \"Sent by\" you. You must be sitting in a voice channel yourself to run this.",
     "wager team": "Bets gold on one team winning the current game, or on a specific tournament match if you give a match id. Only while betting is open, one bet per player per game/match.",
     "wager against": "Challenges another player to a heads-up gold wager, separate from team-game betting, no active game required.",
@@ -1527,8 +1605,22 @@ async def makeTeamsRandom(ctx, use_roles: bool = False, ranked: bool = False):
     team2Obj = Team()
     team2Obj.deserializeTeam(team2)
 
-    await ctx.response.send_message("Teams created!")
+    await ctx.response.send_message(f"Teams created!\n{helperObj._gameNote(ctx.guild.id)}")
     intro_messages = [await ctx.original_response()]
+
+    # Role-based team balancing is League-only (see /set game). Gated
+    # here, right after randomizeTeamHelper stamps servers.game for this
+    # roster, rather than up front, since ranked:true's own use_roles
+    # gating lives inside rankedTeamHelper instead - this command has two
+    # genuinely separate formation paths below the shared not_setup_note
+    # check above.
+    game = helperObj._activeGame(ctx.guild.id)
+    if use_roles and not helperObj._gameSupportsRoles(game):
+        intro_messages.append(await ctx.channel.send(
+            f"Role-based team balancing is League-only, so it's off for **{game}**. Showing the "
+            f"roster as normal instead."
+        ))
+        use_roles = False
 
     # Roles (Top/Jungle/Mid/Bottom/Support) only make sense for a 5-player
     # team. makeEmbedString() silently falls back to a plain roster for any
@@ -2116,25 +2208,6 @@ async def makeTeamsRepeat(ctx):
 
 
 tree.add_command(makeTeamsGroup)
-
-
-@tree.command(
-    name="test-image",
-    description="Admin/dev: render the matchup graphic (with roles) against dummy teams to preview image changes"
-)
-@app_commands.checks.has_permissions(manage_guild=True)
-async def testImage(ctx):
-    await helperObj.testImageHelper(ctx)
-
-
-@testImage.error
-async def testImage_error(ctx, error):
-    if isinstance(error, app_commands.MissingPermissions):
-        await ctx.response.send_message(
-            "You need the Manage Server permission to use /test-image."
-        )
-    else:
-        raise error
 
 
 @tree.command(

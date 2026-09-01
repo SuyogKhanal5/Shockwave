@@ -2316,6 +2316,7 @@ class helpers():
         self.update(ctx.guild.id, "team1", serialzedTeam1)
         self.update(ctx.guild.id, "team2", serialzedTeam2)
         self.update(ctx.guild.id, "mode", "Normal")
+        self.update(ctx.guild.id, "game", self._currentGame(ctx.guild.id))
 
     # Splits members into two roughly elo-balanced teams. Each player's elo
     # gets a random +/-ELO_BALANCE_JITTER nudge before sorting, so the
@@ -2636,16 +2637,20 @@ class helpers():
         guild_id = ctx.guild.id
         channel = ctx.user.voice.channel
         default_elo = self._defaultEloForGuild(guild_id)
+        game = self._currentGame(guild_id)
 
         members_with_elo = []
         for member in channel.members:
             self.ensureEconomyRow(guild_id, member.id, member.name)
-            elo = self.getEconomy(guild_id, member.id, "elo")
+            self.ensureGameStatsRow(guild_id, member.id, member.name, game)
+            elo = self.getGameStat(guild_id, member.id, game, "elo")
             members_with_elo.append((member, elo if elo is not None else default_elo))
 
         elo_by_id = {member.id: elo for member, elo in members_with_elo}
         name1, name2 = self._rosterTeamNames(guild_id)
 
+        roles_requested = use_roles
+        use_roles = use_roles and self._gameSupportsRoles(game)
         role_split = self.formRoleBalancedTeams(guild_id, members_with_elo) if use_roles else None
 
         team1 = Team()
@@ -2683,6 +2688,7 @@ class helpers():
         self.update(guild_id, "team2", team2.serializeTeam())
         self.update(guild_id, "mode", "Ranked")
         self.update(guild_id, "is_ranked", 1)
+        self.update(guild_id, "game", game)
 
         team1_avg = self.averageElo(team1_members, elo_by_id, default_elo)
         team2_avg = self.averageElo(team2_members, elo_by_id, default_elo)
@@ -2690,7 +2696,12 @@ class helpers():
         message = (
             f"Ranked teams created! Team 1 avg elo **{team1_avg}**, Team 2 avg elo **{team2_avg}**. "
         )
-        if use_roles and role_split is None:
+        if roles_requested and not self._gameSupportsRoles(game):
+            message += (
+                f"Role-based team balancing is League-only, so it's off for **{game}**. Showing the "
+                f"roster as normal instead. "
+            )
+        elif use_roles and role_split is None:
             message += (
                 "Roles need exactly 10 players (5 a side) to assign, so no roles were assigned this "
                 "time. Showing the roster as normal instead. "
@@ -2702,8 +2713,9 @@ class helpers():
             message += f"{not_setup_note} "
         message += (
             "Press Start on the roster below when you're ready to move everyone and open betting, or "
-            "Start (no move) to open betting without moving anyone."
+            "Start (no move) to open betting without moving anyone.\n"
         )
+        message += self._gameNote(guild_id)
         await ctx.response.send_message(message)
         intro_message = await ctx.original_response()
         team1_message, team2_message, _ = await self.printEmbed(ctx, team1, team2, useRoles=role_split is not None)
@@ -2935,13 +2947,15 @@ class helpers():
         # it normally would.
         if member is not None:
             user_id = member.id
-            self.ensureEconomyRow(guild_id, user_id, member.name)
+            game = self._currentGame(guild_id)
+            self.ensureGameStatsRow(guild_id, user_id, member.name, game)
             self.cursor.execute(
-                "UPDATE economy SET elo=? WHERE guildId=? AND userId=?", (elo, guild_id, user_id)
+                "UPDATE game_stats SET elo=? WHERE guildId=? AND userId=? AND game=?",
+                (elo, guild_id, user_id, game)
             )
             self.db.commit()
             self._checkTierRewardUnlocks(guild_id, user_id, elo)
-            applied.append(f"{member.mention}'s elo to **{elo}**")
+            applied.append(f"{member.mention}'s **{game}** elo to **{elo}**")
 
         # What a brand new player's elo starts at in this guild, see
         # _defaultEloForGuild. Doesn't touch anyone's existing rating. Use
@@ -3062,7 +3076,12 @@ class helpers():
     # draft actually finishes and calls in here).
     async def _finalizeRoster(self, guild_id, team1_message, team2_message, team1, team2, use_roles, intro_messages=None):
         size_eligible = len(team1.get_players()) == 5 and len(team2.get_players()) == 5
-        roles_shown = use_roles and size_eligible
+        # Random Roles/Balanced Roles (and so role-labelled embeds/icons
+        # entirely) are League-only - see /set game. roles_eligible, not
+        # size_eligible alone, is what actually gates both the buttons
+        # and whether use_roles is honored at all here.
+        roles_eligible = size_eligible and self._gameSupportsRoles(self._activeGame(guild_id))
+        roles_shown = use_roles and roles_eligible
 
         self.update(guild_id, "roster_team1_message_id", team1_message.id)
         self.update(guild_id, "roster_team2_message_id", team2_message.id)
@@ -3074,7 +3093,7 @@ class helpers():
         if intro_messages is not None:
             self.update(guild_id, "make_teams_message_ids", ",".join(str(m.id) for m in intro_messages))
 
-        await team2_message.edit(view=RosterActionView(self, include_role_buttons=size_eligible))
+        await team2_message.edit(view=RosterActionView(self, include_role_buttons=roles_eligible))
 
     # The voice channel to send everyone back to once the game ends (see
     # moveMembersToOriginalChannel). The old /start command took this from
@@ -3156,12 +3175,13 @@ class helpers():
     # exactly 5 players.
     async def _applyBalancedRolesToRoster(self, guild_id, channel, team1, team2):
         default_elo = self._defaultEloForGuild(guild_id)
+        game = self._activeGame(guild_id)
 
         def _withElo(players):
             entries = []
             for player in players:
-                self.ensureEconomyRow(guild_id, player.get_id(), player.get_name())
-                elo = self.getEconomy(guild_id, player.get_id(), "elo")
+                self.ensureGameStatsRow(guild_id, player.get_id(), player.get_name(), game)
+                elo = self.getGameStat(guild_id, player.get_id(), game, "elo")
                 entries.append((player, elo if elo is not None else default_elo))
             return entries
 
@@ -3247,6 +3267,11 @@ class helpers():
             return
         if not await self._checkRosterPermission(interaction, guild_id):
             return
+        if not self._gameSupportsRoles(self._activeGame(guild_id)):
+            await interaction.response.send_message(
+                "Role-based team balancing is League-only.", ephemeral=True
+            )
+            return
 
         await interaction.response.defer()
         await self._rerollRoster(guild_id, interaction.channel)
@@ -3266,6 +3291,11 @@ class helpers():
             await interaction.response.send_message("This roster is no longer live.", ephemeral=True)
             return
         if not await self._checkRosterPermission(interaction, guild_id):
+            return
+        if not self._gameSupportsRoles(self._activeGame(guild_id)):
+            await interaction.response.send_message(
+                "Role-based team balancing is League-only.", ephemeral=True
+            )
             return
 
         team1 = Team()
@@ -3373,7 +3403,7 @@ class helpers():
             # that's never started a game at all.
             self.update(guild_id, "original_channel", "")
 
-        label = self._matchupLabelForMode(self.get(guild_id, "mode"))
+        label = self._matchupLabelForMode(self.get(guild_id, "mode"), self._activeGame(guild_id))
         use_roles = bool(self.get(guild_id, "roster_use_roles"))
         await self._sendMatchupImage(channel, team1, team2, label, use_roles=use_roles, guild_id=guild_id)
         # The graphic above already shows both full rosters, so the
@@ -3412,6 +3442,7 @@ class helpers():
         if ranked:
             self.update(ctx.guild.id, "is_ranked", 1)
         self.update(ctx.guild.id, "draft_snake", 1 if snake else 0)
+        self.update(ctx.guild.id, "game", self._currentGame(ctx.guild.id))
 
         original_channel = ctx.user.voice.channel
         self.update(ctx.guild.id, "original_channel", str(original_channel))
@@ -3443,6 +3474,7 @@ class helpers():
                 " Snake draft: pick order reverses every 2 picks (1,2,2,1,1,2,...) instead of "
                 "alternating every pick."
             )
+        message += f"\n{self._gameNote(ctx.guild.id)}"
         await ctx.response.send_message(message)
         intro_message = await ctx.original_response()
         # _applyDraftPick appends the picker/pool messages onto this once
@@ -3458,34 +3490,6 @@ class helpers():
 
         content, view = self._renderDraftPickView(ctx.guild.id)
         await ctx.channel.send(content, view=view)
-
-    # /test-image: renders the matchup graphic (with role icons showing,
-    # see _renderMatchupImage's use_roles) against two dummy 5-player
-    # teams and posts it, so an admin/dev can preview image changes
-    # without needing a real 10-person voice channel just to get
-    # /make-teams random use_roles:true to actually assign roles. Doesn't
-    # touch team1/team2 or any other guild state. Purely a render
-    # preview, nothing here is a real roster.
-    async def testImageHelper(self, ctx):
-        def dummy_team(name, start_id):
-            team = Team()
-            team.set_name(name)
-            captain = None
-            for i, role in enumerate(SETUP_ROLE_NAMES):
-                player = Player(start_id + i, f"{role}Player")
-                team.add_player(player)
-                if i == 0:
-                    captain = player
-            team.set_captain(captain)
-            return team
-
-        team1 = dummy_team("Team 1", 1)
-        team2 = dummy_team("Team 2", 100)
-
-        image = await asyncio.to_thread(
-            self._renderMatchupImage, None, team1, team2, "Test Render", None, ctx.guild.name, True
-        )
-        await ctx.response.send_message(file=self._imageToFile(image, "test_matchup.png"))
 
     async def getRandomMember(self, ctx):
         playersSer = self.get(ctx.guild.id, "players")
@@ -3781,6 +3785,10 @@ class helpers():
         # afterward, cause elo to be touched when the winner is
         # eventually reported.
         self.update(guild_id, "is_ranked", 0)
+        # Goes stale the moment team1/team2 do, same as disliked_role_user_ids
+        # above - whichever team-formation helper runs next re-stamps it
+        # from current_game.
+        self.update(guild_id, "game", None)
 
     # `message`, when given, replaces the default "You've been invited..."
     # line entirely rather than being appended alongside it. The invite
@@ -3843,9 +3851,9 @@ class helpers():
         self.cursor.execute(
             "INSERT OR IGNORE INTO economy"
             "(guildId, userId, username, balance, wins, losses, gold_wagered, gold_won, gold_lost, "
-            "game_wins, game_losses, elo, last_daily) "
-            "VALUES(?, ?, ?, 0, 0, 0, 0, 0, 0, 0, 0, ?, NULL)",
-            (guild_id, user_id, username, self._defaultEloForGuild(guild_id))
+            "last_daily) "
+            "VALUES(?, ?, ?, 0, 0, 0, 0, 0, 0, NULL)",
+            (guild_id, user_id, username)
         )
         self.cursor.execute(
             "UPDATE economy SET username=? WHERE guildId=? AND userId=?",
@@ -3853,20 +3861,119 @@ class helpers():
         )
         self.db.commit()
 
+    # /set game: which game a server's next-formed roster tracks elo/
+    # stats for. NULL (a server that's never run /set game) reads as
+    # "League", the game this bot always tracked before per-game stats
+    # existed.
+    def _currentGame(self, guild_id):
+        return self.get(guild_id, "current_game") or "League"
+
+    # The game the CURRENT team1/team2 roster was actually stamped with
+    # (see every team-forming helper), for recordResult and friends to
+    # know which game_stats row a just-resolved game affects. Falls back
+    # to _currentGame for a guild that somehow has a live roster from
+    # before this column existed.
+    def _activeGame(self, guild_id):
+        return self.get(guild_id, "game") or self._currentGame(guild_id)
+
+    # Appended to every team-forming command's own confirmation message
+    # (randomizeTeamHelper/rankedTeamHelper/captainsHelper/
+    # useTeamsHelper/reuseTeamsHelper), so it's always visible which game
+    # a just-formed roster's elo/stats will actually count toward, and how
+    # to change it, without needing to check /set game separately. Reads
+    # _activeGame rather than _currentGame: every caller but
+    # reuseTeamsHelper has already stamped servers.game by the time this
+    # runs, and reuseTeamsHelper deliberately never re-stamps it (a reused
+    # roster keeps whatever game it originally formed under).
+    def _gameNote(self, guild_id):
+        return f"\U0001f3ae Playing **{self._activeGame(guild_id)}**. Use `/set game` to switch."
+
+    # Only "League" gets role-based team balancing/role icons - simpler to
+    # link this to the game itself than maintain a separate per-game flag.
+    # Takes the game string directly (not guild_id) since callers need
+    # this at two different points with two different notions of "the
+    # game": team-forming code checks it against _currentGame (the roster
+    # being formed right now hasn't stamped servers.game yet), while
+    # anything about an already-formed roster (the matchup image, the
+    # roster buttons) checks it against _activeGame instead.
+    def _gameSupportsRoles(self, game):
+        return game == "League"
+
+    def ensureGameStatsRow(self, guild_id, user_id, username, game):
+        self.cursor.execute(
+            "INSERT OR IGNORE INTO game_stats"
+            "(guildId, userId, game, username, elo, game_wins, game_losses, ranked_wins, "
+            "ranked_losses, current_win_streak) VALUES(?, ?, ?, ?, ?, 0, 0, 0, 0, 0)",
+            (guild_id, user_id, game, username, self._defaultEloForGuild(guild_id))
+        )
+        self.cursor.execute(
+            "UPDATE game_stats SET username=? WHERE guildId=? AND userId=? AND game=?",
+            (username, guild_id, user_id, game)
+        )
+        self.db.commit()
+
+    def getGameStat(self, guild_id, user_id, game, column):
+        self.cursor.execute(
+            f"SELECT {column} FROM game_stats WHERE guildId=? AND userId=? AND game=?",
+            (guild_id, user_id, game)
+        )
+        row = self.cursor.fetchone()
+        return row[0] if row is not None else None
+
+    # /set game itself: registers `game` as known for this guild (so it
+    # shows up in gameAutocomplete from now on, same as any other saved
+    # game) and points current_game at it. Only affects the NEXT roster
+    # formed (see servers.game's own comment) - whatever's currently in
+    # progress keeps resolving against whichever game it actually started
+    # under.
+    async def setGameHelper(self, ctx, game):
+        game = game.strip()
+        if not game:
+            await ctx.response.send_message("Give a game name.", ephemeral=True)
+            return
+        guild_id = ctx.guild.id
+        self.cursor.execute(
+            "INSERT OR IGNORE INTO guild_games(guildId, game) VALUES(?, ?)", (guild_id, game)
+        )
+        self.update(guild_id, "current_game", game)
+        self.db.commit()
+        await ctx.response.send_message(
+            f"This server's current game is now **{game}**. New rosters will track its own elo and "
+            f"stats from here on."
+            + ("" if game == "League" else " Role-based team balancing is League-only, so it's off for this game.")
+        )
+
+    # Every game this guild has ever set itself to via /set game (always
+    # includes "League", seeded per-guild - see guild_games), for
+    # gameAutocomplete in bot.py. Typing something not in this list is
+    # still accepted outright; this is a convenience list, not a
+    # restriction.
+    def listKnownGames(self, guild_id):
+        self.cursor.execute("SELECT game FROM guild_games WHERE guildId=? ORDER BY game", (guild_id,))
+        return [row[0] for row in self.cursor.fetchall()]
+
     # Wipes every player's currency stats (balance, wins/losses,
     # wagered/won/lost gold, daily-claim cooldown) for a guild. Rows get
     # recreated with fresh defaults the next time each player touches the
     # economy (daily, wager, balance) via ensureEconomyRow.
     def resetEconomyHelper(self, guild_id):
         self.cursor.execute("DELETE FROM economy WHERE guildId=?", (guild_id,))
+        # Every game's elo/record, not just the current one - a full
+        # economy wipe means everything, unlike resetEloHelper's own
+        # current-game-only reset.
+        self.cursor.execute("DELETE FROM game_stats WHERE guildId=?", (guild_id,))
         self.db.commit()
 
     # Resets every existing player's elo back to this guild's configured
     # default (see _defaultEloForGuild), leaving balance/wins/losses/gold
     # untouched, unlike resetEconomyHelper, which wipes the whole row.
+    # Resets the CURRENT game's elo only (see /set game) - a server
+    # running several games shouldn't have resetting League's ladder also
+    # wipe Valorant's.
     def resetEloHelper(self, guild_id):
         self.cursor.execute(
-            "UPDATE economy SET elo=? WHERE guildId=?", (self._defaultEloForGuild(guild_id), guild_id)
+            "UPDATE game_stats SET elo=? WHERE guildId=? AND game=?",
+            (self._defaultEloForGuild(guild_id), guild_id, self._currentGame(guild_id))
         )
         self.db.commit()
 
@@ -5674,13 +5781,14 @@ class helpers():
     # headline. Used by /start, which posts the image from whatever's
     # currently loaded rather than knowing for itself how those teams
     # were formed.
-    def _matchupLabelForMode(self, mode):
-        return {
+    def _matchupLabelForMode(self, mode, game):
+        base = {
             "Normal": "Casual Match",
             "Ranked": "Ranked Match",
             "Captains": "Captains Match",
             "Ranked Captains": "Ranked Captains Match",
         }.get(mode, "Match")
+        return f"{game} {base}"
 
     # The plain-text status that accompanies the bracket images: which
     # team's the (winners-bracket, for double elimination) champion, the
@@ -5847,7 +5955,7 @@ class helpers():
         # round happened to start.
         channel = self._resolveConfiguredChannel(guild_id, "matchup_channel", channel)
         tournament = self.getTournament(guild_id)
-        round_label = self._matchRoundLabel(tournament, round_index, bracket_type)
+        round_label = f"{self._currentGame(guild_id)} {self._matchRoundLabel(tournament, round_index, bracket_type)}"
         guild_name = channel.guild.name if channel.guild is not None else None
         matchup_image = await asyncio.to_thread(
             self._renderMatchupImage, match_id, team1, team2, round_label, tournament.get_name(), guild_name
@@ -5886,7 +5994,7 @@ class helpers():
         # follows the same channel through for the match's own result.
         channel = self._resolveConfiguredChannel(guild_id, "matchup_channel", channel)
         tournament = self.getTournament(guild_id)
-        round_label = self._matchRoundLabel(tournament, round_index, bracket_type)
+        round_label = f"{self._currentGame(guild_id)} {self._matchRoundLabel(tournament, round_index, bracket_type)}"
         guild_name = channel.guild.name if channel.guild is not None else None
         matchup_image = await asyncio.to_thread(
             self._renderMatchupImage, match_id, team1, team2, round_label, tournament.get_name(), guild_name
@@ -6532,6 +6640,7 @@ class helpers():
         self.update(guild_id, "team2", team2.serializeTeam())
         self.update(guild_id, "original_channel", "")
         self.update(guild_id, "is_ranked", 0)
+        self.update(guild_id, "game", self._currentGame(guild_id))
         self.update(guild_id, "active_tournament_match_id", match_id)
 
         await interaction.response.defer()
@@ -8825,6 +8934,7 @@ class helpers():
         self.update(guild_id, "mode", "Ranked" if ranked else "Normal")
         if ranked:
             self.update(guild_id, "is_ranked", 1)
+        self.update(guild_id, "game", self._currentGame(guild_id))
 
         ranked_note = " (ranked, elo will update when the winner is reported)" if ranked else ""
         # escape_markdown on the actual resolved names (not the raw
@@ -8836,7 +8946,8 @@ class helpers():
             f"**{discord.utils.escape_markdown(team1.get_name())}** vs "
             f"**{discord.utils.escape_markdown(team2.get_name())}** loaded{ranked_note}. "
             "Press Start on the roster below when you're ready to move everyone and open betting, or "
-            "Start (no move) to open betting without moving anyone."
+            "Start (no move) to open betting without moving anyone.\n"
+            f"{self._gameNote(guild_id)}"
         )
         intro_message = await ctx.original_response()
         team1_message, team2_message, _ = await self.printEmbed(ctx, team1, team2)
@@ -8894,7 +9005,8 @@ class helpers():
             f"Reusing **{discord.utils.escape_markdown(team1.get_name())}** vs "
             f"**{discord.utils.escape_markdown(team2.get_name())}**{ranked_note}. "
             "Press Start on the roster below when you're ready to move everyone and open betting, or "
-            "Start (no move) to open betting without moving anyone."
+            "Start (no move) to open betting without moving anyone.\n"
+            f"{self._gameNote(guild_id)}"
         )
         intro_message = await ctx.original_response()
         team1_message, team2_message, _ = await self.printEmbed(ctx, team1, team2, useRoles=use_roles)
@@ -9057,11 +9169,13 @@ class helpers():
     # Current elo for each (user_id, name) in `roster`, defaulting to this
     # guild's configured default (see _defaultEloForGuild) for anyone
     # without an economy row yet.
-    def getEloLookup(self, guild_id, roster):
+    def getEloLookup(self, guild_id, roster, game=None):
+        if game is None:
+            game = self._activeGame(guild_id)
         default_elo = self._defaultEloForGuild(guild_id)
         lookup = {}
         for user_id, _name in roster:
-            elo = self.getEconomy(guild_id, user_id, "elo")
+            elo = self.getGameStat(guild_id, user_id, game, "elo")
             lookup[user_id] = elo if elo is not None else default_elo
         return lookup
 
@@ -9840,7 +9954,8 @@ class helpers():
         team2_roster = self.getRosterPlayers(guild_id, "team2")
         team1_name = self.getRosterName(guild_id, "team1", "Team 1")
         team2_name = self.getRosterName(guild_id, "team2", "Team 2")
-        elo_lookup = self.getEloLookup(guild_id, team1_roster + team2_roster)
+        game = self._activeGame(guild_id)
+        elo_lookup = self.getEloLookup(guild_id, team1_roster + team2_roster, game)
         is_ranked = bool(self.get(guild_id, "is_ranked"))
         disliked_role_user_ids = self._dislikedRoleUserIds(guild_id)
 
@@ -9850,11 +9965,11 @@ class helpers():
             team1_name=team1_name, team2_name=team2_name,
             disliked_role_user_ids=disliked_role_user_ids,
         )
-        newly_unlocked = self.applyGameDeltas(guild_id, deltas)
+        newly_unlocked = self.applyGameDeltas(guild_id, deltas, game)
         self.saveLastResult(
             guild_id, winning_team, allWagers, team1_roster, team2_roster, deltas, is_ranked,
             team1_name=team1_name, team2_name=team2_name,
-            disliked_role_user_ids=disliked_role_user_ids,
+            disliked_role_user_ids=disliked_role_user_ids, game=game,
         )
 
         # Replies to the game/match's own matchup graphic (_sendMatchupImage
@@ -10316,24 +10431,44 @@ class helpers():
     # reasoning as the elo-tier check below. Callers with a channel handy
     # pass this straight to _announceAchievements; callers that don't
     # (or a reversal, which never populates it) just ignore it.
-    def applyGameDeltas(self, guild_id, deltas, sign=1):
+    def applyGameDeltas(self, guild_id, deltas, game=None, sign=1):
+        if game is None:
+            game = self._currentGame(guild_id)
         newly_unlocked = []
         for user_id, d in deltas.items():
             self.ensureEconomyRow(guild_id, user_id, d["username"])
             self.cursor.execute(
                 "UPDATE economy SET balance = balance + ?, wins = wins + ?, losses = losses + ?, "
-                "gold_wagered = gold_wagered + ?, gold_won = gold_won + ?, gold_lost = gold_lost + ?, "
-                "game_wins = game_wins + ?, game_losses = game_losses + ?, "
-                "ranked_wins = ranked_wins + ?, ranked_losses = ranked_losses + ?, elo = elo + ? "
+                "gold_wagered = gold_wagered + ?, gold_won = gold_won + ?, gold_lost = gold_lost + ? "
                 "WHERE guildId=? AND userId=?",
                 (
                     sign * d["balance"], sign * d["wins"], sign * d["losses"],
                     sign * d["gold_wagered"], sign * d["gold_won"], sign * d["gold_lost"],
-                    sign * d["game_wins"], sign * d["game_losses"],
-                    sign * d["ranked_wins"], sign * d["ranked_losses"], sign * d["elo"],
                     guild_id, user_id,
                 )
             )
+
+            # game_wins/game_losses/ranked_wins/ranked_losses/elo are the
+            # per-game slice (see /set game): a pure bettor with no
+            # rostered-player delta at all (every one of these still 0)
+            # has nothing to touch here, and no reason to seed a
+            # game_stats row for a game they didn't even play.
+            has_game_delta = (
+                d["game_wins"] or d["game_losses"] or d["ranked_wins"] or d["ranked_losses"] or d["elo"]
+            )
+            if has_game_delta:
+                self.ensureGameStatsRow(guild_id, user_id, d["username"], game)
+                self.cursor.execute(
+                    "UPDATE game_stats SET game_wins = game_wins + ?, game_losses = game_losses + ?, "
+                    "ranked_wins = ranked_wins + ?, ranked_losses = ranked_losses + ?, elo = elo + ? "
+                    "WHERE guildId=? AND userId=? AND game=?",
+                    (
+                        sign * d["game_wins"], sign * d["game_losses"],
+                        sign * d["ranked_wins"], sign * d["ranked_losses"], sign * d["elo"],
+                        guild_id, user_id, game,
+                    )
+                )
+
             # Only on forward application, not a correction's reversal.
             # Unlocking a tier reward (or an achievement) while UNDOING
             # a wrongly-recorded result (see
@@ -10344,24 +10479,25 @@ class helpers():
             if sign > 0:
                 if d["elo"] != 0:
                     self.cursor.execute(
-                        "SELECT elo FROM economy WHERE guildId=? AND userId=?", (guild_id, user_id)
+                        "SELECT elo FROM game_stats WHERE guildId=? AND userId=? AND game=?",
+                        (guild_id, user_id, game)
                     )
                     self._checkTierRewardUnlocks(guild_id, user_id, self.cursor.fetchone()[0])
 
                 # Streak tracking: a win extends it, a loss resets it to
                 # zero. Not itself a pure additive delta the way every
-                # other economy column is, so it needs the CURRENT
+                # other game_stats column is, so it needs the CURRENT
                 # stored value rather than just adding a fixed amount,
                 # hence its own UPDATE instead of joining the one above.
                 if d["game_wins"] > 0:
                     self.cursor.execute(
-                        "UPDATE economy SET current_win_streak = current_win_streak + 1 "
-                        "WHERE guildId=? AND userId=?", (guild_id, user_id)
+                        "UPDATE game_stats SET current_win_streak = current_win_streak + 1 "
+                        "WHERE guildId=? AND userId=? AND game=?", (guild_id, user_id, game)
                     )
                 elif d["game_losses"] > 0:
                     self.cursor.execute(
-                        "UPDATE economy SET current_win_streak = 0 WHERE guildId=? AND userId=?",
-                        (guild_id, user_id)
+                        "UPDATE game_stats SET current_win_streak = 0 "
+                        "WHERE guildId=? AND userId=? AND game=?", (guild_id, user_id, game)
                     )
 
                 # High Roller, Jackpot, and Giant Slayer all need this
@@ -10382,7 +10518,7 @@ class helpers():
                     if self._unlockAchievement(guild_id, user_id, "underdog"):
                         newly_unlocked.append((user_id, "underdog"))
 
-                for achievement_key in self._checkAchievements(guild_id, user_id):
+                for achievement_key in self._checkAchievements(guild_id, user_id, game):
                     newly_unlocked.append((user_id, achievement_key))
         self.db.commit()
         return newly_unlocked
@@ -10437,8 +10573,10 @@ class helpers():
     # row per guild. A new result overwrites the previous snapshot.
     def saveLastResult(
         self, guild_id, winning_team, wagers, team1_roster, team2_roster, deltas, is_ranked=False,
-        team1_name="Team 1", team2_name="Team 2", disliked_role_user_ids=frozenset(),
+        team1_name="Team 1", team2_name="Team 2", disliked_role_user_ids=frozenset(), game=None,
     ):
+        if game is None:
+            game = self._currentGame(guild_id)
         payload = {
             "winning_team": winning_team,
             "wagers": [list(w) for w in wagers],
@@ -10453,6 +10591,11 @@ class helpers():
             # game, no matter how much later the correction happens or
             # what team1/team2 have moved on to since.
             "disliked_role_user_ids": list(disliked_role_user_ids),
+            # Which game_stats row this snapshot's deltas actually
+            # touched (see /set game), so a later correction/invalidation
+            # reverses/recomputes against the SAME game even if the
+            # server's current_game has since moved on to something else.
+            "game": game,
         }
         self.cursor.execute(
             "INSERT OR REPLACE INTO last_result(guildId, data) VALUES(?, ?)",
@@ -10473,6 +10616,9 @@ class helpers():
         payload["deltas"] = {int(uid): d for uid, d in payload["deltas"].items()}
         payload.setdefault("is_ranked", False)
         payload["disliked_role_user_ids"] = frozenset(payload.get("disliked_role_user_ids", []))
+        # An older snapshot saved before /set game existed was always for
+        # "League", the only game this bot tracked at the time.
+        payload.setdefault("game", "League")
         return payload
 
     # Fully undoes the last resolved game. Reverses last["deltas"] the
@@ -10489,7 +10635,7 @@ class helpers():
     # entirely afterward: once invalidated, there's no "last game" left
     # for a further correction to flip between team1/team2.
     def _invalidateLastResult(self, guild_id, last):
-        self.applyGameDeltas(guild_id, last["deltas"], sign=-1)
+        self.applyGameDeltas(guild_id, last["deltas"], last["game"], sign=-1)
         for user_id, _username, _team, amount in last["wagers"]:
             self.cursor.execute(
                 "UPDATE economy SET balance = balance + ? WHERE guildId=? AND userId=?",
@@ -10570,24 +10716,25 @@ class helpers():
             )
             return
 
-        self.applyGameDeltas(guild_id, last["deltas"], sign=-1)
+        game = last["game"]
+        self.applyGameDeltas(guild_id, last["deltas"], game, sign=-1)
 
         team1_roster = last["team1_roster"]
         team2_roster = last["team2_roster"]
         is_ranked = last["is_ranked"]
         disliked_role_user_ids = last["disliked_role_user_ids"]
-        elo_lookup = self.getEloLookup(guild_id, team1_roster + team2_roster)
+        elo_lookup = self.getEloLookup(guild_id, team1_roster + team2_roster, game)
         new_deltas, summary = self.computeGameDeltas(
             last["wagers"], team1_roster, team2_roster, elo_lookup, correct_team, is_ranked,
             default_elo=self._defaultEloForGuild(guild_id),
             team1_name=team1_name, team2_name=team2_name,
             disliked_role_user_ids=disliked_role_user_ids,
         )
-        newly_unlocked = self.applyGameDeltas(guild_id, new_deltas)
+        newly_unlocked = self.applyGameDeltas(guild_id, new_deltas, game)
         self.saveLastResult(
             guild_id, correct_team, last["wagers"], team1_roster, team2_roster, new_deltas, is_ranked,
             team1_name=team1_name, team2_name=team2_name,
-            disliked_role_user_ids=disliked_role_user_ids,
+            disliked_role_user_ids=disliked_role_user_ids, game=game,
         )
 
         previous_name = team1_name if last["winning_team"] == 1 else team2_name
@@ -10606,8 +10753,10 @@ class helpers():
     # to it, without duplicating the field layout.
     def _buildStatsEmbed(self, guild_id, target):
         user_id = target.id
+        game = self._currentGame(guild_id)
 
         self.ensureEconomyRow(guild_id, user_id, target.name)
+        self.ensureGameStatsRow(guild_id, user_id, target.name, game)
         # Keeps this player's trading_cards row in sync with the
         # current CARD_DEFAULT_* palette (see ensureCardSettings) every
         # time /stats runs for them, not just the first time their card
@@ -10617,12 +10766,17 @@ class helpers():
         self.ensureCardSettings(guild_id, user_id)
 
         self.cursor.execute(
-            "SELECT balance, wins, losses, gold_wagered, gold_won, gold_lost, "
-            "game_wins, game_losses, ranked_wins, ranked_losses, elo FROM economy WHERE guildId=? AND userId=?",
+            "SELECT balance, wins, losses, gold_wagered, gold_won, gold_lost FROM economy "
+            "WHERE guildId=? AND userId=?",
             (guild_id, user_id)
         )
-        (balance, bet_wins, bet_losses, gold_wagered, gold_won, gold_lost, game_wins, game_losses,
-         ranked_wins, ranked_losses, elo) = self.cursor.fetchone()
+        balance, bet_wins, bet_losses, gold_wagered, gold_won, gold_lost = self.cursor.fetchone()
+        self.cursor.execute(
+            "SELECT game_wins, game_losses, ranked_wins, ranked_losses, elo FROM game_stats "
+            "WHERE guildId=? AND userId=? AND game=?",
+            (guild_id, user_id, game)
+        )
+        game_wins, game_losses, ranked_wins, ranked_losses, elo = self.cursor.fetchone()
         # Lazy self-heal, same idea as
         # ensureCardSettings/ensureEconomyRow just above: a player
         # already sitting at Diamond+ before card_unlocks existed (or
@@ -10635,7 +10789,7 @@ class helpers():
         # value intentionally discarded, no _announceAchievements call
         # here, since a quiet backfill shouldn't suddenly announce
         # something that may have been true for a while).
-        self._checkAchievements(guild_id, user_id)
+        self._checkAchievements(guild_id, user_id, game)
 
         net_gold = gold_won - gold_lost
 
@@ -10657,7 +10811,7 @@ class helpers():
         elo_rank = self.eloRankLabel(elo)
 
         embed = discord.Embed(
-            title=f"{target.display_name}'s Stats", color=discord.Color.gold()
+            title=f"{target.display_name}'s Stats - {game}", color=discord.Color.gold()
         )
         # display_avatar (not the possibly-None .avatar) always
         # resolves to something: the member's own custom avatar if they
@@ -11110,16 +11264,24 @@ class helpers():
     # _buildStatsEmbed path, which intentionally discards it. The
     # self-heal shouldn't announce something that may have quietly been
     # true for a while).
-    def _checkAchievements(self, guild_id, user_id):
+    def _checkAchievements(self, guild_id, user_id, game=None):
+        if game is None:
+            game = self._currentGame(guild_id)
         self.cursor.execute(
-            "SELECT game_wins, game_losses, current_win_streak, wins, losses "
-            "FROM economy WHERE guildId=? AND userId=?",
-            (guild_id, user_id)
+            "SELECT wins, losses FROM economy WHERE guildId=? AND userId=?", (guild_id, user_id)
         )
         row = self.cursor.fetchone()
         if row is None:
             return []
-        game_wins, game_losses, current_win_streak, bet_wins, bet_losses = row
+        bet_wins, bet_losses = row
+
+        self.cursor.execute(
+            "SELECT game_wins, game_losses, current_win_streak FROM game_stats "
+            "WHERE guildId=? AND userId=? AND game=?",
+            (guild_id, user_id, game)
+        )
+        game_row = self.cursor.fetchone()
+        game_wins, game_losses, current_win_streak = game_row if game_row is not None else (0, 0, 0)
 
         newly_unlocked = []
         if game_wins >= 1 and self._unlockAchievement(guild_id, user_id, "first_blood"):
@@ -11255,10 +11417,12 @@ class helpers():
         user_id = member.id
         display_name = member.display_name
 
+        game = self._currentGame(guild_id)
         self.ensureEconomyRow(guild_id, user_id, display_name)
+        self.ensureGameStatsRow(guild_id, user_id, display_name, game)
         self.cursor.execute(
-            "SELECT elo, ranked_wins, ranked_losses FROM economy WHERE guildId=? AND userId=?",
-            (guild_id, user_id)
+            "SELECT elo, ranked_wins, ranked_losses FROM game_stats WHERE guildId=? AND userId=? AND game=?",
+            (guild_id, user_id, game)
         )
         elo, ranked_wins, ranked_losses = self.cursor.fetchone()
         ranked_games = ranked_wins + ranked_losses
@@ -12209,10 +12373,12 @@ class helpers():
         member = await self._resolveGuildMember(guild_id, target_user_id)
         display_name = member.display_name if member is not None else f"Player {target_user_id}"
 
+        game = self._currentGame(guild_id)
         self.ensureEconomyRow(guild_id, target_user_id, display_name)
+        self.ensureGameStatsRow(guild_id, target_user_id, display_name, game)
         self.cursor.execute(
-            "SELECT elo, ranked_wins, ranked_losses FROM economy WHERE guildId=? AND userId=?",
-            (guild_id, target_user_id)
+            "SELECT elo, ranked_wins, ranked_losses FROM game_stats WHERE guildId=? AND userId=? AND game=?",
+            (guild_id, target_user_id, game)
         )
         elo, ranked_wins, ranked_losses = self.cursor.fetchone()
         ranked_games = ranked_wins + ranked_losses
@@ -12377,11 +12543,23 @@ class helpers():
     # None (not 0) when a player has no games/bets yet, so they can
     # sort to the bottom instead of looking like the worst possible
     # rate.
+    # Scoped to the server's CURRENT game (see /set game): a player who's
+    # never played it (only ever bet, or only played a different game)
+    # still has an economy row, so a LEFT JOIN (rather than requiring a
+    # game_stats row to exist) is what lets them show up at all - with
+    # elo/game_wins/etc. all reading as 0/default, the same "hasn't
+    # played this game" shape _filterLeaderboardEntries already treats as
+    # not belonging on a game-record-based leaderboard.
     def getLeaderboardEntries(self, guild_id):
+        game = self._currentGame(guild_id)
         self.cursor.execute(
-            "SELECT userId, username, balance, wins, losses, gold_wagered, gold_won, gold_lost, "
-            "game_wins, game_losses, ranked_wins, ranked_losses, elo FROM economy WHERE guildId=?",
-            (guild_id,)
+            "SELECT e.userId, e.username, e.balance, e.wins, e.losses, e.gold_wagered, e.gold_won, "
+            "e.gold_lost, COALESCE(g.game_wins, 0), COALESCE(g.game_losses, 0), "
+            "COALESCE(g.ranked_wins, 0), COALESCE(g.ranked_losses, 0), COALESCE(g.elo, ?) "
+            "FROM economy e LEFT JOIN game_stats g "
+            "ON g.guildId = e.guildId AND g.userId = e.userId AND g.game = ? "
+            "WHERE e.guildId=?",
+            (self._defaultEloForGuild(guild_id), game, guild_id)
         )
         entries = []
         for (user_id, username, balance, bet_wins, bet_losses, gold_wagered,
@@ -12463,14 +12641,14 @@ class helpers():
     # win/loss record, not the combined game_wins/game_losses total,
     # since elo itself only ever moves from ranked games) or one of
     # LEADERBOARD_STAT_LABELS for a single stat.
-    def _renderLeaderboardEmbed(self, guild_name, entries_sorted, stat, order, page):
+    def _renderLeaderboardEmbed(self, guild_name, entries_sorted, stat, order, page, game):
         total_pages = self._leaderboardPageCount(entries_sorted)
         start = page * LEADERBOARD_PAGE_SIZE
         page_entries = entries_sorted[start:start + LEADERBOARD_PAGE_SIZE]
 
         title = (
-            f"\U0001f3c6 {guild_name} Leaderboard - Overview" if stat is None
-            else f"\U0001f3c6 {guild_name} Leaderboard - {LEADERBOARD_STAT_LABELS[stat]}"
+            f"\U0001f3c6 {guild_name} {game} Leaderboard - Overview" if stat is None
+            else f"\U0001f3c6 {guild_name} {game} Leaderboard - {LEADERBOARD_STAT_LABELS[stat]}"
         )
 
         lines = []
@@ -12541,7 +12719,9 @@ class helpers():
 
         entries_sorted = self._sortLeaderboardEntries(entries, stat if stat is not None else "elo", order)
         view = LeaderboardPagingView(self)
-        embed = self._renderLeaderboardEmbed(ctx.guild.name, entries_sorted, stat, order, page=0)
+        embed = self._renderLeaderboardEmbed(
+            ctx.guild.name, entries_sorted, stat, order, page=0, game=self._currentGame(guild_id)
+        )
         await ctx.response.send_message(embed=embed, view=view)
         msg = await ctx.original_response()
 
@@ -12606,7 +12786,9 @@ class helpers():
                 embed = await self._renderLeaderboardEntryStatsEmbed(guild_id, entries_sorted, new_page)
                 await interaction.response.edit_message(embed=embed, attachments=[])
         else:
-            embed = self._renderLeaderboardEmbed(guild_name, entries_sorted, stat, order, new_page)
+            embed = self._renderLeaderboardEmbed(
+                guild_name, entries_sorted, stat, order, new_page, game=self._currentGame(guild_id)
+            )
             await interaction.response.edit_message(embed=embed)
 
         self.cursor.execute(
@@ -12693,7 +12875,9 @@ class helpers():
                 embed = await self._renderLeaderboardEntryStatsEmbed(guild_id, entries_sorted, 0)
                 await interaction.response.edit_message(embed=embed, attachments=[])
         else:
-            embed = self._renderLeaderboardEmbed(guild_name, entries_sorted, stat, order, 0)
+            embed = self._renderLeaderboardEmbed(
+                guild_name, entries_sorted, stat, order, 0, game=self._currentGame(guild_id)
+            )
             await interaction.response.edit_message(embed=embed)
 
         self.cursor.execute(
@@ -12717,11 +12901,11 @@ class helpers():
         user_id = entry["user_id"]
         display_name = target.display_name if target is not None else entry["username"]
 
-        self.cursor.execute(
-            "SELECT elo, ranked_wins, ranked_losses FROM economy WHERE guildId=? AND userId=?",
-            (guild_id, user_id)
-        )
-        elo, ranked_wins, ranked_losses = self.cursor.fetchone()
+        # entry already carries the current game's elo/ranked record
+        # (see getLeaderboardEntries), no separate query needed - and,
+        # unlike re-querying game_stats directly, it's already
+        # None-tolerant for a player with no row for this game yet.
+        elo, ranked_wins, ranked_losses = entry["elo"], entry["ranked_wins"], entry["ranked_losses"]
         ranked_games = ranked_wins + ranked_losses
         stats = {
             "elo": elo, "elo_rank": self.eloRankLabelPlain(elo),
@@ -12879,7 +13063,9 @@ class helpers():
 
         await interaction.response.defer()
         guild_name = interaction.guild.name if interaction.guild is not None else ""
-        embed = self._renderLeaderboardEmbed(guild_name, entries_sorted, stat, order, 0)
+        embed = self._renderLeaderboardEmbed(
+            guild_name, entries_sorted, stat, order, 0, game=self._currentGame(guild_id)
+        )
         await message.edit(embed=embed, attachments=[], view=LeaderboardPagingView(self))
         self.cursor.execute(
             "UPDATE leaderboards SET cards=0, cardShown=0, page=0 WHERE guildId=? AND messageId=?",
