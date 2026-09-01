@@ -1513,14 +1513,22 @@ or omitted.) Pressing Back rebuilds the plain `/stats` embed
 `stats_views.cardShown` back to 0, and swaps Back back out for Card: a real
 back-and-forth toggle.
 
-Avatar isn't touched by either swap, since it applies on both sides of the
-embed/card divide. `_handleStatsAvatarToggleClick` branches on `cardShown`,
-and once a card is up the toggle re-renders the whole card image in place
-instead of swapping an embed thumbnail URL, since the avatar is baked into the
-PNG. `_resolveCardAvatarImage` picks between `member`'s per-server avatar and a
+`_handleStatsAvatarToggleClick` branches on `cardShown`, and once a card is up
+the toggle re-renders the whole card image in place instead of swapping an
+embed thumbnail URL, since the avatar is baked into the PNG.
+`_resolveCardAvatarImage` picks between `member`'s per-server avatar and a
 plain `discord.User`'s account-wide one, and `stats_views.cardAvatarGlobal`
-tracks which one is currently showing, reset to 0 every time the card is
-(re-)entered so it always starts on the server avatar.
+tracks which one is currently showing. Both swaps carry that choice across the
+embed/card divide instead of resetting it: `_handleStatsShowCardClick` reads
+whichever avatar the embed's own thumbnail is currently showing (comparing its
+URL against a freshly-resolved server URL, the same comparison the toggle
+itself uses) and renders the card with that avatar and `cardAvatarGlobal` set
+to match; `_handleStatsReturnClick` does the reverse, reading
+`cardAvatarGlobal` and passing it into `_swapTradingCardForStats`, which
+swaps the freshly-built embed's thumbnail to the global avatar when it's set
+rather than leaving `_buildStatsEmbed`'s own server-avatar default in place.
+Only a brand new `/stats` post (`statsHelper`) starts on the server avatar;
+switching back and forth after that keeps whatever was last chosen.
 
 A card's look lives in `trading_cards` (one row per guild/player pair, same
 self-healing "insert defaults on first read" shape `ensureEconomyRow` uses for
@@ -1589,12 +1597,11 @@ Only the accent gets boosted. The background stays the badge color's raw
 darkened shade either way, so a scheme's overall mood still authentically
 reflects the tier that earned it.
 
-`grantSpecialCardTitle` is the escape hatch for a title with no elo tier behind
-it at all, a per-guild/player `card_unlocks` row with the same shape as a tier
-reward's own title unlock. Shockwave's own developer gets "Developer" a
-different way: `SHOCKWAVE_DEVELOPER_ID` is a hardcoded Discord user id
+`CARD_SPECIAL_TITLES` is for a title with no elo tier behind it at all - right
+now just "Developer". Shockwave's own developer gets it without any
+`card_unlocks` row: `SHOCKWAVE_DEVELOPER_ID` is a hardcoded Discord user id
 `getUnlockedCardTitles` checks directly, so it's available in every guild the
-bot is in, including ones with no `card_unlocks` row for them at all.
+bot is in.
 
 ### Shop
 
@@ -1915,9 +1922,10 @@ round that never got a row as resolved once play has moved past it.
 | `my_team_views` | posted `/team lookup` messages | which page (and whose team list) each message is currently showing |
 | `team_list_views` | posted `/team list` messages | which filter/sort/page each message is currently showing (`memberIds`/`memberNames` for the member filter), plus `cards`/`cardShown` for cards:true mode |
 | `last_result` | one row per guild | a snapshot of the most recently resolved game, for `/set correct-winner` |
-| `teams` | persistent named teams | one row per team: captain, roster, target size, voice channel, `logo_path` |
+| `teams` | persistent named teams | one row per team: captain, roster, target size, voice channel, `logo_path`. `wins`/`losses` embedded in its serialized data are frozen/unused now, see `team_game_stats` below |
+| `team_game_stats` | one row per (guild, team, game) | a persistent team's win/loss record, scoped per game the same way `game_stats` scopes a player's - split out of `teams`' embedded `wins`/`losses` since a team's record shouldn't mix results from different games |
 | `tournaments` | one row per guild | name, team/bracket size, elimination type, registered teams, the winners bracket, and (double elimination only) the losers bracket |
 | `team_invites` | pending `/team invite`s | one row per invitee per invite. Several invitees from one `/team invite` call share a `messageId`, each accepting independently |
-| `tournament_matches` | every tournament match ever played | which bracket (`bracketType`: winners/losers/finals) and round/bracket-node it's for, its two teams, state, (once decided) its winner, and `bettingClosed` |
+| `tournament_matches` | every tournament match ever played | which bracket (`bracketType`: winners/losers/finals) and round/bracket-node it's for, its two teams, state, (once decided) its winner, `bettingClosed`, and `game` (which game it was played under, stamped at creation time) |
 | `player_role_preferences` | each player's liked/disliked roles from `/setup` | one row per (guild, player, role), `preference` is `like` or `dislike` |
 

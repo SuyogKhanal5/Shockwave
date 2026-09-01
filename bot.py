@@ -468,11 +468,13 @@ cursor.execute(
 # mess of it.
 ensure_column("stats_views", "targetUserId")
 ensure_column("stats_views", "cardShown", "INTEGER", "0")
-# Which avatar the trading card is currently rendered with: 0 (default)
-# for this server's own profile picture, 1 for the regular account-wide
-# one. Only matters once cardShown=1. Reset to 0 every time the card is
-# (re-)entered, so it always starts on the server avatar, matching the
-# plain /stats embed's own default (see StatsView).
+# Which avatar this view is currently showing: 0 (default) for this
+# server's own profile picture, 1 for the regular account-wide one.
+# Carries across Card/Back (see _handleStatsShowCardClick/
+# _handleStatsReturnClick), so toggling to the global avatar and then
+# switching between the embed and the card keeps showing it either way,
+# rather than resetting back to the server avatar on every switch. Only a
+# fresh /stats post (statsHelper) starts back on the server avatar.
 ensure_column("stats_views", "cardAvatarGlobal", "INTEGER", "0")
 # A player's trading-card look (see /stats' Card button and
 # _renderTradingCardImage). One row per (guild, player), created with
@@ -618,6 +620,42 @@ ensure_column("tournament_matches", "settledWagers", "TEXT")
 # betting message at all.
 ensure_column("tournament_matches", "roundBettingMessageId", "INTEGER")
 ensure_column("tournament_matches", "roundBettingClosedMessageId", "INTEGER")
+# Which game (see /set game) this match was played under, stamped from
+# current_game at match-creation time (_startRound/_startLosersRound/
+# _startGrandFinals) same as servers.game is for a casual/ranked game. Feeds
+# team_game_stats below so a team's persistent record only counts matches
+# played in the same game. Defaults to 'League' for every match that existed
+# before this column did, since League was the only game tournaments ever
+# tracked results for.
+ensure_column("tournament_matches", "game", "TEXT", "'League'")
+# Persistent team win/loss records, one row per (guild, team, game) - see
+# /set game. Split out of Team.wins/Team.losses (still embedded in `teams`.
+# data, now frozen/unused going forward - see game_stats' own comment for
+# the same pattern) so a team's record only reflects matches played in the
+# same game, the same reasoning that split game_stats off of `economy`.
+_team_game_stats_already_existed = cursor.execute(
+    "SELECT name FROM sqlite_master WHERE type='table' AND name='team_game_stats'"
+).fetchone() is not None
+cursor.execute(
+    "CREATE TABLE IF NOT EXISTS team_game_stats("
+    "guildId, teamId, game, wins, losses, PRIMARY KEY(guildId, teamId, game))"
+)
+if not _team_game_stats_already_existed:
+    # One-time backfill: every existing persistent team's embedded
+    # wins/losses becomes its "League" record, since League was the only
+    # game tournaments ever tracked results for before /set game existed.
+    # Read through TourneyClasses.Team rather than a plain SQL SELECT since
+    # wins/losses live inside the serialized `data` blob, not their own
+    # columns.
+    for _team_id, _team_guild_id, _team_data in cursor.execute(
+        "SELECT id, guildId, data FROM teams"
+    ).fetchall():
+        _team = Team()
+        _team.deserializeTeam(_team_data)
+        cursor.execute(
+            "INSERT INTO team_game_stats(guildId, teamId, game, wins, losses) VALUES(?, ?, 'League', ?, ?)",
+            (_team_guild_id, _team_id, _team.wins, _team.losses)
+        )
 # Wagers on one specific tournament match. Unlike `wagers` above (one bet
 # per user per guild, tied to whichever single casual/ranked game or
 # sequential-mode tournament match is currently active), simultaneous-mode

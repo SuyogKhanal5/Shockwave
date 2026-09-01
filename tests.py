@@ -137,7 +137,12 @@ TEAM_INVITES_SCHEMA = (
 TOURNAMENT_MATCHES_SCHEMA = (
     "CREATE TABLE tournament_matches(id INTEGER PRIMARY KEY AUTOINCREMENT, guildId, roundIndex, "
     "nodeIndex, team1, team2, state, mode, messageId, channelId, winner, bracketType, "
-    "bettingClosed DEFAULT 0, settledWagers, roundBettingMessageId, roundBettingClosedMessageId)"
+    "bettingClosed DEFAULT 0, settledWagers, roundBettingMessageId, roundBettingClosedMessageId, "
+    "game DEFAULT 'League')"
+)
+TEAM_GAME_STATS_SCHEMA = (
+    "CREATE TABLE team_game_stats(guildId, teamId, game, wins, losses, "
+    "PRIMARY KEY(guildId, teamId, game))"
 )
 TOURNAMENT_WAGERS_SCHEMA = (
     "CREATE TABLE tournament_wagers(matchId, guildId, userId, username, team, amount, "
@@ -174,6 +179,7 @@ def make_db():
     cursor.execute(TOURNAMENTS_SCHEMA)
     cursor.execute(TEAM_INVITES_SCHEMA)
     cursor.execute(TOURNAMENT_MATCHES_SCHEMA)
+    cursor.execute(TEAM_GAME_STATS_SCHEMA)
     cursor.execute(TOURNAMENT_WAGERS_SCHEMA)
     cursor.execute(PLAYER_ROLE_PREFERENCES_SCHEMA)
     cursor.execute(SETUP_ROLE_SESSIONS_SCHEMA)
@@ -191,6 +197,22 @@ def insert_guild_row(cursor, db, guild_id=GUILD_ID, name="Test Guild"):
     )
     cursor.execute("INSERT OR IGNORE INTO guild_games(guildId, game) VALUES(?, 'League')", (guild_id,))
     db.commit()
+
+
+# Test-only stand-in for the manual "special" title grant (e.g. "Developer")
+# production never actually exercises - the only real grant of one
+# (SHOCKWAVE_DEVELOPER_ID's own "Developer" title) is done in memory by
+# getUnlockedCardTitles, not written to card_unlocks. Several test classes
+# still need a persisted itemType='title' row to set up "this player already
+# has a special title" state, so this writes one directly instead of going
+# through a helper method that doesn't exist in production.
+def _grant_special_card_title(helper_obj, guild_id, user_id, title_key):
+    helper_obj.cursor.execute(
+        "INSERT OR IGNORE INTO card_unlocks(guildId, userId, itemType, itemKey) "
+        "VALUES(?, ?, 'title', ?)",
+        (guild_id, user_id, title_key)
+    )
+    helper_obj.db.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -439,13 +461,6 @@ class PlayerTests(unittest.TestCase):
         p.set_name("Bob")
         self.assertEqual(p.get_id(), 7)
         self.assertEqual(p.get_name(), "Bob")
-
-    def test_convert_from_member(self):
-        member = FakeMember("Carol", id=42)
-        p = Player()
-        p.convertFromMember(member)
-        self.assertEqual(p.id, 42)
-        self.assertEqual(p.name, "Carol")
 
 
 class TeamTests(unittest.TestCase):
@@ -4319,11 +4334,10 @@ class TeamStatsHelperTests(_FakeLogoDirTestCase):
 
     async def test_reports_win_rate_once_games_are_recorded(self):
         await self.helperObj.createTeamHelper(self._ctx(), "Red", 5)
-        team_id, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
-        team.addWin()
-        team.addWin()
-        team.addLoss()
-        self.helperObj.updateTeamData(team_id, team)
+        team_id, _team = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        self.helperObj._recordTeamGameResult(GUILD_ID, team_id, "League", True)
+        self.helperObj._recordTeamGameResult(GUILD_ID, team_id, "League", True)
+        self.helperObj._recordTeamGameResult(GUILD_ID, team_id, "League", False)
 
         ctx = self._ctx()
         await self.helperObj.teamStatsHelper(ctx, "Red")
@@ -4398,6 +4412,60 @@ class TeamStatsHelperTests(_FakeLogoDirTestCase):
             "SELECT guildId, teamId, cardShown FROM team_stats_views WHERE messageId=?", (msg.id,)
         )
         self.assertEqual(self.cursor.fetchone(), (GUILD_ID, team_id, 0))
+
+
+class TeamGameStatsScopingTests(_FakeLogoDirTestCase):
+    def _ctx(self, user_id=901, name="Alice"):
+        return FakeInteraction(self.guild, FakeMember(name, id=user_id))
+
+    async def test_recording_isolates_wins_and_losses_per_game(self):
+        await self.helperObj.createTeamHelper(self._ctx(), "Red", 5)
+        team_id, _ = self.helperObj.getTeamRow(GUILD_ID, "Red")
+
+        self.helperObj._recordTeamGameResult(GUILD_ID, team_id, "League", True)
+        self.helperObj._recordTeamGameResult(GUILD_ID, team_id, "Valorant", True)
+        self.helperObj._recordTeamGameResult(GUILD_ID, team_id, "Valorant", True)
+        self.helperObj._recordTeamGameResult(GUILD_ID, team_id, "Valorant", False)
+
+        self.assertEqual(self.helperObj.getTeamGameStat(GUILD_ID, team_id, "League", "wins"), 1)
+        self.assertEqual(self.helperObj.getTeamGameStat(GUILD_ID, team_id, "League", "losses"), 0)
+        self.assertEqual(self.helperObj.getTeamGameStat(GUILD_ID, team_id, "Valorant", "wins"), 2)
+        self.assertEqual(self.helperObj.getTeamGameStat(GUILD_ID, team_id, "Valorant", "losses"), 1)
+
+    async def test_team_stats_embed_follows_the_servers_current_game(self):
+        await self.helperObj.createTeamHelper(self._ctx(), "Red", 5)
+        team_id, _ = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        self.helperObj._recordTeamGameResult(GUILD_ID, team_id, "League", True)
+        self.helperObj._recordTeamGameResult(GUILD_ID, team_id, "Valorant", True)
+        self.helperObj._recordTeamGameResult(GUILD_ID, team_id, "Valorant", True)
+
+        ctx = self._ctx()
+        await self.helperObj.teamStatsHelper(ctx, "Red")
+        values = {f.name: f.value for f in ctx.response.send_message.call_args.kwargs["embed"].fields}
+        self.assertEqual(values["Record"], "1W - 0L")
+
+        await self.helperObj.setGameHelper(self._ctx(), "Valorant")
+        ctx2 = self._ctx()
+        await self.helperObj.teamStatsHelper(ctx2, "Red")
+        values2 = {f.name: f.value for f in ctx2.response.send_message.call_args.kwargs["embed"].fields}
+        self.assertEqual(values2["Record"], "2W - 0L")
+
+    # _recordMatchResult is fed tournament_matches.game (stamped at
+    # match-creation time), not whatever the server's current_game
+    # happens to be by the time the match actually resolves - see
+    # servers.game/_activeGame's own comment for why "the game a match
+    # was played under" and "the game a server is set to right now" are
+    # deliberately allowed to diverge.
+    async def test_match_result_records_against_the_matchs_own_game_not_the_current_one(self):
+        red = _captained_team("Red", 901, "Alice")
+        blue = _captained_team("Blue", 902, "Bob")
+        red_id = self.helperObj._saveNewTeam(GUILD_ID, red)
+
+        await self.helperObj.setGameHelper(self._ctx(), "Valorant")
+        self.helperObj._recordMatchResult(GUILD_ID, red, blue, "League")
+
+        self.assertEqual(self.helperObj.getTeamGameStat(GUILD_ID, red_id, "League", "wins"), 1)
+        self.assertIsNone(self.helperObj.getTeamGameStat(GUILD_ID, red_id, "Valorant", "wins"))
 
 
 class DominantLogoColorTests(_FakeLogoDirTestCase):
@@ -4854,13 +4922,11 @@ class TeamListHelperTests(HelperTestCase):
     async def test_sort_by_wins_descending(self):
         await self.helperObj.createTeamHelper(self._ctx(901, "Alice"), "Red", 5)
         await self.helperObj.createTeamHelper(self._ctx(902, "Bob"), "Blue", 5)
-        red_id, red = self.helperObj.getTeamRow(GUILD_ID, "Red")
-        red.addWin()
-        red.addWin()
-        self.helperObj.updateTeamData(red_id, red)
-        blue_id, blue = self.helperObj.getTeamRow(GUILD_ID, "Blue")
-        blue.addWin()
-        self.helperObj.updateTeamData(blue_id, blue)
+        red_id, _red = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        self.helperObj._recordTeamGameResult(GUILD_ID, red_id, "League", True)
+        self.helperObj._recordTeamGameResult(GUILD_ID, red_id, "League", True)
+        blue_id, _blue = self.helperObj.getTeamRow(GUILD_ID, "Blue")
+        self.helperObj._recordTeamGameResult(GUILD_ID, blue_id, "League", True)
 
         ctx = self._ctx()
         await self.helperObj.teamListHelper(ctx, None, False, "wins", "desc")
@@ -6487,6 +6553,18 @@ class StartTournamentHelperTests(HelperTestCase):
         ctx.response.send_message.assert_awaited_once_with(
             "This tournament's current round is already in progress.", ephemeral=True
         )
+
+    async def test_stamps_the_servers_current_game_onto_each_match(self):
+        red = _captained_team("Red", 901, "Alice")
+        blue = _captained_team("Blue", 902, "Bob")
+        self._tournament_with_teams(red, blue)
+        await self.helperObj.setGameHelper(self._ctx(), "Valorant")
+
+        ctx = self._ctx()
+        await self.helperObj.startTournamentHelper(ctx, "sequential")
+
+        self.cursor.execute("SELECT game FROM tournament_matches WHERE guildId=?", (GUILD_ID,))
+        self.assertEqual([row[0] for row in self.cursor.fetchall()], ["Valorant"])
 
     async def test_sequential_posts_ready_check_for_first_match_only(self):
         red = _captained_team("Red", 901, "Alice")
@@ -10734,7 +10812,7 @@ class StatsViewTests(HelperTestCase):
         self.cursor.execute("SELECT cardAvatarGlobal FROM stats_views WHERE messageId=?", (msg.id,))
         self.assertEqual(self.cursor.fetchone(), (0,))
 
-    async def test_returning_from_the_card_resets_the_avatar_to_server(self):
+    async def test_returning_from_the_card_keeps_the_global_avatar(self):
         alice = FakeMember("Alice", id=901)
         self.guild.members = [alice]
         ctx = FakeInteraction(self.guild, alice, channel=self.channel)
@@ -10748,6 +10826,7 @@ class StatsViewTests(HelperTestCase):
         await show_view.showCard.callback(self._click(fetched_message))
         card_view = helper_module.StatsView(self.helperObj, card_shown=True)
         await card_view.avatarToggle.callback(self._click(fetched_message))
+        fetched_message.edit.call_args.kwargs["attachments"][0].close()
 
         self.cursor.execute("SELECT cardAvatarGlobal FROM stats_views WHERE messageId=?", (msg.id,))
         self.assertEqual(self.cursor.fetchone(), (1,))
@@ -10758,8 +10837,40 @@ class StatsViewTests(HelperTestCase):
         fetched_message.embeds[0].set_image(url="attachment://trading_card.png")
         await card_view.returnToStats.callback(self._click(fetched_message))
 
+        # cardShown flips back off, but cardAvatarGlobal is deliberately
+        # NOT reset - the embed keeps showing the same avatar the card
+        # just had, rather than snapping back to the server one.
         self.cursor.execute("SELECT cardShown, cardAvatarGlobal FROM stats_views WHERE messageId=?", (msg.id,))
-        self.assertEqual(self.cursor.fetchone(), (0, 0))
+        self.assertEqual(self.cursor.fetchone(), (0, 1))
+        returned_embed = fetched_message.edit.call_args.kwargs["embed"]
+        self.assertEqual(returned_embed.thumbnail.url, "https://cdn.discordapp.com/avatars/901/global.png")
+
+    async def test_showing_the_card_keeps_the_global_avatar_from_the_embed(self):
+        alice = FakeMember("Alice", id=901)
+        self.guild.members = [alice]
+        ctx = FakeInteraction(self.guild, alice, channel=self.channel)
+        await self.helperObj.statsHelper(ctx)
+        msg = await ctx.original_response()
+
+        fetched_message = FakeMessage(id=msg.id)
+        fetched_message.embeds = [ctx.response.send_message.call_args.kwargs["embed"]]
+
+        embed_view = helper_module.StatsView(self.helperObj, card_shown=False)
+        await embed_view.avatarToggle.callback(self._click(fetched_message))
+        # avatarToggle edits the embed via message.edit; FakeMessage doesn't
+        # apply that automatically, so mirror it back onto .embeds the way a
+        # real Discord message would already reflect it by the next click.
+        fetched_message.embeds = [fetched_message.edit.call_args.kwargs["embed"]]
+
+        with patch.object(
+            self.helperObj, "_resolveCardAvatarImage", wraps=self.helperObj._resolveCardAvatarImage
+        ) as mock_resolve:
+            await embed_view.showCard.callback(self._click(fetched_message))
+        fetched_message.edit.call_args.kwargs["attachments"][0].close()
+
+        self.assertTrue(mock_resolve.call_args.args[1])  # use_global_avatar=True, carried from the embed
+        self.cursor.execute("SELECT cardAvatarGlobal FROM stats_views WHERE messageId=?", (msg.id,))
+        self.assertEqual(self.cursor.fetchone(), (1,))
 
     async def test_card_falls_back_to_a_plain_tile_if_the_avatar_cant_be_fetched(self):
         alice = FakeMember("Alice", id=901)
@@ -10844,7 +10955,7 @@ class CountShopPurchasesTests(HelperTestCase):
     async def test_counts_only_shop_bought_items_not_other_unlock_types(self):
         # a tier reward and a special grant shouldn't count as "purchased"
         self.helperObj._checkTierRewardUnlocks(GUILD_ID, 901, helper_module.ELO_TIER_THRESHOLDS["Diamond"])
-        self.helperObj.grantSpecialCardTitle(GUILD_ID, 901, "Developer")
+        _grant_special_card_title(self.helperObj, GUILD_ID, 901, "Developer")
         self.assertEqual(self.helperObj._countShopPurchases(GUILD_ID, 901), 0)
 
         ctx = FakeInteraction(self.guild, FakeMember("Alice", id=901))
@@ -11299,15 +11410,15 @@ class CardUnlocksTests(HelperTestCase):
         )
 
     def test_special_title_grant_shows_up_in_unlocked_titles(self):
-        self.helperObj.grantSpecialCardTitle(GUILD_ID, 901, "Developer")
+        _grant_special_card_title(self.helperObj, GUILD_ID, 901, "Developer")
         self.assertEqual(self.helperObj.getUnlockedCardTitles(GUILD_ID, 901), ["Developer"])
         # A special grant has no elo tier behind it, so no color scheme
         # unlocks alongside it the way a rank reward's does.
         self.assertEqual(self.helperObj.getUnlockedCardColorSchemes(GUILD_ID, 901), [])
 
     def test_special_title_grant_is_idempotent(self):
-        self.helperObj.grantSpecialCardTitle(GUILD_ID, 901, "Developer")
-        self.helperObj.grantSpecialCardTitle(GUILD_ID, 901, "Developer")
+        _grant_special_card_title(self.helperObj, GUILD_ID, 901, "Developer")
+        _grant_special_card_title(self.helperObj, GUILD_ID, 901, "Developer")
         self.assertEqual(self.helperObj.getUnlockedCardTitles(GUILD_ID, 901), ["Developer"])
 
     def test_shockwave_developer_always_has_developer_title_with_no_grant_needed(self):
@@ -11323,7 +11434,7 @@ class CardUnlocksTests(HelperTestCase):
         self.assertEqual(titles, ["Developer"])
 
     def test_developer_title_is_not_duplicated_if_also_separately_granted(self):
-        self.helperObj.grantSpecialCardTitle(GUILD_ID, helper_module.SHOCKWAVE_DEVELOPER_ID, "Developer")
+        _grant_special_card_title(self.helperObj, GUILD_ID, helper_module.SHOCKWAVE_DEVELOPER_ID, "Developer")
         titles = self.helperObj.getUnlockedCardTitles(GUILD_ID, helper_module.SHOCKWAVE_DEVELOPER_ID)
         self.assertEqual(titles, ["Developer"])
 
@@ -11338,7 +11449,7 @@ class CardUnlocksTests(HelperTestCase):
 
     def test_available_titles_combines_the_default_with_unlocked_ones(self):
         self.helperObj._checkTierRewardUnlocks(GUILD_ID, 901, helper_module.ELO_TIER_THRESHOLDS["Diamond"])
-        self.helperObj.grantSpecialCardTitle(GUILD_ID, 901, "Developer")
+        _grant_special_card_title(self.helperObj, GUILD_ID, 901, "Developer")
         available = self.helperObj.getAvailableCardTitles(GUILD_ID, 901)
         # CARD_DEFAULT_TITLE is always first (it's prepended in Python,
         # not part of the DB query). The unlocked ones' own relative order
@@ -11437,7 +11548,7 @@ class CardSetHelperTests(HelperTestCase):
         self.assertIn("haven't unlocked", message)
 
     async def test_equips_a_specially_granted_title(self):
-        self.helperObj.grantSpecialCardTitle(GUILD_ID, 901, "Developer")
+        _grant_special_card_title(self.helperObj, GUILD_ID, 901, "Developer")
         ctx = self._ctx()
         await self.helperObj.cardSetHelper(ctx, "Developer", None, None)
         settings = self.helperObj.getCardSettings(GUILD_ID, 901)
@@ -11608,7 +11719,7 @@ class ResetCardUnlocksHelperTests(HelperTestCase):
     def test_removes_every_unlock_for_the_target(self):
         target_id = 555
         self.helperObj._checkTierRewardUnlocks(GUILD_ID, target_id, helper_module.ELO_TIER_THRESHOLDS["Diamond"])
-        self.helperObj.grantSpecialCardTitle(GUILD_ID, target_id, "Developer")
+        _grant_special_card_title(self.helperObj, GUILD_ID, target_id, "Developer")
         self.assertTrue(self.helperObj.getUnlockedCardTitles(GUILD_ID, target_id))
 
         self.helperObj.resetCardUnlocksHelper(GUILD_ID, target_id)
@@ -16967,7 +17078,7 @@ class ClearCommandTests(BotModuleTestCase):
         guild_id = 9038
         await self._insert_guild_row(guild_id)
         self.bot.helperObj.ensureEconomyRow(guild_id, 901, "Alice")
-        self.bot.helperObj.grantSpecialCardTitle(guild_id, 901, "Developer")
+        _grant_special_card_title(self.bot.helperObj, guild_id, 901, "Developer")
         self.bot.helperObj._unlockAchievement(guild_id, 901, "first_blood")
         self.bot.helperObj._unlockAchievement(guild_id, 901, "veteran")
         ctx = self._ctx(guild_id=guild_id)

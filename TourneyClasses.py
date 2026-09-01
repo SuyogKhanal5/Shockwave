@@ -18,11 +18,6 @@ class Player:
     def set_name(self, name: str) -> None:
         self.name = name
 
-    # Convert from discord.Member to Player obj
-    def convertFromMember(self, member: discord.Member) -> None:
-        self.id = member.id
-        self.name = member.name
-
     def serializePlayer(self) -> str:
         return '({},{})'.format(self.id, self.name)
 
@@ -46,6 +41,12 @@ class Team:
         self.size = 0
         self.voice_channel = ""
         self.captain = None
+        # Frozen/unused going forward - nothing in helper.py reads or writes
+        # these anymore (see team_game_stats in bot.py, the per-game
+        # replacement, and _hydrateTeamGameRecord). Kept only so
+        # serializeTeam/deserializeTeam still round-trip an older team's
+        # data unchanged, and as the one-time migration source for
+        # team_game_stats.
         self.wins = 0
         self.losses = 0
         # Target roster size for a persistent team, set via /team-create.
@@ -78,9 +79,6 @@ class Team:
     def addLoss(self) -> None:
         self.losses += 1
 
-    def set_winner(self, winner: bool) -> None:
-        self.winner = winner
-
     def set_voice_channel(self, voice_channel: discord.VoiceChannel) -> None:
         self.voice_channel = str(voice_channel)
 
@@ -101,12 +99,6 @@ class Team:
 
     def get_players(self) -> list:
         return self.players
-
-    def get_score(self) -> int:
-        return self.score
-
-    def get_winner(self) -> bool:
-        return self.winner
 
     def get_voice_channel(self) -> discord.VoiceChannel:
         return self.voice_channel
@@ -214,14 +206,6 @@ class Team:
             self.logo_path = None
 
 
-class Match:
-    def __init__(self) -> None:
-        self.team1 = None
-        self.team2 = None
-        self.finished = False
-        self.winner = None
-
-
 class Tournament:
     def __init__(self, name=None, team_size=None, num_teams=None, double_elimination=False) -> None:
         self.name = name
@@ -270,9 +254,6 @@ class Tournament:
 
     def get_num_teams(self) -> int:
         return self.num_teams
-
-    def set_num_teams(self, num_teams: int) -> None:
-        self.num_teams = num_teams
 
     def is_double_elimination(self) -> bool:
         return self.double_elimination

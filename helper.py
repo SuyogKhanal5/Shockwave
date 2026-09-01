@@ -1,6 +1,6 @@
 import discord
 from TourneyClasses import (
-    Team, Tournament, Match, Player, BracketNode, serialize_bracket, deserialize_bracket,
+    Team, Tournament, Player, BracketNode, serialize_bracket, deserialize_bracket,
     serialize_losers_rounds, deserialize_losers_rounds,
 )
 import random
@@ -86,7 +86,6 @@ PREVIEW_DIR = os.path.join(os.path.dirname(__file__), "assets", "previews")
 # linked, so rendering doesn't depend on network access or the host having
 # them installed.
 FONTS_DIR = os.path.join(os.path.dirname(__file__), "assets", "fonts")
-CHAKRA_PETCH_REGULAR = os.path.join(FONTS_DIR, "ChakraPetch-Regular.ttf")
 CHAKRA_PETCH_SEMIBOLD = os.path.join(FONTS_DIR, "ChakraPetch-SemiBold.ttf")
 CHAKRA_PETCH_BOLD = os.path.join(FONTS_DIR, "ChakraPetch-Bold.ttf")
 IBM_PLEX_SANS = os.path.join(FONTS_DIR, "IBMPlexSans.ttf")  # variable weight, see _loadFont
@@ -526,11 +525,12 @@ CARD_TIER_REWARD_TITLES = {
     "Grandmaster": "Grandmaster",
     "Challenger": "The Challenger",
 }
-# Titles granted directly (see grantSpecialCardTitle) rather than earned by
-# reaching an elo tier. This is a manual admin action, not something
-# _checkTierRewardUnlocks ever awards on its own. Kept as its own small
-# catalog rather than folded into CARD_TIER_REWARD_TITLES since these have
-# no elo threshold backing them at all.
+# Titles granted directly rather than earned by reaching an elo tier - not
+# something _checkTierRewardUnlocks ever awards on its own. Right now the
+# only grant is SHOCKWAVE_DEVELOPER_ID's own "Developer" title (see
+# getUnlockedCardTitles). Kept as its own small catalog rather than folded
+# into CARD_TIER_REWARD_TITLES since these have no elo threshold backing
+# them at all.
 CARD_SPECIAL_TITLES = {
     "Developer": "Developer",
 }
@@ -2560,9 +2560,9 @@ class helpers():
         return round(sum(elo_by_id[m.id] for m in members) / len(members))
 
     # The (emoji, plain-text label, badge color, bare tier name) behind
-    # eloRankLabel/eloRankLabelPlain/eloRankBadgeColor/
-    # eloRankBadgeImagePath, e.g. ("\U0001f537", "Platinum III", (41, 121,
-    # 255), "Platinum") once divisions stop applying. ELO_TIERS is sorted
+    # eloRankLabel/eloRankLabelPlain/eloRankBadgeImagePath, e.g.
+    # ("\U0001f537", "Platinum III", (41, 121, 255), "Platinum") once
+    # divisions stop applying. ELO_TIERS is sorted
     # ascending, so the last threshold at or below elo wins: exactly 1000
     # is Platinum, not Gold, and anything above the top tier's threshold
     # is still Challenger. `tier_name` is always the bare name (no
@@ -2603,12 +2603,6 @@ class helpers():
     # available there the way it is for a normal embed field.
     def eloRankLabelPlain(self, elo):
         return self._eloRankParts(elo)[1]
-
-    # The tier's badge color (see ELO_TIERS), used for the tier-reward
-    # trading-card color scheme (getUnlockedCardColorSchemes), independent
-    # of whatever image eloRankBadgeImagePath below points at.
-    def eloRankBadgeColor(self, elo):
-        return self._eloRankParts(elo)[2]
 
     # Path to this tier's real emoji artwork (see ELO_BADGE_DIR), the
     # trading card's stand-in for the emoji eloRankLabel shows in a real
@@ -6389,10 +6383,11 @@ class helpers():
             node_index = bracket.index(a)
             self.cursor.execute(
                 "INSERT INTO tournament_matches"
-                "(guildId, roundIndex, nodeIndex, team1, team2, state, mode, messageId, channelId, winner, bracketType) "
-                "VALUES(?, ?, ?, ?, ?, 'QUEUED', ?, NULL, ?, NULL, 'winners')",
+                "(guildId, roundIndex, nodeIndex, team1, team2, state, mode, messageId, channelId, winner, "
+                "bracketType, game) "
+                "VALUES(?, ?, ?, ?, ?, 'QUEUED', ?, NULL, ?, NULL, 'winners', ?)",
                 (guild_id, round_index, node_index, a.team.serializeTeam(), b.team.serializeTeam(),
-                 mode, channel.id)
+                 mode, channel.id, self._currentGame(guild_id))
             )
             self.db.commit()
             match_ids.append(self.cursor.lastrowid)
@@ -6460,10 +6455,11 @@ class helpers():
             node_index = losers_nodes.index(a)
             self.cursor.execute(
                 "INSERT INTO tournament_matches"
-                "(guildId, roundIndex, nodeIndex, team1, team2, state, mode, messageId, channelId, winner, bracketType) "
-                "VALUES(?, ?, ?, ?, ?, 'QUEUED', ?, NULL, ?, NULL, 'losers')",
+                "(guildId, roundIndex, nodeIndex, team1, team2, state, mode, messageId, channelId, winner, "
+                "bracketType, game) "
+                "VALUES(?, ?, ?, ?, ?, 'QUEUED', ?, NULL, ?, NULL, 'losers', ?)",
                 (guild_id, round_index, node_index, a.team.serializeTeam(), b.team.serializeTeam(),
-                 mode, channel.id)
+                 mode, channel.id, self._currentGame(guild_id))
             )
             self.db.commit()
             match_ids.append(self.cursor.lastrowid)
@@ -6503,10 +6499,11 @@ class helpers():
 
         self.cursor.execute(
             "INSERT INTO tournament_matches"
-            "(guildId, roundIndex, nodeIndex, team1, team2, state, mode, messageId, channelId, winner, bracketType) "
-            "VALUES(?, ?, -1, ?, ?, 'QUEUED', ?, NULL, ?, NULL, 'finals')",
+            "(guildId, roundIndex, nodeIndex, team1, team2, state, mode, messageId, channelId, winner, "
+            "bracketType, game) "
+            "VALUES(?, ?, -1, ?, ?, 'QUEUED', ?, NULL, ?, NULL, 'finals', ?)",
             (guild_id, 1 if reset else 0, wb_champion.serializeTeam(), lb_champion.serializeTeam(),
-             mode, channel.id)
+             mode, channel.id, self._currentGame(guild_id))
         )
         self.db.commit()
         match_id = self.cursor.lastrowid
@@ -6748,13 +6745,13 @@ class helpers():
     # for anything that isn't a winners-bracket match.
     async def _resolveTournamentMatch(self, guild_id, match_id, winning_team, channel_id):
         self.cursor.execute(
-            "SELECT roundIndex, nodeIndex, mode, state, bracketType FROM tournament_matches WHERE id=?",
+            "SELECT roundIndex, nodeIndex, mode, state, bracketType, game FROM tournament_matches WHERE id=?",
             (match_id,)
         )
         row = self.cursor.fetchone()
         if row is None or row[3] == "RESOLVED":
             return
-        round_index, node_index, mode, _, bracket_type = row
+        round_index, node_index, mode, _, bracket_type, game = row
 
         # BUG-PRONE PATTERN AVOIDED: flip to RESOLVED before anything async
         # below, so a concurrent/duplicate call can't process this twice.
@@ -6772,12 +6769,14 @@ class helpers():
             return
 
         if bracket_type == "finals":
-            await self._resolveFinalsMatch(guild_id, tournament, match_id, round_index, winning_team, mode, channel)
+            await self._resolveFinalsMatch(
+                guild_id, tournament, match_id, round_index, winning_team, mode, channel, game
+            )
             return
 
         if bracket_type == "losers":
             await self._resolveLosersMatch(
-                guild_id, tournament, match_id, round_index, node_index, winning_team, mode, channel
+                guild_id, tournament, match_id, round_index, node_index, winning_team, mode, channel, game
             )
             return
 
@@ -6798,7 +6797,7 @@ class helpers():
                 if node_a.next.drop_to is not None:
                     node_a.next.drop_to.team = loser_node.team
         self.saveTournament(guild_id, tournament)
-        self._recordMatchResult(guild_id, winner_node.team, loser_node.team)
+        self._recordMatchResult(guild_id, winner_node.team, loser_node.team, game)
 
         matchup_message = await self._fetchMatchupMessage(guild_id, channel, match_id=match_id)
         await channel.send(
@@ -6847,7 +6846,7 @@ class helpers():
     # (or Grand Finals, once there isn't one). A losers-bracket loser is
     # simply eliminated, nothing further to propagate for them.
     async def _resolveLosersMatch(
-        self, guild_id, tournament, match_id, round_index, node_index, winning_team, mode, channel
+        self, guild_id, tournament, match_id, round_index, node_index, winning_team, mode, channel, game
     ):
         losers_nodes = tournament.get_losers_bracket_nodes()
         node_a = losers_nodes[node_index]
@@ -6857,7 +6856,7 @@ class helpers():
         if node_a.next is not None:
             node_a.next.team = winner_node.team
         self.saveTournament(guild_id, tournament)
-        self._recordMatchResult(guild_id, winner_node.team, loser_node.team)
+        self._recordMatchResult(guild_id, winner_node.team, loser_node.team, game)
 
         matchup_message = await self._fetchMatchupMessage(guild_id, channel, match_id=match_id)
         await channel.send(
@@ -6896,7 +6895,9 @@ class helpers():
     # one loss, so a second, decider match (roundIndex 1) is posted
     # instead of ending the tournament. Whoever wins THAT one is champion
     # no matter what.
-    async def _resolveFinalsMatch(self, guild_id, tournament, match_id, round_index, winning_team, mode, channel):
+    async def _resolveFinalsMatch(
+        self, guild_id, tournament, match_id, round_index, winning_team, mode, channel, game
+    ):
         self.cursor.execute("SELECT team1, team2 FROM tournament_matches WHERE id=?", (match_id,))
         team1_ser, team2_ser = self.cursor.fetchone()
         team1, team2 = Team(), Team()
@@ -6908,7 +6909,7 @@ class helpers():
         # decider. Both are real, played matches, even when game 1's
         # result just leads into a reset rather than ending the
         # tournament.
-        self._recordMatchResult(guild_id, winner, loser)
+        self._recordMatchResult(guild_id, winner, loser, game)
         await self._settleMatchWagers(guild_id, match_id, winning_team, channel)
         # Unlike winners/losers rounds (several matches, only "done" once
         # every one resolves), a finals round is always exactly this one
@@ -7051,6 +7052,7 @@ class helpers():
         team = Team()
         team.deserializeTeam(data)
         self._ensureLogo(team_id, team)
+        self._hydrateTeamGameRecord(guild_id, team_id, team)
         return team_id, team
 
     def getTeamById(self, guild_id, team_id):
@@ -7063,6 +7065,7 @@ class helpers():
         team = Team()
         team.deserializeTeam(row[0])
         self._ensureLogo(team_id, team)
+        self._hydrateTeamGameRecord(guild_id, team_id, team)
         return team
 
     def getTeamsForGuild(self, guild_id):
@@ -7072,6 +7075,7 @@ class helpers():
             team = Team()
             team.deserializeTeam(data)
             self._ensureLogo(team_id, team)
+            self._hydrateTeamGameRecord(guild_id, team_id, team)
             teams.append((team_id, team))
         return teams
 
@@ -7489,6 +7493,51 @@ class helpers():
         self.cursor.execute("UPDATE teams SET data=? WHERE id=?", (team.serializeTeam(), team_id))
         self.db.commit()
 
+    # Per-game team win/loss record - see /set game. Split out of
+    # Team.wins/Team.losses (now frozen/unused, see bot.py's
+    # team_game_stats comment) the same way game_stats split off of
+    # economy.elo, so a team's record only reflects matches played under
+    # the same game.
+    def ensureTeamGameStatsRow(self, guild_id, team_id, game):
+        self.cursor.execute(
+            "INSERT OR IGNORE INTO team_game_stats(guildId, teamId, game, wins, losses) "
+            "VALUES(?, ?, ?, 0, 0)",
+            (guild_id, team_id, game)
+        )
+        self.db.commit()
+
+    def getTeamGameStat(self, guild_id, team_id, game, column):
+        self.cursor.execute(
+            f"SELECT {column} FROM team_game_stats WHERE guildId=? AND teamId=? AND game=?",
+            (guild_id, team_id, game)
+        )
+        row = self.cursor.fetchone()
+        return row[0] if row is not None else None
+
+    def _recordTeamGameResult(self, guild_id, team_id, game, won):
+        self.ensureTeamGameStatsRow(guild_id, team_id, game)
+        column = "wins" if won else "losses"
+        self.cursor.execute(
+            f"UPDATE team_game_stats SET {column} = {column} + 1 WHERE guildId=? AND teamId=? AND game=?",
+            (guild_id, team_id, game)
+        )
+        self.db.commit()
+
+    # Overwrites a freshly-deserialized Team's in-memory wins/losses with
+    # its team_game_stats record for the guild's current game, so every
+    # display site that already reads team.wins/team.losses (the team
+    # list, /team stats, the trading card) shows the per-game record
+    # without needing its own game-scoping logic. Only ever touches the
+    # in-memory object - never persisted back through updateTeamData - so
+    # Team.wins/Team.losses stays whatever was embedded in `teams`.data
+    # (frozen, unused going forward) on disk. Called from every loader
+    # that deserializes a Team (getTeamRow/getTeamById/getTeamsForGuild)
+    # right after _ensureLogo, the other per-load enrichment step.
+    def _hydrateTeamGameRecord(self, guild_id, team_id, team):
+        game = self._currentGame(guild_id)
+        team.wins = self.getTeamGameStat(guild_id, team_id, game, "wins") or 0
+        team.losses = self.getTeamGameStat(guild_id, team_id, game, "losses") or 0
+
     # Records one played tournament match against each side's PERSISTENT
     # team record (the one /team list, /team lookup, and /team stats
     # actually read), called from every match-resolution path (winners
@@ -7501,19 +7550,18 @@ class helpers():
     # team, shouldn't happen for a match that was ever actually queued,
     # but this is cheap insurance) or simply not a persisted team at
     # all, in which case there's nothing to record and this is a no-op.
-    def _recordMatchResult(self, guild_id, winner_team, loser_team):
+    # `game` is whichever game the match was actually played under
+    # (tournament_matches.game, stamped at match-creation time), not
+    # necessarily the server's current game if it's been switched since.
+    def _recordMatchResult(self, guild_id, winner_team, loser_team, game):
         for team, won in ((winner_team, True), (loser_team, False)):
             if team is None:
                 continue
             result = self.getTeamRow(guild_id, team.get_name())
             if result is None:
                 continue
-            team_id, persisted_team = result
-            if won:
-                persisted_team.addWin()
-            else:
-                persisted_team.addLoss()
-            self.updateTeamData(team_id, persisted_team)
+            team_id, _persisted_team = result
+            self._recordTeamGameResult(guild_id, team_id, game, won)
 
     def isTeamCaptain(self, team, user_id):
         captain = team.get_captain()
@@ -11210,7 +11258,7 @@ class helpers():
 
     # Permanently records that `user_id` has earned `achievement_key`
     # (a CARD_ACHIEVEMENT_TITLES key), same INSERT OR IGNORE shape
-    # _unlockCardReward/grantSpecialCardTitle use, so an achievement
+    # _unlockCardReward uses, so an achievement
     # title shows up through the exact same
     # getUnlockedCardTitles/getAvailableCardTitles/_countShopPurchases
     # reads those use, with no separate "did they earn this" concept
@@ -11396,21 +11444,6 @@ class helpers():
     # whatever this player has actually unlocked.
     def getAvailableCardTitles(self, guild_id, user_id):
         return [CARD_DEFAULT_TITLE] + self.getUnlockedCardTitles(guild_id, user_id)
-
-    # A manual, one-off unlock: CARD_SPECIAL_TITLES' `title_key` (e.g.
-    # "Developer") rather than an elo-tier one. So this skips
-    # _checkTierRewardUnlocks/ELO_TIER_THRESHOLDS entirely and just
-    # records the itemType='title' row directly. No matching
-    # color_scheme unlock the way a tier reward gets one: a special
-    # title isn't paired with an ELO_TIERS badge color to derive a
-    # scheme from.
-    def grantSpecialCardTitle(self, guild_id, user_id, title_key):
-        self.cursor.execute(
-            "INSERT OR IGNORE INTO card_unlocks(guildId, userId, itemType, itemKey) "
-            "VALUES(?, ?, 'title', ?)",
-            (guild_id, user_id, title_key)
-        )
-        self.db.commit()
 
     # Sets `user_id`'s equipped trading-card title. Trusts `title` is
     # already validated (see cardSetHelper, the command boundary that
@@ -12101,9 +12134,8 @@ class helpers():
         await ctx.response.send_message(embed=embed)
 
     # /shop buy: spends gold to permanently unlock one CARD_SHOP_* item,
-    # writes to card_unlocks exactly like a tier reward or a special
-    # grant does (see _unlockCardReward/grantSpecialCardTitle). So a
-    # purchased item shows up through the exact same
+    # writes to card_unlocks exactly like a tier reward does (see
+    # _unlockCardReward). So a purchased item shows up through the exact same
     # getUnlockedCardTitles/getUnlockedCardColorSchemes/
     # getUnlockedCardFontStyles reads those use, with no separate "did
     # I buy this" concept anywhere else in the code.
@@ -12437,12 +12469,19 @@ class helpers():
     # image. attachments=[] is required here, not just omitted. The
     # message currently has the card's PNG attached, and message.edit()
     # otherwise leaves existing attachments alone. See
-    # _swapStatsForTradingCard on `view`.
-    async def _swapTradingCardForStats(self, message, guild_id, target_user_id, view=None):
+    # _swapStatsForTradingCard on `view`. `use_global_avatar` carries the
+    # card's own avatar choice over onto the embed's thumbnail
+    # (_buildStatsEmbed itself always starts on the server avatar, same
+    # as a fresh /stats post), see _handleStatsReturnClick.
+    async def _swapTradingCardForStats(self, message, guild_id, target_user_id, use_global_avatar=False, view=None):
         member = await self._resolveGuildMember(guild_id, target_user_id)
         if member is None:
             return
         embed = self._buildStatsEmbed(guild_id, member)
+        if use_global_avatar:
+            global_url = await self._resolveGlobalAvatarUrl(target_user_id)
+            if global_url is not None:
+                embed.set_thumbnail(url=global_url)
         edit_kwargs = {"embed": embed, "attachments": []}
         if view is not None:
             edit_kwargs["view"] = view
@@ -12450,7 +12489,11 @@ class helpers():
 
     # StatsView's Card button callback, swaps the plain embed for the
     # trading-card image and re-renders with a Back button in place of
-    # Card (see StatsView).
+    # Card (see StatsView). Whichever avatar the embed happened to be
+    # showing (server or global - see _handleStatsAvatarToggleClick's own
+    # embed-thumbnail comparison, mirrored here) carries straight over
+    # onto the card, rather than always starting the card back on the
+    # server avatar.
     async def _handleStatsShowCardClick(self, interaction):
         guild_id = interaction.guild_id
         message = interaction.message
@@ -12465,36 +12508,52 @@ class helpers():
             return
         target_user_id = row[0]
 
+        use_global = False
+        if message.embeds:
+            embed = message.embeds[0]
+            server_url = await self._resolveMemberAvatarUrl(guild_id, target_user_id)
+            if server_url is not None and embed.thumbnail is not None:
+                use_global = embed.thumbnail.url != server_url
+
         await interaction.response.defer()
         guild_name = interaction.guild.name if interaction.guild is not None else ""
         await self._swapStatsForTradingCard(
-            message, guild_id, guild_name, target_user_id, view=StatsView(self, card_shown=True)
+            message, guild_id, guild_name, target_user_id, use_global_avatar=use_global,
+            view=StatsView(self, card_shown=True)
         )
         self.cursor.execute(
-            "UPDATE stats_views SET cardShown=1, cardAvatarGlobal=0 WHERE guildId=? AND messageId=?",
-            (guild_id, message.id)
+            "UPDATE stats_views SET cardShown=1, cardAvatarGlobal=? WHERE guildId=? AND messageId=?",
+            (1 if use_global else 0, guild_id, message.id)
         )
         self.db.commit()
 
-    # StatsView's Back button callback, the reverse swap.
+    # StatsView's Back button callback, the reverse swap. cardAvatarGlobal
+    # carries straight over onto the embed's thumbnail (see
+    # _swapTradingCardForStats) rather than resetting to the server
+    # avatar, and is deliberately left untouched here (not reset to 0 the
+    # way it used to be) so a later Card press picks the same avatar back
+    # up too - see _handleStatsShowCardClick.
     async def _handleStatsReturnClick(self, interaction):
         guild_id = interaction.guild_id
         message = interaction.message
 
         self.cursor.execute(
-            "SELECT targetUserId FROM stats_views WHERE guildId=? AND messageId=? AND cardShown=1",
+            "SELECT targetUserId, cardAvatarGlobal FROM stats_views WHERE guildId=? AND messageId=? AND cardShown=1",
             (guild_id, message.id)
         )
         row = self.cursor.fetchone()
         if row is None:
             await interaction.response.send_message("This stats view is no longer live.", ephemeral=True)
             return
-        target_user_id = row[0]
+        target_user_id, card_avatar_global = row
 
         await interaction.response.defer()
-        await self._swapTradingCardForStats(message, guild_id, target_user_id, view=StatsView(self, card_shown=False))
+        await self._swapTradingCardForStats(
+            message, guild_id, target_user_id, use_global_avatar=bool(card_avatar_global),
+            view=StatsView(self, card_shown=False)
+        )
         self.cursor.execute(
-            "UPDATE stats_views SET cardShown=0, cardAvatarGlobal=0 WHERE guildId=? AND messageId=?",
+            "UPDATE stats_views SET cardShown=0 WHERE guildId=? AND messageId=?",
             (guild_id, message.id)
         )
         self.db.commit()
