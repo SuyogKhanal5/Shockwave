@@ -2847,27 +2847,31 @@ class helpers():
 
     # /set (admin-only, manage_guild, see bot.py): a single entry point
     # for every server-tunable knob an admin might want to change (team
-    # channels/size, the betting timer, the wager-postings channel, and a
-    # direct elo correction), so tweaking one doesn't mean hunting down a
-    # handful of different commands. Every given field is validated before
-    # ANY of them is applied, the same validate-then-apply-all pattern
-    # /card-set and /team set use, so a bad value in one field can't leave
-    # another, genuinely valid field half-applied. team1/team2 and
-    # member/elo are each pairs (either both given or neither). size,
-    # betting_timer, and wager_channel each stand alone.
+    # channels/size, the betting timer, and a direct elo correction), so
+    # tweaking one doesn't mean hunting down a handful of different
+    # commands. Every given field is validated before ANY of them is
+    # applied, the same validate-then-apply-all pattern /card-set and
+    # /team set use, so a bad value in one field can't leave another,
+    # genuinely valid field half-applied. team1/team2 and member/elo are
+    # each pairs (either both given or neither). size and betting_timer
+    # each stand alone. wager_channel/matchup_channel are their own
+    # dedicated commands/helpers instead (setWagerChannelHelper/
+    # setMatchupChannelHelper), not folded in here, since both can be run
+    # with no channel given at all (meaning "here"), a shape that doesn't
+    # fit this function's shared "was this field even touched" None-check.
     async def adminSetHelper(
-        self, ctx, team1, team2, size, betting_timer, wager_channel, member, elo, default_elo,
+        self, ctx, team1, team2, size, betting_timer, member, elo, default_elo,
     ):
         guild = ctx.guild
         guild_id = guild.id
 
         if all(
             v is None
-            for v in (team1, team2, size, betting_timer, wager_channel, member, elo, default_elo)
+            for v in (team1, team2, size, betting_timer, member, elo, default_elo)
         ):
             await ctx.response.send_message(
                 "Give at least one setting to change: team1+team2, size, betting_timer, "
-                "wager_channel, member+elo, or default_elo.",
+                "member+elo, or default_elo.",
                 ephemeral=True,
             )
             return
@@ -2926,16 +2930,6 @@ class helpers():
         if betting_timer is not None:
             self.update(guild_id, "betting_timer_seconds", betting_timer)
             applied.append(f"the betting window to **{betting_timer} seconds**")
-
-        # Points every future betting posting (open/closed/winner-report,
-        # see _openBetting) at a specific text channel instead of wherever
-        # a game or a tournament match happens to run.
-        if wager_channel is not None:
-            channel = discord.utils.get(guild.text_channels, name=wager_channel)
-            if channel is None:
-                channel = await guild.create_text_channel(wager_channel)
-            self.update(guild_id, "wager_channel", channel.name)
-            applied.append(f"the wager channel to {channel.mention}")
 
         # Sets `member`'s elo to an exact value rather than a +/- delta,
         # for correcting a broken rating directly rather than fighting the
@@ -3027,17 +3021,40 @@ class helpers():
             message = "Betting is disabled. /wager team and /wager against will no longer accept bets."
         await ctx.response.send_message(message)
 
+    # Points every future betting posting (open/closed, see _openBetting)
+    # at a specific text channel instead of wherever a game or a
+    # tournament match happens to run. Independent of /set matchup-channel,
+    # which only redirects the matchup graphic/winner-report message; the
+    # two can point at different channels.
+    async def setWagerChannelHelper(self, ctx, channel_name=None):
+        guild = ctx.guild
+        if channel_name is None:
+            # No channel given: point it at wherever this command was run,
+            # same as omitting it entirely being "use right here".
+            channel = ctx.channel
+        else:
+            channel = discord.utils.get(guild.text_channels, name=channel_name)
+            if channel is None:
+                channel = await guild.create_text_channel(channel_name)
+        self.update(guild.id, "wager_channel", channel.name)
+        await ctx.response.send_message(f"The wager channel is now {channel.mention}.")
+
     # Points every future matchup graphic and winner-report message
     # (_sendMatchupImage, _openBetting's report half, _postReadyCheck,
     # _postMatchReport) at one specific text channel instead of wherever
     # the roster or tournament match happens to run. Independent of /set
     # wager-channel, which only redirects the betting-open/closed
     # notices; the two can point at different channels.
-    async def setMatchupChannelHelper(self, ctx, channel_name):
+    async def setMatchupChannelHelper(self, ctx, channel_name=None):
         guild = ctx.guild
-        channel = discord.utils.get(guild.text_channels, name=channel_name)
-        if channel is None:
-            channel = await guild.create_text_channel(channel_name)
+        if channel_name is None:
+            # No channel given: point it at wherever this command was run,
+            # same as omitting it entirely being "use right here".
+            channel = ctx.channel
+        else:
+            channel = discord.utils.get(guild.text_channels, name=channel_name)
+            if channel is None:
+                channel = await guild.create_text_channel(channel_name)
         self.update(guild.id, "matchup_channel", channel.name)
         await ctx.response.send_message(
             f"Matchup graphics and winner-report messages will now go to {channel.mention}."
@@ -5788,7 +5805,7 @@ class helpers():
             "Captains": "Captains Match",
             "Ranked Captains": "Ranked Captains Match",
         }.get(mode, "Match")
-        return f"{game} {base}"
+        return f"{game} - {base}"
 
     # The plain-text status that accompanies the bracket images: which
     # team's the (winners-bracket, for double elimination) champion, the
@@ -5955,7 +5972,7 @@ class helpers():
         # round happened to start.
         channel = self._resolveConfiguredChannel(guild_id, "matchup_channel", channel)
         tournament = self.getTournament(guild_id)
-        round_label = f"{self._currentGame(guild_id)} {self._matchRoundLabel(tournament, round_index, bracket_type)}"
+        round_label = f"{self._currentGame(guild_id)} - {self._matchRoundLabel(tournament, round_index, bracket_type)}"
         guild_name = channel.guild.name if channel.guild is not None else None
         matchup_image = await asyncio.to_thread(
             self._renderMatchupImage, match_id, team1, team2, round_label, tournament.get_name(), guild_name
@@ -5994,7 +6011,7 @@ class helpers():
         # follows the same channel through for the match's own result.
         channel = self._resolveConfiguredChannel(guild_id, "matchup_channel", channel)
         tournament = self.getTournament(guild_id)
-        round_label = f"{self._currentGame(guild_id)} {self._matchRoundLabel(tournament, round_index, bracket_type)}"
+        round_label = f"{self._currentGame(guild_id)} - {self._matchRoundLabel(tournament, round_index, bracket_type)}"
         guild_name = channel.guild.name if channel.guild is not None else None
         matchup_image = await asyncio.to_thread(
             self._renderMatchupImage, match_id, team1, team2, round_label, tournament.get_name(), guild_name
@@ -9917,7 +9934,12 @@ class helpers():
     # used by _openBetting to silently clear a stale round before
     # opening a fresh one, where moving anyone would be wrong.
     async def cancelGameHelper(self, guild_id, channel, guild):
-        await channel.send(f"{CANCEL_GAME_EMOJI} Game cancelled.")
+        # Same "stay visually anchored to the graphic" reasoning
+        # recordResult's own result message follows (see
+        # _matchupMessageLocation); best-effort, so a game that never
+        # actually got a matchup graphic just falls back to a plain send.
+        matchup_message = await self._fetchMatchupMessage(guild_id, channel)
+        await channel.send(f"{CANCEL_GAME_EMOJI} Game cancelled.", reference=matchup_message)
         await self.cancelBettingHelper(guild_id, channel)
 
         if guild is not None and await self.moveMembersToOriginalChannel(guild):

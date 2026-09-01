@@ -5779,11 +5779,11 @@ class BracketRoundsAndLabelTests(HelperTestCase):
 
 class MatchupLabelForModeTests(HelperTestCase):
     def test_prepends_the_given_game_name(self):
-        self.assertEqual(self.helperObj._matchupLabelForMode("Ranked", "League"), "League Ranked Match")
-        self.assertEqual(self.helperObj._matchupLabelForMode("Normal", "Valorant"), "Valorant Casual Match")
+        self.assertEqual(self.helperObj._matchupLabelForMode("Ranked", "League"), "League - Ranked Match")
+        self.assertEqual(self.helperObj._matchupLabelForMode("Normal", "Valorant"), "Valorant - Casual Match")
 
     def test_unknown_mode_falls_back_to_plain_match(self):
-        self.assertEqual(self.helperObj._matchupLabelForMode("Something Else", "League"), "League Match")
+        self.assertEqual(self.helperObj._matchupLabelForMode("Something Else", "League"), "League - Match")
 
 
 class RenderBracketTextTests(HelperTestCase):
@@ -8266,10 +8266,10 @@ class AdminSetHelperTests(HelperTestCase):
 
     async def _set(
         self, ctx, team1=None, team2=None, size=None, betting_timer=None,
-        wager_channel=None, member=None, elo=None, default_elo=None,
+        member=None, elo=None, default_elo=None,
     ):
         await self.helperObj.adminSetHelper(
-            ctx, team1, team2, size, betting_timer, wager_channel, member, elo, default_elo
+            ctx, team1, team2, size, betting_timer, member, elo, default_elo
         )
 
     async def test_rejects_when_nothing_is_given(self):
@@ -8378,26 +8378,6 @@ class AdminSetHelperTests(HelperTestCase):
         self.assertIn("30 seconds", message)
         self.assertIn("tournament round", message)
 
-    async def test_sets_wager_channel_creating_it_when_missing(self):
-        ctx = self._ctx()
-        await self._set(ctx, wager_channel="bets")
-
-        created = [c for c in self.guild.channels if c.name == "bets"]
-        self.assertEqual(len(created), 1)
-        self.assertEqual(created[0].kind, "text")
-        self.assertEqual(self.helperObj.get(GUILD_ID, "wager_channel"), "bets")
-        self.assertIn(created[0].mention, ctx.response.send_message.call_args.args[0])
-
-    async def test_wager_channel_ignores_a_same_named_voice_channel(self):
-        self.guild.channels.append(FakeChannel("bets", kind="voice"))
-        ctx = self._ctx()
-
-        await self._set(ctx, wager_channel="bets")
-
-        # a new text channel is created rather than reusing the voice one
-        text_channels = [c for c in self.guild.channels if c.kind == "text"]
-        self.assertEqual(len(text_channels), 1)
-
     async def test_sets_a_players_elo(self):
         target = FakeMember("Target", id=555)
         ctx = self._ctx()
@@ -8462,14 +8442,13 @@ class AdminSetHelperTests(HelperTestCase):
         ctx = self._ctx()
         await self._set(
             ctx, team1="Red", team2="Blue", size=4, betting_timer=30,
-            wager_channel="bets", member=target, elo=1500, default_elo=1200,
+            member=target, elo=1500, default_elo=1200,
         )
 
         self.assertEqual(self.helperObj.get(GUILD_ID, "channel1"), "Red")
         self.assertEqual(self.helperObj.get(GUILD_ID, "channel2"), "Blue")
         self.assertEqual(self.helperObj.get(GUILD_ID, "team_size"), 4)
         self.assertEqual(self.helperObj.get(GUILD_ID, "betting_timer_seconds"), 30)
-        self.assertEqual(self.helperObj.get(GUILD_ID, "wager_channel"), "bets")
         self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 555, "League", "elo"), 1500)
         self.assertEqual(self.helperObj.get(GUILD_ID, "default_elo"), 1200)
         ctx.response.send_message.assert_awaited_once()
@@ -8541,9 +8520,52 @@ class BettingHelperTests(HelperTestCase):
         self.assertIn("enabled", message)
 
 
+class WagerChannelHelperTests(HelperTestCase):
+    def _ctx(self, channel=None):
+        return FakeInteraction(self.guild, FakeMember("Caller"), channel=channel)
+
+    async def test_creates_the_channel_when_missing(self):
+        ctx = self._ctx()
+        await self.helperObj.setWagerChannelHelper(ctx, "bets")
+
+        created = [c for c in self.guild.channels if c.name == "bets"]
+        self.assertEqual(len(created), 1)
+        self.assertEqual(created[0].kind, "text")
+        self.assertEqual(self.helperObj.get(GUILD_ID, "wager_channel"), "bets")
+        self.assertIn(created[0].mention, ctx.response.send_message.call_args.args[0])
+
+    async def test_reuses_an_existing_text_channel(self):
+        existing = FakeChannel("bets", kind="text")
+        self.guild.channels.append(existing)
+        ctx = self._ctx()
+
+        await self.helperObj.setWagerChannelHelper(ctx, "bets")
+
+        text_channels = [c for c in self.guild.channels if c.name == "bets" and c.kind == "text"]
+        self.assertEqual(len(text_channels), 1)
+
+    async def test_ignores_a_same_named_voice_channel(self):
+        self.guild.channels.append(FakeChannel("bets", kind="voice"))
+        ctx = self._ctx()
+
+        await self.helperObj.setWagerChannelHelper(ctx, "bets")
+
+        text_channels = [c for c in self.guild.channels if c.kind == "text"]
+        self.assertEqual(len(text_channels), 1)
+
+    async def test_no_channel_given_uses_the_channel_the_command_ran_in(self):
+        here = FakeChannel("game-chat", kind="text")
+        ctx = self._ctx(channel=here)
+
+        await self.helperObj.setWagerChannelHelper(ctx)
+
+        self.assertEqual(self.helperObj.get(GUILD_ID, "wager_channel"), "game-chat")
+        self.assertIn(here.mention, ctx.response.send_message.call_args.args[0])
+
+
 class MatchupChannelHelperTests(HelperTestCase):
-    def _ctx(self):
-        return FakeInteraction(self.guild, FakeMember("Caller"))
+    def _ctx(self, channel=None):
+        return FakeInteraction(self.guild, FakeMember("Caller"), channel=channel)
 
     async def test_creates_the_channel_when_missing(self):
         ctx = self._ctx()
@@ -8574,6 +8596,15 @@ class MatchupChannelHelperTests(HelperTestCase):
 
         text_channels = [c for c in self.guild.channels if c.kind == "text"]
         self.assertEqual(len(text_channels), 1)
+
+    async def test_no_channel_given_uses_the_channel_the_command_ran_in(self):
+        here = FakeChannel("game-chat", kind="text")
+        ctx = self._ctx(channel=here)
+
+        await self.helperObj.setMatchupChannelHelper(ctx)
+
+        self.assertEqual(self.helperObj.get(GUILD_ID, "matchup_channel"), "game-chat")
+        self.assertIn(here.mention, ctx.response.send_message.call_args.args[0])
 
 
 class SetGameHelperTests(HelperTestCase):
@@ -8748,6 +8779,23 @@ class CancelGameHelperTests(HelperTestCase):
         self.assertTrue(any("cancelled" in text for text in sent))
         self.assertTrue(any("refunded" in text for text in sent))
         self.assertTrue(any("Moved everyone back" in text for text in sent))
+
+    async def test_cancelled_message_replies_to_the_matchup_graphic(self):
+        channel = FakeChannel("game-chat")
+        matchup_message = FakeMessage(id=3001, channel=channel)
+        channel._sent_messages[matchup_message.id] = matchup_message
+        self.helperObj.update(GUILD_ID, "matchup_message_id", matchup_message.id)
+
+        await self.helperObj.cancelGameHelper(GUILD_ID, channel, None)
+
+        cancelled_call = next(c for c in channel.send.call_args_list if "cancelled" in c.args[0])
+        self.assertIs(cancelled_call.kwargs.get("reference"), matchup_message)
+
+    async def test_no_matchup_graphic_to_reply_to_sends_plainly(self):
+        channel = FakeChannel("game-chat")
+        await self.helperObj.cancelGameHelper(GUILD_ID, channel, None)
+        cancelled_call = next(c for c in channel.send.call_args_list if "cancelled" in c.args[0])
+        self.assertIsNone(cancelled_call.kwargs.get("reference"))
 
     async def test_cancel_on_ranked_game_refunds_bets_without_touching_elo(self):
         # Cancelling ends a ranked game early exactly like ending a regular
@@ -16498,28 +16546,35 @@ class AdminSetCommandTests(BotModuleTestCase):
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "adminSetHelper", mock):
             await self._command("set channels").callback(ctx, team1="Red", team2="Blue")
-        mock.assert_awaited_once_with(ctx, "Red", "Blue", None, None, None, None, None, None)
+        mock.assert_awaited_once_with(ctx, "Red", "Blue", None, None, None, None, None)
 
     async def test_team_size_delegates_size_only(self):
         ctx = self._ctx()
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "adminSetHelper", mock):
             await self._command("set team-size").callback(ctx, size=4)
-        mock.assert_awaited_once_with(ctx, None, None, 4, None, None, None, None, None)
+        mock.assert_awaited_once_with(ctx, None, None, 4, None, None, None, None)
 
     async def test_betting_timer_delegates_seconds_only(self):
         ctx = self._ctx()
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "adminSetHelper", mock):
             await self._command("set betting-timer").callback(ctx, seconds=30)
-        mock.assert_awaited_once_with(ctx, None, None, None, 30, None, None, None, None)
+        mock.assert_awaited_once_with(ctx, None, None, None, 30, None, None, None)
 
-    async def test_wager_channel_delegates_channel_only(self):
+    async def test_wager_channel_delegates_channel(self):
         ctx = self._ctx()
         mock = AsyncMock()
-        with patch.object(self.bot.helperObj, "adminSetHelper", mock):
+        with patch.object(self.bot.helperObj, "setWagerChannelHelper", mock):
             await self._command("set wager-channel").callback(ctx, channel="bets")
-        mock.assert_awaited_once_with(ctx, None, None, None, None, "bets", None, None, None)
+        mock.assert_awaited_once_with(ctx, "bets")
+
+    async def test_wager_channel_omitted_delegates_none(self):
+        ctx = self._ctx()
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "setWagerChannelHelper", mock):
+            await self._command("set wager-channel").callback(ctx)
+        mock.assert_awaited_once_with(ctx, None)
 
     async def test_elo_delegates_member_and_elo_only(self):
         ctx = self._ctx()
@@ -16527,14 +16582,14 @@ class AdminSetCommandTests(BotModuleTestCase):
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "adminSetHelper", mock):
             await self._command("set elo").callback(ctx, member=member, elo=1500)
-        mock.assert_awaited_once_with(ctx, None, None, None, None, None, member, 1500, None)
+        mock.assert_awaited_once_with(ctx, None, None, None, None, member, 1500, None)
 
     async def test_default_elo_delegates_elo_only(self):
         ctx = self._ctx()
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "adminSetHelper", mock):
             await self._command("set default-elo").callback(ctx, elo=1200)
-        mock.assert_awaited_once_with(ctx, None, None, None, None, None, None, None, 1200)
+        mock.assert_awaited_once_with(ctx, None, None, None, None, None, None, 1200)
 
     async def test_team_size_updates_and_confirms_end_to_end(self):
         guild_id = 903

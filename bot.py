@@ -1009,7 +1009,7 @@ async def _setAdminPermissionError(ctx, error):
 )
 @app_commands.checks.has_permissions(manage_guild=True)
 async def setChannels(ctx, team1: str, team2: str):
-    await helperObj.adminSetHelper(ctx, team1, team2, None, None, None, None, None, None)
+    await helperObj.adminSetHelper(ctx, team1, team2, None, None, None, None, None)
 
 setChannels.error(_setAdminPermissionError)
 
@@ -1021,7 +1021,7 @@ setChannels.error(_setAdminPermissionError)
 @app_commands.describe(size="Number of players per team")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def setTeamSize(ctx, size: int):
-    await helperObj.adminSetHelper(ctx, None, None, size, None, None, None, None, None)
+    await helperObj.adminSetHelper(ctx, None, None, size, None, None, None, None)
 
 setTeamSize.error(_setAdminPermissionError)
 
@@ -1035,7 +1035,7 @@ setTeamSize.error(_setAdminPermissionError)
 )
 @app_commands.checks.has_permissions(manage_guild=True)
 async def setBettingTimer(ctx, seconds: int):
-    await helperObj.adminSetHelper(ctx, None, None, None, seconds, None, None, None, None)
+    await helperObj.adminSetHelper(ctx, None, None, None, seconds, None, None, None)
 
 setBettingTimer.error(_setAdminPermissionError)
 
@@ -1044,10 +1044,12 @@ setBettingTimer.error(_setAdminPermissionError)
     name="wager-channel",
     description="Admin: redirect every betting posting to one specific text channel"
 )
-@app_commands.describe(channel="Name of the text channel; created if it doesn't exist")
+@app_commands.describe(
+    channel="Name of the text channel; created if it doesn't exist. Omit to use the channel this runs in."
+)
 @app_commands.checks.has_permissions(manage_guild=True)
-async def setWagerChannel(ctx, channel: str):
-    await helperObj.adminSetHelper(ctx, None, None, None, None, channel, None, None, None)
+async def setWagerChannel(ctx, channel: str = None):
+    await helperObj.setWagerChannelHelper(ctx, channel)
 
 setWagerChannel.error(_setAdminPermissionError)
 
@@ -1059,7 +1061,7 @@ setWagerChannel.error(_setAdminPermissionError)
 @app_commands.describe(member="Whose elo to set", elo="The exact elo value to set them to")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def setElo(ctx, member: discord.Member, elo: int):
-    await helperObj.adminSetHelper(ctx, None, None, None, None, None, member, elo, None)
+    await helperObj.adminSetHelper(ctx, None, None, None, None, member, elo, None)
 
 setElo.error(_setAdminPermissionError)
 
@@ -1071,7 +1073,7 @@ setElo.error(_setAdminPermissionError)
 @app_commands.describe(elo="Elo a brand new player starts at (default 1000); doesn't change existing players")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def setDefaultElo(ctx, elo: int):
-    await helperObj.adminSetHelper(ctx, None, None, None, None, None, None, None, elo)
+    await helperObj.adminSetHelper(ctx, None, None, None, None, None, None, elo)
 
 setDefaultElo.error(_setAdminPermissionError)
 
@@ -1142,9 +1144,11 @@ setBetting.error(_setAdminPermissionError)
     name="matchup-channel",
     description="Admin: redirect every matchup graphic and winner-report message to one text channel"
 )
-@app_commands.describe(channel="Name of the text channel; created if it doesn't exist")
+@app_commands.describe(
+    channel="Name of the text channel; created if it doesn't exist. Omit to use the channel this runs in."
+)
 @app_commands.checks.has_permissions(manage_guild=True)
-async def setMatchupChannel(ctx, channel: str):
+async def setMatchupChannel(ctx, channel: str = None):
     await helperObj.setMatchupChannelHelper(ctx, channel)
 
 setMatchupChannel.error(_setAdminPermissionError)
@@ -1410,14 +1414,14 @@ COMMAND_HELP = {
     "set channels": "Sets the voice channel names teams get moved into (creates them if missing). Requires the Manage Server permission.",
     "set team-size": "Sets how many players make up one side. Requires the Manage Server permission.",
     "set betting-timer": "Sets how long a betting window stays open (1-600 seconds, multiplied by the number of matches for a concurrent tournament round). Requires the Manage Server permission.",
-    "set wager-channel": "Redirects every betting posting to one specific text channel (created if it doesn't exist). Requires the Manage Server permission.",
+    "set wager-channel": "Redirects the betting-open/betting-closed notices to one specific text channel (created if it doesn't exist). Omit channel to use wherever this command is run. Independent of set matchup-channel, which redirects the matchup graphic and winner-report message instead. Requires the Manage Server permission.",
     "set elo": "Sets a player's elo directly to an exact value (still credits any Diamond+ tier reward the new elo qualifies for). Requires the Manage Server permission.",
     "set default-elo": "Sets what a brand new player in this server starts at (1000 by default); doesn't touch anyone's existing elo, use /clear elo to reset current players to it. Requires the Manage Server permission.",
     "set correct-winner": "Fixes a misreported winner: undoes and reapplies the payouts, records, and elo. invalidate undoes the last game entirely instead (bets refunded, nothing reapplied), as if it never happened. Requires Manage Server.",
     "set roster-permissions": "Controls who can use the Start/Start (no move)/Random Roles/Balanced Roles buttons on a posted roster. strict:true restricts them to a rostered player or a Manage Server admin, matching how the winner-report buttons already work; strict:false (the default) leaves them open to anyone who can see the message. Requires the Manage Server permission.",
     "set max-wager": "Caps how much gold a single /wager team or /wager against bet can be. Omit amount to remove the cap. Requires the Manage Server permission.",
     "set betting": "Turns /wager team and /wager against on or off for this server. Games, elo, and reporting a winner all still work the same either way; this only gates the wagering layer on top of them. Requires the Manage Server permission.",
-    "set matchup-channel": "Redirects every matchup graphic (a game's own, and a tournament match's ready-check/report graphic) and the winner-report message to one specific text channel, no matter where the roster or match actually started. Independent of set wager-channel, which only redirects the betting-open/closed notices; the two can point at different channels. Requires the Manage Server permission.",
+    "set matchup-channel": "Redirects every matchup graphic (a game's own, and a tournament match's ready-check/report graphic) and the winner-report message to one specific text channel, no matter where the roster or match actually started. Omit channel to use wherever this command is run. Independent of set wager-channel, which only redirects the betting-open/closed notices; the two can point at different channels. Requires the Manage Server permission.",
     "set game": "Sets which game this server's next roster tracks elo and stats for. Type a brand new name to start tracking it, or pick a previously-used one from the autocomplete list. Elo, game record, and ranked record are all tracked per game, so switching games doesn't touch another game's numbers. Only affects the next roster formed; whatever's currently in progress keeps resolving under whichever game it actually started as. League is the default, and the only game with role-based team balancing. Requires the Manage Server permission.",
     "clear teams": "Wipes the current teams/draft so you can start a fresh session. Requires the Manage Server permission.",
     "clear channels": "Wipes the current teams/draft, and also forgets the saved team channel names. Requires the Manage Server permission.",

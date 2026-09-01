@@ -454,7 +454,8 @@ case), so it can't stomp a window that was never actually interrupted.
 The headline text comes from whichever `mode` string
 (`"Normal"`/`"Ranked"`/`"Captains"`/`"Ranked Captains"`) the most recent
 team-forming command left in `servers` (`_matchupLabelForMode`), so it reads
-correctly no matter how the two teams got there.
+correctly no matter how the two teams got there. It's prefixed with the
+active game and a hyphen (`"League - Ranked Match"`, see `/set game`).
 
 Random Roles and Balanced Roles sit alongside Start/Start (no move) on that
 same message, but only when the roster actually qualifies: both teams
@@ -589,7 +590,9 @@ the same "nothing left to say" treatment the winner-report side gives it;
 `ConfirmCancelGameView.confirm` itself then deletes the confirmation
 prompt too, mirroring `ConfirmWinnerReportView.confirm` exactly.
 `cancelGameHelper`'s own "Game cancelled." message is what the channel
-keeps instead.
+keeps instead, replying to the same matchup graphic the result message
+would have (`_fetchMatchupMessage`, best-effort, same as everywhere else
+that reply lives) so a cancelled game stays visually anchored to it too.
 
 Cancel and a timeout on either confirmation view instead call
 `_restoreWinnerReportMessage`, which puts the original report message's id
@@ -798,10 +801,11 @@ The button handlers (`_handleRosterRerollClick`/
 same defense-in-depth the 5v5 size check already had, for a stale message
 whose buttons were already posted before the game changed.
 
-The matchup graphic's headline includes the game name:
-`_matchupLabelForMode(mode, game)` prepends it for a casual/ranked game
-(`"League Ranked Match"`), and `_postReadyCheck`/`_postMatchReport` do the
-same for a tournament match's own round label.
+The matchup graphic's headline includes the game name, hyphen-separated
+from the rest of the label: `_matchupLabelForMode(mode, game)` prepends it
+for a casual/ranked game (`"League - Ranked Match"`), and
+`_postReadyCheck`/`_postMatchReport` do the same for a tournament match's
+own round label (`"League - Quarterfinals"`).
 
 ### Correcting a misreported winner
 
@@ -939,6 +943,17 @@ own split. `recordResult`'s betting-closed-notice cleanup and
 `_deleteRoundBettingMessages` both resolve the wager channel explicitly
 too, rather than trusting whatever channel they were handed, since that's
 now the matchup channel more often than not.
+
+`/set wager-channel`/`/set matchup-channel` each have their own dedicated
+helper (`setWagerChannelHelper`/`setMatchupChannelHelper`) rather than
+folding into `adminSetHelper`'s combined param system the way they used
+to: their `channel` param is optional, and omitting it points the setting
+at wherever the command was actually run (`ctx.channel`) instead of
+looking anything up by name. `adminSetHelper`'s own shared "was this field
+even given" check can't represent that (`None` already means "field not
+touched" there), so both got pulled out once that shape stopped fitting -
+the same move `/set roster-permissions`/`/set max-wager`/`/set betting`/
+`/set game` already made for their own settings.
 
 ### Capping and disabling wagers (`/set max-wager`, `/set betting`)
 
