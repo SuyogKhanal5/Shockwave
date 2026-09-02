@@ -204,6 +204,12 @@ _elo_badge_cache = {}
 _role_icon_cache = {}
 
 BETTING_DURATION_SECONDS = 60
+# How long a /team invite or /wager against challenge sits waiting on the
+# other side before expireStalePendingInvites cleans it up (see that
+# method's own comment). Both are otherwise indefinite - the posted view
+# is persistent (timeout=None) and nothing else ever revisits a row nobody
+# acted on.
+PENDING_INVITE_EXPIRY_SECONDS = 24 * 60 * 60
 # _openConcurrentTournamentBetting multiplies a guild's configured
 # per-match timer by however many matches are in the round. This caps
 # the result so a generous base times a big bracket's first round can't
@@ -288,6 +294,9 @@ TEAM_CONFIRM_TIMEOUT_SECONDS = 30
 # ...and for confirming a reported game winner (see ConfirmWinnerReportView)
 # before it's actually recorded.
 WINNER_REPORT_CONFIRM_TIMEOUT_SECONDS = 30
+# ...and for /set correct-winner's own confirmation (see
+# ConfirmCorrectWinnerView) before it reverses/reapplies a game's payouts.
+CORRECT_WINNER_CONFIRM_TIMEOUT_SECONDS = 30
 # How long /shop browse's own sort buttons (see ShopSortView) stay
 # clickable before they freeze in place. Longer than the confirm/cancel
 # views above since this isn't gating anything destructive, just a display
@@ -727,11 +736,14 @@ CARD_TITLE_CATALOG = {**CARD_TITLE_CATALOG, **CARD_ACHIEVEMENT_TITLES}
 
 # Shockwave's own developer. Always has the "Developer" title available
 # in every guild the bot is in (see getUnlockedCardTitles), not just ones
-# with a card_unlocks row for them. A single hardcoded id rather than a
-# per-guild grant, since the alternative would mean re-granting it by hand
-# every time the bot joins a new guild, for something that should just
-# always be true, everywhere, for this one account.
-SHOCKWAVE_DEVELOPER_ID = 217743368959164416
+# with a card_unlocks row for them. A single id rather than a per-guild
+# grant, since the alternative would mean re-granting it by hand every
+# time the bot joins a new guild, for something that should just always be
+# true, everywhere, for this one account. Set from token.txt's second
+# line (see bot.py, right after it reads the token from the first line),
+# not hardcoded here, so this default only applies before bot.py has had
+# a chance to override it (e.g. in tests, or if token.txt lacks the line).
+SHOCKWAVE_DEVELOPER_ID = None
 # Same darken-for-background ratio _renderTeamCardImage uses to derive a
 # team card's background from its sampled logo accent. Reused here so a
 # reward scheme's background relates to its accent the same visual way
@@ -958,15 +970,26 @@ class ConfirmResetView(discord.ui.View):
     async def confirm(self, interaction, button):
         results = []
         if self.clear_economy:
-            self.helperObj.resetEconomyHelper(self.guild_id)
-            results.append(
-                "Economy data (balance, elo, game record, betting record, gold "
-                f"wagered/won/lost) has been reset for every player in **{self.guild_name}**."
-            )
+            if self.target is not None:
+                self.helperObj.resetEconomyHelper(self.guild_id, user_id=self.target.id)
+                results.append(
+                    "Economy data (balance, elo, game record, betting record, gold "
+                    f"wagered/won/lost) has been reset for {self.target.mention}."
+                )
+            else:
+                self.helperObj.resetEconomyHelper(self.guild_id)
+                results.append(
+                    "Economy data (balance, elo, game record, betting record, gold "
+                    f"wagered/won/lost) has been reset for every player in **{self.guild_name}**."
+                )
         elif self.clear_elo:
-            self.helperObj.resetEloHelper(self.guild_id)
             reset_elo = self.helperObj._defaultEloForGuild(self.guild_id)
-            results.append(f"Elo has been reset to {reset_elo} for every player in **{self.guild_name}**.")
+            if self.target is not None:
+                self.helperObj.resetEloHelper(self.guild_id, user_id=self.target.id)
+                results.append(f"Elo has been reset to {reset_elo} for {self.target.mention}.")
+            else:
+                self.helperObj.resetEloHelper(self.guild_id)
+                results.append(f"Elo has been reset to {reset_elo} for every player in **{self.guild_name}**.")
         if self.clear_achievements:
             if self.target is not None:
                 self.helperObj.resetAchievementsHelper(self.guild_id, user_id=self.target.id)
@@ -992,6 +1015,11 @@ class ConfirmResetView(discord.ui.View):
         result = " ".join(results)
         self._disable_buttons()
         self.stop()
+        # Also clears the current teams/draft (and cancels/refunds any
+        # in-progress game first), same as ConfirmClearActionView's own
+        # Confirm does - only now, not before this prompt even posted, so
+        # Cancel below genuinely leaves everything untouched.
+        await self.helperObj.clearTeamsHelper(interaction)
         await interaction.response.edit_message(content=result, view=self)
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
@@ -1066,6 +1094,84 @@ class ConfirmTournamentOverwriteView(discord.ui.View):
                     content=(
                         "Confirmation expired. Run /tournament create again if you still want to "
                         "overwrite the existing tournament."
+                    ),
+                    view=self,
+                )
+            except discord.HTTPException:
+                pass
+
+
+# Confirm/cancel for /tournament create-bracket when this guild already has
+# match history (tournament_matches rows) from a previous bracket -
+# rebuilding erases it outright (results, and any bets that were never
+# settled). Same "only gate what's actually destructive" reasoning
+# ConfirmTournamentOverwriteView's own ownership check applies: a bracket
+# built (or rerolled) before /tournament start has ever run has no history
+# to lose, so createBracketHelper skips this (and the Manage Server check)
+# entirely in that case.
+class ConfirmBracketOverwriteView(discord.ui.View):
+    def __init__(self, helperObj, guild_id, invoker_id, double_elimination, losers_bracket_timing):
+        super().__init__(timeout=TOURNAMENT_CONFIRM_TIMEOUT_SECONDS)
+        self.helperObj = helperObj
+        self.guild_id = guild_id
+        self.invoker_id = invoker_id
+        self.double_elimination = double_elimination
+        self.losers_bracket_timing = losers_bracket_timing
+        self.message = None
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.invoker_id:
+            await interaction.response.send_message(
+                "Only the person who ran /tournament create-bracket can confirm this.", ephemeral=True
+            )
+            return False
+        return True
+
+    def _disable_buttons(self):
+        for item in self.children:
+            item.disabled = True
+
+    @discord.ui.button(label="Rebuild bracket", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction, button):
+        self._disable_buttons()
+        self.stop()
+        tournament = self.helperObj.getTournament(self.guild_id)
+        if tournament is None:
+            await interaction.response.edit_message(
+                content="This server's tournament no longer exists.", view=self
+            )
+            return
+        teams = tournament.get_teams()
+        self.helperObj._rebuildBracket(
+            self.guild_id, tournament, teams, self.double_elimination, self.losers_bracket_timing
+        )
+        elim_style = "double" if self.double_elimination else "single"
+        timing_note = self.helperObj._bracketTimingNote(self.double_elimination, self.losers_bracket_timing)
+        await interaction.response.edit_message(
+            content=(
+                f"Bracket rebuilt for **{tournament.get_name()}** - {len(teams)} teams, "
+                f"{elim_style} elimination.{timing_note}"
+            ),
+            view=self,
+        )
+        await self.helperObj._sendBracketText(interaction.channel, tournament, self.guild_id)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction, button):
+        self._disable_buttons()
+        self.stop()
+        await interaction.response.edit_message(
+            content="Cancelled. The existing bracket and match history were kept.", view=self
+        )
+
+    async def on_timeout(self):
+        self._disable_buttons()
+        if self.message is not None:
+            try:
+                await self.message.edit(
+                    content=(
+                        "Confirmation expired. Run /tournament create-bracket again if you still want to "
+                        "rebuild the bracket."
                     ),
                     view=self,
                 )
@@ -1404,6 +1510,85 @@ class ConfirmWinnerReportView(discord.ui.View):
                 pass
 
 
+# /set correct-winner's own confirmation, for its last-game path (the
+# match_id path gets its own ConfirmTournamentMatchCorrectionView instead,
+# a different enough shape - bracket propagation, wager-only reversal - not
+# to share this one). Reverses and reapplies a real game's payouts/elo/
+# records the same way ConfirmWinnerReportView's own Confirm applies them
+# in the first place, so this shouldn't hinge on one accidental click
+# either, even though it's a typed command rather than a stray button - the
+# blast radius (every player in the game, potentially) is the same. Stores
+# the exact last_result snapshot the warning was built from (not just a
+# guild_id) so Confirm can detect a newer game having resolved in between
+# and refuse instead of corrupting it.
+class ConfirmCorrectWinnerView(discord.ui.View):
+    def __init__(self, helperObj, guild_id, invoker_id, snapshot, correct_team, invalidate):
+        super().__init__(timeout=CORRECT_WINNER_CONFIRM_TIMEOUT_SECONDS)
+        self.helperObj = helperObj
+        self.guild_id = guild_id
+        self.invoker_id = invoker_id
+        self.snapshot = snapshot
+        self.correct_team = correct_team
+        self.invalidate = invalidate
+        self.message = None
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.invoker_id:
+            await interaction.response.send_message(
+                "Only the person who ran /set correct-winner can confirm this.", ephemeral=True
+            )
+            return False
+        return True
+
+    def _disable_buttons(self):
+        for item in self.children:
+            item.disabled = True
+
+    @discord.ui.button(label="Confirm correction", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction, button):
+        self._disable_buttons()
+        self.stop()
+
+        current = self.helperObj.getLastResult(self.guild_id)
+        if current is None or current != self.snapshot:
+            await interaction.response.edit_message(
+                content=(
+                    "The last game has changed since this correction was requested (a newer game "
+                    "probably resolved in between). Run /set correct-winner again if it still needs "
+                    "correcting."
+                ),
+                view=self,
+            )
+            return
+
+        result_text, summary, newly_unlocked = self.helperObj._applyCorrectWinner(
+            self.guild_id, self.snapshot, self.correct_team, self.invalidate
+        )
+        await interaction.response.edit_message(content=result_text, view=self)
+        if summary is not None:
+            await interaction.channel.send(self.helperObj.formatResultMessage(self.correct_team, summary))
+            await self.helperObj._announceAchievements(interaction.channel, newly_unlocked)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction, button):
+        self._disable_buttons()
+        self.stop()
+        await interaction.response.edit_message(content="Cancelled. Nothing was corrected.", view=self)
+
+    async def on_timeout(self):
+        self._disable_buttons()
+        if self.message is not None:
+            try:
+                await self.message.edit(
+                    content=(
+                        "Confirmation expired. Run /set correct-winner again if it still needs correcting."
+                    ),
+                    view=self,
+                )
+            except discord.HTTPException:
+                pass
+
+
 # Cancel Game click posts this instead of cancelling immediately, same
 # reasoning as ConfirmWinnerReportView. A real refund-and-move-everyone-
 # back action shouldn't hinge on one accidental click, so both of the
@@ -1548,6 +1733,98 @@ class ConfirmTournamentMatchReportView(discord.ui.View):
                     content=(
                         "Confirmation timed out. Use the buttons on the original match message to "
                         "report the winner."
+                    ),
+                    view=self,
+                )
+            except discord.HTTPException:
+                pass
+
+
+# /set correct-winner's match_id path (see _correctTournamentMatchHelper),
+# same "a real payout/bracket change shouldn't hinge on one click" reasoning
+# ConfirmCorrectWinnerView applies to the last-game path, just with this
+# path's own state to re-verify: the expected old winner and "next round
+# hasn't started" check both get re-checked at Confirm time too, not just
+# when the prompt was first built, in case either changed in between.
+class ConfirmTournamentMatchCorrectionView(discord.ui.View):
+    def __init__(
+        self, helperObj, guild_id, invoker_id, match_id, round_index, node_index, expected_winner, correct_team
+    ):
+        super().__init__(timeout=CORRECT_WINNER_CONFIRM_TIMEOUT_SECONDS)
+        self.helperObj = helperObj
+        self.guild_id = guild_id
+        self.invoker_id = invoker_id
+        self.match_id = match_id
+        self.round_index = round_index
+        self.node_index = node_index
+        self.expected_winner = expected_winner
+        self.correct_team = correct_team
+        self.message = None
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.invoker_id:
+            await interaction.response.send_message(
+                "Only the person who ran /set correct-winner can confirm this.", ephemeral=True
+            )
+            return False
+        return True
+
+    def _disable_buttons(self):
+        for item in self.children:
+            item.disabled = True
+
+    @discord.ui.button(label="Confirm correction", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction, button):
+        self._disable_buttons()
+        self.stop()
+
+        self.helperObj.cursor.execute(
+            "SELECT state, winner FROM tournament_matches WHERE guildId=? AND id=?",
+            (self.guild_id, self.match_id)
+        )
+        row = self.helperObj.cursor.fetchone()
+        stale = (
+            row is None or row[0] != "RESOLVED" or row[1] != self.expected_winner
+            or self.helperObj._nextTournamentRoundStarted(self.guild_id, self.round_index)
+        )
+        if stale:
+            await interaction.response.edit_message(
+                content=(
+                    f"Match #{self.match_id} has changed since this correction was requested. Run "
+                    "/set correct-winner again if it still needs correcting."
+                ),
+                view=self,
+            )
+            return
+
+        applied = self.helperObj._applyTournamentMatchCorrection(
+            self.guild_id, self.match_id, self.node_index, self.correct_team
+        )
+        if applied is None:
+            await interaction.response.edit_message(
+                content="This server's tournament no longer exists.", view=self
+            )
+            return
+        result_text, tournament, newly_unlocked = applied
+        await interaction.response.edit_message(content=result_text, view=self)
+        await self.helperObj._sendBracketText(interaction.channel, tournament, self.guild_id)
+        await self.helperObj._announceAchievements(interaction.channel, newly_unlocked)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction, button):
+        self._disable_buttons()
+        self.stop()
+        await interaction.response.edit_message(
+            content="Cancelled. The match's recorded winner was kept.", view=self
+        )
+
+    async def on_timeout(self):
+        self._disable_buttons()
+        if self.message is not None:
+            try:
+                await self.message.edit(
+                    content=(
+                        "Confirmation expired. Run /set correct-winner again if it still needs correcting."
                     ),
                     view=self,
                 )
@@ -1882,11 +2159,18 @@ class LeaderboardPagingView(discord.ui.View):
         await self.helperObj._handleLeaderboardReturnClick(interaction)
 
 
-# See LeaderboardPagingView, same shape, /team lookup' own table/handler.
+# See LeaderboardPagingView, same shape, /team lookup's own table/handler.
+# Also offers the same Card/Back toggle TeamListPagingView's cards:true mode
+# does (see that class's own comment), so a team's actual trading card is
+# reachable from here too, not just from /team list cards:true.
 class MyTeamsPagingView(discord.ui.View):
-    def __init__(self, helperObj):
+    def __init__(self, helperObj, card_shown=False):
         super().__init__(timeout=None)
         self.helperObj = helperObj
+        if card_shown:
+            self.remove_item(self.showCard)
+        else:
+            self.remove_item(self.returnToStats)
 
     @discord.ui.button(label=LEADERBOARD_FIRST_EMOJI, style=discord.ButtonStyle.secondary, custom_id="shockwave:my_teams:first")
     async def first(self, interaction, button):
@@ -1910,6 +2194,18 @@ class MyTeamsPagingView(discord.ui.View):
     )
     async def jump(self, interaction, button):
         await self.helperObj._handleMyTeamsJumpClick(interaction)
+
+    @discord.ui.button(
+        label=f"Card {TEAM_CARD_EMOJI}", style=discord.ButtonStyle.primary, custom_id="shockwave:my_teams:show_card",
+    )
+    async def showCard(self, interaction, button):
+        await self.helperObj._handleMyTeamsShowCardClick(interaction)
+
+    @discord.ui.button(
+        label=f"Back {TEAM_CARD_RETURN_EMOJI}", style=discord.ButtonStyle.primary, custom_id="shockwave:my_teams:return",
+    )
+    async def returnToStats(self, interaction, button):
+        await self.helperObj._handleMyTeamsReturnClick(interaction)
 
 
 # See LeaderboardPagingView for the paging buttons, /team list's own
@@ -2040,13 +2336,17 @@ class ShopSortView(discord.ui.View):
                 pass
 
 
-# /wager against's challenge message's own button, persistent (custom_id,
+# /wager against's challenge message's own buttons, persistent (custom_id,
 # timeout=None, registered once via client.add_view) since a challenge can
 # sit unanswered indefinitely, same reasoning as WinnerReportView. A
 # single shared instance covers every pending challenge in every guild,
-# so the callback re-derives which duel (and whether this clicker is
+# so each callback re-derives which duel (and whether this clicker is
 # actually the challenged player) from interaction.guild_id and
-# interaction.message.id rather than anything stored on self.
+# interaction.message.id rather than anything stored on self. Decline
+# mirrors TeamInviteAcceptView's own Accept/Decline pair: the challenged
+# player can make an unwanted challenge go away instead of it just sitting
+# there forever (no gold is ever escrowed until Accept, so there's nothing
+# to refund on a decline).
 class DuelAcceptView(discord.ui.View):
     def __init__(self, helperObj):
         super().__init__(timeout=None)
@@ -2056,13 +2356,23 @@ class DuelAcceptView(discord.ui.View):
     async def accept(self, interaction, button):
         await self.helperObj._handleDuelAcceptClick(interaction)
 
+    @discord.ui.button(label="Decline", style=discord.ButtonStyle.secondary, custom_id="shockwave:duel:decline")
+    async def decline(self, interaction, button):
+        await self.helperObj._handleDuelDeclineClick(interaction)
+
 
 # The accepted duel's own result-report message's buttons, same
 # persistent shape as DuelAcceptView, for the same "a duel can sit
 # AWAITING_RESULT indefinitely" reason. A press posts a
 # ConfirmDuelResultView instead of paying out immediately, matching
 # WinnerReportView/ConfirmWinnerReportView's two-step shape, a real gold
-# transfer shouldn't hinge on a single accidental click.
+# transfer shouldn't hinge on a single accidental click. Cancel Duel
+# mirrors WinnerReportView's own Cancel Game button (see
+# ConfirmDuelCancelView below): once gold is actually escrowed (see
+# DuelAcceptView's own Decline, which only covers before that point),
+# there was otherwise no way back for a duel neither side wants finished -
+# a disagreement, someone leaving, or it just being forgotten would leave
+# both stakes stuck with no refund and no admin override either.
 class DuelResultView(discord.ui.View):
     def __init__(self, helperObj):
         super().__init__(timeout=None)
@@ -2081,6 +2391,12 @@ class DuelResultView(discord.ui.View):
     )
     async def targetWon(self, interaction, button):
         await self.helperObj._handleDuelResultClick(interaction, winner_is_challenger=False)
+
+    @discord.ui.button(
+        label="Cancel Duel", style=discord.ButtonStyle.secondary, custom_id="shockwave:duel:cancel",
+    )
+    async def cancelDuel(self, interaction, button):
+        await self.helperObj._handleDuelCancelClick(interaction)
 
 
 # A Challenger Won/Target Won click posts this instead of paying out the
@@ -2148,6 +2464,74 @@ class ConfirmDuelResultView(discord.ui.View):
                     content=(
                         "Confirmation timed out. Use the buttons on the original message to report "
                         "the result."
+                    ),
+                    view=self,
+                )
+            except discord.HTTPException:
+                pass
+
+
+# DuelResultView's Cancel Duel click posts this instead of refunding
+# immediately, same two-step shape ConfirmDuelResultView uses for the
+# opposite action (paying out) and for the same reason. Shares
+# _restoreDuelAwaitingResult with ConfirmDuelResultView on Cancel/timeout:
+# both views only ever move a duel INTO the shared 'CONFIRMING' state from
+# 'AWAITING_RESULT', so restoring back to 'AWAITING_RESULT' is correct
+# regardless of which of the two prompted it.
+class ConfirmDuelCancelView(discord.ui.View):
+    def __init__(self, helperObj, duel_id, report_message=None):
+        super().__init__(timeout=DUEL_CONFIRM_TIMEOUT_SECONDS)
+        self.helperObj = helperObj
+        self.duel_id = duel_id
+        self.report_message = report_message
+        self.message = None
+
+    def _disable_buttons(self):
+        for item in self.children:
+            item.disabled = True
+
+    # Scoped to this specific duel's own two participants
+    # (_isPlayerInDuel), same reasoning as the other confirm views.
+    async def interaction_check(self, interaction):
+        if (
+            interaction.user.guild_permissions.manage_guild
+            or self.helperObj._isPlayerInDuel(self.duel_id, interaction.user.id)
+        ):
+            return True
+        await interaction.response.send_message(
+            "Only a participant in this duel, or a member with the Manage Server permission, can confirm this.",
+            ephemeral=True,
+        )
+        return False
+
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction, button):
+        self._disable_buttons()
+        self.stop()
+        await interaction.response.edit_message(
+            content="Duel cancelled, refunding both players...", view=self
+        )
+        await self.helperObj._finishDuelCancellation(self.duel_id)
+        await self.helperObj._clearMessageButtons(self.report_message)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction, button):
+        self._disable_buttons()
+        self.stop()
+        self.helperObj._restoreDuelAwaitingResult(self.duel_id)
+        await interaction.response.edit_message(
+            content="Duel kept. Use the buttons on the original message to report a result or cancel again.",
+            view=self,
+        )
+
+    async def on_timeout(self):
+        self._disable_buttons()
+        self.helperObj._restoreDuelAwaitingResult(self.duel_id)
+        if self.message is not None:
+            try:
+                await self.message.edit(
+                    content=(
+                        "Cancellation confirmation timed out. Use the buttons on the original message."
                     ),
                     view=self,
                 )
@@ -3273,7 +3657,8 @@ class helpers():
             return
 
         stored_message_id = self.get(guild_id, "roster_team2_message_id")
-        if stored_message_id is None or int(stored_message_id) != interaction.message.id:
+        already_starting = bool(self.get(guild_id, "roster_starting"))
+        if stored_message_id is None or int(stored_message_id) != interaction.message.id or already_starting:
             await interaction.response.send_message("This roster is no longer live.", ephemeral=True)
             return
         if not await self._checkRosterPermission(interaction, guild_id):
@@ -3298,7 +3683,8 @@ class helpers():
             return
 
         stored_message_id = self.get(guild_id, "roster_team2_message_id")
-        if stored_message_id is None or int(stored_message_id) != interaction.message.id:
+        already_starting = bool(self.get(guild_id, "roster_starting"))
+        if stored_message_id is None or int(stored_message_id) != interaction.message.id or already_starting:
             await interaction.response.send_message("This roster is no longer live.", ephemeral=True)
             return
         if not await self._checkRosterPermission(interaction, guild_id):
@@ -3385,6 +3771,13 @@ class helpers():
         # roster message by it once the game actually ends.
         # roster_starting is the actual mutex here instead, reset back to
         # 0 the next time _finalizeRoster posts a fresh roster.
+        # _handleRosterRerollClick/_handleRosterBalanceRolesClick check it
+        # too (not just this handler), since the message id alone staying
+        # valid post-Start would otherwise leave those two fully clickable
+        # on an already-started game - and recordResult reads team1/team2/
+        # disliked_role_user_ids live at result time, not from a Start-time
+        # snapshot, so a late reroll/rebalance would silently change who
+        # actually gets credited for the game already in progress.
         self.update(guild_id, "roster_starting", 1)
 
         await interaction.response.defer()
@@ -3500,7 +3893,8 @@ class helpers():
         self.update(ctx.guild.id, "draft_players_message_id", players_message.id if players_message else None)
 
         content, view = self._renderDraftPickView(ctx.guild.id)
-        await ctx.channel.send(content, view=view)
+        picker_message = await ctx.channel.send(content, view=view)
+        self.update(ctx.guild.id, "draft_picker_message_id", picker_message.id)
 
     async def getRandomMember(self, ctx):
         playersSer = self.get(ctx.guild.id, "players")
@@ -3564,10 +3958,22 @@ class helpers():
     # needs this check itself rather than relying on the containing
     # View's.) Re-derives whose turn it is from `servers` fresh every
     # time, since there's no per-instance state to trust on a persistent
-    # view.
+    # view. Checked against draft_picker_message_id first, the same
+    # "an older message's buttons stop working once a newer one takes
+    # over" role roster_team2_message_id plays for the roster buttons -
+    # without it, a draft abandoned via /clear teams (or superseded by a
+    # fresh /make-teams draft/random) left its old picker message fully
+    # clickable, and if the same person happened to be captain1 again in
+    # the new draft, a click on it would resolve against the NEW draft's
+    # pool at the OLD message's stale button position instead of being
+    # rejected outright.
     async def _isDraftPickTurn(self, interaction):
         guild_id = interaction.guild_id
         if guild_id is None:
+            return False
+        stored_message_id = self.get(guild_id, "draft_picker_message_id")
+        if stored_message_id is None or int(stored_message_id) != interaction.message.id:
+            await interaction.response.send_message("This draft is no longer active.", ephemeral=True)
             return False
         turn = int(self.get(guild_id, "turn") or 1)
         captain = Player()
@@ -3954,6 +4360,27 @@ class helpers():
             + ("" if game == "League" else " Role-based team balancing is League-only, so it's off for this game.")
         )
 
+    # /current-game: a plain, read-only way to check what /set game last
+    # configured, without needing to run an admin-only command or dig a
+    # roster's own _gameNote out of chat history. Also flags it when an
+    # in-progress roster (_activeGame) is still tracking a different game
+    # than current_game - possible since /set game only ever applies to
+    # the NEXT roster formed, so switching mid-game doesn't retroactively
+    # change which game the one already running affects (see
+    # _activeGame's own comment).
+    async def currentGameHelper(self, ctx):
+        guild_id = ctx.guild.id
+        game = self._currentGame(guild_id)
+        active = self._activeGame(guild_id)
+
+        message = f"This server's current game is **{game}**."
+        if active != game:
+            message += (
+                f" The roster currently in progress is still tracking **{active}** though - "
+                "`/set game` only affects the next roster formed."
+            )
+        await ctx.response.send_message(message)
+
     # Every game this guild has ever set itself to via /set game (always
     # includes "League", seeded per-guild - see guild_games), for
     # gameAutocomplete in bot.py. Typing something not in this list is
@@ -3964,28 +4391,42 @@ class helpers():
         return [row[0] for row in self.cursor.fetchall()]
 
     # Wipes every player's currency stats (balance, wins/losses,
-    # wagered/won/lost gold, daily-claim cooldown) for a guild. Rows get
+    # wagered/won/lost gold, daily-claim cooldown) for a guild, or just one
+    # player if `user_id` is given (the same optional narrowing
+    # resetAchievementsHelper/resetCardUnlocksHelper below already offer
+    # for /clear achievements/card-unlocks' own `user` param). Rows get
     # recreated with fresh defaults the next time each player touches the
     # economy (daily, wager, balance) via ensureEconomyRow.
-    def resetEconomyHelper(self, guild_id):
-        self.cursor.execute("DELETE FROM economy WHERE guildId=?", (guild_id,))
-        # Every game's elo/record, not just the current one - a full
-        # economy wipe means everything, unlike resetEloHelper's own
-        # current-game-only reset.
-        self.cursor.execute("DELETE FROM game_stats WHERE guildId=?", (guild_id,))
+    def resetEconomyHelper(self, guild_id, user_id=None):
+        if user_id is None:
+            self.cursor.execute("DELETE FROM economy WHERE guildId=?", (guild_id,))
+            # Every game's elo/record, not just the current one - a full
+            # economy wipe means everything, unlike resetEloHelper's own
+            # current-game-only reset.
+            self.cursor.execute("DELETE FROM game_stats WHERE guildId=?", (guild_id,))
+        else:
+            self.cursor.execute("DELETE FROM economy WHERE guildId=? AND userId=?", (guild_id, user_id))
+            self.cursor.execute("DELETE FROM game_stats WHERE guildId=? AND userId=?", (guild_id, user_id))
         self.db.commit()
 
     # Resets every existing player's elo back to this guild's configured
     # default (see _defaultEloForGuild), leaving balance/wins/losses/gold
-    # untouched, unlike resetEconomyHelper, which wipes the whole row.
-    # Resets the CURRENT game's elo only (see /set game) - a server
-    # running several games shouldn't have resetting League's ladder also
-    # wipe Valorant's.
-    def resetEloHelper(self, guild_id):
-        self.cursor.execute(
-            "UPDATE game_stats SET elo=? WHERE guildId=? AND game=?",
-            (self._defaultEloForGuild(guild_id), guild_id, self._currentGame(guild_id))
-        )
+    # untouched, unlike resetEconomyHelper, which wipes the whole row. Or
+    # just one player's elo if `user_id` is given, same narrowing as
+    # resetEconomyHelper above. Resets the CURRENT game's elo only (see
+    # /set game) - a server running several games shouldn't have resetting
+    # League's ladder also wipe Valorant's.
+    def resetEloHelper(self, guild_id, user_id=None):
+        if user_id is None:
+            self.cursor.execute(
+                "UPDATE game_stats SET elo=? WHERE guildId=? AND game=?",
+                (self._defaultEloForGuild(guild_id), guild_id, self._currentGame(guild_id))
+            )
+        else:
+            self.cursor.execute(
+                "UPDATE game_stats SET elo=? WHERE guildId=? AND userId=? AND game=?",
+                (self._defaultEloForGuild(guild_id), guild_id, user_id, self._currentGame(guild_id))
+            )
         self.db.commit()
 
     # Resets EARNED ACHIEVEMENTS for a guild. Deletes only the
@@ -4081,17 +4522,26 @@ class helpers():
         await ctx.response.defer()
         warnings = []
         if clear_economy:
-            warnings.append(
-                "This will **wipe the entire economy** (balance, elo, game record, "
-                "betting record, gold wagered/won/lost) for **every player** in "
-                f"**{ctx.guild.name}**."
-            )
+            if target is not None:
+                warnings.append(
+                    f"This will **wipe the entire economy** (balance, elo, game record, "
+                    f"betting record, gold wagered/won/lost) for {target.mention}."
+                )
+            else:
+                warnings.append(
+                    "This will **wipe the entire economy** (balance, elo, game record, "
+                    "betting record, gold wagered/won/lost) for **every player** in "
+                    f"**{ctx.guild.name}**."
+                )
         elif clear_elo:
             reset_elo = self._defaultEloForGuild(ctx.guild.id)
-            warnings.append(
-                f"This will **reset elo back to {reset_elo}** for **every player** "
-                f"in **{ctx.guild.name}**."
-            )
+            if target is not None:
+                warnings.append(f"This will **reset elo back to {reset_elo}** for {target.mention}.")
+            else:
+                warnings.append(
+                    f"This will **reset elo back to {reset_elo}** for **every player** "
+                    f"in **{ctx.guild.name}**."
+                )
         if clear_achievements:
             if target is not None:
                 warnings.append(
@@ -4113,6 +4563,10 @@ class helpers():
                     f"This will **wipe every trading-card unlock** for **every player** in "
                     f"**{ctx.guild.name}** and reset their cards to Shockwave's defaults."
                 )
+        warnings.append(
+            "This will also clear the current teams/draft; any in-progress game will be cancelled "
+            "(refunded) first."
+        )
         warning = " ".join(warnings) + " This can't be undone."
         view = ConfirmResetView(
             self, ctx.guild.id, ctx.guild.name, ctx.user.id,
@@ -4294,6 +4748,62 @@ class helpers():
         self.saveTournament(guild_id, tournament)
         await ctx.response.send_message(
             f"**{team_name}** registered for **{tournament.get_name()}**! "
+            f"({len(tournament.get_teams())}/{tournament.get_num_teams()} teams)"
+        )
+
+    # The reverse of registerTeamHelper: same captain-or-admin gate, but
+    # refuses once a bracket exists (get_bracket() is non-empty), since a
+    # registered team's roster is what buildBracket actually seeded into
+    # the tree - unregistering after that would leave the bracket
+    # referencing a team the tournament no longer considers entered.
+    # /tournament create-bracket (its own Confirm-gated reroll once real
+    # match history exists) is the way to change the lineup past that
+    # point, not this. No confirmation needed here: a registration entry
+    # before a bracket exists is trivially reversible by registering
+    # again, the same "only gate what's actually destructive" reasoning
+    # createBracketHelper/createTournamentHelper already apply elsewhere.
+    async def unregisterTeamHelper(self, ctx, team_name):
+        guild_id = ctx.guild.id
+
+        tournament = self.getTournament(guild_id)
+        if tournament is None:
+            await ctx.response.send_message(
+                "No tournament set up for this server. Use /tournament create first.", ephemeral=True
+            )
+            return
+
+        result = self.getTeamRow(guild_id, team_name)
+        if result is None:
+            await ctx.response.send_message(f"No team named **{team_name}** in this server.", ephemeral=True)
+            return
+        _, team = result
+
+        if not self.isTeamCaptain(team, ctx.user.id) and not ctx.user.guild_permissions.manage_guild:
+            await ctx.response.send_message(
+                f"Only **{team_name}**'s captain or a member with the Manage Server permission can "
+                "unregister it from the tournament.",
+                ephemeral=True,
+            )
+            return
+
+        if tournament.get_bracket():
+            await ctx.response.send_message(
+                f"**{tournament.get_name()}**'s bracket has already been built; teams can't be "
+                "unregistered anymore. Use /tournament create-bracket to reroll it if the lineup "
+                "really needs to change.",
+                ephemeral=True,
+            )
+            return
+
+        if not tournament.unregister_team(team.get_id()):
+            await ctx.response.send_message(
+                f"**{team_name}** isn't registered for this tournament.", ephemeral=True
+            )
+            return
+
+        self.saveTournament(guild_id, tournament)
+        await ctx.response.send_message(
+            f"**{team_name}** unregistered from **{tournament.get_name()}**. "
             f"({len(tournament.get_teams())}/{tournament.get_num_teams()} teams)"
         )
 
@@ -4500,23 +5010,22 @@ class helpers():
         self.db.commit()
         self._clearTournamentMatchesForGuild(guild_id)
 
-    async def createBracketHelper(self, ctx, double_elimination, losers_bracket_timing="after_winners"):
-        guild_id = ctx.guild.id
+    def _bracketTimingNote(self, double_elimination, losers_bracket_timing):
+        if not double_elimination:
+            return ""
+        return (
+            " Losers bracket starts once the winners bracket finishes."
+            if losers_bracket_timing == "after_winners" else
+            " Losers bracket rounds are interleaved with the winners bracket as they're unlocked."
+        )
 
-        tournament = self.getTournament(guild_id)
-        if tournament is None:
-            await ctx.response.send_message(
-                "No tournament set up for this server. Use /tournament create first.", ephemeral=True
-            )
-            return
-
-        teams = tournament.get_teams()
-        if len(teams) < 2:
-            await ctx.response.send_message(
-                "Need at least 2 registered teams to build a bracket.", ephemeral=True
-            )
-            return
-
+    # The actual bracket build/save behind /tournament create-bracket, with
+    # no messaging of its own - shared by createBracketHelper's direct path
+    # (nothing to lose yet) and ConfirmBracketOverwriteView's Confirm button
+    # (rebuilding over real match history), which announce the result two
+    # different ways (a fresh response vs. editing the confirmation prompt
+    # in place) and so can't share that part.
+    def _rebuildBracket(self, guild_id, tournament, teams, double_elimination, losers_bracket_timing):
         tournament.set_double_elimination(double_elimination)
         wb_nodes = self.buildBracket(teams)
         tournament.set_bracket(wb_nodes)
@@ -4538,14 +5047,52 @@ class helpers():
         self._clearTournamentMatchesForGuild(guild_id)
         self.saveTournament(guild_id, tournament)
 
-        elim_style = "double" if double_elimination else "single"
-        timing_note = ""
-        if double_elimination:
-            timing_note = (
-                " Losers bracket starts once the winners bracket finishes."
-                if losers_bracket_timing == "after_winners" else
-                " Losers bracket rounds are interleaved with the winners bracket as they're unlocked."
+    async def createBracketHelper(self, ctx, double_elimination, losers_bracket_timing="after_winners"):
+        guild_id = ctx.guild.id
+
+        tournament = self.getTournament(guild_id)
+        if tournament is None:
+            await ctx.response.send_message(
+                "No tournament set up for this server. Use /tournament create first.", ephemeral=True
             )
+            return
+
+        teams = tournament.get_teams()
+        if len(teams) < 2:
+            await ctx.response.send_message(
+                "Need at least 2 registered teams to build a bracket.", ephemeral=True
+            )
+            return
+
+        # Only actually destructive once there's real match history to
+        # lose (see ConfirmBracketOverwriteView's own comment) - a bracket
+        # built or rerolled before /tournament start has ever run needs
+        # neither Manage Server nor a confirmation.
+        self.cursor.execute("SELECT COUNT(*) FROM tournament_matches WHERE guildId=?", (guild_id,))
+        has_match_history = self.cursor.fetchone()[0] > 0
+        if has_match_history:
+            if not ctx.user.guild_permissions.manage_guild:
+                await ctx.response.send_message(
+                    "This tournament already has match history from a previous bracket. Only a member "
+                    "with the Manage Server permission can rebuild it.",
+                    ephemeral=True,
+                )
+                return
+
+            view = ConfirmBracketOverwriteView(
+                self, guild_id, ctx.user.id, double_elimination, losers_bracket_timing
+            )
+            await ctx.response.send_message(
+                f"**{tournament.get_name()}** already has match history from a previous bracket. "
+                "Rebuilding will erase it (results, and any bets that were never settled). Are you sure?",
+                view=view
+            )
+            view.message = await ctx.original_response()
+            return
+
+        self._rebuildBracket(guild_id, tournament, teams, double_elimination, losers_bracket_timing)
+        elim_style = "double" if double_elimination else "single"
+        timing_note = self._bracketTimingNote(double_elimination, losers_bracket_timing)
         await ctx.response.send_message(
             f"Bracket created for **{tournament.get_name()}** - {len(teams)} teams, "
             f"{elim_style} elimination.{timing_note}"
@@ -6948,65 +7495,36 @@ class helpers():
         await self._postTournamentLeaderboard(channel, guild_id, tournament)
         await self._announceAchievements(channel, self._grantTournamentChampionAchievement(guild_id, winner))
 
-    # /set correct-winner's match_id path: fixes a specific tournament
-    # match's recorded winner, re-propagates the bracket, and (if anyone
-    # had money on it) reverses the payouts _settleMatchWagers already
-    # made against the wrong winner and reapplies them against the right
-    # one (using the settledWagers snapshot _settleMatchWagers leaves
-    # behind, since tournament_wagers' own rows are long gone by the
-    # time a match is old enough to need correcting). Independent of the
-    # guild-wide last_result correction (which only ever covers the
-    # single most-recently-resolved team game). Refuses once the next
-    # round has already started, rather than risk silently corrupting a
-    # bracket that's already moved on.
-    async def _correctTournamentMatchHelper(self, ctx, match_id, correct_team):
-        guild_id = ctx.guild.id
-
-        self.cursor.execute(
-            "SELECT roundIndex, nodeIndex, state, winner, bracketType, settledWagers "
-            "FROM tournament_matches WHERE guildId=? AND id=?",
-            (guild_id, match_id)
-        )
-        row = self.cursor.fetchone()
-        if row is None:
-            await ctx.response.send_message(
-                f"No tournament match with id {match_id} in this server.", ephemeral=True
-            )
-            return
-        round_index, node_index, state, winner, bracket_type, settled_wagers_json = row
-
-        if bracket_type != "winners":
-            await ctx.response.send_message(
-                f"Match #{match_id} is a {'losers bracket' if bracket_type == 'losers' else 'Grand Finals'} "
-                f"match. Correcting those isn't supported yet.",
-                ephemeral=True,
-            )
-            return
-
-        if state != "RESOLVED":
-            await ctx.response.send_message(f"Match #{match_id} hasn't been resolved yet.", ephemeral=True)
-            return
-
-        if winner == correct_team:
-            await ctx.response.send_message(
-                f"Match #{match_id} is already recorded as Team {correct_team}.", ephemeral=True
-            )
-            return
-
+    # Whether ANY winners-bracket match in the round after `round_index`
+    # has already been queued, the signal _correctTournamentMatchHelper (and
+    # ConfirmTournamentMatchCorrectionView's own re-check at Confirm time)
+    # both refuse to correct past, since the bracket's already moved on by
+    # then and a correction could no longer be safely re-propagated.
+    def _nextTournamentRoundStarted(self, guild_id, round_index):
         self.cursor.execute(
             "SELECT COUNT(*) FROM tournament_matches WHERE guildId=? AND roundIndex=? AND bracketType='winners'",
             (guild_id, round_index + 1)
         )
-        if self.cursor.fetchone()[0] > 0:
-            await ctx.response.send_message(
-                f"Can't correct Match #{match_id}; the next round has already started.", ephemeral=True
-            )
-            return
+        return self.cursor.fetchone()[0] > 0
+
+    # The actual bracket-propagation/wager-reversal work behind /set
+    # correct-winner's match_id path, with no messaging of its own -
+    # shared by nothing else, but kept separate from
+    # _correctTournamentMatchHelper so ConfirmTournamentMatchCorrectionView's
+    # Confirm button can re-verify the match is still in the exact state
+    # the warning was built from (see its own comment) before calling this.
+    # None if the tournament itself is somehow gone by the time Confirm is
+    # pressed. Otherwise (result_text, tournament, newly_unlocked).
+    def _applyTournamentMatchCorrection(self, guild_id, match_id, node_index, correct_team):
+        self.cursor.execute(
+            "SELECT winner, settledWagers FROM tournament_matches WHERE guildId=? AND id=?",
+            (guild_id, match_id)
+        )
+        winner, settled_wagers_json = self.cursor.fetchone()
 
         tournament = self.getTournament(guild_id)
         if tournament is None:
-            await ctx.response.send_message("This server's tournament no longer exists.", ephemeral=True)
-            return
+            return None
 
         bracket = tournament.get_bracket()
         node_a = bracket[node_index]
@@ -7028,11 +7546,85 @@ class helpers():
 
         self.db.commit()
 
-        await ctx.response.send_message(
-            f"Match #{match_id} corrected: **{correct_winner_node.team.get_name()}** actually won.{wager_note}"
+        result_text = f"Match #{match_id} corrected: **{correct_winner_node.team.get_name()}** actually won.{wager_note}"
+        return result_text, tournament, newly_unlocked
+
+    # /set correct-winner's match_id path: posts a confirmation for fixing
+    # a specific tournament match's recorded winner rather than
+    # re-propagating the bracket (and, if anyone had money on it, reversing
+    # the payouts _settleMatchWagers already made against the wrong winner
+    # and reapplying them against the right one, using the settledWagers
+    # snapshot _settleMatchWagers leaves behind, since tournament_wagers'
+    # own rows are long gone by the time a match is old enough to need
+    # correcting) immediately - the same "a real payout/bracket change
+    # shouldn't hinge on one click" reasoning every other winner-report
+    # flow in this file already follows. Independent of the guild-wide
+    # last_result correction (which only ever covers the single
+    # most-recently-resolved team game). Refuses once the next round has
+    # already started, rather than risk silently corrupting a bracket
+    # that's already moved on; ConfirmTournamentMatchCorrectionView
+    # re-checks that (and the match's own state) again at Confirm time,
+    # in case either changed while the prompt was sitting there.
+    async def _correctTournamentMatchHelper(self, ctx, match_id, correct_team):
+        guild_id = ctx.guild.id
+
+        self.cursor.execute(
+            "SELECT roundIndex, nodeIndex, state, winner, bracketType, settledWagers "
+            "FROM tournament_matches WHERE guildId=? AND id=?",
+            (guild_id, match_id)
         )
-        await self._sendBracketText(ctx.channel, tournament, guild_id)
-        await self._announceAchievements(ctx.channel, newly_unlocked)
+        row = self.cursor.fetchone()
+        if row is None:
+            await ctx.response.send_message(
+                f"No tournament match with id {match_id} in this server.", ephemeral=True
+            )
+            return
+        round_index, node_index, state, winner, bracket_type, _settled_wagers_json = row
+
+        if bracket_type != "winners":
+            await ctx.response.send_message(
+                f"Match #{match_id} is a {'losers bracket' if bracket_type == 'losers' else 'Grand Finals'} "
+                f"match. Correcting those isn't supported yet.",
+                ephemeral=True,
+            )
+            return
+
+        if state != "RESOLVED":
+            await ctx.response.send_message(f"Match #{match_id} hasn't been resolved yet.", ephemeral=True)
+            return
+
+        if winner == correct_team:
+            await ctx.response.send_message(
+                f"Match #{match_id} is already recorded as Team {correct_team}.", ephemeral=True
+            )
+            return
+
+        if self._nextTournamentRoundStarted(guild_id, round_index):
+            await ctx.response.send_message(
+                f"Can't correct Match #{match_id}; the next round has already started.", ephemeral=True
+            )
+            return
+
+        tournament = self.getTournament(guild_id)
+        if tournament is None:
+            await ctx.response.send_message("This server's tournament no longer exists.", ephemeral=True)
+            return
+
+        bracket = tournament.get_bracket()
+        node_a = bracket[node_index]
+        node_b = node_a.opponent
+        correct_winner_node = node_a if correct_team == 1 else node_b
+
+        view = ConfirmTournamentMatchCorrectionView(
+            self, guild_id, ctx.user.id, match_id, round_index, node_index, winner, correct_team
+        )
+        await ctx.response.send_message(
+            f"This will correct Match #{match_id}: **{correct_winner_node.team.get_name()}** actually won "
+            f"(previously recorded as Team {winner}). Any bet payouts on this match will be reversed and "
+            "reapplied. This can't be undone.",
+            view=view,
+        )
+        view.message = await ctx.original_response()
 
     # ---------------- Persistent teams ----------------
 
@@ -7869,23 +8461,71 @@ class helpers():
         await ctx.response.send_message(message, view=TeamInviteAcceptView(self))
         msg = await ctx.original_response()
 
+        created_at = int(time.time())
         for member in valid:
             self.cursor.execute(
                 "INSERT INTO team_invites"
-                "(guildId, channelId, messageId, teamId, teamName, inviterId, targetId, targetName) "
-                "VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
-                (guild_id, ctx.channel.id, msg.id, team_id, team_name, ctx.user.id, member.id, member.name)
+                "(guildId, channelId, messageId, teamId, teamName, inviterId, targetId, targetName, createdAt) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    guild_id, ctx.channel.id, msg.id, team_id, team_name, ctx.user.id, member.id, member.name,
+                    created_at,
+                )
             )
         self.db.commit()
 
-    # /team leave: the self-service counterpart to /team invite, no
-    # captain/admin gate at all, since removing *yourself* needs nobody
-    # else's permission. The captain can't use this one directly,
-    # though. Unlike every other team command, there's no "who's in
-    # charge now" answer to fall back to, so leaving a non-empty team
-    # captain-less would break isTeamCaptain everywhere else it's
-    # checked (rename/set/invite/delete) down to just "whoever has
-    # Manage Server." A captain who wants out has to answer that
+    # The captain/admin counterpart to /team leave, symmetric with how
+    # /team invite force is the captain/admin counterpart to a normal
+    # (self-accepted) invite: a captain or a Manage Server admin can
+    # remove someone from the roster who won't (or can't) run /team leave
+    # themselves. No confirmation, same as force-inviting - easily undone
+    # either way (re-invite, or leave). The captain themselves can't be
+    # removed this way, same "no captain-less non-empty team" reasoning
+    # teamLeaveHelper's own captain guard has below; /team transfer or
+    # /team delete are what that situation actually needs.
+    async def teamRemoveHelper(self, ctx, team_name, member):
+        guild_id = ctx.guild.id
+
+        result = self.getTeamRow(guild_id, team_name)
+        if result is None:
+            await ctx.response.send_message(f"No team named **{team_name}** in this server.", ephemeral=True)
+            return
+        team_id, team = result
+
+        if not self.isTeamCaptain(team, ctx.user.id) and not ctx.user.guild_permissions.manage_guild:
+            await ctx.response.send_message(
+                f"Only **{team_name}**'s captain or a member with the Manage Server permission can "
+                "remove a player from the roster.",
+                ephemeral=True,
+            )
+            return
+
+        if self.isTeamCaptain(team, member.id):
+            await ctx.response.send_message(
+                f"{member.display_name} is **{team_name}**'s captain; use /team transfer to hand off "
+                "the captaincy first, or /team delete if you want the team gone entirely.",
+                ephemeral=True,
+            )
+            return
+
+        player = next((p for p in team.get_players() if p.get_id() == member.id), None)
+        if player is None:
+            await ctx.response.send_message(f"{member.display_name} isn't on **{team_name}**.", ephemeral=True)
+            return
+
+        team.remove_player(player)
+        self.updateTeamData(team_id, team)
+
+        await ctx.response.send_message(f"{member.mention} has been removed from **{team_name}**.")
+
+    # /team leave: the self-service counterpart to /team invite/
+    # /team remove, no captain/admin gate at all, since removing
+    # *yourself* needs nobody else's permission. The captain can't use
+    # this one directly, though. Unlike every other team command, there's
+    # no "who's in charge now" answer to fall back to, so leaving a
+    # non-empty team captain-less would break isTeamCaptain everywhere
+    # else it's checked (rename/set/invite/delete) down to just "whoever
+    # has Manage Server." A captain who wants out has to answer that
     # question explicitly first: either /team transfer to someone else
     # already on the roster, or /team delete if the team shouldn't
     # exist at all anymore.
@@ -8808,21 +9448,23 @@ class helpers():
     # shared view. That matches how /leaderboard's own paging already
     # behaves (any clicker can page a guild-wide view). A personal view
     # being paged by someone else just steps through the looked-up
-    # player's teams, not the clicker's.
+    # player's teams, not the clicker's. cardShown carries across the
+    # flip the same way team_list_views' own does, see
+    # _handleTeamListPageClick.
     async def _handleMyTeamsPageClick(self, interaction, direction=None, target_page=None):
         guild_id = interaction.guild_id
         if guild_id is None:
             return
 
         self.cursor.execute(
-            "SELECT userId, page FROM my_team_views WHERE guildId=? AND messageId=?",
+            "SELECT userId, page, cardShown FROM my_team_views WHERE guildId=? AND messageId=?",
             (guild_id, interaction.message.id)
         )
         row = self.cursor.fetchone()
         if row is None:
             await interaction.response.send_message("This view is no longer live.", ephemeral=True)
             return
-        user_id, page = row
+        user_id, page, card_shown = row
 
         teams = self.getTeamsForPlayer(guild_id, user_id)
         if not teams:
@@ -8836,15 +9478,87 @@ class helpers():
             await interaction.response.defer()
             return
 
-        embed, file = self._renderMyTeamsEmbed(teams, new_page)
-        if file is not None:
+        if card_shown:
+            guild_name = interaction.guild.name if interaction.guild is not None else ""
+            embed, file = await self._renderTeamListCardEmbed(guild_name, teams, new_page)
             await interaction.response.edit_message(embed=embed, attachments=[file])
         else:
-            await interaction.response.edit_message(embed=embed, attachments=[])
+            embed, file = self._renderMyTeamsEmbed(teams, new_page)
+            if file is not None:
+                await interaction.response.edit_message(embed=embed, attachments=[file])
+            else:
+                await interaction.response.edit_message(embed=embed, attachments=[])
 
         self.cursor.execute(
             "UPDATE my_team_views SET page=? WHERE guildId=? AND messageId=?",
             (new_page, guild_id, interaction.message.id)
+        )
+        self.db.commit()
+
+    # MyTeamsPagingView's Card button callback, swaps the currently-paged
+    # team's plain stats card for its actual trading card - see
+    # _handleTeamListShowCardClick, same idea, just re-deriving the team
+    # list from my_team_views' own stored userId instead of a stored
+    # search/sort/filter.
+    async def _handleMyTeamsShowCardClick(self, interaction):
+        guild_id = interaction.guild_id
+        message = interaction.message
+
+        self.cursor.execute(
+            "SELECT userId, page FROM my_team_views WHERE guildId=? AND messageId=? AND cardShown=0",
+            (guild_id, message.id)
+        )
+        row = self.cursor.fetchone()
+        if row is None:
+            await interaction.response.send_message("This view is no longer live.", ephemeral=True)
+            return
+        user_id, page = row
+
+        teams = self.getTeamsForPlayer(guild_id, user_id)
+        if not teams:
+            await interaction.response.send_message("This view is no longer live.", ephemeral=True)
+            return
+        page = min(page, len(teams) - 1)
+
+        await interaction.response.defer()
+        guild_name = interaction.guild.name if interaction.guild is not None else ""
+        embed, file = await self._renderTeamListCardEmbed(guild_name, teams, page)
+        await message.edit(embed=embed, attachments=[file], view=MyTeamsPagingView(self, card_shown=True))
+        self.cursor.execute(
+            "UPDATE my_team_views SET cardShown=1 WHERE guildId=? AND messageId=?",
+            (guild_id, message.id)
+        )
+        self.db.commit()
+
+    # MyTeamsPagingView's Back button callback, the reverse swap.
+    async def _handleMyTeamsReturnClick(self, interaction):
+        guild_id = interaction.guild_id
+        message = interaction.message
+
+        self.cursor.execute(
+            "SELECT userId, page FROM my_team_views WHERE guildId=? AND messageId=? AND cardShown=1",
+            (guild_id, message.id)
+        )
+        row = self.cursor.fetchone()
+        if row is None:
+            await interaction.response.send_message("This view is no longer live.", ephemeral=True)
+            return
+        user_id, page = row
+
+        teams = self.getTeamsForPlayer(guild_id, user_id)
+        if not teams:
+            await interaction.response.send_message("This view is no longer live.", ephemeral=True)
+            return
+        page = min(page, len(teams) - 1)
+
+        await interaction.response.defer()
+        embed, file = self._renderMyTeamsEmbed(teams, page)
+        edit_kwargs = {"embed": embed, "attachments": [file] if file is not None else []}
+        edit_kwargs["view"] = MyTeamsPagingView(self, card_shown=False)
+        await message.edit(**edit_kwargs)
+        self.cursor.execute(
+            "UPDATE my_team_views SET cardShown=0 WHERE guildId=? AND messageId=?",
+            (guild_id, message.id)
         )
         self.db.commit()
 
@@ -9121,6 +9835,61 @@ class helpers():
         new_balance = self.getEconomy(guild_id, user_id, "balance")
         await ctx.response.send_message(
             f"You claimed your daily {DAILY_GOLD_AMOUNT} gold! Your balance is now {new_balance}."
+        )
+
+    # /give: a plain, immediate gold transfer between two players, no
+    # accept step needed (unlike /wager against - the recipient never has
+    # to consent to being given gold, the same way nobody has to consent
+    # to /notify DMing them an invite). Deliberately NOT capped by /set
+    # max-wager (that's a per-bet risk limit; a transfer isn't a wager,
+    # there's no outcome to hedge against) and not gated by
+    # betting_enabled either (moving gold between players isn't betting,
+    # so turning betting off on a server shouldn't also turn this off).
+    # Doesn't touch wins/losses/gold_wagered/gold_won/gold_lost - those
+    # are bet-outcome-only columns, and a gift is even less bet-like than
+    # a cancelled duel (see _finishDuelCancellation, which already
+    # doesn't touch them for the same reason).
+    async def giveGoldHelper(self, ctx, member, amount):
+        guild_id = ctx.guild.id
+        giver = ctx.user
+
+        if member.id == giver.id:
+            await ctx.response.send_message("You can't give gold to yourself!", ephemeral=True)
+            return
+
+        if member.bot:
+            await ctx.response.send_message("You can't give gold to a bot!", ephemeral=True)
+            return
+
+        if amount <= 0:
+            await ctx.response.send_message("Amount must be greater than 0.", ephemeral=True)
+            return
+
+        self.ensureEconomyRow(guild_id, giver.id, giver.name)
+        balance = self.getEconomy(guild_id, giver.id, "balance")
+        if amount > balance:
+            await ctx.response.send_message(
+                f"You don't have enough gold for that! Your balance is {balance}.", ephemeral=True
+            )
+            return
+
+        self.ensureEconomyRow(guild_id, member.id, member.name)
+
+        self.cursor.execute(
+            "UPDATE economy SET balance = balance - ? WHERE guildId=? AND userId=?",
+            (amount, guild_id, giver.id)
+        )
+        self.cursor.execute(
+            "UPDATE economy SET balance = balance + ? WHERE guildId=? AND userId=?",
+            (amount, guild_id, member.id)
+        )
+        self.db.commit()
+
+        giver_balance = self.getEconomy(guild_id, giver.id, "balance")
+        recipient_balance = self.getEconomy(guild_id, member.id, "balance")
+        await ctx.response.send_message(
+            f"{giver.mention} gave **{amount} gold** to {member.mention}! "
+            f"{giver.name}'s balance: {giver_balance}. {member.name}'s balance: {recipient_balance}."
         )
 
     # ---------------- Betting ----------------
@@ -9667,6 +10436,33 @@ class helpers():
         if task is not None and not task.done():
             task.cancel()
 
+    # Deletes any /team invite or /wager against challenge nobody ever
+    # answered within PENDING_INVITE_EXPIRY_SECONDS. Called periodically
+    # (see bot.py's expireInvitesTask) rather than scheduling a real timer
+    # per invite: unlike the betting timers below, whose whole point is
+    # firing at a precise moment, a 24-hour window is long enough that a
+    # coarse periodic sweep is plenty, and it means a pending invite
+    # doesn't need any reconciliation on restart the way an in-flight
+    # betting countdown does. Only ever touches PENDING_ACCEPT duels - an
+    # accepted one has real gold escrowed and stays open indefinitely
+    # regardless of age, same as today. A NULL createdAt (a row from
+    # before that column existed) counts as already expired rather than
+    # guessing how old it actually is. Returns (invites_expired,
+    # duels_expired) purely for the caller's own logging.
+    def expireStalePendingInvites(self):
+        cutoff = int(time.time()) - PENDING_INVITE_EXPIRY_SECONDS
+        self.cursor.execute(
+            "DELETE FROM team_invites WHERE createdAt IS NULL OR createdAt < ?", (cutoff,)
+        )
+        invites_expired = self.cursor.rowcount
+        self.cursor.execute(
+            "DELETE FROM duels WHERE state='PENDING_ACCEPT' AND (createdAt IS NULL OR createdAt < ?)",
+            (cutoff,)
+        )
+        duels_expired = self.cursor.rowcount
+        self.db.commit()
+        return invites_expired, duels_expired
+
     # Called once from on_ready. _bettingTimer's own countdown is only
     # ever an in-memory asyncio.Task (self.bettingTasks), lost on a
     # genuine process restart, though not on a mere gateway reconnect,
@@ -10132,8 +10928,12 @@ class helpers():
 
         self.cursor.execute(
             "INSERT INTO duels(guildId, channelId, messageId, challengerId, challengerName, "
-            "targetId, targetName, amount, state) VALUES(?, ?, NULL, ?, ?, ?, ?, ?, 'PENDING_ACCEPT')",
-            (guild_id, ctx.channel.id, challenger.id, challenger.name, member.id, member.name, amount)
+            "targetId, targetName, amount, state, createdAt) "
+            "VALUES(?, ?, NULL, ?, ?, ?, ?, ?, 'PENDING_ACCEPT', ?)",
+            (
+                guild_id, ctx.channel.id, challenger.id, challenger.name, member.id, member.name, amount,
+                int(time.time()),
+            )
         )
         self.db.commit()
         duel_id = self.cursor.lastrowid
@@ -10180,6 +10980,44 @@ class helpers():
         await interaction.response.defer()
         await self._acceptDuel(
             guild_id, duel_id, channel_id, challenger_id, challenger_name, target_id, target_name, amount
+        )
+        await self._clearMessageButtons(interaction.message)
+
+    # DuelAcceptView's Decline button callback, the reverse of Accept
+    # above: same "only the challenged player" gate, but just deletes the
+    # pending duel row outright rather than moving it forward. No gold to
+    # refund - _acceptDuel is the only place a duel's amount ever actually
+    # leaves anyone's balance.
+    async def _handleDuelDeclineClick(self, interaction):
+        guild_id = interaction.guild_id
+        if guild_id is None:
+            return
+
+        self.cursor.execute(
+            "SELECT id, challengerName, targetId, targetName "
+            "FROM duels WHERE guildId=? AND messageId=? AND state='PENDING_ACCEPT'",
+            (guild_id, interaction.message.id)
+        )
+        row = self.cursor.fetchone()
+        if row is None:
+            await interaction.response.send_message(
+                "This challenge is no longer pending.", ephemeral=True
+            )
+            return
+        duel_id, challenger_name, target_id, target_name = row
+
+        # Only the challenged player can decline their own challenge.
+        if interaction.user.id != target_id:
+            await interaction.response.send_message(
+                "Only the challenged player can decline this.", ephemeral=True
+            )
+            return
+
+        self.cursor.execute("DELETE FROM duels WHERE id=?", (duel_id,))
+        self.db.commit()
+
+        await interaction.response.send_message(
+            f"**{target_name}** declined **{challenger_name}**'s wager."
         )
         await self._clearMessageButtons(interaction.message)
 
@@ -10236,11 +11074,58 @@ class helpers():
         )
         view.message = await interaction.original_response()
 
-    # Undoes _handleDuelResultClick's own CONFIRMING flip once a
-    # pending result confirmation is cancelled or times out, so the
-    # duel's report buttons work again. An atomic conditional UPDATE
-    # (not select-then-update) so it naturally no-ops if the duel
-    # already resolved a different way in the meantime.
+    # DuelResultView's Cancel Duel button callback, same participant-or-
+    # admin gate and CONFIRMING flip _handleDuelResultClick uses above,
+    # just for the opposite outcome (a refund instead of a payout).
+    async def _handleDuelCancelClick(self, interaction):
+        guild_id = interaction.guild_id
+        if guild_id is None:
+            return
+
+        self.cursor.execute(
+            "SELECT id, challengerId, targetId FROM duels "
+            "WHERE guildId=? AND messageId=? AND state='AWAITING_RESULT'",
+            (guild_id, interaction.message.id)
+        )
+        row = self.cursor.fetchone()
+        if row is None:
+            await interaction.response.send_message(
+                "This duel has already been reported or is no longer pending.", ephemeral=True
+            )
+            return
+        duel_id, challenger_id, target_id = row
+
+        if not (
+            interaction.user.guild_permissions.manage_guild
+            or interaction.user.id in (challenger_id, target_id)
+        ):
+            await interaction.response.send_message(
+                "Only a participant in this duel, or a member with the Manage Server permission, can "
+                "cancel it.",
+                ephemeral=True,
+            )
+            return
+
+        # BUG-PRONE PATTERN AVOIDED: flip the state before doing anything
+        # async below, so a second near-simultaneous click (a result
+        # button, or another cancel click) can't also pass the check
+        # above and double-process the same duel.
+        self.cursor.execute("UPDATE duels SET state='CONFIRMING' WHERE id=?", (duel_id,))
+        self.db.commit()
+
+        view = ConfirmDuelCancelView(self, duel_id, report_message=interaction.message)
+        await interaction.response.send_message(
+            "Cancel this duel? Both players get their exact stake back. Confirm to cancel, or Cancel "
+            "to keep it going.",
+            view=view,
+        )
+        view.message = await interaction.original_response()
+
+    # Undoes _handleDuelResultClick's/_handleDuelCancelClick's own
+    # CONFIRMING flip once a pending confirmation is cancelled or times
+    # out, so the duel's report/cancel buttons work again. An atomic
+    # conditional UPDATE (not select-then-update) so it naturally no-ops
+    # if the duel already resolved a different way in the meantime.
     def _restoreDuelAwaitingResult(self, duel_id):
         self.cursor.execute(
             "UPDATE duels SET state='AWAITING_RESULT' WHERE id=? AND state='CONFIRMING'", (duel_id,)
@@ -10264,6 +11149,45 @@ class helpers():
         await self._resolveDuel(
             guild_id, duel_id, channel_id, challenger_id, challenger_name,
             target_id, target_name, amount, winner_is_challenger
+        )
+
+    # ConfirmDuelCancelView's Confirm button callback, the refund
+    # counterpart to _finishDuelResolution's payout. Re-fetches the duel's
+    # own row by id the same way. Doesn't touch wins/losses/gold_won/
+    # gold_lost - a cancelled duel never happened, unlike a resolved one.
+    async def _finishDuelCancellation(self, duel_id):
+        self.cursor.execute(
+            "SELECT guildId, channelId, challengerId, challengerName, targetId, targetName, amount "
+            "FROM duels WHERE id=?",
+            (duel_id,)
+        )
+        row = self.cursor.fetchone()
+        if row is None:
+            return
+        guild_id, channel_id, challenger_id, challenger_name, target_id, target_name, amount = row
+
+        # BUG-PRONE PATTERN AVOIDED: delete the duel row before anything
+        # async below, so a double-click on Confirm can't refund twice.
+        self.cursor.execute("DELETE FROM duels WHERE id=?", (duel_id,))
+        self.db.commit()
+
+        self.cursor.execute(
+            "UPDATE economy SET balance = balance + ? WHERE guildId=? AND userId=?",
+            (amount, guild_id, challenger_id)
+        )
+        self.cursor.execute(
+            "UPDATE economy SET balance = balance + ? WHERE guildId=? AND userId=?",
+            (amount, guild_id, target_id)
+        )
+        self.db.commit()
+
+        channel = self.client.get_channel(channel_id)
+        if channel is None:
+            channel = await self.client.fetch_channel(channel_id)
+
+        await channel.send(
+            f"Duel cancelled: **{challenger_name}** and **{target_name}** have each been refunded "
+            f"{amount} gold."
         )
 
     # Escrows `amount` from both players and posts the win/loss report
@@ -10735,6 +11659,58 @@ class helpers():
     # bracket node, not the guild-wide economy snapshot below.
     # invalidate isn't supported there yet, since undoing a match would
     # also mean un-advancing whatever it fed into the bracket.
+    # The actual reverse-and-reapply (or invalidate) work behind
+    # ConfirmCorrectWinnerView's Confirm button, with no messaging of its
+    # own. `snapshot` is the exact last_result dict the warning was built
+    # from - the caller has already checked it's still current (see that
+    # view's own comment) before calling this. Returns (result_text,
+    # summary, newly_unlocked); `summary` is None for an invalidation
+    # (nothing further to announce), a computeGameDeltas summary dict
+    # otherwise, for the caller to post via formatResultMessage.
+    def _applyCorrectWinner(self, guild_id, snapshot, correct_team, invalidate):
+        # .get(...) with a fallback rather than snapshot[...]: an older
+        # last_result snapshot saved before team1_name/team2_name existed
+        # won't have these keys, and shouldn't crash a correction over it.
+        team1_name = snapshot.get("team1_name", "Team 1")
+        team2_name = snapshot.get("team2_name", "Team 2")
+
+        if invalidate:
+            self._invalidateLastResult(guild_id, snapshot)
+            result_text = (
+                f"**{team1_name}** vs **{team2_name}** has been invalidated; bets refunded and "
+                "elo/records/gold undone, as if the game never happened."
+            )
+            return result_text, None, []
+
+        correct_name = team1_name if correct_team == 1 else team2_name
+        game = snapshot["game"]
+        self.applyGameDeltas(guild_id, snapshot["deltas"], game, sign=-1)
+
+        team1_roster = snapshot["team1_roster"]
+        team2_roster = snapshot["team2_roster"]
+        is_ranked = snapshot["is_ranked"]
+        disliked_role_user_ids = snapshot["disliked_role_user_ids"]
+        elo_lookup = self.getEloLookup(guild_id, team1_roster + team2_roster, game)
+        new_deltas, summary = self.computeGameDeltas(
+            snapshot["wagers"], team1_roster, team2_roster, elo_lookup, correct_team, is_ranked,
+            default_elo=self._defaultEloForGuild(guild_id),
+            team1_name=team1_name, team2_name=team2_name,
+            disliked_role_user_ids=disliked_role_user_ids,
+        )
+        newly_unlocked = self.applyGameDeltas(guild_id, new_deltas, game)
+        self.saveLastResult(
+            guild_id, correct_team, snapshot["wagers"], team1_roster, team2_roster, new_deltas, is_ranked,
+            team1_name=team1_name, team2_name=team2_name,
+            disliked_role_user_ids=disliked_role_user_ids, game=game,
+        )
+
+        previous_name = team1_name if snapshot["winning_team"] == 1 else team2_name
+        result_text = (
+            f"Correction recorded: **{correct_name}** actually won (previously recorded as "
+            f"{previous_name}). Balances, records, and elo have been adjusted."
+        )
+        return result_text, summary, newly_unlocked
+
     async def reportCorrectWinnerHelper(self, ctx, correct_team, match_id=None, invalidate=False):
         if match_id is not None:
             if invalidate:
@@ -10771,49 +11747,27 @@ class helpers():
         team2_name = last.get("team2_name", "Team 2")
 
         if invalidate:
-            self._invalidateLastResult(guild_id, last)
-            await ctx.response.send_message(
-                f"**{team1_name}** vs **{team2_name}** has been invalidated; bets refunded and "
-                "elo/records/gold undone, as if the game never happened."
+            warning = (
+                f"This will **invalidate** **{team1_name}** vs **{team2_name}**: bets refunded and "
+                "elo/records/gold undone, as if the game never happened. This can't be undone."
             )
-            return
-
-        correct_name = team1_name if correct_team == 1 else team2_name
-
-        if last["winning_team"] == correct_team:
-            await ctx.response.send_message(
-                f"**{correct_name}** is already the recorded winner; nothing to correct.", ephemeral=True
+        else:
+            correct_name = team1_name if correct_team == 1 else team2_name
+            if last["winning_team"] == correct_team:
+                await ctx.response.send_message(
+                    f"**{correct_name}** is already the recorded winner; nothing to correct.", ephemeral=True
+                )
+                return
+            previous_name = team1_name if last["winning_team"] == 1 else team2_name
+            warning = (
+                f"This will correct **{team1_name}** vs **{team2_name}**: **{correct_name}** actually "
+                f"won (previously recorded as {previous_name}). Balances, records, and elo will be "
+                "adjusted accordingly. This can't be undone."
             )
-            return
 
-        game = last["game"]
-        self.applyGameDeltas(guild_id, last["deltas"], game, sign=-1)
-
-        team1_roster = last["team1_roster"]
-        team2_roster = last["team2_roster"]
-        is_ranked = last["is_ranked"]
-        disliked_role_user_ids = last["disliked_role_user_ids"]
-        elo_lookup = self.getEloLookup(guild_id, team1_roster + team2_roster, game)
-        new_deltas, summary = self.computeGameDeltas(
-            last["wagers"], team1_roster, team2_roster, elo_lookup, correct_team, is_ranked,
-            default_elo=self._defaultEloForGuild(guild_id),
-            team1_name=team1_name, team2_name=team2_name,
-            disliked_role_user_ids=disliked_role_user_ids,
-        )
-        newly_unlocked = self.applyGameDeltas(guild_id, new_deltas, game)
-        self.saveLastResult(
-            guild_id, correct_team, last["wagers"], team1_roster, team2_roster, new_deltas, is_ranked,
-            team1_name=team1_name, team2_name=team2_name,
-            disliked_role_user_ids=disliked_role_user_ids, game=game,
-        )
-
-        previous_name = team1_name if last["winning_team"] == 1 else team2_name
-        await ctx.response.send_message(
-            f"Correction recorded: **{correct_name}** actually won (previously recorded as "
-            f"{previous_name}). Balances, records, and elo have been adjusted."
-        )
-        await ctx.channel.send(self.formatResultMessage(correct_team, summary))
-        await self._announceAchievements(ctx.channel, newly_unlocked)
+        view = ConfirmCorrectWinnerView(self, guild_id, ctx.user.id, last, correct_team, invalidate)
+        await ctx.response.send_message(warning, view=view)
+        view.message = await ctx.original_response()
 
     # Builds the plain /stats embed for `target` (a discord.Member or
     # discord.User, anything with

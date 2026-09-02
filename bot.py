@@ -1,10 +1,12 @@
 # Import Statements
+import asyncio
 import random
 import itertools
 import os
 import os.path as path
 import sqlite3
 import logging
+import sys
 import time
 from datetime import datetime
 import discord
@@ -83,7 +85,8 @@ _console_handler.setFormatter(_log_formatter)
 logging.basicConfig(level=logging.INFO, handlers=[_file_handler, _console_handler])
 logger = logging.getLogger("shockwave")
 
-# Get token from text file
+# Get token (and the developer's own user id, see SHOCKWAVE_DEVELOPER_ID
+# below) from text file
 token = ""
 
 # encoding="utf-8" is set explicitly instead of left to the platform
@@ -92,6 +95,17 @@ token = ""
 # either way, but there's no reason to leave it to chance.
 with open(os.path.join(BASE_DIR, "token.txt"), encoding="utf-8") as f:
     token = f.readline().strip()
+    developerIdLine = f.readline().strip()
+
+# helper.py can't read token.txt itself: BASE_DIR is only resolved here,
+# and helper.py has no import back to this file (that import only goes the
+# other way, to avoid a circular import). Overriding the module-level
+# default right after reading it keeps token.txt the single source for
+# both this and the bot token, instead of a second hardcoded id living in
+# helper.py. Left unset (None) if the line is missing, e.g. the tests'
+# fake single-line token file, or an install that hasn't added it yet.
+if developerIdLine:
+    helper.SHOCKWAVE_DEVELOPER_ID = int(developerIdLine)
 
 # Connect to Database
 dataFolder = os.path.join(BASE_DIR, "data", "guildData", "serverInfo")
@@ -199,7 +213,7 @@ if not db_already_existed:
         "default_elo, betting_opened_at, disliked_role_user_ids, draft_pick_page, "
         "draft_players_message_id, draft_snake, betting_closed_message_id, make_teams_message_ids, "
         "matchup_message_id, roster_starting, roster_permissions_strict, max_wager, betting_enabled, "
-        "matchup_channel, current_game, game)"
+        "matchup_channel, current_game, game, draft_picker_message_id)"
     )
     mainDB.commit()
 else:
@@ -341,6 +355,18 @@ else:
     # change which game's elo/stats an already-in-progress game affects -
     # /set game only ever applies to the NEXT roster formed after it runs.
     ensure_column("servers", "game", "TEXT")
+    # The draft picker's own posted message id (CaptainsDraftPickView),
+    # edited in place on every pick rather than reposted, the same way
+    # roster_team1_message_id/roster_team2_message_id already are. Checked
+    # against the clicked message by _isDraftPickTurn (the shared gate
+    # every draft-pick button routes through), the same "an older
+    # message's buttons stop working once a newer one takes over" role
+    # roster_team2_message_id already plays for the roster buttons - a
+    # draft abandoned via /clear teams or superseded by a fresh
+    # /make-teams draft/random otherwise left its old picker message
+    # fully clickable, resolving picks against whatever draft happens to
+    # be current instead of the one actually shown.
+    ensure_column("servers", "draft_picker_message_id", "INTEGER")
 
 # Per-member currency: gold balance plus win/loss and wagering stats, one
 # row per (guild, user). Shared across every game a server plays - elo and
@@ -431,6 +457,11 @@ cursor.execute(
     "id INTEGER PRIMARY KEY AUTOINCREMENT, guildId, channelId, messageId, "
     "challengerId, challengerName, targetId, targetName, amount, state)"
 )
+# When this challenge was created, so expireStalePendingInvites can clean
+# up one nobody ever answered (see PENDING_INVITE_EXPIRY_SECONDS). Only
+# ever read for a still-PENDING_ACCEPT row - an accepted duel has real gold
+# escrowed and is never auto-expired, regardless of age.
+ensure_column("duels", "createdAt", "INTEGER")
 # One row per posted /leaderboard message, tracking which page it's
 # currently showing so the paging buttons know what to re-render. cards
 # and cardShown carry over /team list's own cards:true toggle. See the
@@ -452,6 +483,11 @@ cursor.execute(
     "CREATE TABLE IF NOT EXISTS my_team_views("
     "messageId INTEGER PRIMARY KEY, guildId, channelId, userId, page)"
 )
+# Whether this /team lookup page is currently showing the paged team's
+# actual trading card instead of its plain stats embed - same Card/Back
+# toggle team_list_views.cardShown backs for /team list cards:true, now at
+# parity here too.
+ensure_column("my_team_views", "cardShown", "INTEGER", "0")
 # One row per posted /stats message, so we can recognize that a click
 # landed on a real /stats embed (see StatsView).
 cursor.execute(
@@ -581,6 +617,11 @@ cursor.execute(
     "id INTEGER PRIMARY KEY AUTOINCREMENT, guildId, channelId, messageId, "
     "teamId, teamName, inviterId, targetId, targetName)"
 )
+# When this invite was sent, so expireStalePendingInvites can clean up one
+# nobody ever answered (see PENDING_INVITE_EXPIRY_SECONDS). NULL for an
+# invite sent before this column existed - treated as already expired
+# rather than guessing how long ago it actually went out.
+ensure_column("team_invites", "createdAt", "INTEGER")
 # One row per tournament match ever played. /tournament start creates a
 # batch of these per round (sequential mode: one at a time; simultaneous
 # mode: all at once), each keyed by its own id so /set correct-winner can
@@ -778,6 +819,19 @@ class LoggingCommandTree(app_commands.CommandTree):
                     "Command called: /%s %s | %s",
                     name, _truncateForLog(str(params)), _interactionLogContext(interaction)
                 )
+        except TypeError as error:
+            # "NoneType object is not callable" here (as opposed to any
+            # other exception type) has only ever been observed when this
+            # process is running on stale bytecode compiled before a live
+            # edit to this file, and Python prints the *current* on-disk
+            # source line for a lineno the running code object no longer
+            # matches (e.g. this exact comment block). It's not an
+            # actionable runtime bug, just noise from editing bot.py while
+            # it's running, so skip logging it. Restarting the process
+            # clears it. Anything else still falls through to the handler
+            # below.
+            if "is not callable" not in str(error):
+                logger.exception("LoggingCommandTree.interaction_check failed, continuing without logging this call")
         except Exception:
             logger.exception("LoggingCommandTree.interaction_check failed, continuing without logging this call")
         return True
@@ -796,6 +850,73 @@ helperObj.client = client
 # custom_id after a restart. It reaches back through
 # interaction.client.helperObj instead.
 client.helperObj = helperObj
+
+# Runtime on/off switch for DeveloperDMHandler below, flipped by /dev
+# alerts without needing a restart. Starts enabled so a deploy that never
+# touches /dev alerts still gets DMed by default.
+_developerAlertsEnabled = True
+
+# emit() can run before client.run() ever connects (e.g. a warning from
+# _runStartupSelfTests, which runs before that call) - queued here instead
+# of just dropped, and flushed once on_ready first fires and there's
+# actually a connection to send a DM over.
+_pendingDeveloperDMs = []
+
+# Discord's own hard cap on a single message's length. A formatted
+# logger.exception record includes the full traceback, easily past this,
+# so _sendDeveloperDM below truncates to it rather than letting the send
+# itself fail.
+_DISCORD_MESSAGE_MAX_LENGTH = 2000
+
+
+# Surfaces WARNING-and-up log records as a DM instead of leaving them
+# sitting unnoticed in shockwave.log between check-ins. Attached to the
+# same "shockwave" logger everything else in this file and helper.py
+# already logs through (see logger.addHandler below), filtered to
+# WARNING+ via setLevel so this file's routine logger.info calls (command
+# invocations, DB writes) never trigger it.
+class DeveloperDMHandler(logging.Handler):
+    def emit(self, record):
+        if not _developerAlertsEnabled or helper.SHOCKWAVE_DEVELOPER_ID is None:
+            return
+        try:
+            message = self.format(record)
+        except Exception:
+            return
+        if client.is_ready():
+            asyncio.run_coroutine_threadsafe(_sendDeveloperDM(message), client.loop)
+        else:
+            _pendingDeveloperDMs.append(message)
+
+
+async def _sendDeveloperDM(message):
+    try:
+        user = await client.fetch_user(helper.SHOCKWAVE_DEVELOPER_ID)
+        if len(message) > _DISCORD_MESSAGE_MAX_LENGTH:
+            suffix = "... (truncated, see shockwave.log)"
+            message = message[:_DISCORD_MESSAGE_MAX_LENGTH - len(suffix)] + suffix
+        await user.send(message)
+    except Exception:
+        # Deliberately not logger.exception/.error: this handler is itself
+        # attached to this same logger, so logging a failure here through
+        # it would just re-trigger this handler and recurse. print()
+        # bypasses the logging module entirely.
+        print("DeveloperDMHandler: failed to DM the developer", file=sys.stderr)
+
+
+_developer_dm_handler = DeveloperDMHandler()
+_developer_dm_handler.setLevel(logging.WARNING)
+_developer_dm_handler.setFormatter(_log_formatter)
+logger.addHandler(_developer_dm_handler)
+
+
+async def _flushPendingDeveloperDMs():
+    if not _pendingDeveloperDMs:
+        return
+    pending, _pendingDeveloperDMs[:] = list(_pendingDeveloperDMs), []
+    for message in pending:
+        await _sendDeveloperDM(message)
+
 
 # Pure personalization: the bot's Discord status cycles through these
 # instead of sitting on one fixed line. Recalled from memory rather than
@@ -864,6 +985,24 @@ async def backupDatabaseTask():
         logger.exception("Database backup failed.")
 
 
+# Runs immediately on .start(), then hourly after. Hourly rather than once
+# a day like backupDatabaseTask above, since PENDING_INVITE_EXPIRY_SECONDS
+# is a per-item deadline, not a retention window - checking only once a
+# day could leave an already-stale invite/challenge sitting for up to
+# another 23 hours before this notices.
+@tasks.loop(hours=1)
+async def expireInvitesTask():
+    try:
+        invites_expired, duels_expired = helperObj.expireStalePendingInvites()
+        if invites_expired or duels_expired:
+            logger.info(
+                "Expired %d stale team invite(s) and %d stale duel challenge(s).",
+                invites_expired, duels_expired,
+            )
+    except Exception:
+        logger.exception("Expiring stale invites/challenges failed.")
+
+
 # Every @tree.command below is registered with no guild= at all, which
 # makes them "global" command *definitions*. copy_global_to() plus a
 # guild-scoped sync() is what actually publishes them to a specific
@@ -892,7 +1031,7 @@ def ensure_guild_row(guild_id, guild_name):
         "INSERT INTO servers VALUES(?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, "
         "NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'NONE', NULL, NULL, 0, NULL, NULL, ?, "
         "NULL, NULL, NULL, 0, NULL, NULL, NULL, 0, NULL, 0, NULL, NULL, NULL, 0, 0, NULL, 1, NULL, "
-        "'League', NULL)",
+        "'League', NULL, NULL)",
         (guild_id, guild_name, helper.BETTING_DURATION_SECONDS)
     )
     cursor.execute("INSERT OR IGNORE INTO guild_games(guildId, game) VALUES(?, 'League')", (guild_id,))
@@ -908,8 +1047,11 @@ async def on_ready():
         rotateStatus.start()
     if not backupDatabaseTask.is_running():
         backupDatabaseTask.start()
+    if not expireInvitesTask.is_running():
+        expireInvitesTask.start()
     registerPersistentViews()
     await helperObj.reconcileStaleBettingWindows(client)
+    await _flushPendingDeveloperDMs()
     logger.info("Shockwave is ready, logged in as %s.", client.user)
 
 
@@ -1144,8 +1286,7 @@ setCorrectWinner.error(_setAdminPermissionError)
     description="Admin: restrict Start/Random Roles/Balanced Roles to rostered players and admins"
 )
 @app_commands.describe(
-    strict="True: only a rostered player or Manage Server admin can use the roster buttons. "
-           "False: anyone who can see the message can (the default)."
+    strict="True: only a rostered player or admin can use the roster buttons; False (default): anyone can."
 )
 @app_commands.checks.has_permissions(manage_guild=True)
 async def setRosterPermissions(ctx, strict: bool):
@@ -1214,6 +1355,14 @@ setGame.error(_setAdminPermissionError)
 
 
 tree.add_command(setGroup)
+
+
+@tree.command(
+    name="current-game",
+    description="See which game this server is currently tracking"
+)
+async def currentGame(ctx):
+    await helperObj.currentGameHelper(ctx)
 
 
 # /wager and /wager-against are grouped under one /wager command instead
@@ -1285,6 +1434,15 @@ tree.add_command(wagerGroup)
 )
 async def daily(ctx):
     await helperObj.dailyHelper(ctx)
+
+
+@tree.command(
+    name="give",
+    description="Give some of your gold to another player"
+)
+@app_commands.describe(member="Who to give gold to", amount="How much gold to give")
+async def give(ctx, member: discord.Member, amount: int):
+    await helperObj.giveGoldHelper(ctx, member, amount)
 
 
 @tree.command(
@@ -1455,7 +1613,7 @@ COMMAND_HELP = {
     "set wager-channel": "Redirects the betting-open/betting-closed notices to one specific text channel (created if it doesn't exist). Omit channel to use wherever this command is run. Independent of set matchup-channel, which redirects the matchup graphic and winner-report message instead. Requires the Manage Server permission.",
     "set elo": "Sets a player's elo directly to an exact value (still credits any Diamond+ tier reward the new elo qualifies for). Requires the Manage Server permission.",
     "set default-elo": "Sets what a brand new player in this server starts at (1000 by default); doesn't touch anyone's existing elo, use /clear elo to reset current players to it. Requires the Manage Server permission.",
-    "set correct-winner": "Fixes a misreported winner: undoes and reapplies the payouts, records, and elo. invalidate undoes the last game entirely instead (bets refunded, nothing reapplied), as if it never happened. Requires Manage Server.",
+    "set correct-winner": "Fixes a misreported winner: undoes and reapplies the payouts, records, and elo. invalidate undoes the last game entirely instead (bets refunded, nothing reapplied), as if it never happened. Confirmation required. Requires Manage Server.",
     "set roster-permissions": "Controls who can use the Start/Start (no move)/Random Roles/Balanced Roles buttons on a posted roster. strict:true restricts them to a rostered player or a Manage Server admin, matching how the winner-report buttons already work; strict:false (the default) leaves them open to anyone who can see the message. Requires the Manage Server permission.",
     "set max-wager": "Caps how much gold a single /wager team or /wager against bet can be. Omit amount to remove the cap. Requires the Manage Server permission.",
     "set betting": "Turns /wager team and /wager against on or off for this server. Games, elo, and reporting a winner all still work the same either way; this only gates the wagering layer on top of them. Requires the Manage Server permission.",
@@ -1464,8 +1622,8 @@ COMMAND_HELP = {
     "clear teams": "Wipes the current teams/draft so you can start a fresh session. Requires the Manage Server permission.",
     "clear channels": "Wipes the current teams/draft, and also forgets the saved team channel names. Requires the Manage Server permission.",
     "clear tournament": "Wipes the current teams/draft, and deletes this server's tournament entirely: bracket, registrations, match history. Can't be undone. Requires the Manage Server permission.",
-    "clear elo": "Wipes the current teams/draft, and resets every player's elo back to this server's default elo. Confirmation required. Requires the Manage Server permission.",
-    "clear economy": "Wipes the current teams/draft, and resets every player's balance/elo/record/gold entirely for this server. Confirmation required. Requires the Manage Server permission.",
+    "clear elo": "Wipes the current teams/draft, and resets every player's elo back to this server's default elo, or just one player if user is set. Confirmation required. Requires the Manage Server permission.",
+    "clear economy": "Wipes the current teams/draft, and resets every player's balance/elo/record/gold entirely for this server, or just one player if user is set. Confirmation required. Requires the Manage Server permission.",
     "clear achievements": "Wipes the current teams/draft, and resets earned achievements for every player, or just one player if user is set. Confirmation required. Requires the Manage Server permission.",
     "clear card-unlocks": "Wipes the current teams/draft, and resets trading-card unlocks for every player, or just one player if user is set. Confirmation required. Requires the Manage Server permission.",
     "make-teams random": "Randomly splits everyone in your voice channel into two even teams and posts the roster, with a Start button on it to move everyone and open betting when you're ready (Start (no move) to open betting without moving anyone). If both teams land at exactly 5 players, Random Roles and Balanced Roles buttons also appear: Random Roles shuffles who's shown in which of Top/Jungle/Mid/Bottom/Support, while Balanced Roles assigns them by elo + each player's liked roles from /setup, the same logic ranked roles uses, without moving anyone between teams. ranked:true forms roughly elo-balanced teams instead, and tracks elo once a winner is reported. Combine ranked:true with use_roles:true (10 players only) to have the roster already show Top/Jungle/Mid/Bottom/Support the moment it posts, nudging the split toward whichever side is more balanced once roles are considered.",
@@ -1476,6 +1634,8 @@ COMMAND_HELP = {
     "wager team": "Bets gold on one team winning the current game, or on a specific tournament match if you give a match id. Only while betting is open, one bet per player per game/match.",
     "wager against": "Challenges another player to a heads-up gold wager, separate from team-game betting, no active game required.",
     "daily": "Claims 1000 free gold. Once per calendar day, per player.",
+    "give": "Gives some of your gold to another player. Immediate, no confirmation from either side needed.",
+    "current-game": "Shows which game this server is currently tracking (see /set game).",
     "stats": "Shows a player's elo, ranked/casual/game record, betting record, balance, and net gold; defaults to you. Press Avatar to toggle the shown avatar between this server's own profile picture and their regular account-wide one, or Card to replace the whole embed with a customizable trading card; Back swaps back.",
     "card-set": "Equips your unlocked trading-card title, color scheme, and/or font in one go (see /stats' Card button); set any combination of the three at once. Reaching Diamond, Master, Grandmaster, or Challenger permanently unlocks that tier's own title and scheme, even if you derank afterward; \"Default\" is always available for both. Fonts are purchased from /shop buy.",
     "shop preview": "Shows every option for one customization type (Logos, Card Titles, Color Schemes, or Fonts) in a single gallery image (a few images only if there are too many to fit), regardless of what you've personally unlocked yet.",
@@ -1490,12 +1650,14 @@ COMMAND_HELP = {
     "team delete": "Deletes a persistent team: its roster, record, and any pending invites go with it. The team's captain, or anyone with Manage Server, can do this; confirmation required. Doesn't affect a tournament it's already registered in.",
     "team transfer": "Hands off a persistent team's captaincy to another player already on its roster. The team's captain, or anyone with Manage Server, can do this.",
     "team invite": "Invites one or more members (up to 5 per call) to a team. Each invitee must accept before joining. The team's captain, or anyone with Manage Server, can do this. force (Manage Server only) skips the invitee's confirmation and adds them straight to the roster.",
+    "team remove": "Removes a player from a team's roster who won't (or can't) leave themselves. The team's captain, or anyone with Manage Server, can do this. Can't be used on the captain - use /team transfer or /team delete instead.",
     "team leave": "Removes you from a persistent team's roster. Anyone rostered can do this to themselves, no permission needed, except the team's captain, who has to use /team delete instead since there's no one to hand the captaincy to.",
     "team lookup": "Lists the teams you're a rostered player on in this server, with paging to flip through each one's full stats card.",
     "team stats": "Shows a persistent team's captain, roster, voice channel, and win/loss record. Press Card to swap it for a team card: its logo as the focal point, colors sampled from that logo, captain/roster/record/win rate. Back swaps back.",
     "team list": "Browse every team in the server with filtering (name search, recruiting-only, up to 5 members who all have to be on the roster) and sorting (name, wins, losses, win rate, roster size; sort:\"Win Rate\" order:\"Descending\" to rank teams by win rate). Buttons page through it. cards:true flips through each team's full stats card one at a time instead, same as /team lookup but for every team in the server; a Card button on that view swaps the current team's stats card for its actual trading card, and stays selected as you keep paging.",
     "tournament create": "Creates an empty tournament shell for this server: name, team size, and bracket size. One tournament per server.",
     "tournament register": "Registers one of your teams for the server's tournament. The team's captain, or anyone with Manage Server, can do this.",
+    "tournament unregister": "Unregisters a team from the server's tournament. The team's captain, or anyone with Manage Server, can do this. Only works before the bracket is built.",
     "tournament create-bracket": "Builds the tournament bracket from whichever teams are currently registered, seeded randomly. Rerunning it rerolls the bracket. For double elimination, losers_bracket_timing picks whether the losers bracket waits for the whole winners bracket to finish, or interleaves as each round unlocks.",
     "tournament print-bracket": "Prints the current bracket, with each match's id for use with /wager team and /set correct-winner.",
     "tournament start": "Starts playing the current round of the bracket. mode is Sequential (one match at a time) or Simultaneous (all at once, no betting).",
@@ -1594,6 +1756,10 @@ async def makeTeamsRandom(ctx, use_roles: bool = False, ranked: bool = False):
         await ctx.response.send_message(
             "You need to be in a voice channel to form teams from it. Join one and try again."
         )
+        return
+
+    if len(ctx.user.voice.channel.members) < 2:
+        await ctx.response.send_message("Not enough players in the voice channel!")
         return
 
     # getRolePreferences already treats a player with no submitted rows as
@@ -1844,24 +2010,26 @@ clearTournament.error(_clearPermissionError)
 
 @clearGroup.command(
     name="elo",
-    description="Admin: reset every player's elo back to this server's default elo (confirmation required)"
+    description="Admin: reset elo back to the default, or just one player if user is set "
+                 "(confirmation required)"
 )
+@app_commands.describe(user="Only reset this player instead of everyone")
 @app_commands.checks.has_permissions(manage_guild=True)
-async def clearElo(ctx):
-    await helperObj.clearTeamsHelper(ctx)
-    await helperObj.confirmDestructiveClearHelper(ctx, False, True, False, False, None)
+async def clearElo(ctx, user: discord.Member = None):
+    await helperObj.confirmDestructiveClearHelper(ctx, False, True, False, False, user)
 
 clearElo.error(_clearPermissionError)
 
 
 @clearGroup.command(
     name="economy",
-    description="Admin: wipe every player's balance/elo/record/gold for this server (confirmation required)"
+    description="Admin: wipe balance/elo/record/gold, or just one player if user is set "
+                 "(confirmation required)"
 )
+@app_commands.describe(user="Only reset this player instead of everyone")
 @app_commands.checks.has_permissions(manage_guild=True)
-async def clearEconomy(ctx):
-    await helperObj.clearTeamsHelper(ctx)
-    await helperObj.confirmDestructiveClearHelper(ctx, True, False, False, False, None)
+async def clearEconomy(ctx, user: discord.Member = None):
+    await helperObj.confirmDestructiveClearHelper(ctx, True, False, False, False, user)
 
 clearEconomy.error(_clearPermissionError)
 
@@ -1873,7 +2041,6 @@ clearEconomy.error(_clearPermissionError)
 @app_commands.describe(user="Only reset this player instead of everyone")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def clearAchievements(ctx, user: discord.Member = None):
-    await helperObj.clearTeamsHelper(ctx)
     await helperObj.confirmDestructiveClearHelper(ctx, False, False, True, False, user)
 
 clearAchievements.error(_clearPermissionError)
@@ -1886,7 +2053,6 @@ clearAchievements.error(_clearPermissionError)
 @app_commands.describe(user="Only reset this player instead of everyone")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def clearCardUnlocks(ctx, user: discord.Member = None):
-    await helperObj.clearTeamsHelper(ctx)
     await helperObj.confirmDestructiveClearHelper(ctx, False, False, False, True, user)
 
 clearCardUnlocks.error(_clearPermissionError)
@@ -1979,6 +2145,16 @@ async def tournamentCreate(ctx, name: str, teamsize: int, numteams: int, double_
 @app_commands.autocomplete(team=myCaptainedTeamAutocomplete)
 async def tournamentRegister(ctx, team: str):
     await helperObj.registerTeamHelper(ctx, team)
+
+
+@tournamentGroup.command(
+    name="unregister",
+    description="Unregister a team from this server's tournament"
+)
+@app_commands.describe(team="Name of the team to unregister")
+@app_commands.autocomplete(team=myCaptainedTeamAutocomplete)
+async def tournamentUnregister(ctx, team: str):
+    await helperObj.unregisterTeamHelper(ctx, team)
 
 
 @tournamentGroup.command(
@@ -2093,6 +2269,16 @@ async def teamInvite(
 ):
     members = [m for m in (member_1, member_2, member_3, member_4, member_5) if m is not None]
     await helperObj.teamInviteHelper(ctx, team, members, force)
+
+
+@teamGroup.command(
+    name="remove",
+    description="Remove a player from a team's roster (captain or Manage Server only)"
+)
+@app_commands.describe(team="Name of the team", member="Who to remove from the roster")
+@app_commands.autocomplete(team=myCaptainedTeamAutocomplete)
+async def teamRemove(ctx, team: str, member: discord.Member):
+    await helperObj.teamRemoveHelper(ctx, team, member)
 
 
 @teamGroup.command(
@@ -2273,6 +2459,9 @@ async def notify(ctx, member: discord.Member = None, role: discord.Role = None, 
             "You need to be in a voice channel to invite someone to it. Join one and try again."
         )
         return
+    if role is not None and not role.members:
+        await ctx.response.send_message(f"Nobody's in {role.name}, so there's nobody to invite.")
+        return
 
     # notifyHelper DMs the target directly instead of responding to the
     # interaction, so calling it once per role member in a loop is safe.
@@ -2322,6 +2511,41 @@ async def roll(ctx, *, num: int):
             "Try a number greater than 1.",
             ephemeral=True,
         )
+
+
+# Toggles _developerAlertsEnabled (see DeveloperDMHandler above). Not a
+# slash command: every application command is visible to every user who
+# types "/" in any server the bot is in, whether or not they can actually
+# run it, and there's no way to hide one from Discord's own command picker
+# short of registering it to a private guild. A DM the developer sends the
+# bot directly has none of that - it's invisible to literally everyone
+# else, no registration involved. Gated on SHOCKWAVE_DEVELOPER_ID (token.
+# txt's second line) rather than manage_guild for the same reason the
+# removed slash-command version was: this isn't a per-guild admin setting,
+# it's a bot-wide switch over one account's own alerting preference.
+_DEVELOPER_DM_COMMANDS = {
+    "alerts on": True,
+    "alerts off": False,
+}
+
+
+@client.event
+async def on_message(message):
+    if (
+        helper.SHOCKWAVE_DEVELOPER_ID is None
+        or message.author.id != helper.SHOCKWAVE_DEVELOPER_ID
+        or not isinstance(message.channel, discord.DMChannel)
+    ):
+        return
+
+    global _developerAlertsEnabled
+    content = message.content.strip().lower()
+    if content in _DEVELOPER_DM_COMMANDS:
+        _developerAlertsEnabled = _DEVELOPER_DM_COMMANDS[content]
+    elif content != "alerts status":
+        return
+
+    await message.channel.send(f"Developer DM alerts are currently **{'on' if _developerAlertsEnabled else 'off'}**.")
 
 
 # Runs the full test suite before connecting to Discord, so a broken

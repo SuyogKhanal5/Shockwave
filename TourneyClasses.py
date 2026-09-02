@@ -305,6 +305,15 @@ class Tournament:
                 )
         self.teams.append(team)
 
+    # The reverse of register_team, matched by id (the same id every
+    # registered entry's snapshot was stamped with when it was saved,
+    # see _saveNewTeam). Returns whether a team was actually removed, so
+    # the caller can tell "wasn't registered" apart from "was".
+    def unregister_team(self, team_id: int) -> bool:
+        before = len(self.teams)
+        self.teams = [existing for existing in self.teams if existing.get_id() != team_id]
+        return len(self.teams) < before
+
 
 # One slot in a bracket. Each pair of sibling nodes (linked to each other
 # via `opponent`) shares a single `next` node: the empty slot ahead of
