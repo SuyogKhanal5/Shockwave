@@ -93,6 +93,16 @@ text encoding happens to be (Windows' ANSI codepage vs. Linux's
 near-universal UTF-8). That's harmless for a plain-ASCII token today, but
 it's not left to chance either.
 
+`token.txt`'s second line, if present, is the bot developer's own Discord
+user id, read right after the token and used to override `helper.py`'s
+`SHOCKWAVE_DEVELOPER_ID` (module-level default `None`). `helper.py` can't
+read `token.txt` itself: `BASE_DIR` is only resolved in `bot.py`, and
+`helper.py` has no import back to it (that import only goes the other way,
+avoiding a circular import). This id drives both the "Developer" trading-card
+title (see "Trading-card cosmetic unlocks") and the developer DM alerts
+below. Left as `None` if the line is missing, e.g. an install that hasn't
+added it yet, or `tests.py`'s own single-line fake token file.
+
 `bot.py` configures the root logger at import time: a custom
 `MaxLinesFileHandler` (`shockwave.log`) plus a plain console handler, both
 sharing one timestamped formatter. Configuring the root logger rather than
@@ -236,6 +246,41 @@ same reasoning covers pytest itself failing to launch, or running but never
 producing a report at all (e.g. a stale install missing `pytest-xdist`).
 Both cases are caught and logged as a warning rather than raised.
 
+`DeveloperDMHandler`, a `logging.Handler` attached to the same `shockwave`
+logger everything above logs through (`logger.addHandler`, filtered to
+`WARNING`+ via `setLevel`), DMs any `logger.warning`/`.error`/`.exception`
+call to the developer (`SHOCKWAVE_DEVELOPER_ID`, see above) instead of
+leaving it sitting unnoticed in `shockwave.log` between check-ins. `emit()`
+does nothing if `SHOCKWAVE_DEVELOPER_ID` is unset or the developer has
+turned this off via DM (see below; `_developerAlertsEnabled`, in-memory,
+defaults to on). A record that arrives before `client.is_ready()` -
+`_runStartupSelfTests`'s own warnings run before `client.run()` ever
+connects, so there's no connection yet to DM over - is queued in
+`_pendingDeveloperDMs` instead of dropped, and flushed by
+`_flushPendingDeveloperDMs` once `on_ready` first fires. Otherwise it's
+scheduled straight onto the client's own event loop
+(`asyncio.run_coroutine_threadsafe`, since a handler can run from any
+thread, though in practice everything here is single-threaded asyncio).
+`_sendDeveloperDM` truncates a message past Discord's 2000-character limit
+(a formatted `logger.exception` record includes the full traceback, easily
+past that) instead of letting the send itself fail, and deliberately
+doesn't route its own failures back through `logger` - this handler is
+itself attached to that logger, so logging a failure here would just
+re-trigger itself and recurse; it `print()`s to stderr instead.
+
+Turning alerts on/off isn't a slash command: every application command is
+visible to every user who types "/" in any server the bot is in, whether or
+not they can actually run it (there's no way to hide one from Discord's own
+command picker short of registering it to a private guild), and a
+developer-only control has no business being visible to every server's
+membership. Instead, `on_message` checks whether a message is a DM
+(`isinstance(message.channel, discord.DMChannel)`) from
+`SHOCKWAVE_DEVELOPER_ID` and, if so, matches its content (case/whitespace-
+insensitive) against `alerts on`/`alerts off`/`alerts status`, flipping
+`_developerAlertsEnabled` for the first two and just replying with the
+current state either way. Invisible to literally everyone else - nothing is
+registered, so there's nothing for anyone else's client to even show.
+
 ### Team formation
 
 `/make-teams random` and `/make-teams draft` both build two `Team` objects
@@ -243,8 +288,10 @@ seeded from whoever is in the caller's voice channel, then serialize them into
 the `team1`/`team2` columns on `servers`. Nothing is moved yet.
 
 Both commands check `ctx.user.voice`/`.channel` up front and reply with a plain
-explanation if the caller isn't in a voice channel. `/make-teams draft`
-additionally needs at least two people in that channel.
+explanation if the caller isn't in a voice channel, and both also need at
+least two people in that channel, replying "Not enough players in the voice
+channel!" otherwise - a lone caller would otherwise get one whole side of
+the split left empty.
 
 Each `Team`'s `.name` comes from `_rosterTeamNames(guild_id)`: an admin's
 configured `channel1`/`channel2` names (`/set channels`' `team1`/`team2` params) if
@@ -394,6 +441,25 @@ though Start (no move) itself never sets `original_channel`.
 `/make-teams draft` draft starts, so a stale value left over from an
 earlier Start game is possible too.
 
+`servers.draft_picker_message_id` tracks the draft picker's own posted
+message (`CaptainsDraftPickView`), edited in place on every pick rather
+than reposted, the same way `roster_team1_message_id`/
+`roster_team2_message_id` already are for the roster buttons.
+`_isDraftPickTurn` - the shared gate both `CaptainsDraftPickView.
+interaction_check` and `_DraftPickSlotButton`'s own `interaction_check`
+route through, since a `DynamicItem` reconstructed after a restart isn't
+necessarily attached to a live `View` instance - checks the clicked
+message against it before checking whose turn it is. Without that check,
+a draft abandoned via `/clear teams` (or superseded by a fresh
+`/make-teams draft`/`random`) left its old picker message fully clickable:
+`_handleDraftPickSlotClick` re-resolves the clicked slot's position
+against whichever pool is *currently* stored, not the pool that was
+current when that stale message was rendered, so if the same person
+happened to be captain1 again in the new draft (a common case - the same
+organizer running back-to-back games), a click on the old message's stale
+button could silently draft a different, unrelated player from the new
+pool at that same position instead of being rejected outright.
+
 A dedicated `roster_starting` column on `servers` is flipped to `1`
 synchronously, before any `await`, the moment the checks above it pass.
 This is the same "flip before doing anything async" shape
@@ -409,6 +475,17 @@ once the game actually resolves. Clearing it here would just make that
 later cleanup unable to find the message to delete. `_finalizeRoster`
 resets `roster_starting` back to `0` the next time it posts a fresh roster,
 so a new roster is clickable again from scratch.
+
+`_handleRosterRerollClick`/`_handleRosterBalanceRolesClick` check
+`roster_starting` too, not just `_handleRosterStartClick` - since
+`roster_team2_message_id` deliberately stays valid post-Start (see just
+above), the message id check alone isn't enough to keep those two off an
+already-started game. `recordResult` reads `team1`/`team2`/
+`disliked_role_user_ids` live off `servers` at result time, not from a
+snapshot taken when Start was pressed, so a late reroll or rebalance would
+otherwise silently change who actually gets credited (win/loss, elo, the
+disliked-role bonus) for the game already in progress, with no matching
+update to the matchup graphic players and bettors already saw.
 
 By default all four roster buttons (Start, Start (no move), Random Roles,
 Balanced Roles) are clickable by anyone who can see the message. `/set
@@ -684,6 +761,21 @@ correctly flips which rostered players get the win amount versus the loss
 amount, along with everything else a correction re-derives.
 `gold_wagered`/`gold_won`/`gold_lost` stay wager-only and never see it.
 
+`/give` (`giveGoldHelper`) is the one direct way gold moves between two
+players outside of a bet resolving: a plain, immediate transfer, no accept
+step needed from the recipient (unlike `/wager against`, nobody has to
+consent to being given gold, the same way nobody consents to `/notify`
+DMing them). Rejects giving to yourself, to a bot, a non-positive amount,
+or more than the giver's own balance; otherwise it's just two
+`UPDATE economy SET balance = balance ± ?` statements. Deliberately not
+capped by `/set max-wager` (that's a per-bet risk limit; a transfer has no
+outcome to hedge against) and not gated by `betting_enabled` either (moving
+gold between players isn't betting, so turning betting off on a server
+shouldn't turn this off too). Touches only `balance` - never
+`wins`/`losses`/`gold_wagered`/`gold_won`/`gold_lost`, the same "a gift
+isn't a bet outcome" reasoning `_finishDuelCancellation`'s own refund
+already follows.
+
 ### Elo and ranked play
 
 Elo only moves for games formed with `ranked:true` (`is_ranked` on the guild
@@ -750,6 +842,15 @@ deliberately never re-stamps it, reads whatever the original roster
 was actually formed under instead - so repeating a game after
 `/set game` has since moved on still correctly announces the game it's
 really for.
+
+`/current-game` (`currentGameHelper`) is the plain, read-only way to check
+what `/set game` last configured, for anyone (not just an admin) without
+digging a roster's own `_gameNote` out of chat history. It reads
+`_currentGame` for the headline, and separately flags it when
+`_activeGame` (an in-progress roster) is still tracking a different game -
+exactly the "switching only affects the next roster" case just above,
+made visible on demand instead of only in a team-forming command's own
+confirmation message.
 
 `clearTeamsHelper` resets `game` back to `NULL` alongside `team1`/`team2`,
 so a stale value can't leak into whatever forms next.
@@ -830,6 +931,31 @@ or reapplies anything for either team, and then deletes the `last_result` row
 outright rather than saving a new snapshot. There's no "corrected winner" for a
 further correction to work from once a game's been invalidated.
 
+Neither the reverse-and-reapply cycle nor an invalidation happens the moment
+the command runs - both go through `ConfirmCorrectWinnerView`'s "Confirm
+correction"/"Cancel" prompt first, the same "a real payout/elo change
+shouldn't hinge on one accidental click" reasoning every other winner-report
+flow in this file already follows (`ConfirmWinnerReportView`,
+`ConfirmTournamentMatchReportView`, `ConfirmDuelResultView`), even though
+this one's triggered by a typed command rather than a stray button press -
+the blast radius (every player in the game) is the same either way. The
+prompt carries the exact `last_result` snapshot it was built from rather
+than just a `guild_id`; Confirm re-fetches `getLastResult` and refuses
+(instead of corrupting a newer game's numbers) if it's changed - e.g.
+another game resolved and replaced `last_result` while the prompt was
+sitting there. The actual mutation work is split out into
+`_applyCorrectWinner(guild_id, snapshot, correct_team, invalidate)`, called
+only from that Confirm button, so there's exactly one place either path
+can actually take effect.
+
+`/set correct-winner`'s match_id path (`_correctTournamentMatchHelper`) gets
+the identical treatment via its own `ConfirmTournamentMatchCorrectionView`
+and `_applyTournamentMatchCorrection`, re-checking both the match's expected
+prior winner and `_nextTournamentRoundStarted` again at Confirm time (not
+just when the prompt was built), since either could have changed in the
+meantime - the second round starting, in particular, is exactly the
+"already moved on" case this path has always refused to correct past.
+
 Reversing the deltas alone isn't a refund for a bettor, though. A winner's
 stored delta credited their whole payout (stake plus winnings), so undoing it
 removes the payout entirely and leaves them down by exactly their stake, the
@@ -857,15 +983,69 @@ challenge that's never accepted doesn't leave anyone's gold stuck. Both
 players' gold is only locked once the target presses Accept
 (`DuelAcceptView`), which also strips that Accept button via
 `_clearMessageButtons` right after `_acceptDuel` runs. At that point a
-second message goes out with a `DuelResultView` (Challenger Won/Target Won
-buttons). Picking a result posts a `ConfirmDuelResultView` rather than
-paying out immediately, the same two-step confirm shape the team-game
-winner report uses and for the same reason: a real gold transfer shouldn't
-hinge on one accidental click. Confirming there also strips the result
-message's own buttons, matching `ConfirmWinnerReportView`. Both
+second message goes out with a `DuelResultView` (Challenger Won/Target Won/
+Cancel Duel buttons). Picking a result posts a `ConfirmDuelResultView`
+rather than paying out immediately, the same two-step confirm shape the
+team-game winner report uses and for the same reason: a real gold transfer
+shouldn't hinge on one accidental click. Confirming there also strips the
+result message's own buttons, matching `ConfirmWinnerReportView`. Both
 `DuelAcceptView` and `DuelResultView` are persistent, for the same
 reasoning as `WinnerReportView`. `ConfirmDuelResultView` is a short-lived
 confirm view, like `ConfirmWinnerReportView`.
+
+Cancel Duel (`_handleDuelCancelClick`/`ConfirmDuelCancelView`) is the
+accepted-duel counterpart to `WinnerReportView`'s own Cancel Game: once
+gold is escrowed, "Challenger Won"/"Target Won" used to be the only way
+out, so two players who couldn't agree, or one who left, had their stakes
+stuck with no refund and no admin override either. It shares the same
+`'CONFIRMING'` transitional state and `_restoreDuelAwaitingResult` restore
+path `ConfirmDuelResultView` already uses (both only ever move a duel
+*into* `'CONFIRMING'` from `'AWAITING_RESULT'`, so restoring back to
+`'AWAITING_RESULT'` on Cancel/timeout is correct regardless of which of
+the two prompted it), open to either participant or a Manage Server admin
+just like reporting a result is. `_finishDuelCancellation` refunds both
+players their exact stake and touches nothing else - no wins/losses,
+unlike `_resolveDuel`'s payout, since a cancelled duel never happened.
+
+`DuelAcceptView` also has a Decline button (`_handleDuelDeclineClick`),
+mirroring `TeamInviteAcceptView`'s own Accept/Decline pair: only the
+challenged player can press it, and since nothing's escrowed until Accept,
+declining is just deleting the pending `duels` row outright, no refund
+needed. A challenge left unanswered entirely still doesn't sit forever
+either - see "Pending invites expire" below.
+
+### Pending invites expire
+
+`/team invite` and `/wager against` both post a persistent view
+(`timeout=None`), so neither one's Accept/Decline buttons ever go stale on
+their own the way a short-lived confirm view's `on_timeout` does - a
+challenge or invite nobody ever answers would otherwise sit there
+indefinitely. `expireStalePendingInvites` cleans both up after
+`PENDING_INVITE_EXPIRY_SECONDS` (24 hours): any `team_invites` row past
+that age is deleted outright, and any `duels` row still `PENDING_ACCEPT`
+(never accepted) past that age is deleted too. An *accepted* duel
+(`AWAITING_RESULT`) is never touched by this regardless of age - real gold
+is already escrowed on it by then, the same reason Decline only exists for
+the `PENDING_ACCEPT` state in the first place. A `createdAt` of `NULL` (a
+row from before that column existed) counts as already expired rather than
+guessing how old it actually is, the same convention `betting_opened_at`
+already uses for `reconcileStaleBettingWindows`.
+
+This runs as a periodic sweep (`bot.py`'s `expireInvitesTask`, a
+`@tasks.loop(hours=1)`, started from `on_ready` alongside `rotateStatus`
+and `backupDatabaseTask`) rather than scheduling a real per-item timer the
+way `_bettingTimer` does for an open betting window. A betting window
+needs to close at a precise moment; a 24-hour invite deadline doesn't, so
+an hourly sweep is simpler and needs no `reconcileStaleBettingWindows`-style
+reconciliation on restart - nothing was ever counting down in memory to
+begin with. Neither `team_invites` nor a `PENDING_ACCEPT` `duels` row ever
+gets its message edited or its buttons stripped once expired, the same way
+Accept/Decline already don't touch the message afterward either (see
+`_handleTeamInviteDeclineClick`'s own comment) - a stale button simply
+becomes a no-op "isn't an invite for you, or it's already been used"/"this
+challenge is no longer pending" reply on the next click, rather than
+Shockwave going back to edit a message that could be long gone from the
+channel's history by then.
 
 ### Leaderboard paging
 
@@ -891,6 +1071,15 @@ First/Prev/Next/Last arithmetic itself, so that part can't drift out of
 sync between them. All three paging views are persistent too, for the same
 "shouldn't die across a restart" reasoning as everything else long-lived in
 this file.
+
+`MyTeamsPagingView` also carries the same Card/Back toggle
+`TeamListPagingView` offers in `cards:true` mode: `_handleMyTeamsShowCardClick`/
+`_handleMyTeamsReturnClick` swap the currently-paged team's plain stats card
+for its actual trading card and back, `my_team_views.cardShown` tracks which
+is up, and `_handleMyTeamsPageClick` reads that same column so paging while a
+card is shown keeps landing on cards instead of snapping back to stats -
+exactly the pattern `_handleTeamListPageClick` already established for
+`team_list_views.cardShown`.
 
 Missing stats (a win rate with zero games played, for example) sort to the
 bottom regardless of ascending/descending order, rather than a `None`/0 value
@@ -998,19 +1187,23 @@ aren't touched. All three only actually clear anything from inside the view's
 which of the three it's backing.
 
 `/clear elo`, `/clear economy`, `/clear achievements`, and
-`/clear card-unlocks` instead clear the current teams/draft immediately and
-synchronously, the moment the command runs (`await
-helperObj.clearTeamsHelper(ctx)`, in `bot.py` itself, before the
-confirmation is ever shown). They only gate the actual player-data reset
-behind confirmation, since that part touches every player in the server (or
-one specific player, see below) rather than just the guild's own
-in-progress session. `confirmDestructiveClearHelper` posts that warning
-with "Confirm reset"/"Cancel" buttons (`ConfirmResetView`). `/clear elo`
-resets every player's elo back to this server's default (`/set
-default-elo`, 1000 otherwise). `/clear economy` wipes balance, elo, game
-record, betting record, and gold wagered/won/lost for every player,
+`/clear card-unlocks` clear the current teams/draft the same way, alongside
+whichever player-data reset they're each for - both wait on the same
+confirmation. `confirmDestructiveClearHelper` posts the warning (naming
+every effect, including the teams/draft clear) with "Confirm reset"/"Cancel"
+buttons (`ConfirmResetView`); its `confirm` callback runs the player-data
+reset(s) and then calls `clearTeamsHelper`, so Cancel genuinely leaves
+everything untouched rather than having already cleared the session before
+the prompt even posted. `/clear elo` resets elo back to this server's
+default (`/set default-elo`, 1000 otherwise), and `/clear economy` wipes
+balance, elo, game record, betting record, and gold wagered/won/lost -
 superseding the narrower elo reset since the whole-row wipe already resets
-elo too.
+elo too. All four take the same optional `user` param
+(`resetEconomyHelper(guild_id, user_id=None)`/`resetEloHelper(guild_id,
+user_id=None)`, matching `resetAchievementsHelper`/`resetCardUnlocksHelper`'s
+existing shape): given, only that one player's data resets and the warning
+names them by mention instead of "every player"; omitted (the default),
+every player in the guild resets, same as always.
 
 `interaction_check` on both view classes rejects anyone who isn't the member
 who ran the command, and both time out after `CLEAR_CONFIRM_TIMEOUT_SECONDS`
@@ -1100,13 +1293,23 @@ accepted, just run immediately instead of waiting on a click. With
 `force`, there's no posted invite, no Accept button, and no `team_invites`
 row for anyone to accept later.
 
-`/team leave` is the self-service opposite of `/team invite`. Removing yourself
-needs nobody else's permission, so it's the one team command with no
-captain/admin gate at all. The team's own captain is the one exception:
-`teamLeaveHelper` refuses outright, pointing them at `/team transfer` to hand
-off the captaincy first or `/team delete` if they want the team gone
-entirely, rather than ever leaving a team with no one `isTeamCaptain`
-recognizes.
+`/team remove` (`teamRemoveHelper`) is the captain/admin counterpart to
+`/team leave`, symmetric with how `force` is the captain/admin counterpart
+to a normal accepted invite: before this, the only way off a roster was
+self-service (`/team leave`), so a captain or admin had no way to remove
+someone who wouldn't (or couldn't) run it themselves short of deleting the
+whole team. Same captain-or-admin gate as `force`-inviting, no confirmation
+needed for the same reason (easily undone - re-invite, or leave), and the
+same "no captain-less non-empty team" refusal `/team leave` has, just
+checked against the target being removed instead of the caller.
+
+`/team leave` is the self-service opposite of `/team invite`/`/team remove`.
+Removing yourself needs nobody else's permission, so it's the one team
+command with no captain/admin gate at all. The team's own captain is the
+one exception: `teamLeaveHelper` refuses outright, pointing them at
+`/team transfer` to hand off the captaincy first or `/team delete` if they
+want the team gone entirely, rather than ever leaving a team with no one
+`isTeamCaptain` recognizes.
 
 `/team transfer` is that hand-off command: the team's captain, or anyone
 with Manage Server, points it at another player already on the roster, and
@@ -1129,14 +1332,15 @@ display) and `/make-teams saved`'s own messages are where this actually
 matters, since every other display path reads a name back through one of
 those two.
 
-`/team rename`, `/team set`, `/team invite`, `/team delete`, `/team transfer`,
-and `/tournament register` are all captain-gated the same way
-(`isTeamCaptain`), but every one of them also lets any member with the Manage
-Server permission through. That's `not isTeamCaptain(...) and not
-ctx.user.guild_permissions.manage_guild`, the same check repeated at each
-command, so a team whose captain has gone inactive, left the server, or just
-isn't around isn't stuck. An admin can rename it, change its voice channel or logo,
-invite players, register it for a tournament, transfer its captaincy, or
+`/team rename`, `/team set`, `/team invite`, `/team remove`, `/team delete`,
+`/team transfer`, `/tournament register`, and `/tournament unregister` are
+all captain-gated the same way (`isTeamCaptain`), but every one of them
+also lets any member with the Manage Server permission through. That's
+`not isTeamCaptain(...) and not ctx.user.guild_permissions.manage_guild`,
+the same check repeated at each command, so a team whose captain has gone
+inactive, left the server, or just isn't around isn't stuck. An admin can
+rename it, change its voice channel or logo, invite or remove players,
+register or unregister it for a tournament, transfer its captaincy, or
 delete it without being on the roster first. `/team save` has no such gate
 at all, since it never touches an existing team's roster or captaincy. Its
 only real check is that the caller was actually playing on the game roster
@@ -1251,6 +1455,42 @@ per guild, `INSERT OR REPLACE`d as a whole each time
 itself rather than in `helper.py`. It rejects a team if any of its players are
 already on a team registered for that same tournament, while leaving the shared
 `teams` table alone. The same player can freely be on other teams elsewhere.
+`unregister_team` is the reverse, matched by id and returning whether a team
+was actually removed (so `unregisterTeamHelper` can tell "wasn't registered"
+apart from "was"). Freeing a slot this way also un-blocks a player who'd
+been rejected by `register_team`'s own shared-player check for sitting on
+another still-registered team.
+
+`/tournament unregister` (`unregisterTeamHelper`) is the lightweight undo
+`/tournament register` never had: before this, fixing a wrong registration
+meant either `/tournament create` again (Manage Server, confirmation,
+wipes *every* team's registration, not just the wrong one) or `/clear
+tournament` (deletes the bracket and match history outright). Same
+captain-or-admin gate as registering, no confirmation needed (a bare
+registration entry, before a bracket exists, is trivially reversible by
+registering again), but refuses once `tournament.get_bracket()` is
+non-empty - a built bracket already seeded that team into the tree, so
+`/tournament create-bracket`'s own (confirm-gated once there's real match
+history) reroll is what actually changes the lineup past that point, not
+this.
+
+`/tournament create-bracket` needs neither the Manage Server permission nor
+confirmation for a bracket with nothing at stake yet (a fresh build, or a
+reroll before `/tournament start` has ever run - no `tournament_matches` rows
+exist either way). `createBracketHelper` checks that (`SELECT COUNT(*) FROM
+tournament_matches WHERE guildId=?`) before doing anything; only once that
+count is nonzero does rebuilding actually erase something real (results, and
+any bets that were never settled), and only then does it require Manage
+Server and route through `ConfirmBracketOverwriteView`'s "Rebuild
+bracket"/"Cancel" prompt instead of running immediately - the same
+"only gate what's genuinely destructive" reasoning `createTournamentHelper`'s
+own `ConfirmTournamentOverwriteView` already applies to overwriting an
+existing tournament shell. `_rebuildBracket` (the actual build/save, no
+messaging) and `_bracketTimingNote` (the losers-bracket-timing sentence) are
+shared by both `createBracketHelper`'s direct path and the confirm view's
+Confirm button, which announce the result two different ways (a fresh
+response vs. editing the confirmation prompt in place) and so can't share
+that part.
 
 The bracket is a real linked structure, not just a list of pairings.
 `BracketNode` has three pointers: `opponent` (its paired node this round),
@@ -1599,9 +1839,10 @@ reflects the tier that earned it.
 
 `CARD_SPECIAL_TITLES` is for a title with no elo tier behind it at all - right
 now just "Developer". Shockwave's own developer gets it without any
-`card_unlocks` row: `SHOCKWAVE_DEVELOPER_ID` is a hardcoded Discord user id
-`getUnlockedCardTitles` checks directly, so it's available in every guild the
-bot is in.
+`card_unlocks` row: `SHOCKWAVE_DEVELOPER_ID` (`helper.py`, read from
+`token.txt`'s second line at startup, see "Logging and database backups"
+above) is the Discord user id `getUnlockedCardTitles` checks directly, so
+it's available in every guild the bot is in.
 
 ### Shop
 
@@ -1917,15 +2158,15 @@ round that never got a row as resolved once play has moved past it.
 | `guild_games` | one row per (guild, game) | every game name a server has ever run `/set game` to, for its autocomplete suggestions; always seeded with `"League"` |
 | `wagers` | active team-game bets (singleton, one per guild/player) | cleared out (paid or refunded) once the game resolves |
 | `tournament_wagers` | active simultaneous-tournament-match bets (one per match/player) | cleared out once that specific match resolves |
-| `duels` | active `/wager against` challenges | one row per challenge, several can be open at once |
+| `duels` | active `/wager against` challenges | one row per challenge, several can be open at once. `createdAt` backs `expireStalePendingInvites`' 24-hour cleanup, only ever for a still-`PENDING_ACCEPT` row |
 | `leaderboards` | posted `/leaderboard` messages | which filter/order/page each message is currently showing, plus `cards`/`cardShown` for the Cards-button view |
-| `my_team_views` | posted `/team lookup` messages | which page (and whose team list) each message is currently showing |
+| `my_team_views` | posted `/team lookup` messages | which page (and whose team list) each message is currently showing, plus `cardShown` for the Card/Back toggle |
 | `team_list_views` | posted `/team list` messages | which filter/sort/page each message is currently showing (`memberIds`/`memberNames` for the member filter), plus `cards`/`cardShown` for cards:true mode |
 | `last_result` | one row per guild | a snapshot of the most recently resolved game, for `/set correct-winner` |
 | `teams` | persistent named teams | one row per team: captain, roster, target size, voice channel, `logo_path`. `wins`/`losses` embedded in its serialized data are frozen/unused now, see `team_game_stats` below |
 | `team_game_stats` | one row per (guild, team, game) | a persistent team's win/loss record, scoped per game the same way `game_stats` scopes a player's - split out of `teams`' embedded `wins`/`losses` since a team's record shouldn't mix results from different games |
 | `tournaments` | one row per guild | name, team/bracket size, elimination type, registered teams, the winners bracket, and (double elimination only) the losers bracket |
-| `team_invites` | pending `/team invite`s | one row per invitee per invite. Several invitees from one `/team invite` call share a `messageId`, each accepting independently |
+| `team_invites` | pending `/team invite`s | one row per invitee per invite. Several invitees from one `/team invite` call share a `messageId`, each accepting independently. `createdAt` backs `expireStalePendingInvites`' 24-hour cleanup |
 | `tournament_matches` | every tournament match ever played | which bracket (`bracketType`: winners/losers/finals) and round/bracket-node it's for, its two teams, state, (once decided) its winner, `bettingClosed`, and `game` (which game it was played under, stamped at creation time) |
 | `player_role_preferences` | each player's liked/disliked roles from `/setup` | one row per (guild, player, role), `preference` is `like` or `dislike` |
 
