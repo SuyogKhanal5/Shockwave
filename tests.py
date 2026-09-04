@@ -135,6 +135,11 @@ TEAM_INVITES_SCHEMA = (
     "CREATE TABLE team_invites(id INTEGER PRIMARY KEY AUTOINCREMENT, guildId, channelId, "
     "messageId, teamId, teamName, inviterId, targetId, targetName, createdAt INTEGER)"
 )
+TEAM_TRANSFERS_SCHEMA = (
+    "CREATE TABLE team_transfers(id INTEGER PRIMARY KEY AUTOINCREMENT, guildId, channelId, "
+    "messageId, teamId, teamName, fromCaptainId, fromCaptainName, toCaptainId, toCaptainName, "
+    "createdAt INTEGER)"
+)
 TOURNAMENT_MATCHES_SCHEMA = (
     "CREATE TABLE tournament_matches(id INTEGER PRIMARY KEY AUTOINCREMENT, guildId, roundIndex, "
     "nodeIndex, team1, team2, state, mode, messageId, channelId, winner, bracketType, "
@@ -179,6 +184,7 @@ def make_db():
     cursor.execute(TEAMS_SCHEMA)
     cursor.execute(TOURNAMENTS_SCHEMA)
     cursor.execute(TEAM_INVITES_SCHEMA)
+    cursor.execute(TEAM_TRANSFERS_SCHEMA)
     cursor.execute(TOURNAMENT_MATCHES_SCHEMA)
     cursor.execute(TEAM_GAME_STATS_SCHEMA)
     cursor.execute(TOURNAMENT_WAGERS_SCHEMA)
@@ -3227,40 +3233,103 @@ class TeamTransferHelperTests(HelperTestCase):
         await self.helperObj.teamTransferHelper(ctx, "Red", target)
         ctx.response.send_message.assert_awaited_once_with(f"{target.mention} is already **Red**'s captain.", ephemeral=True)
 
-    async def test_captain_transfers_to_a_rostered_teammate(self):
+    async def test_captain_transferring_posts_an_offer_without_moving_captaincy_yet(self):
         await self._make_team("Red")
         self._add_to_roster("Red", 902, "Bob")
         target = FakeMember("Bob", id=902)
         ctx = self._ctx()
+        ctx.original_response.return_value = FakeMessage(id=555)
 
         await self.helperObj.teamTransferHelper(ctx, "Red", target)
 
+        ctx.response.send_message.assert_awaited_once()
+        text = ctx.response.send_message.call_args.args[0]
+        self.assertIn(target.mention, text)
+        self.assertIn(ctx.user.mention, text)
+        self.assertIsInstance(
+            ctx.response.send_message.call_args.kwargs["view"], helper_module.TeamTransferAcceptView
+        )
+
+        # captaincy hasn't actually moved yet - it's still just an offer
+        _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        self.assertTrue(self.helperObj.isTeamCaptain(team, 901))
+        self.assertFalse(self.helperObj.isTeamCaptain(team, 902))
+
+        self.cursor.execute("SELECT toCaptainId FROM team_transfers WHERE messageId=555")
+        self.assertEqual(self.cursor.fetchone(), (902,))
+
+    async def test_non_captain_admin_can_also_start_a_transfer(self):
+        await self._make_team("Red")
+        self._add_to_roster("Red", 902, "Bob")
+        ctx = self._ctx(user_id=903, name="Charlie", manage_guild=True)
+        ctx.original_response.return_value = FakeMessage(id=556)
+
+        await self.helperObj.teamTransferHelper(ctx, "Red", FakeMember("Bob", id=902))
+
+        self.cursor.execute("SELECT COUNT(*) FROM team_transfers WHERE messageId=556")
+        self.assertEqual(self.cursor.fetchone()[0], 1)
+
+    async def test_rejects_a_second_transfer_while_one_is_already_pending(self):
+        await self._make_team("Red")
+        self._add_to_roster("Red", 902, "Bob")
+        self._add_to_roster("Red", 903, "Cleo")
+
+        first = self._ctx()
+        first.original_response.return_value = FakeMessage(id=1)
+        await self.helperObj.teamTransferHelper(first, "Red", FakeMember("Bob", id=902))
+
+        second = self._ctx()
+        await self.helperObj.teamTransferHelper(second, "Red", FakeMember("Cleo", id=903))
+
+        second.response.send_message.assert_awaited_once_with(
+            "**Red** already has a pending captaincy transfer. Cancel it first if you want to send "
+            "a different one.",
+            ephemeral=True,
+        )
+        self.cursor.execute("SELECT COUNT(*) FROM team_transfers")
+        self.assertEqual(self.cursor.fetchone()[0], 1)
+
+    async def test_force_transfers_immediately_for_an_admin(self):
+        await self._make_team("Red")
+        self._add_to_roster("Red", 902, "Bob")
+        target = FakeMember("Bob", id=902)
+        ctx = self._ctx()  # Alice: captain and manage_guild=True by default
+
+        await self.helperObj.teamTransferHelper(ctx, "Red", target, force=True)
+
         ctx.response.send_message.assert_awaited_once_with(
-            f"**Red**'s captaincy has been transferred to {target.mention}."
+            f"**Red**'s captaincy has been transferred to {target.mention}; no confirmation needed."
         )
         _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
         self.assertTrue(self.helperObj.isTeamCaptain(team, 902))
         self.assertFalse(self.helperObj.isTeamCaptain(team, 901))
-        # roster itself is untouched; both are still on the team
-        self.assertEqual({p.get_id() for p in team.get_players()}, {901, 902})
+        self.cursor.execute("SELECT COUNT(*) FROM team_transfers")
+        self.assertEqual(self.cursor.fetchone()[0], 0)
 
-    async def test_non_captain_admin_can_also_transfer(self):
+    async def test_force_is_rejected_for_a_captain_without_manage_guild(self):
         await self._make_team("Red")
         self._add_to_roster("Red", 902, "Bob")
-        ctx = self._ctx(user_id=903, name="Charlie", manage_guild=True)
+        ctx = self._ctx(manage_guild=False)  # still the captain, just not an admin
 
-        await self.helperObj.teamTransferHelper(ctx, "Red", FakeMember("Bob", id=902))
+        await self.helperObj.teamTransferHelper(ctx, "Red", FakeMember("Bob", id=902), force=True)
 
+        ctx.response.send_message.assert_awaited_once_with(
+            "Only a member with the Manage Server permission can force-transfer captaincy; "
+            "everyone else still needs the new captain's own confirmation.",
+            ephemeral=True,
+        )
         _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
-        self.assertTrue(self.helperObj.isTeamCaptain(team, 902))
+        self.assertTrue(self.helperObj.isTeamCaptain(team, 901))
 
     async def test_transferred_captain_can_then_use_team_delete(self):
         # Regression: /team-leave used to be a dead end for a captain
         # ("nobody to hand it to yet"). This confirms the old captain, no
         # longer captain after a transfer, isn't stuck on that team either.
+        # force=True here since this test is about /team leave afterward,
+        # not about the transfer offer/accept flow itself.
         await self._make_team("Red")
         self._add_to_roster("Red", 902, "Bob")
-        await self.helperObj.teamTransferHelper(self._ctx(), "Red", FakeMember("Bob", id=902))
+        await self.helperObj.teamTransferHelper(self._ctx(), "Red", FakeMember("Bob", id=902), force=True)
 
         leave_ctx = self._ctx()  # Alice, no longer captain
         await self.helperObj.teamLeaveHelper(leave_ctx, "Red")
@@ -3268,6 +3337,119 @@ class TeamTransferHelperTests(HelperTestCase):
         leave_ctx.response.send_message.assert_awaited_once_with("You've left **Red**.")
         _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
         self.assertEqual({p.get_id() for p in team.get_players()}, {902})
+
+
+class TeamTransferAcceptViewTests(HelperTestCase):
+    def setUp(self):
+        super().setUp()
+        self.channel = FakeChannel("general")
+        self.helperObj.client = FakeClient(channels=[self.channel], guilds=[self.guild])
+
+    async def _make_team_and_offer(self):
+        create_ctx = FakeInteraction(self.guild, FakeMember("Alice", id=901), channel=self.channel)
+        await self.helperObj.createTeamHelper(create_ctx, "Red", 5)
+        team_id, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        team.add_player(Player(902, "Bob"))
+        self.helperObj.updateTeamData(team_id, team)
+
+        transfer_ctx = FakeInteraction(self.guild, FakeMember("Alice", id=901), channel=self.channel)
+        posted_message = FakeMessage(id=888)
+        transfer_ctx.original_response.return_value = posted_message
+        await self.helperObj.teamTransferHelper(transfer_ctx, "Red", FakeMember("Bob", id=902))
+        return posted_message
+
+    def _click(self, message, user_id, name="Clicker"):
+        return FakeInteraction(
+            self.guild, FakeMember(name, id=user_id), channel=self.channel, message=message
+        )
+
+    async def test_accept_from_someone_other_than_the_offered_captain_is_rejected(self):
+        message = await self._make_team_and_offer()
+        view = helper_module.TeamTransferAcceptView(self.helperObj)
+        click = self._click(message, 903)
+        await view.accept.callback(click)
+
+        _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        self.assertTrue(self.helperObj.isTeamCaptain(team, 901))
+        self.assertTrue(click.response.send_message.call_args.kwargs.get("ephemeral"))
+
+    async def test_accept_from_the_offered_captain_moves_captaincy(self):
+        message = await self._make_team_and_offer()
+        view = helper_module.TeamTransferAcceptView(self.helperObj)
+        click = self._click(message, 902)
+        await view.accept.callback(click)
+
+        _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        self.assertTrue(self.helperObj.isTeamCaptain(team, 902))
+        self.assertFalse(self.helperObj.isTeamCaptain(team, 901))
+        click.response.send_message.assert_awaited_once()
+        self.assertIn("captaincy", click.response.send_message.call_args.args[0])
+
+        self.cursor.execute("SELECT COUNT(*) FROM team_transfers")
+        self.assertEqual(self.cursor.fetchone()[0], 0)
+
+    async def test_decline_from_the_offered_captain_leaves_captaincy_untouched(self):
+        message = await self._make_team_and_offer()
+        view = helper_module.TeamTransferAcceptView(self.helperObj)
+        click = self._click(message, 902)
+        await view.decline.callback(click)
+
+        _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        self.assertTrue(self.helperObj.isTeamCaptain(team, 901))
+        click.response.send_message.assert_awaited_once()
+        message_text = click.response.send_message.call_args.args[0]
+        self.assertIn("declined", message_text)
+        self.assertIn("Alice", message_text)
+
+        self.cursor.execute("SELECT COUNT(*) FROM team_transfers")
+        self.assertEqual(self.cursor.fetchone()[0], 0)
+
+    async def test_decline_from_someone_other_than_the_offered_captain_is_rejected(self):
+        message = await self._make_team_and_offer()
+        view = helper_module.TeamTransferAcceptView(self.helperObj)
+        click = self._click(message, 903)
+        await view.decline.callback(click)
+
+        self.cursor.execute("SELECT COUNT(*) FROM team_transfers")
+        self.assertEqual(self.cursor.fetchone()[0], 1)
+        self.assertTrue(click.response.send_message.call_args.kwargs.get("ephemeral"))
+
+    async def test_cancel_from_the_captain_retracts_the_offer(self):
+        message = await self._make_team_and_offer()
+        view = helper_module.TeamTransferAcceptView(self.helperObj)
+        click = self._click(message, 901, name="Alice")
+        await view.cancelTransfer.callback(click)
+
+        self.cursor.execute("SELECT COUNT(*) FROM team_transfers")
+        self.assertEqual(self.cursor.fetchone()[0], 0)
+        _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        self.assertTrue(self.helperObj.isTeamCaptain(team, 901))
+        click.response.edit_message.assert_awaited_once()
+        self.assertIn("cancelled", click.response.edit_message.call_args.kwargs["content"])
+        self.assertIsNone(click.response.edit_message.call_args.kwargs["view"])
+
+    async def test_cancel_from_a_non_captain_non_admin_is_rejected(self):
+        message = await self._make_team_and_offer()
+        view = helper_module.TeamTransferAcceptView(self.helperObj)
+        click = FakeInteraction(
+            self.guild, FakeMember("Random", id=904, manage_guild=False), channel=self.channel, message=message
+        )
+        await view.cancelTransfer.callback(click)
+
+        self.cursor.execute("SELECT COUNT(*) FROM team_transfers")
+        self.assertEqual(self.cursor.fetchone()[0], 1)
+        self.assertTrue(click.response.send_message.call_args.kwargs.get("ephemeral"))
+
+    async def test_accept_after_already_used_up_is_handled_gracefully(self):
+        message = await self._make_team_and_offer()
+        view = helper_module.TeamTransferAcceptView(self.helperObj)
+        await view.decline.callback(self._click(message, 902))
+
+        click = self._click(message, 902)
+        await view.accept.callback(click)
+
+        self.assertTrue(click.response.send_message.call_args.kwargs.get("ephemeral"))
+        self.assertIn("no longer pending", click.response.send_message.call_args.args[0])
 
 
 class TeamDeleteHelperTests(HelperTestCase):
@@ -3722,6 +3904,38 @@ class TeamInviteHelperTests(HelperTestCase):
         await self.helperObj.teamInviteHelper(ctx, "Red", [ctx.user])
         ctx.response.send_message.assert_awaited_once_with("Alice is already on **Red**.", ephemeral=True)
 
+    async def test_rejects_reinviting_someone_with_a_pending_invite(self):
+        await self._make_team()
+        target = FakeMember("Bob", id=902)
+        first = self._ctx()
+        first.original_response.return_value = FakeMessage(id=777)
+        await self.helperObj.teamInviteHelper(first, "Red", [target])
+
+        second = self._ctx()
+        await self.helperObj.teamInviteHelper(second, "Red", [target])
+
+        second.response.send_message.assert_awaited_once_with(
+            "Bob already has a pending invite to **Red**.", ephemeral=True
+        )
+        # Still just the one row from the first invite, not a second.
+        self.cursor.execute("SELECT COUNT(*) FROM team_invites WHERE teamId=?", (
+            self.helperObj.getTeamRow(GUILD_ID, "Red")[0],
+        ))
+        self.assertEqual(self.cursor.fetchone()[0], 1)
+
+    async def test_force_bypasses_the_pending_invite_check(self):
+        await self._make_team()
+        target = FakeMember("Bob", id=902)
+        first = self._ctx()
+        first.original_response.return_value = FakeMessage(id=777)
+        await self.helperObj.teamInviteHelper(first, "Red", [target])
+
+        second = self._ctx()
+        await self.helperObj.teamInviteHelper(second, "Red", [target], force=True)
+
+        _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        self.assertEqual({p.get_id() for p in team.get_players()}, {901, 902})
+
     async def test_successful_invite_posts_message_and_stores_pending_row(self):
         await self._make_team()
         channel = FakeChannel("general")
@@ -3987,6 +4201,59 @@ class TeamInviteAcceptViewTests(HelperTestCase):
         self.assertIn("Bob", click.response.send_message.call_args.args[0])
         self.assertIn("declined", click.response.send_message.call_args.args[0])
 
+    async def test_cancel_from_the_captain_retracts_the_whole_invite(self):
+        message = await self._make_team_and_invite(
+            [FakeMember("Bob", id=902), FakeMember("Cleo", id=903)]
+        )
+        view = helper_module.TeamInviteAcceptView(self.helperObj)
+        click = self._click(message, 901, name="Alice")  # 901 is Red's captain
+        await view.cancelInvite.callback(click)
+
+        self.cursor.execute("SELECT COUNT(*) FROM team_invites WHERE messageId=?", (message.id,))
+        self.assertEqual(self.cursor.fetchone()[0], 0)
+        _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        self.assertEqual({p.get_id() for p in team.get_players()}, {901})
+        click.response.edit_message.assert_awaited_once()
+        content = click.response.edit_message.call_args.kwargs["content"]
+        self.assertIn("cancelled", content)
+        self.assertIn("Bob", content)
+        self.assertIn("Cleo", content)
+        self.assertIsNone(click.response.edit_message.call_args.kwargs["view"])
+
+    async def test_cancel_from_a_manage_guild_admin_who_isnt_the_captain_works(self):
+        message = await self._make_team_and_invite()
+        view = helper_module.TeamInviteAcceptView(self.helperObj)
+        click = FakeInteraction(
+            self.guild, FakeMember("Admin", id=999, manage_guild=True), channel=self.channel, message=message
+        )
+        await view.cancelInvite.callback(click)
+
+        self.cursor.execute("SELECT COUNT(*) FROM team_invites WHERE messageId=?", (message.id,))
+        self.assertEqual(self.cursor.fetchone()[0], 0)
+
+    async def test_cancel_from_a_non_captain_non_admin_is_rejected(self):
+        message = await self._make_team_and_invite()
+        view = helper_module.TeamInviteAcceptView(self.helperObj)
+        click = FakeInteraction(
+            self.guild, FakeMember("Random", id=904, manage_guild=False), channel=self.channel, message=message
+        )
+        await view.cancelInvite.callback(click)
+
+        self.cursor.execute("SELECT COUNT(*) FROM team_invites WHERE messageId=?", (message.id,))
+        self.assertEqual(self.cursor.fetchone()[0], 1)
+        self.assertTrue(click.response.send_message.call_args.kwargs.get("ephemeral"))
+
+    async def test_cancel_when_invite_already_used_up_is_handled_gracefully(self):
+        message = await self._make_team_and_invite()
+        view = helper_module.TeamInviteAcceptView(self.helperObj)
+        await view.accept.callback(self._click(message, 902))
+
+        click = self._click(message, 901, name="Alice")
+        await view.cancelInvite.callback(click)
+
+        self.assertTrue(click.response.send_message.call_args.kwargs.get("ephemeral"))
+        self.assertIn("already been used up", click.response.send_message.call_args.args[0])
+
         self.cursor.execute("SELECT COUNT(*) FROM team_invites")
         self.assertEqual(self.cursor.fetchone()[0], 0)
 
@@ -4027,10 +4294,11 @@ class ExpireStalePendingInvitesTests(HelperTestCase):
         await self.helperObj.teamInviteHelper(self._ctx(), "Red", [FakeMember("Bob", id=902)])
         self._backdate("team_invites", helper_module.PENDING_INVITE_EXPIRY_SECONDS + 60)
 
-        invites_expired, duels_expired = self.helperObj.expireStalePendingInvites()
+        invites_expired, duels_expired, transfers_expired = self.helperObj.expireStalePendingInvites()
 
         self.assertEqual(invites_expired, 1)
         self.assertEqual(duels_expired, 0)
+        self.assertEqual(transfers_expired, 0)
         self.cursor.execute("SELECT COUNT(*) FROM team_invites")
         self.assertEqual(self.cursor.fetchone()[0], 0)
 
@@ -4039,7 +4307,7 @@ class ExpireStalePendingInvitesTests(HelperTestCase):
         await self.helperObj.teamInviteHelper(self._ctx(), "Red", [FakeMember("Bob", id=902)])
         self._backdate("team_invites", helper_module.PENDING_INVITE_EXPIRY_SECONDS - 60)
 
-        invites_expired, _ = self.helperObj.expireStalePendingInvites()
+        invites_expired, _, _ = self.helperObj.expireStalePendingInvites()
 
         self.assertEqual(invites_expired, 0)
         self.cursor.execute("SELECT COUNT(*) FROM team_invites")
@@ -4051,7 +4319,7 @@ class ExpireStalePendingInvitesTests(HelperTestCase):
         self.cursor.execute("UPDATE team_invites SET createdAt=NULL")
         self.db.commit()
 
-        invites_expired, _ = self.helperObj.expireStalePendingInvites()
+        invites_expired, _, _ = self.helperObj.expireStalePendingInvites()
 
         self.assertEqual(invites_expired, 1)
 
@@ -4062,7 +4330,7 @@ class ExpireStalePendingInvitesTests(HelperTestCase):
         await self.helperObj.challengeDuelHelper(self._ctx(), FakeMember("Bob", id=902), 100)
         self._backdate("duels", helper_module.PENDING_INVITE_EXPIRY_SECONDS + 60)
 
-        invites_expired, duels_expired = self.helperObj.expireStalePendingInvites()
+        invites_expired, duels_expired, _ = self.helperObj.expireStalePendingInvites()
 
         self.assertEqual(invites_expired, 0)
         self.assertEqual(duels_expired, 1)
@@ -4080,10 +4348,40 @@ class ExpireStalePendingInvitesTests(HelperTestCase):
         )
         self.db.commit()
 
-        _, duels_expired = self.helperObj.expireStalePendingInvites()
+        _, duels_expired, _ = self.helperObj.expireStalePendingInvites()
 
         self.assertEqual(duels_expired, 0)
         self.cursor.execute("SELECT COUNT(*) FROM duels")
+        self.assertEqual(self.cursor.fetchone()[0], 1)
+
+    async def test_expires_a_pending_captaincy_transfer_past_the_deadline(self):
+        await self.helperObj.createTeamHelper(self._ctx(), "Red", 5)
+        team_id, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        team.add_player(Player(902, "Bob"))
+        self.helperObj.updateTeamData(team_id, team)
+        await self.helperObj.teamTransferHelper(self._ctx(), "Red", FakeMember("Bob", id=902))
+        self._backdate("team_transfers", helper_module.PENDING_INVITE_EXPIRY_SECONDS + 60)
+
+        invites_expired, duels_expired, transfers_expired = self.helperObj.expireStalePendingInvites()
+
+        self.assertEqual(invites_expired, 0)
+        self.assertEqual(duels_expired, 0)
+        self.assertEqual(transfers_expired, 1)
+        self.cursor.execute("SELECT COUNT(*) FROM team_transfers")
+        self.assertEqual(self.cursor.fetchone()[0], 0)
+
+    async def test_keeps_a_captaincy_transfer_still_within_the_deadline(self):
+        await self.helperObj.createTeamHelper(self._ctx(), "Red", 5)
+        team_id, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        team.add_player(Player(902, "Bob"))
+        self.helperObj.updateTeamData(team_id, team)
+        await self.helperObj.teamTransferHelper(self._ctx(), "Red", FakeMember("Bob", id=902))
+        self._backdate("team_transfers", helper_module.PENDING_INVITE_EXPIRY_SECONDS - 60)
+
+        _, _, transfers_expired = self.helperObj.expireStalePendingInvites()
+
+        self.assertEqual(transfers_expired, 0)
+        self.cursor.execute("SELECT COUNT(*) FROM team_transfers")
         self.assertEqual(self.cursor.fetchone()[0], 1)
 
 
@@ -9831,7 +10129,8 @@ class WagerHelperTests(HelperTestCase):
         self.db.commit()
         ctx = self._ctx()
         await self.helperObj.wagerHelper(ctx, 100, 1)
-        ctx.response.send_message.assert_awaited_once_with("You wagered 100 gold on **Team 1**!")
+        ctx.response.send_message.assert_awaited_once()
+        self.assertEqual(ctx.response.send_message.call_args.args[0], "You wagered 100 gold on **Team 1**!")
 
     async def test_no_cap_set_allows_any_amount(self):
         self.helperObj.update(GUILD_ID, "betting_state", "OPEN")
@@ -9842,7 +10141,8 @@ class WagerHelperTests(HelperTestCase):
         self.db.commit()
         ctx = self._ctx()
         await self.helperObj.wagerHelper(ctx, 50000, 1)
-        ctx.response.send_message.assert_awaited_once_with("You wagered 50000 gold on **Team 1**!")
+        ctx.response.send_message.assert_awaited_once()
+        self.assertEqual(ctx.response.send_message.call_args.args[0], "You wagered 50000 gold on **Team 1**!")
 
     async def test_rejects_when_betting_not_open(self):
         ctx = self._ctx()
@@ -9920,7 +10220,8 @@ class WagerHelperTests(HelperTestCase):
             "SELECT team, amount FROM wagers WHERE guildId=? AND userId=?", (GUILD_ID, 901)
         )
         self.assertEqual(self.cursor.fetchone(), (2, 250))
-        ctx.response.send_message.assert_awaited_once_with("You wagered 250 gold on **Team 2**!")
+        ctx.response.send_message.assert_awaited_once()
+        self.assertEqual(ctx.response.send_message.call_args.args[0], "You wagered 250 gold on **Team 2**!")
 
     async def test_rejects_wager_from_a_player_in_the_game(self):
         team1 = Team()
@@ -9986,7 +10287,68 @@ class WagerHelperTests(HelperTestCase):
         ctx = self._ctx()  # Alice (901) isn't rostered on either team
         await self.helperObj.wagerHelper(ctx, 100, 1)
 
-        ctx.response.send_message.assert_awaited_once_with("You wagered 100 gold on **Team 1**!")
+        ctx.response.send_message.assert_awaited_once()
+        self.assertEqual(ctx.response.send_message.call_args.args[0], "You wagered 100 gold on **Team 1**!")
+
+    async def _place_bet(self, user_id=901, name="Alice", amount=250, team=1):
+        self.helperObj.update(GUILD_ID, "betting_state", "OPEN")
+        self.helperObj.ensureEconomyRow(GUILD_ID, user_id, name)
+        self.cursor.execute(
+            "UPDATE economy SET balance=1000 WHERE guildId=? AND userId=?", (GUILD_ID, user_id)
+        )
+        self.db.commit()
+        ctx = self._ctx(user_id, name)
+        await self.helperObj.wagerHelper(ctx, amount, team)
+        return ctx
+
+    async def test_confirmation_attaches_a_cancel_view(self):
+        ctx = await self._place_bet()
+        view = ctx.response.send_message.call_args.kwargs["view"]
+        self.assertIsInstance(view, helper_module.WagerCancelView)
+        self.assertIsNone(view.match_id)
+
+    async def test_bettor_cancelling_refunds_and_removes_the_wager(self):
+        await self._place_bet(amount=250)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "balance"), 750)
+
+        click = self._ctx()
+        await self.helperObj._handleWagerCancelClick(click, GUILD_ID, 901, None)
+
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "balance"), 1000)
+        self.cursor.execute("SELECT COUNT(*) FROM wagers WHERE guildId=? AND userId=?", (GUILD_ID, 901))
+        self.assertEqual(self.cursor.fetchone()[0], 0)
+        click.response.edit_message.assert_awaited_once()
+        self.assertIn("refunded 250", click.response.edit_message.call_args.kwargs["content"])
+
+    async def test_someone_else_cannot_cancel_another_players_bet(self):
+        await self._place_bet(amount=250)
+        click = self._ctx(user_id=902, name="Mallory")
+        await self.helperObj._handleWagerCancelClick(click, GUILD_ID, 901, None)
+
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "balance"), 750)
+        self.cursor.execute("SELECT COUNT(*) FROM wagers WHERE guildId=? AND userId=?", (GUILD_ID, 901))
+        self.assertEqual(self.cursor.fetchone()[0], 1)
+        self.assertTrue(click.response.send_message.call_args.kwargs.get("ephemeral"))
+
+    async def test_cannot_cancel_once_betting_has_closed(self):
+        await self._place_bet(amount=250)
+        self.helperObj.update(GUILD_ID, "betting_state", "CLOSED")
+
+        click = self._ctx()
+        await self.helperObj._handleWagerCancelClick(click, GUILD_ID, 901, None)
+
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "balance"), 750)
+        self.assertIn("already closed", click.response.send_message.call_args.args[0])
+
+    async def test_cancelling_twice_the_second_click_is_rejected_without_double_refunding(self):
+        await self._place_bet(amount=250)
+        await self.helperObj._handleWagerCancelClick(self._ctx(), GUILD_ID, 901, None)
+
+        click2 = self._ctx()
+        await self.helperObj._handleWagerCancelClick(click2, GUILD_ID, 901, None)
+
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "balance"), 1000)
+        self.assertIn("already been cancelled", click2.response.send_message.call_args.args[0])
 
 
 class RecordResultTests(HelperTestCase):
@@ -12150,6 +12512,124 @@ class AchievementsHelperTests(HelperTestCase):
         self.assertIn("more", joined)
         self.assertTrue(joined.startswith("line 0 "))
 
+    async def test_locked_achievement_shows_its_progress_in_the_embed(self):
+        self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 901, "Alice", "League")
+        self.cursor.execute(
+            "UPDATE game_stats SET game_wins=3 WHERE guildId=? AND userId=? AND game='League'", (GUILD_ID, 901)
+        )
+        self.db.commit()
+
+        ctx = self._ctx()
+        await self.helperObj.achievementsHelper(ctx)
+
+        embed = ctx.response.send_message.call_args.kwargs["embed"]
+        veteran_field = next(field for field in embed.fields if field.name == "__Veteran__")
+        self.assertIn(f"(3/{helper_module.CARD_ACHIEVEMENT_VETERAN_WINS})", veteran_field.value)
+
+    async def test_earned_achievement_shows_no_progress_fraction(self):
+        self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 901, "Alice", "League")
+        self.cursor.execute(
+            "UPDATE game_stats SET game_wins=1 WHERE guildId=? AND userId=? AND game='League'", (GUILD_ID, 901)
+        )
+        self.db.commit()
+
+        ctx = self._ctx()
+        await self.helperObj.achievementsHelper(ctx)
+
+        embed = ctx.response.send_message.call_args.kwargs["embed"]
+        other_field = next(field for field in embed.fields if field.name == "__Other__")
+        first_blood_line = next(
+            line for line in other_field.value.split("\n")
+            if helper_module.CARD_ACHIEVEMENT_TITLES["first_blood"] in line
+        )
+        self.assertNotIn("(", first_blood_line)
+
+
+class AchievementProgressTests(HelperTestCase):
+    def _catalog(self, user_id=901):
+        return {item["key"]: item for item in self.helperObj.getAchievementCatalog(GUILD_ID, user_id)}
+
+    async def test_veteran_ladder_progress_tracks_game_wins(self):
+        self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 901, "Alice", "League")
+        self.cursor.execute(
+            "UPDATE game_stats SET game_wins=3 WHERE guildId=? AND userId=? AND game='League'", (GUILD_ID, 901)
+        )
+        self.db.commit()
+
+        catalog = self._catalog()
+        self.assertEqual(catalog["veteran"]["progress"], (3, helper_module.CARD_ACHIEVEMENT_VETERAN_WINS))
+        self.assertFalse(catalog["veteran"]["earned"])
+
+    async def test_on_fire_ladder_progress_tracks_current_win_streak(self):
+        self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 901, "Alice", "League")
+        self.cursor.execute(
+            "UPDATE game_stats SET current_win_streak=2 WHERE guildId=? AND userId=? AND game='League'",
+            (GUILD_ID, 901),
+        )
+        self.db.commit()
+
+        catalog = self._catalog()
+        self.assertEqual(catalog["on_fire"]["progress"], (2, helper_module.CARD_ACHIEVEMENT_ON_FIRE_STREAK))
+
+    async def test_gambler_progress_counts_bet_wins_and_losses_together(self):
+        self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.cursor.execute("UPDATE economy SET wins=4, losses=6 WHERE guildId=? AND userId=?", (GUILD_ID, 901))
+        self.db.commit()
+
+        catalog = self._catalog()
+        self.assertEqual(catalog["gambler"]["progress"], (10, helper_module.CARD_ACHIEVEMENT_GAMBLER_BETS))
+
+    async def test_iron_will_progress_tracks_game_losses(self):
+        self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 901, "Alice", "League")
+        self.cursor.execute(
+            "UPDATE game_stats SET game_losses=5 WHERE guildId=? AND userId=? AND game='League'", (GUILD_ID, 901)
+        )
+        self.db.commit()
+
+        catalog = self._catalog()
+        self.assertEqual(catalog["iron_will"]["progress"], (5, helper_module.CARD_ACHIEVEMENT_IRON_WILL_LOSSES))
+
+    async def test_team_player_progress_counts_teams_rostered_on(self):
+        for name in ("Red", "Blue"):
+            ctx = FakeInteraction(self.guild, FakeMember("Alice", id=901))
+            await self.helperObj.createTeamHelper(ctx, name, 5)
+
+        catalog = self._catalog()
+        self.assertEqual(catalog["team_player"]["progress"], (2, helper_module.CARD_ACHIEVEMENT_TEAM_PLAYER_TEAMS))
+
+    async def test_binary_achievements_have_no_progress_fraction(self):
+        catalog = self._catalog()
+        self.assertIsNone(catalog["captain"]["progress"])
+        self.assertIsNone(catalog["first_blood"]["progress"])
+        self.assertIsNone(catalog["tournament_champion"]["progress"])
+
+    async def test_earned_achievement_has_no_progress_fraction(self):
+        self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.helperObj._unlockAchievement(GUILD_ID, 901, "first_blood")
+
+        catalog = self._catalog()
+        self.assertTrue(catalog["first_blood"]["earned"])
+        self.assertIsNone(catalog["first_blood"]["progress"])
+
+    async def test_progress_is_scoped_to_the_currently_tracked_game(self):
+        self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 901, "Alice", "League")
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 901, "Alice", "Valorant")
+        self.cursor.execute(
+            "UPDATE game_stats SET game_wins=7 WHERE guildId=? AND userId=? AND game='Valorant'", (GUILD_ID, 901)
+        )
+        self.db.commit()
+
+        # Still tracking League by default, so Valorant's 7 wins shouldn't
+        # show up as this player's veteran progress here.
+        catalog = self._catalog()
+        self.assertEqual(catalog["veteran"]["progress"], (0, helper_module.CARD_ACHIEVEMENT_VETERAN_WINS))
+
 
 class CardUnlocksTests(HelperTestCase):
     def test_reaching_diamond_unlocks_its_title_and_color_scheme(self):
@@ -14085,8 +14565,9 @@ class PlaceTournamentWagerTests(HelperTestCase):
             "SELECT team, amount FROM tournament_wagers WHERE matchId=? AND userId=?", (1, 901)
         )
         self.assertEqual(self.cursor.fetchone(), (2, 250))
-        ctx.response.send_message.assert_awaited_once_with(
-            "You wagered 250 gold on **Team 2** for match #1!"
+        ctx.response.send_message.assert_awaited_once()
+        self.assertEqual(
+            ctx.response.send_message.call_args.args[0], "You wagered 250 gold on **Team 2** for match #1!"
         )
 
     async def test_confirmation_uses_the_matchs_own_real_team_name(self):
@@ -14099,8 +14580,9 @@ class PlaceTournamentWagerTests(HelperTestCase):
         ctx = self._ctx()
         await self.helperObj.wagerHelper(ctx, 250, 2, match_id=2)
 
-        ctx.response.send_message.assert_awaited_once_with(
-            "You wagered 250 gold on **Falcons** for match #2!"
+        ctx.response.send_message.assert_awaited_once()
+        self.assertEqual(
+            ctx.response.send_message.call_args.args[0], "You wagered 250 gold on **Falcons** for match #2!"
         )
 
     async def test_a_user_can_bet_on_multiple_concurrent_matches_independently(self):
@@ -14114,6 +14596,43 @@ class PlaceTournamentWagerTests(HelperTestCase):
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "balance"), 700)
         self.cursor.execute("SELECT COUNT(*) FROM tournament_wagers WHERE userId=901")
         self.assertEqual(self.cursor.fetchone()[0], 2)
+
+    async def test_confirmation_attaches_a_cancel_view_scoped_to_the_match(self):
+        self._insert_match(1)
+        self._give_gold(901, "Alice", 1000)
+        ctx = self._ctx()
+        await self.helperObj.wagerHelper(ctx, 250, 1, match_id=1)
+
+        view = ctx.response.send_message.call_args.kwargs["view"]
+        self.assertIsInstance(view, helper_module.WagerCancelView)
+        self.assertEqual(view.match_id, 1)
+
+    async def test_bettor_cancelling_refunds_and_removes_the_tournament_wager(self):
+        self._insert_match(1)
+        self._give_gold(901, "Alice", 1000)
+        await self.helperObj.wagerHelper(self._ctx(), 250, 1, match_id=1)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "balance"), 750)
+
+        click = self._ctx()
+        await self.helperObj._handleWagerCancelClick(click, GUILD_ID, 901, 1)
+
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "balance"), 1000)
+        self.cursor.execute("SELECT COUNT(*) FROM tournament_wagers WHERE matchId=? AND userId=?", (1, 901))
+        self.assertEqual(self.cursor.fetchone()[0], 0)
+        click.response.edit_message.assert_awaited_once()
+
+    async def test_cannot_cancel_once_betting_is_closed_for_the_match(self):
+        self._insert_match(1)
+        self._give_gold(901, "Alice", 1000)
+        await self.helperObj.wagerHelper(self._ctx(), 250, 1, match_id=1)
+        self.cursor.execute("UPDATE tournament_matches SET bettingClosed=1 WHERE id=1")
+        self.db.commit()
+
+        click = self._ctx()
+        await self.helperObj._handleWagerCancelClick(click, GUILD_ID, 901, 1)
+
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "balance"), 750)
+        self.assertIn("closed for match #1", click.response.send_message.call_args.args[0])
 
 
 class SettleMatchWagersTests(HelperTestCase):
@@ -14657,6 +15176,50 @@ class ChallengeDuelHelperTests(HelperTestCase):
             row, (GUILD_ID, channel.id, posted_message.id, 901, 902, 250, "PENDING_ACCEPT")
         )
 
+    async def test_rejects_a_second_challenge_against_the_same_pending_target(self):
+        self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.cursor.execute(
+            "UPDATE economy SET balance=1000 WHERE guildId=? AND userId=?", (GUILD_ID, 901)
+        )
+        self.db.commit()
+        target = FakeMember("Bob", id=902)
+
+        first = self._ctx()
+        first.original_response.return_value = FakeMessage(id=1)
+        await self.helperObj.challengeDuelHelper(first, target, 100)
+
+        second = self._ctx()
+        await self.helperObj.challengeDuelHelper(second, target, 50)
+
+        second.response.send_message.assert_awaited_once()
+        message = second.response.send_message.call_args.args[0]
+        self.assertIn("already have a pending challenge", message)
+        self.assertIn(target.mention, message)
+        self.cursor.execute("SELECT COUNT(*) FROM duels")
+        self.assertEqual(self.cursor.fetchone()[0], 1)
+        # No gold moved for the rejected second attempt.
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "balance"), 1000)
+
+    async def test_a_new_challenge_against_a_different_target_is_unaffected(self):
+        self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.cursor.execute(
+            "UPDATE economy SET balance=1000 WHERE guildId=? AND userId=?", (GUILD_ID, 901)
+        )
+        self.db.commit()
+
+        first = self._ctx()
+        first.original_response.return_value = FakeMessage(id=1)
+        await self.helperObj.challengeDuelHelper(first, FakeMember("Bob", id=902), 100)
+
+        second = self._ctx()
+        second.original_response.return_value = FakeMessage(id=2)
+        await self.helperObj.challengeDuelHelper(second, FakeMember("Cleo", id=903), 50)
+
+        second.response.send_message.assert_awaited_once()
+        self.assertIsInstance(second.response.send_message.call_args.kwargs["view"], helper_module.DuelAcceptView)
+        self.cursor.execute("SELECT COUNT(*) FROM duels")
+        self.assertEqual(self.cursor.fetchone()[0], 2)
+
 
 class DuelAcceptViewTests(HelperTestCase):
     def setUp(self):
@@ -14764,6 +15327,50 @@ class DuelAcceptViewTests(HelperTestCase):
         self.cursor.execute("SELECT state FROM duels WHERE messageId=555")
         self.assertEqual(self.cursor.fetchone()[0], "PENDING_ACCEPT")
         self.assertTrue(click.response.send_message.call_args.kwargs.get("ephemeral"))
+
+    async def test_cancel_challenge_from_the_challenger_deletes_the_pending_duel(self):
+        click = self._click(555, 901)
+        await helper_module.DuelAcceptView(self.helperObj).cancelChallenge.callback(click)
+
+        self.cursor.execute("SELECT COUNT(*) FROM duels WHERE messageId=555")
+        self.assertEqual(self.cursor.fetchone()[0], 0)
+        # nothing was ever escrowed, so nothing to refund on a cancel
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "balance"), 1000)
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 902, "balance"), 1000)
+        click.response.send_message.assert_awaited_once_with(
+            "**Alice** cancelled the challenge against **Bob**."
+        )
+        click.message.edit.assert_awaited_once_with(view=None)
+
+    async def test_cancel_challenge_from_the_target_is_rejected(self):
+        click = self._click(555, 902)
+        await helper_module.DuelAcceptView(self.helperObj).cancelChallenge.callback(click)
+
+        self.cursor.execute("SELECT state FROM duels WHERE messageId=555")
+        self.assertEqual(self.cursor.fetchone()[0], "PENDING_ACCEPT")
+        self.assertTrue(click.response.send_message.call_args.kwargs.get("ephemeral"))
+
+    async def test_cancel_challenge_ignores_mismatched_message_id(self):
+        click = self._click(999, 901)
+        await helper_module.DuelAcceptView(self.helperObj).cancelChallenge.callback(click)
+
+        self.cursor.execute("SELECT state FROM duels WHERE messageId=555")
+        self.assertEqual(self.cursor.fetchone()[0], "PENDING_ACCEPT")
+        self.assertTrue(click.response.send_message.call_args.kwargs.get("ephemeral"))
+
+    async def test_cancel_challenge_after_acceptance_is_already_gone(self):
+        click_accept = self._click(555, 902)
+        await helper_module.DuelAcceptView(self.helperObj).accept.callback(click_accept)
+
+        click_cancel = self._click(555, 901)
+        await helper_module.DuelAcceptView(self.helperObj).cancelChallenge.callback(click_cancel)
+
+        click_cancel.response.send_message.assert_awaited_once_with(
+            "This challenge is no longer pending.", ephemeral=True
+        )
+        # the now-AWAITING_RESULT duel is untouched
+        self.cursor.execute("SELECT state FROM duels WHERE challengerId=901 AND targetId=902")
+        self.assertEqual(self.cursor.fetchone()[0], "AWAITING_RESULT")
 
 
 class DuelResultViewTests(HelperTestCase):
@@ -16847,7 +17454,8 @@ class GuildLifecycleEventTests(BotModuleTestCase):
                 self.bot.helper.WinnerReportView, self.bot.helper.DuelAcceptView,
                 self.bot.helper.DuelResultView, self.bot.helper.TournamentReadyView,
                 self.bot.helper.TournamentMatchReportView, self.bot.helper.RosterActionView,
-                self.bot.helper.TeamInviteAcceptView, self.bot.helper.StatsView, self.bot.helper.TeamStatsView,
+                self.bot.helper.TeamInviteAcceptView, self.bot.helper.TeamTransferAcceptView,
+                self.bot.helper.StatsView, self.bot.helper.TeamStatsView,
                 self.bot.helper.CaptainsDraftPickView,
                 self.bot.helper.LeaderboardPagingView, self.bot.helper.MyTeamsPagingView,
                 self.bot.helper.TeamListPagingView,
@@ -17334,7 +17942,7 @@ class BackupDatabaseTests(BotModuleTestCase):
 class ExpireInvitesTaskTests(BotModuleTestCase):
     async def test_task_calls_the_real_expiry_and_logs_when_something_expired(self):
         with patch.object(
-            self.bot.helperObj, "expireStalePendingInvites", MagicMock(return_value=(2, 1))
+            self.bot.helperObj, "expireStalePendingInvites", MagicMock(return_value=(2, 1, 1))
         ) as mock_expire:
             with self.assertLogs(self.bot.logger, level="INFO") as cm:
                 await self.bot.expireInvitesTask.coro()
@@ -17343,12 +17951,12 @@ class ExpireInvitesTaskTests(BotModuleTestCase):
 
     async def test_task_stays_quiet_when_nothing_expired(self):
         with patch.object(
-            self.bot.helperObj, "expireStalePendingInvites", MagicMock(return_value=(0, 0))
+            self.bot.helperObj, "expireStalePendingInvites", MagicMock(return_value=(0, 0, 0))
         ):
             # assertNoLogs isn't available on this Python version's
             # unittest, so this just confirms the call completes cleanly;
-            # the "if invites_expired or duels_expired" guard itself is
-            # what keeps this quiet in practice.
+            # the "if invites_expired or duels_expired or transfers_expired"
+            # guard itself is what keeps this quiet in practice.
             await self.bot.expireInvitesTask.coro()
 
     async def test_task_logs_and_swallows_a_failure(self):
@@ -17817,7 +18425,7 @@ class CommandDelegationTests(BotModuleTestCase):
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "teamTransferHelper", mock):
             await self._command("team transfer").callback(ctx, "Red", target)
-        mock.assert_awaited_once_with(ctx, "Red", target)
+        mock.assert_awaited_once_with(ctx, "Red", target, False)
 
     async def test_team_invite_delegates(self):
         ctx = self._ctx()

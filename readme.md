@@ -1014,22 +1014,45 @@ declining is just deleting the pending `duels` row outright, no refund
 needed. A challenge left unanswered entirely still doesn't sit forever
 either - see "Pending invites expire" below.
 
+`DuelAcceptView`'s third button, Cancel challenge
+(`_handleDuelRetractClick`), is the challenger's own side of Decline -
+retracting a challenge they regret sending, mirroring
+`TeamInviteAcceptView`'s own Cancel invite button - rather than leaving it
+for the target to either accept or decline. Deliberately a distinct
+`custom_id` (`shockwave:duel:cancel_challenge`) from `DuelResultView`'s
+"Cancel Duel" (`shockwave:duel:cancel`): the two apply at different
+stages - before acceptance, when nothing's escrowed yet, versus after,
+when gold's actually at stake and a refund is involved. Same single-click
+shape as Decline (no confirm step, since nothing's escrowed yet to make a
+double-click dangerous), and the same `_clearMessageButtons` call
+afterward to strip the now-defunct Accept/Decline/Cancel buttons off the
+original challenge message.
+
+`challengeDuelHelper` also refuses a second challenge against someone the
+caller already has a `PENDING_ACCEPT` duel against in the same guild,
+pointing them at Cancel challenge instead of just quietly creating a
+second, independent pending duel the way it used to. `teamInviteHelper`
+gets the same treatment for the same reason - see "Persistent teams"
+below.
+
 ### Pending invites expire
 
-`/team invite` and `/wager against` both post a persistent view
-(`timeout=None`), so neither one's Accept/Decline buttons ever go stale on
-their own the way a short-lived confirm view's `on_timeout` does - a
-challenge or invite nobody ever answers would otherwise sit there
-indefinitely. `expireStalePendingInvites` cleans both up after
-`PENDING_INVITE_EXPIRY_SECONDS` (24 hours): any `team_invites` row past
-that age is deleted outright, and any `duels` row still `PENDING_ACCEPT`
-(never accepted) past that age is deleted too. An *accepted* duel
-(`AWAITING_RESULT`) is never touched by this regardless of age - real gold
-is already escrowed on it by then, the same reason Decline only exists for
-the `PENDING_ACCEPT` state in the first place. A `createdAt` of `NULL` (a
-row from before that column existed) counts as already expired rather than
-guessing how old it actually is, the same convention `betting_opened_at`
-already uses for `reconcileStaleBettingWindows`.
+`/team invite`, `/wager against`, and `/team transfer` (without `force`)
+all post a persistent view (`timeout=None`), so none of their
+Accept/Decline/Cancel buttons ever go stale on their own the way a
+short-lived confirm view's `on_timeout` does - a challenge, invite, or
+transfer offer nobody ever answers would otherwise sit there indefinitely.
+`expireStalePendingInvites` cleans all three up after
+`PENDING_INVITE_EXPIRY_SECONDS` (24 hours): any `team_invites` or
+`team_transfers` row past that age is deleted outright, and any `duels`
+row still `PENDING_ACCEPT` (never accepted) past that age is deleted too.
+An *accepted* duel (`AWAITING_RESULT`) is never touched by this regardless
+of age - real gold is already escrowed on it by then, the same reason
+Decline only exists for the `PENDING_ACCEPT` state in the first place. A
+`createdAt` of `NULL` (a row from before that column existed) counts as
+already expired rather than guessing how old it actually is, the same
+convention `betting_opened_at` already uses for
+`reconcileStaleBettingWindows`.
 
 This runs as a periodic sweep (`bot.py`'s `expireInvitesTask`, a
 `@tasks.loop(hours=1)`, started from `on_ready` alongside `rotateStatus`
@@ -1038,12 +1061,13 @@ way `_bettingTimer` does for an open betting window. A betting window
 needs to close at a precise moment; a 24-hour invite deadline doesn't, so
 an hourly sweep is simpler and needs no `reconcileStaleBettingWindows`-style
 reconciliation on restart - nothing was ever counting down in memory to
-begin with. Neither `team_invites` nor a `PENDING_ACCEPT` `duels` row ever
-gets its message edited or its buttons stripped once expired, the same way
-Accept/Decline already don't touch the message afterward either (see
-`_handleTeamInviteDeclineClick`'s own comment) - a stale button simply
-becomes a no-op "isn't an invite for you, or it's already been used"/"this
-challenge is no longer pending" reply on the next click, rather than
+begin with. None of `team_invites`, `team_transfers`, or a
+`PENDING_ACCEPT` `duels` row ever gets its message edited or its buttons
+stripped once expired, the same way Accept/Decline already don't touch
+the message afterward either (see `_handleTeamInviteDeclineClick`'s own
+comment) - a stale button simply becomes a no-op "isn't an invite for
+you, or it's already been used"/"this challenge is no longer pending"/
+"this transfer is no longer pending" reply on the next click, rather than
 Shockwave going back to edit a message that could be long gone from the
 channel's history by then.
 
@@ -1159,6 +1183,37 @@ either way; with betting disabled it just skips the separate "betting is
 open" message and the countdown timer, never creating a `_bettingTimer`
 task. `reconcileStaleBettingWindows` skips a betting-disabled guild the
 same way, since there's never a timer to resume for one.
+
+### Cancelling your own `/wager team` bet
+
+`wagerHelper`/`_placeTournamentWager`'s own bet confirmation carries a
+`WagerCancelView` with one "Cancel bet" button, so a misclick (wrong team,
+wrong amount) doesn't have to sit locked in until the game or match
+actually resolves - before this, `wagers`/`tournament_wagers`' own
+one-bet-per-player uniqueness meant there was no way to fix a bad bet at
+all short of waiting it out. Unlike the persistent views elsewhere in this
+file, `WagerCancelView` isn't registered via `client.add_view`: it only
+needs to stay clickable for as long as betting could plausibly still be
+open (`WAGER_CANCEL_VIEW_TIMEOUT_SECONDS`, 600s, matching `/set
+betting-timer`'s own max), so surviving a restart isn't worth the
+`custom_id`-routing machinery the genuinely long-lived views need.
+`guild_id`/`user_id`/`match_id` are captured on the view instance at
+construction instead of re-derived from the interaction, since a
+non-persistent view is never reconstructed from a bare `custom_id` the way
+a persistent one is. `match_id` is `None` for a bet on the current game, or
+a tournament match's own id for one placed via `match_id=`.
+
+`_handleWagerCancelClick` still re-checks everything server-side rather
+than trusting the button's own clickability: only the original bettor can
+cancel (`interaction.user.id` against the id captured on the view, not
+just whoever's looking at the message), and only while betting's actually
+still open (`servers.betting_state == "OPEN"` for the current game, or
+`tournament_matches.state != "RESOLVED" and not bettingClosed` for a
+match) - a click past that point gets a friendly "already closed" message
+instead of silently doing nothing. The lookup, delete, and refund all
+happen with no `await` in between, the same "nothing async between
+finding a row and deleting it" discipline `_handleTeamInviteAcceptClick`
+already documents, so a rapid double-click can't refund twice.
 
 ### Admin resets and permissions
 
@@ -1293,6 +1348,37 @@ accepted, just run immediately instead of waiting on a click. With
 `force`, there's no posted invite, no Accept button, and no `team_invites`
 row for anyone to accept later.
 
+`TeamInviteAcceptView`'s third button, Cancel invite, is the odd one out
+of the three: Accept/Decline are each scoped to
+`targetId=interaction.user.id` (one invitee's own response), but Cancel is
+the captain/admin side retracting the whole call at once - every
+still-pending invitee's row for that message, not just one of them. Before
+this, an invite sent to the wrong person had no way back short of just
+waiting out the (now 24-hour, see "Pending invites expire" above) expiry.
+`_handleTeamInviteCancelClick` gates on the same captain-or-`manage_guild`
+check `teamRemoveHelper` uses, deletes every `team_invites` row for
+`interaction.message.id` in one statement, and edits the original message
+in place (`content=`, `view=None`) rather than posting a new one alongside
+it the way Accept/Decline do - since Cancel invalidates the invite
+entirely rather than just answering it, leaving the old Accept/Decline
+buttons live underneath would be actively misleading.
+
+`teamInviteHelper` also skips (rather than re-inviting) anyone who
+already has an outstanding `team_invites` row for the same team, with its
+own "already has a pending invite" reason alongside the existing "bot"/
+"already on the team" skips - re-running `/team invite` on someone who
+hasn't answered yet used to just post a second, entirely independent
+invite message rather than pointing back at the first one. `force` builds
+its own `already_invited_ids` as an empty set rather than querying at all,
+since it writes no `team_invites` row in the first place and skips the
+whole mechanism the check exists to protect - re-checking there would
+wrongly block an admin from force-adding someone who happens to have one
+outstanding. `challengeDuelHelper` gets the same treatment for the exact
+same reason: a `SELECT 1 FROM duels WHERE ... state='PENDING_ACCEPT'` check
+for that same (challenger, target) pair before ever touching gold, since
+before this a second `/wager against` call against someone you'd already
+challenged just quietly created a second, independent pending duel.
+
 `/team remove` (`teamRemoveHelper`) is the captain/admin counterpart to
 `/team leave`, symmetric with how `force` is the captain/admin counterpart
 to a normal accepted invite: before this, the only way off a roster was
@@ -1312,11 +1398,27 @@ want the team gone entirely, rather than ever leaving a team with no one
 `isTeamCaptain` recognizes.
 
 `/team transfer` is that hand-off command: the team's captain, or anyone
-with Manage Server, points it at another player already on the roster, and
-`team.set_captain(...)` swaps who holds it. `Team.set_captain` itself
-enforces "captain must be a roster player," so the new captain has to
-already be rostered. Inviting them first with `/team invite` is on the
-caller, not something this does automatically.
+with Manage Server, points it at another player already on the roster.
+Captaincy doesn't move immediately, though - the offered player gets a
+press-to-accept prompt (`TeamTransferAcceptView`, Accept/Decline/Cancel
+transfer, the exact same three-button shape `TeamInviteAcceptView` uses)
+first, backed by its own `team_transfers` table (one row per pending
+offer, `guildId`+`teamId` unique - a second offer while one's already
+outstanding is refused, pointed at Cancel transfer instead of creating a
+competing one). Taking on a team's admin responsibilities (voice channel,
+roster, renaming, deleting it) isn't something that should just happen to
+someone, the same reasoning `/team invite` already applies to joining a
+roster in the first place. `_handleTeamTransferAcceptClick`'s
+`team.set_captain(...)` (Accept) is what actually swaps who holds it;
+`Team.set_captain` itself still enforces "captain must be a roster
+player," so the new captain has to already be rostered - inviting them
+first with `/team invite` is on the caller, not something this does
+automatically. `force` (Manage Server only, same gate `/team invite`'s
+own `force` uses) skips the whole thing and transfers immediately, no
+`team_transfers` row ever written, for an admin who needs it done now
+rather than waiting on a response. An offer nobody answers expires after
+24 hours, same sweep as `team_invites`/`duels` - see "Pending invites
+expire" above.
 
 `/make-teams saved` is the shortcut: it loads two persistent teams straight
 into `team1`/`team2` so a casual or ranked game can start immediately, without
@@ -2026,6 +2128,25 @@ groups fields the same way `/shop browse` groups by item type. Veteran and On Fi
 get their own field, tiers listed lowest-to-highest, and everything else lands
 in a shared `__Other__` field.
 
+Each locked line also shows a `(current/threshold)` fraction where one's
+meaningful, e.g. "Place 25+ total bets. (12/25)" - before this, a locked
+achievement was just its flat requirement text with no sense of how close
+the caller actually was. `_achievementProgress` gathers the same
+`economy`/`game_stats`/team-count/shop-purchase-count snapshot
+`_checkAchievements` itself reads, reused rather than re-derived so the
+two can't quietly drift apart, and returns it as `{key: (current,
+threshold)}` for every achievement that has a plain accumulating count
+behind it: the Veteran and On Fire ladders (`game_wins`/
+`current_win_streak`, scoped to whichever game `/set game` currently
+tracks, matching `_checkAchievements`' own default), Iron Will
+(`game_losses`), Frequent Bettor (`bet_wins + bet_losses`), Team Player
+(rostered-team count), and Big Spender (shop-purchase count). Left out
+entirely - just the description, no fraction - for anything binary or
+event-tied rather than accumulating: First Blood, The Captain, High
+Roller, Jackpot, Giant Slayer, Tournament Champion, Onboarded. Also `None`
+once an achievement's actually earned, since there's nothing left to show
+progress toward.
+
 ### Team cards
 
 `/team stats` gets the same card treatment as `/stats`, via its own
@@ -2167,6 +2288,7 @@ round that never got a row as resolved once play has moved past it.
 | `team_game_stats` | one row per (guild, team, game) | a persistent team's win/loss record, scoped per game the same way `game_stats` scopes a player's - split out of `teams`' embedded `wins`/`losses` since a team's record shouldn't mix results from different games |
 | `tournaments` | one row per guild | name, team/bracket size, elimination type, registered teams, the winners bracket, and (double elimination only) the losers bracket |
 | `team_invites` | pending `/team invite`s | one row per invitee per invite. Several invitees from one `/team invite` call share a `messageId`, each accepting independently. `createdAt` backs `expireStalePendingInvites`' 24-hour cleanup |
+| `team_transfers` | pending `/team transfer` offers | at most one per `(guildId, teamId)`; a second offer while one's outstanding is refused rather than creating a competing row. No row at all for a `force` transfer. `createdAt` backs the same 24-hour cleanup |
 | `tournament_matches` | every tournament match ever played | which bracket (`bracketType`: winners/losers/finals) and round/bracket-node it's for, its two teams, state, (once decided) its winner, `bettingClosed`, and `game` (which game it was played under, stamped at creation time) |
 | `player_role_preferences` | each player's liked/disliked roles from `/setup` | one row per (guild, player, role), `preference` is `like` or `dislike` |
 

@@ -622,6 +622,17 @@ cursor.execute(
 # invite sent before this column existed - treated as already expired
 # rather than guessing how long ago it actually went out.
 ensure_column("team_invites", "createdAt", "INTEGER")
+# At most one pending /team transfer per team (guildId, teamId) - a second
+# transfer request while one's already outstanding is refused rather than
+# creating a competing one. Not `force`'s concern at all: force skips this
+# table entirely, transferring immediately with no row ever written, the
+# same way team_invites' force path never gets a row either. createdAt
+# backs the same expireStalePendingInvites cleanup team_invites/duels use.
+cursor.execute(
+    "CREATE TABLE IF NOT EXISTS team_transfers("
+    "id INTEGER PRIMARY KEY AUTOINCREMENT, guildId, channelId, messageId, "
+    "teamId, teamName, fromCaptainId, fromCaptainName, toCaptainId, toCaptainName, createdAt)"
+)
 # One row per tournament match ever played. /tournament start creates a
 # batch of these per round (sequential mode: one at a time; simultaneous
 # mode: all at once), each keyed by its own id so /set correct-winner can
@@ -993,11 +1004,12 @@ async def backupDatabaseTask():
 @tasks.loop(hours=1)
 async def expireInvitesTask():
     try:
-        invites_expired, duels_expired = helperObj.expireStalePendingInvites()
-        if invites_expired or duels_expired:
+        invites_expired, duels_expired, transfers_expired = helperObj.expireStalePendingInvites()
+        if invites_expired or duels_expired or transfers_expired:
             logger.info(
-                "Expired %d stale team invite(s) and %d stale duel challenge(s).",
-                invites_expired, duels_expired,
+                "Expired %d stale team invite(s), %d stale duel challenge(s), and %d stale "
+                "captaincy transfer(s).",
+                invites_expired, duels_expired, transfers_expired,
             )
     except Exception:
         logger.exception("Expiring stale invites/challenges failed.")
@@ -1077,6 +1089,7 @@ def registerPersistentViews():
     client.add_view(helper.TournamentMatchReportView(helperObj))
     client.add_view(helper.RosterActionView(helperObj))
     client.add_view(helper.TeamInviteAcceptView(helperObj))
+    client.add_view(helper.TeamTransferAcceptView(helperObj))
     client.add_view(helper.StatsView(helperObj))
     client.add_view(helper.TeamStatsView(helperObj))
     client.add_view(helper.LeaderboardPagingView(helperObj))
@@ -1621,7 +1634,7 @@ COMMAND_HELP = {
     "set game": "Sets which game this server's next roster tracks elo and stats for. Type a brand new name to start tracking it, or pick a previously-used one from the autocomplete list. Elo, game record, and ranked record are all tracked per game, so switching games doesn't touch another game's numbers. Only affects the next roster formed; whatever's currently in progress keeps resolving under whichever game it actually started as. League is the default, and the only game with role-based team balancing. Requires the Manage Server permission.",
     "clear teams": "Wipes the current teams/draft so you can start a fresh session. Requires the Manage Server permission.",
     "clear channels": "Wipes the current teams/draft, and also forgets the saved team channel names. Requires the Manage Server permission.",
-    "clear tournament": "Wipes the current teams/draft, and deletes this server's tournament entirely: bracket, registrations, match history. Can't be undone. Requires the Manage Server permission.",
+    "clear tournament": "Wipes the current teams/draft, and deletes this server's tournament entirely: bracket, registrations, match history. Can't be undone. Confirmation required. Requires the Manage Server permission.",
     "clear elo": "Wipes the current teams/draft, and resets every player's elo back to this server's default elo, or just one player if user is set. Confirmation required. Requires the Manage Server permission.",
     "clear economy": "Wipes the current teams/draft, and resets every player's balance/elo/record/gold entirely for this server, or just one player if user is set. Confirmation required. Requires the Manage Server permission.",
     "clear achievements": "Wipes the current teams/draft, and resets earned achievements for every player, or just one player if user is set. Confirmation required. Requires the Manage Server permission.",
@@ -1631,8 +1644,8 @@ COMMAND_HELP = {
     "make-teams saved": "Loads two persistent teams straight into a casual or ranked game, skipping the random-split-or-draft step. Posts a roster with the same Start/Start (no move) buttons as /make-teams random to start it.",
     "make-teams repeat": "Re-posts the exact same two teams from whichever of /make-teams random, /make-teams draft, or /make-teams saved ran last, instead of drawing a fresh random split or captains draft. Stays ranked if the last game was ranked, casual if it was casual. Cancels an actively in-progress game from those same teams first (refund + move back) if there is one.",
     "notify": "DMs a one-time invite link to your voice channel, to one member, or to everyone holding a given role. message optionally replaces the default invite text; either way it's signed \"Sent by\" you. You must be sitting in a voice channel yourself to run this.",
-    "wager team": "Bets gold on one team winning the current game, or on a specific tournament match if you give a match id. Only while betting is open, one bet per player per game/match.",
-    "wager against": "Challenges another player to a heads-up gold wager, separate from team-game betting, no active game required.",
+    "wager team": "Bets gold on one team winning the current game, or on a specific tournament match if you give a match id. Only while betting is open, one bet per player per game/match. Cancel bet on your bet confirmation refunds it, as long as betting's still open.",
+    "wager against": "Challenges another player to a heads-up gold wager, separate from team-game betting, no active game required. Cancel challenge on the posted challenge lets you retract it before it's accepted. Refuses a second challenge against someone you already have a pending one against - cancel it first if you want to send a different one.",
     "daily": "Claims 1000 free gold. Once per calendar day, per player.",
     "give": "Gives some of your gold to another player. Immediate, no confirmation from either side needed.",
     "current-game": "Shows which game this server is currently tracking (see /set game).",
@@ -1640,7 +1653,7 @@ COMMAND_HELP = {
     "card-set": "Equips your unlocked trading-card title, color scheme, and/or font in one go (see /stats' Card button); set any combination of the three at once. Reaching Diamond, Master, Grandmaster, or Challenger permanently unlocks that tier's own title and scheme, even if you derank afterward; \"Default\" is always available for both. Fonts are purchased from /shop buy.",
     "shop preview": "Shows every option for one customization type (Logos, Card Titles, Color Schemes, or Fonts) in a single gallery image (a few images only if there are too many to fit), regardless of what you've personally unlocked yet.",
     "shop browse": "Browse every trading-card title, color scheme, and font purchasable with gold, with a ✅ next to anything you already own. Sort: Price / Sort: Owned buttons under the listing re-sort each category (Ascending/Descending toggle which way) without needing to re-run the command.",
-    "achievements": "Browse every gameplay achievement, what it takes to earn it, and whether you already have. Earning one unlocks its title for /card-set and posts a one-time announcement in the channel.",
+    "achievements": "Browse every gameplay achievement, what it takes to earn it, whether you already have, and your current progress toward the ones you don't. Earning one unlocks its title for /card-set and posts a one-time announcement in the channel.",
     "shop buy": "Purchases a trading-card cosmetic with gold, permanently unlocking it for /card-set. Refuses if you already own it or can't afford it.",
     "leaderboard": "Ranks the server by a stat, including ranked-only and casual-only wins/losses/win rate. Omit filter for an elo-sorted overview. Players with a 0W-0L record in the selected stat's category (or who've never played a game at all, for the overview and elo views) are left off, so a currency-based stat like balance still shows everyone. Buttons page through the results, and Ascending/Descending buttons flip the sort direction without re-running the command. Press Cards to flip through each player's full stats card one at a time instead, same as /team lookup but ranked; a Card button on that view swaps the current player's stats card for their actual trading card, and List brings you back to the ranked list.",
     "team create": "Creates a persistent team with you as its captain, or captain as its captain if given.",
@@ -1648,8 +1661,8 @@ COMMAND_HELP = {
     "team set": "Sets a persistent team's voice channel and/or logo, any combination in one call. new_voice_channel creates a fresh one named after the team. The team's captain, or anyone with Manage Server, can do this.",
     "team rename": "Renames a persistent team. The new name can't already belong to another team in this server. The team's captain, or anyone with Manage Server, can do this.",
     "team delete": "Deletes a persistent team: its roster, record, and any pending invites go with it. The team's captain, or anyone with Manage Server, can do this; confirmation required. Doesn't affect a tournament it's already registered in.",
-    "team transfer": "Hands off a persistent team's captaincy to another player already on its roster. The team's captain, or anyone with Manage Server, can do this.",
-    "team invite": "Invites one or more members (up to 5 per call) to a team. Each invitee must accept before joining. The team's captain, or anyone with Manage Server, can do this. force (Manage Server only) skips the invitee's confirmation and adds them straight to the roster.",
+    "team transfer": "Offers a persistent team's captaincy to another player already on its roster; they have to press Accept before it actually moves, or Decline to turn it down. Cancel transfer on the posted offer retracts it. The team's captain, or anyone with Manage Server, can start this. force (Manage Server only) transfers immediately, skipping their confirmation.",
+    "team invite": "Invites one or more members (up to 5 per call) to a team. Each invitee must accept before joining. The team's captain, or anyone with Manage Server, can do this. Skips anyone who already has a pending invite to the same team instead of sending a second one. force (Manage Server only) skips the invitee's confirmation and adds them straight to the roster. Cancel invite on the posted invite retracts it for everyone still pending, same captain/Manage Server permission.",
     "team remove": "Removes a player from a team's roster who won't (or can't) leave themselves. The team's captain, or anyone with Manage Server, can do this. Can't be used on the captain - use /team transfer or /team delete instead.",
     "team leave": "Removes you from a persistent team's roster. Anyone rostered can do this to themselves, no permission needed, except the team's captain, who has to use /team delete instead since there's no one to hand the captaincy to.",
     "team lookup": "Lists the teams you're a rostered player on in this server, with paging to flip through each one's full stats card.",
@@ -2341,15 +2354,16 @@ async def teamDelete(ctx, team: str):
 
 @teamGroup.command(
     name="transfer",
-    description="Hand off captaincy of a persistent team you captain to another player on its roster"
+    description="Offer captaincy of a persistent team you captain to another player on its roster"
 )
 @app_commands.describe(
     team="Name of the team to transfer",
-    member="Who to make the new captain; must already be on the team's roster",
+    member="Who to offer the captaincy to; must already be on the team's roster",
+    force="Manage Server only: transfers immediately, skipping the new captain's own confirmation",
 )
 @app_commands.autocomplete(team=myCaptainedTeamAutocomplete)
-async def teamTransfer(ctx, team: str, member: discord.Member):
-    await helperObj.teamTransferHelper(ctx, team, member)
+async def teamTransfer(ctx, team: str, member: discord.Member, force: bool = False):
+    await helperObj.teamTransferHelper(ctx, team, member, force)
 
 
 @teamGroup.command(
