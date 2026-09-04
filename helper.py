@@ -305,6 +305,15 @@ SHOP_SORT_TIMEOUT_SECONDS = 180
 # ...and for confirming a reported duel result (see ConfirmDuelResultView)
 # before gold actually changes hands.
 DUEL_CONFIRM_TIMEOUT_SECONDS = 30
+# How long /wager team's own "Cancel bet" button (see WagerCancelView)
+# stays clickable. Not a confirm/cancel dialog like the ones above - just
+# the button's own lifetime - so it's set to /set betting-timer's own max
+# (600s) rather than a short 30s window: a bet should stay cancellable for
+# as long as betting could plausibly still be open. Server-side (see
+# _handleWagerCancelClick) is what actually decides whether betting's
+# still open on a given click, this just bounds how long Discord itself
+# keeps the button interactive.
+WAGER_CANCEL_VIEW_TIMEOUT_SECONDS = 600
 
 # /stats: press to toggle the shown avatar between this server's own
 # per-server profile picture (if the player has set one, same as the
@@ -1948,7 +1957,11 @@ class RosterActionView(discord.ui.View):
 # button covers every invitee on the message (see
 # _handleTeamInviteAcceptClick). The DB lookup itself, scoped to
 # targetId=interaction.user.id, is what tells several different invited
-# members' clicks apart, not anything about the button or view.
+# members' clicks apart, not anything about the button or view. Cancel is
+# the odd one out of the three: unlike Accept/Decline (each scoped to
+# whichever invitee clicked), it's for the team's own captain/admin side -
+# retracting the whole invite, every remaining invitee on the message at
+# once, not just one of them (see _handleTeamInviteCancelClick).
 class TeamInviteAcceptView(discord.ui.View):
     def __init__(self, helperObj):
         super().__init__(timeout=None)
@@ -1963,6 +1976,41 @@ class TeamInviteAcceptView(discord.ui.View):
     )
     async def decline(self, interaction, button):
         await self.helperObj._handleTeamInviteDeclineClick(interaction)
+
+    @discord.ui.button(
+        label="Cancel invite", style=discord.ButtonStyle.danger, custom_id="shockwave:team_invite:cancel"
+    )
+    async def cancelInvite(self, interaction, button):
+        await self.helperObj._handleTeamInviteCancelClick(interaction)
+
+
+# /team transfer's own posted message, same persistent shape as
+# TeamInviteAcceptView and for the same reason: an offer can sit
+# unanswered indefinitely. Accept/Decline are scoped to the one player
+# being offered the captaincy (toCaptainId), Cancel transfer to whoever's
+# captain right now (or a Manage Server admin) - the exact same
+# three-button shape TeamInviteAcceptView already uses, just for handing
+# off captaincy instead of joining a roster.
+class TeamTransferAcceptView(discord.ui.View):
+    def __init__(self, helperObj):
+        super().__init__(timeout=None)
+        self.helperObj = helperObj
+
+    @discord.ui.button(label="Accept", style=discord.ButtonStyle.success, custom_id="shockwave:team_transfer:accept")
+    async def accept(self, interaction, button):
+        await self.helperObj._handleTeamTransferAcceptClick(interaction)
+
+    @discord.ui.button(
+        label="Decline", style=discord.ButtonStyle.secondary, custom_id="shockwave:team_transfer:decline"
+    )
+    async def decline(self, interaction, button):
+        await self.helperObj._handleTeamTransferDeclineClick(interaction)
+
+    @discord.ui.button(
+        label="Cancel transfer", style=discord.ButtonStyle.danger, custom_id="shockwave:team_transfer:cancel"
+    )
+    async def cancelTransfer(self, interaction, button):
+        await self.helperObj._handleTeamTransferCancelClick(interaction)
 
 
 # /stats' own posted message, persistent (custom_id, timeout=None,
@@ -2336,6 +2384,29 @@ class ShopSortView(discord.ui.View):
                 pass
 
 
+# /wager team's own bet-confirmation message. Not persistent (no
+# custom_id, not registered via client.add_view): a bet only needs
+# cancelling for as long as betting could still be open
+# (WAGER_CANCEL_VIEW_TIMEOUT_SECONDS), so surviving a restart isn't worth
+# the same custom_id-routing machinery the genuinely long-lived views
+# above need. guild_id/user_id/match_id are captured on self at
+# construction instead, since (unlike a persistent view) this one's never
+# reconstructed from a custom_id alone. match_id is None for a bet on the
+# current game, or a tournament match's own id for one placed via
+# match_id= (see wagerHelper/_placeTournamentWager).
+class WagerCancelView(discord.ui.View):
+    def __init__(self, helperObj, guild_id, user_id, match_id=None):
+        super().__init__(timeout=WAGER_CANCEL_VIEW_TIMEOUT_SECONDS)
+        self.helperObj = helperObj
+        self.guild_id = guild_id
+        self.user_id = user_id
+        self.match_id = match_id
+
+    @discord.ui.button(label="Cancel bet", style=discord.ButtonStyle.danger)
+    async def cancel(self, interaction, button):
+        await self.helperObj._handleWagerCancelClick(interaction, self.guild_id, self.user_id, self.match_id)
+
+
 # /wager against's challenge message's own buttons, persistent (custom_id,
 # timeout=None, registered once via client.add_view) since a challenge can
 # sit unanswered indefinitely, same reasoning as WinnerReportView. A
@@ -2346,7 +2417,12 @@ class ShopSortView(discord.ui.View):
 # mirrors TeamInviteAcceptView's own Accept/Decline pair: the challenged
 # player can make an unwanted challenge go away instead of it just sitting
 # there forever (no gold is ever escrowed until Accept, so there's nothing
-# to refund on a decline).
+# to refund on a decline). Cancel challenge is the challenger's own side of
+# that same idea - retracting a challenge they regret sending, mirroring
+# TeamInviteAcceptView's Cancel invite button - distinct from
+# DuelResultView's "Cancel Duel" below (custom_id
+# shockwave:duel:cancel, note the different id), which only applies once a
+# duel's already been accepted and gold's actually at stake.
 class DuelAcceptView(discord.ui.View):
     def __init__(self, helperObj):
         super().__init__(timeout=None)
@@ -2359,6 +2435,12 @@ class DuelAcceptView(discord.ui.View):
     @discord.ui.button(label="Decline", style=discord.ButtonStyle.secondary, custom_id="shockwave:duel:decline")
     async def decline(self, interaction, button):
         await self.helperObj._handleDuelDeclineClick(interaction)
+
+    @discord.ui.button(
+        label="Cancel challenge", style=discord.ButtonStyle.danger, custom_id="shockwave:duel:cancel_challenge"
+    )
+    async def cancelChallenge(self, interaction, button):
+        await self.helperObj._handleDuelRetractClick(interaction)
 
 
 # The accepted duel's own result-report message's buttons, same
@@ -8413,12 +8495,27 @@ class helpers():
             unique_members.append(member)
 
         rostered_ids = {player.get_id() for player in team.get_players()}
+        # force skips the whole invite mechanism entirely (no team_invites
+        # row ever gets written for it), so an existing pending invite is
+        # irrelevant to it - re-checking here would wrongly block an admin
+        # from force-adding someone who happens to already have one
+        # outstanding.
+        if force:
+            already_invited_ids = set()
+        else:
+            self.cursor.execute(
+                "SELECT targetId FROM team_invites WHERE guildId=? AND teamId=?", (guild_id, team_id)
+            )
+            already_invited_ids = {row[0] for row in self.cursor.fetchall()}
+
         valid, skipped = [], []
         for member in unique_members:
             if member.bot:
                 skipped.append((member, "bot"))
             elif member.id in rostered_ids:
                 skipped.append((member, "already on the team"))
+            elif member.id in already_invited_ids:
+                skipped.append((member, "already has a pending invite"))
             else:
                 valid.append(member)
 
@@ -8427,6 +8524,11 @@ class helpers():
                 member, reason = skipped[0]
                 if reason == "bot":
                     await ctx.response.send_message("You can't invite a bot to a team.", ephemeral=True)
+                elif reason == "already has a pending invite":
+                    await ctx.response.send_message(
+                        f"{member.display_name} already has a pending invite to **{team_name}**.",
+                        ephemeral=True,
+                    )
                 else:
                     await ctx.response.send_message(
                         f"{member.display_name} is already on **{team_name}**.", ephemeral=True
@@ -8892,17 +8994,24 @@ class helpers():
 
         await ctx.response.send_message(f"**{current_name}** has been renamed to **{new_name}**.")
 
-    # /team transfer: hands off a persistent team's captaincy to another
-    # player already on its roster. The team's own captain, or any
-    # member with the Manage Server permission, same "check
-    # manage_guild by hand" gate /team rename and /team delete both
-    # use. set_captain() itself enforces "captain must be a roster
-    # player" (see TourneyClasses.Team), so the new captain has to
-    # already be rostered. Inviting them first is on the caller, not
-    # something this quietly does for them. This is what /team leave's
-    # own "you're the captain, there's nobody to hand it to" block
-    # needed to exist before a captain could ever use it.
-    async def teamTransferHelper(self, ctx, team_name, new_captain):
+    # /team transfer: offers a persistent team's captaincy to another
+    # player already on its roster, same "check manage_guild by hand"
+    # gate /team rename and /team delete both use for who can even start
+    # this. Doesn't move captaincy immediately: the new captain gets a
+    # press-to-accept prompt (TeamTransferAcceptView), the exact same
+    # shape /team invite already uses, since taking on a team's admin
+    # responsibilities (voice channel, roster, renaming, deleting it)
+    # isn't something that should just happen to someone. force (Manage
+    # Server only, same gate /team invite's own force uses) skips all of
+    # that and transfers immediately, for an admin who needs it done now
+    # rather than waiting on someone's response. set_captain() itself
+    # still enforces "captain must be a roster player" (see
+    # TourneyClasses.Team) either way, so the new captain has to already
+    # be rostered - inviting them first is on the caller, not something
+    # this quietly does for them. This is what /team leave's own "you're
+    # the captain, there's nobody to hand it to" block needed to exist
+    # before a captain could ever use it.
+    async def teamTransferHelper(self, ctx, team_name, new_captain, force=False):
         guild_id = ctx.guild.id
 
         result = self.getTeamRow(guild_id, team_name)
@@ -8915,6 +9024,14 @@ class helpers():
             await ctx.response.send_message(
                 f"Only **{team_name}**'s captain or a member with the Manage Server permission can "
                 "transfer it.",
+                ephemeral=True,
+            )
+            return
+
+        if force and not ctx.user.guild_permissions.manage_guild:
+            await ctx.response.send_message(
+                "Only a member with the Manage Server permission can force-transfer captaincy; "
+                "everyone else still needs the new captain's own confirmation.",
                 ephemeral=True,
             )
             return
@@ -8934,11 +9051,164 @@ class helpers():
             )
             return
 
+        if force:
+            team.set_captain(player)
+            self.updateTeamData(team_id, team)
+            await ctx.response.send_message(
+                f"**{team_name}**'s captaincy has been transferred to {new_captain.mention}; no "
+                "confirmation needed."
+            )
+            return
+
+        self.cursor.execute(
+            "SELECT 1 FROM team_transfers WHERE guildId=? AND teamId=?", (guild_id, team_id)
+        )
+        if self.cursor.fetchone() is not None:
+            await ctx.response.send_message(
+                f"**{team_name}** already has a pending captaincy transfer. Cancel it first if you "
+                "want to send a different one.",
+                ephemeral=True,
+            )
+            return
+
+        await ctx.response.send_message(
+            f"{new_captain.mention}, {ctx.user.mention} wants to hand you the captaincy of "
+            f"**{team_name}**! Press Accept below to take it.",
+            view=TeamTransferAcceptView(self),
+        )
+        msg = await ctx.original_response()
+
+        self.cursor.execute(
+            "INSERT INTO team_transfers"
+            "(guildId, channelId, messageId, teamId, teamName, fromCaptainId, fromCaptainName, "
+            "toCaptainId, toCaptainName, createdAt) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                guild_id, ctx.channel.id, msg.id, team_id, team_name, ctx.user.id, ctx.user.name,
+                new_captain.id, new_captain.name, int(time.time()),
+            )
+        )
+        self.db.commit()
+
+    # TeamTransferAcceptView's Accept button callback. Deletes the pending
+    # row before anything async below, the same "nothing async between
+    # finding a row and deleting it" discipline _handleTeamInviteAcceptClick
+    # documents, so a rapid double-click can't transfer captaincy twice.
+    async def _handleTeamTransferAcceptClick(self, interaction):
+        guild_id = interaction.guild_id
+        if guild_id is None:
+            return
+
+        self.cursor.execute(
+            "SELECT id, teamId, teamName, toCaptainId FROM team_transfers WHERE guildId=? AND messageId=?",
+            (guild_id, interaction.message.id)
+        )
+        row = self.cursor.fetchone()
+        if row is None:
+            await interaction.response.send_message("This transfer is no longer pending.", ephemeral=True)
+            return
+        transfer_id, team_id, team_name, to_captain_id = row
+
+        if interaction.user.id != to_captain_id:
+            await interaction.response.send_message(
+                "Only the player being offered the captaincy can accept it.", ephemeral=True
+            )
+            return
+
+        self.cursor.execute("DELETE FROM team_transfers WHERE id=?", (transfer_id,))
+        self.db.commit()
+
+        team = self.getTeamById(guild_id, team_id)
+        if team is None:
+            return
+        player = next((p for p in team.get_players() if p.get_id() == to_captain_id), None)
+        if player is None:
+            # Left the roster (or was removed) between the offer going out
+            # and this accept - nothing left to actually transfer.
+            await interaction.response.send_message(
+                f"You're no longer on **{team_name}**'s roster, so there's nothing to accept.",
+                ephemeral=True,
+            )
+            return
+
         team.set_captain(player)
         self.updateTeamData(team_id, team)
 
-        await ctx.response.send_message(
-            f"**{team_name}**'s captaincy has been transferred to {new_captain.mention}."
+        await interaction.response.send_message(
+            f"**{team_name}**'s captaincy has been transferred to {interaction.user.mention}!"
+        )
+
+    # TeamTransferAcceptView's Decline button callback. Only the offered
+    # player can press it, same as _handleTeamInviteDeclineClick; nothing
+    # was ever moved, so declining is just deleting the row.
+    async def _handleTeamTransferDeclineClick(self, interaction):
+        guild_id = interaction.guild_id
+        if guild_id is None:
+            return
+
+        self.cursor.execute(
+            "SELECT id, teamName, fromCaptainName, toCaptainId "
+            "FROM team_transfers WHERE guildId=? AND messageId=?",
+            (guild_id, interaction.message.id)
+        )
+        row = self.cursor.fetchone()
+        if row is None:
+            await interaction.response.send_message("This transfer is no longer pending.", ephemeral=True)
+            return
+        transfer_id, team_name, from_captain_name, to_captain_id = row
+
+        if interaction.user.id != to_captain_id:
+            await interaction.response.send_message(
+                "Only the player being offered the captaincy can decline it.", ephemeral=True
+            )
+            return
+
+        self.cursor.execute("DELETE FROM team_transfers WHERE id=?", (transfer_id,))
+        self.db.commit()
+
+        await interaction.response.send_message(
+            f"{interaction.user.mention} declined the captaincy of **{team_name}**. "
+            f"**{from_captain_name}** is still captain."
+        )
+
+    # TeamTransferAcceptView's Cancel transfer button callback - the
+    # current captain's (or a Manage Server admin's) own side, mirroring
+    # _handleTeamInviteCancelClick: retracting an offer before the other
+    # side has answered, rather than leaving them to accept or decline
+    # something no longer wanted. Checked against whoever's captain right
+    # now (isTeamCaptain), not just whichever captain originally sent this
+    # particular offer, so it still works correctly even if captaincy
+    # somehow changed hands some other way while this was pending.
+    async def _handleTeamTransferCancelClick(self, interaction):
+        guild_id = interaction.guild_id
+        if guild_id is None:
+            return
+
+        self.cursor.execute(
+            "SELECT id, teamId, teamName FROM team_transfers WHERE guildId=? AND messageId=?",
+            (guild_id, interaction.message.id)
+        )
+        row = self.cursor.fetchone()
+        if row is None:
+            await interaction.response.send_message("This transfer is no longer pending.", ephemeral=True)
+            return
+        transfer_id, team_id, team_name = row
+
+        team = self.getTeamById(guild_id, team_id)
+        is_captain = team is not None and self.isTeamCaptain(team, interaction.user.id)
+        if not is_captain and not interaction.user.guild_permissions.manage_guild:
+            await interaction.response.send_message(
+                f"Only **{team_name}**'s captain or a member with the Manage Server permission can "
+                "cancel this transfer.",
+                ephemeral=True,
+            )
+            return
+
+        self.cursor.execute("DELETE FROM team_transfers WHERE id=?", (transfer_id,))
+        self.db.commit()
+
+        await interaction.response.edit_message(
+            content=f"The captaincy transfer for **{team_name}** was cancelled by {interaction.user.mention}.",
+            view=None,
         )
 
     # Deletes a team's row and any pending /team invite for it (a stale
@@ -9050,6 +9320,51 @@ class helpers():
         self.db.commit()
 
         await interaction.response.send_message(f"**{target_name}** declined the invite to **{team_name}**.")
+
+    # TeamInviteAcceptView's Cancel invite button callback. Unlike Accept/
+    # Decline (each scoped to targetId=interaction.user.id, one invitee's
+    # own row), this retracts every remaining invitee's row for this
+    # message at once - the captain/admin side undoing the whole /team
+    # invite call, not any one invitee's individual response to it.
+    async def _handleTeamInviteCancelClick(self, interaction):
+        guild_id = interaction.guild_id
+        if guild_id is None:
+            return
+
+        self.cursor.execute(
+            "SELECT teamId, teamName, targetName FROM team_invites WHERE guildId=? AND messageId=?",
+            (guild_id, interaction.message.id)
+        )
+        rows = self.cursor.fetchall()
+        if not rows:
+            await interaction.response.send_message(
+                "This invite's already been used up - everyone on it has accepted, declined, or it "
+                "expired.",
+                ephemeral=True,
+            )
+            return
+
+        team_id, team_name = rows[0][0], rows[0][1]
+        team = self.getTeamById(guild_id, team_id)
+        is_captain = team is not None and self.isTeamCaptain(team, interaction.user.id)
+        if not is_captain and not interaction.user.guild_permissions.manage_guild:
+            await interaction.response.send_message(
+                f"Only **{team_name}**'s captain or a member with the Manage Server permission can "
+                "cancel this invite.",
+                ephemeral=True,
+            )
+            return
+
+        self.cursor.execute(
+            "DELETE FROM team_invites WHERE guildId=? AND messageId=?", (guild_id, interaction.message.id)
+        )
+        self.db.commit()
+
+        target_names = ", ".join(target_name for _team_id, _team_name, target_name in rows)
+        await interaction.response.edit_message(
+            content=f"Invite to **{team_name}** for {target_names} was cancelled by {interaction.user.mention}.",
+            view=None,
+        )
 
     # Builds a team's stats embed, shared by /team stats and /team
     # lookup's paging, so both stay in sync automatically. Returns
@@ -10131,7 +10446,10 @@ class helpers():
         self.db.commit()
 
         team_name = self.getRosterName(guild_id, "team1" if team == 1 else "team2", f"Team {team}")
-        await ctx.response.send_message(f"You wagered {amount} gold on **{team_name}**!")
+        await ctx.response.send_message(
+            f"You wagered {amount} gold on **{team_name}**!",
+            view=WagerCancelView(self, guild_id, user_id),
+        )
 
     # wagerHelper's match_id path. Same shape as the block above it
     # (state check, self-bet guard, balance check, duplicate-bet guard,
@@ -10191,8 +10509,78 @@ class helpers():
         team_name = discord.utils.escape_markdown(
             (team1.get_name() if team == 1 else team2.get_name()) or f"Team {team}"
         )
-        await ctx.response.send_message(f"You wagered {amount} gold on **{team_name}** for match #{match_id}!")
+        await ctx.response.send_message(
+            f"You wagered {amount} gold on **{team_name}** for match #{match_id}!",
+            view=WagerCancelView(self, guild_id, user_id, match_id=match_id),
+        )
 
+    # WagerCancelView's Cancel bet button callback, for both the current-
+    # game path (match_id is None) and the tournament-match path. Only the
+    # bettor themselves can cancel their own bet (interaction.user.id is
+    # checked, not just whoever's looking at the message), and only while
+    # betting's genuinely still open - the view's own timeout
+    # (WAGER_CANCEL_VIEW_TIMEOUT_SECONDS) just bounds how long Discord
+    # keeps the button clickable at all; this is what actually decides a
+    # given click. The lookup+delete+refund below has no `await` in
+    # between, so nothing else can interleave and double-refund a rapid
+    # double-click the way BUG-PRONE PATTERN AVOIDED comments elsewhere in
+    # this file warn about.
+    async def _handleWagerCancelClick(self, interaction, guild_id, user_id, match_id):
+        if interaction.user.id != user_id:
+            await interaction.response.send_message(
+                "Only the person who placed this bet can cancel it.", ephemeral=True
+            )
+            return
+
+        if match_id is None:
+            if self.get(guild_id, "betting_state") != "OPEN":
+                await interaction.response.send_message(
+                    "Betting's already closed, so this bet can't be cancelled anymore.", ephemeral=True
+                )
+                return
+            self.cursor.execute(
+                "SELECT amount FROM wagers WHERE guildId=? AND userId=?", (guild_id, user_id)
+            )
+            row = self.cursor.fetchone()
+            if row is None:
+                await interaction.response.send_message(
+                    "This bet's already been cancelled or resolved.", ephemeral=True
+                )
+                return
+            amount, = row
+            self.cursor.execute("DELETE FROM wagers WHERE guildId=? AND userId=?", (guild_id, user_id))
+        else:
+            self.cursor.execute(
+                "SELECT state, bettingClosed FROM tournament_matches WHERE id=? AND guildId=?",
+                (match_id, guild_id)
+            )
+            match_row = self.cursor.fetchone()
+            if match_row is None or match_row[0] == "RESOLVED" or match_row[1]:
+                await interaction.response.send_message(
+                    f"Betting's already closed for match #{match_id}, so this bet can't be cancelled anymore.",
+                    ephemeral=True,
+                )
+                return
+            self.cursor.execute(
+                "SELECT amount FROM tournament_wagers WHERE matchId=? AND userId=?", (match_id, user_id)
+            )
+            row = self.cursor.fetchone()
+            if row is None:
+                await interaction.response.send_message(
+                    "This bet's already been cancelled or resolved.", ephemeral=True
+                )
+                return
+            amount, = row
+            self.cursor.execute(
+                "DELETE FROM tournament_wagers WHERE matchId=? AND userId=?", (match_id, user_id)
+            )
+
+        self.cursor.execute(
+            "UPDATE economy SET balance = balance + ? WHERE guildId=? AND userId=?", (amount, guild_id, user_id)
+        )
+        self.db.commit()
+
+        await interaction.response.edit_message(content=f"Bet cancelled - refunded {amount} gold.", view=None)
 
     # This guild's own configured betting-window length (/set
     # betting-timer's param), or BETTING_DURATION_SECONDS for a guild
@@ -10436,19 +10824,20 @@ class helpers():
         if task is not None and not task.done():
             task.cancel()
 
-    # Deletes any /team invite or /wager against challenge nobody ever
-    # answered within PENDING_INVITE_EXPIRY_SECONDS. Called periodically
-    # (see bot.py's expireInvitesTask) rather than scheduling a real timer
-    # per invite: unlike the betting timers below, whose whole point is
-    # firing at a precise moment, a 24-hour window is long enough that a
-    # coarse periodic sweep is plenty, and it means a pending invite
-    # doesn't need any reconciliation on restart the way an in-flight
-    # betting countdown does. Only ever touches PENDING_ACCEPT duels - an
-    # accepted one has real gold escrowed and stays open indefinitely
-    # regardless of age, same as today. A NULL createdAt (a row from
-    # before that column existed) counts as already expired rather than
-    # guessing how old it actually is. Returns (invites_expired,
-    # duels_expired) purely for the caller's own logging.
+    # Deletes any /team invite, /wager against challenge, or /team transfer
+    # nobody ever answered within PENDING_INVITE_EXPIRY_SECONDS. Called
+    # periodically (see bot.py's expireInvitesTask) rather than scheduling
+    # a real timer per invite: unlike the betting timers below, whose
+    # whole point is firing at a precise moment, a 24-hour window is long
+    # enough that a coarse periodic sweep is plenty, and it means a
+    # pending invite doesn't need any reconciliation on restart the way an
+    # in-flight betting countdown does. Only ever touches PENDING_ACCEPT
+    # duels - an accepted one has real gold escrowed and stays open
+    # indefinitely regardless of age, same as today. A NULL createdAt (a
+    # row from before that column existed) counts as already expired
+    # rather than guessing how old it actually is. Returns
+    # (invites_expired, duels_expired, transfers_expired) purely for the
+    # caller's own logging.
     def expireStalePendingInvites(self):
         cutoff = int(time.time()) - PENDING_INVITE_EXPIRY_SECONDS
         self.cursor.execute(
@@ -10460,8 +10849,12 @@ class helpers():
             (cutoff,)
         )
         duels_expired = self.cursor.rowcount
+        self.cursor.execute(
+            "DELETE FROM team_transfers WHERE createdAt IS NULL OR createdAt < ?", (cutoff,)
+        )
+        transfers_expired = self.cursor.rowcount
         self.db.commit()
-        return invites_expired, duels_expired
+        return invites_expired, duels_expired, transfers_expired
 
     # Called once from on_ready. _bettingTimer's own countdown is only
     # ever an in-memory asyncio.Task (self.bettingTasks), lost on a
@@ -10918,6 +11311,18 @@ class helpers():
             )
             return
 
+        self.cursor.execute(
+            "SELECT 1 FROM duels WHERE guildId=? AND challengerId=? AND targetId=? AND state='PENDING_ACCEPT'",
+            (guild_id, challenger.id, member.id)
+        )
+        if self.cursor.fetchone() is not None:
+            await ctx.response.send_message(
+                f"You already have a pending challenge against {member.mention}. Cancel it first if you "
+                "want to send a different one.",
+                ephemeral=True,
+            )
+            return
+
         self.ensureEconomyRow(guild_id, challenger.id, challenger.name)
         balance = self.getEconomy(guild_id, challenger.id, "balance")
         if amount > balance:
@@ -11018,6 +11423,43 @@ class helpers():
 
         await interaction.response.send_message(
             f"**{target_name}** declined **{challenger_name}**'s wager."
+        )
+        await self._clearMessageButtons(interaction.message)
+
+    # DuelAcceptView's Cancel challenge button callback, the challenger's
+    # own side of _handleDuelDeclineClick right above: retracting a
+    # challenge they regret sending rather than leaving it for the target
+    # to either accept or decline. Same "no gold escrowed yet" reasoning
+    # as Decline - nothing to refund, just a row to delete.
+    async def _handleDuelRetractClick(self, interaction):
+        guild_id = interaction.guild_id
+        if guild_id is None:
+            return
+
+        self.cursor.execute(
+            "SELECT id, challengerId, challengerName, targetName "
+            "FROM duels WHERE guildId=? AND messageId=? AND state='PENDING_ACCEPT'",
+            (guild_id, interaction.message.id)
+        )
+        row = self.cursor.fetchone()
+        if row is None:
+            await interaction.response.send_message(
+                "This challenge is no longer pending.", ephemeral=True
+            )
+            return
+        duel_id, challenger_id, challenger_name, target_name = row
+
+        if interaction.user.id != challenger_id:
+            await interaction.response.send_message(
+                "Only the challenger can cancel this.", ephemeral=True
+            )
+            return
+
+        self.cursor.execute("DELETE FROM duels WHERE id=?", (duel_id,))
+        self.db.commit()
+
+        await interaction.response.send_message(
+            f"**{challenger_name}** cancelled the challenge against **{target_name}**."
         )
         await self._clearMessageButtons(interaction.message)
 
@@ -13004,21 +13446,63 @@ class helpers():
         await ctx.response.send_message(embed=embed, view=view)
         view.message = await ctx.original_response()
 
+    # {key: (current, threshold)} for every achievement that has a plain
+    # numeric progress toward it - the same snapshot _checkAchievements
+    # itself gathers to decide who's newly qualified, reused here instead
+    # of re-deriving it, so the two can't quietly drift apart. Left out
+    # entirely for a key with no meaningful fraction: first_blood and
+    # captain are one-off/binary, and high_roller/jackpot/giant_slayer/
+    # tournament_champion/onboarded are each tied to a specific event
+    # rather than an accumulating count. game defaults to the currently-
+    # tracked game, matching _checkAchievements' own default, so a
+    # locked veteran/on_fire tier's progress reflects whichever game
+    # would actually unlock it next.
+    def _achievementProgress(self, guild_id, user_id, game=None):
+        if game is None:
+            game = self._currentGame(guild_id)
+        self.cursor.execute("SELECT wins, losses FROM economy WHERE guildId=? AND userId=?", (guild_id, user_id))
+        row = self.cursor.fetchone()
+        bet_wins, bet_losses = row if row is not None else (0, 0)
+
+        self.cursor.execute(
+            "SELECT game_wins, game_losses, current_win_streak FROM game_stats "
+            "WHERE guildId=? AND userId=? AND game=?",
+            (guild_id, user_id, game)
+        )
+        game_row = self.cursor.fetchone()
+        game_wins, game_losses, current_win_streak = game_row if game_row is not None else (0, 0, 0)
+
+        progress = {key: (game_wins, threshold) for threshold, key in self.CARD_ACHIEVEMENT_VETERAN_LADDER}
+        progress.update(
+            {key: (current_win_streak, threshold) for threshold, key in self.CARD_ACHIEVEMENT_ON_FIRE_LADDER}
+        )
+        progress["iron_will"] = (game_losses, CARD_ACHIEVEMENT_IRON_WILL_LOSSES)
+        progress["gambler"] = (bet_wins + bet_losses, CARD_ACHIEVEMENT_GAMBLER_BETS)
+        progress["team_player"] = (
+            len(self.getTeamsForPlayer(guild_id, user_id)), CARD_ACHIEVEMENT_TEAM_PLAYER_TEAMS
+        )
+        progress["big_spender"] = (self._countShopPurchases(guild_id, user_id), CARD_ACHIEVEMENT_BIG_SPENDER_ITEMS)
+        return progress
+
     # Every CARD_ACHIEVEMENT_TITLES entry as {key, name, description,
-    # earned}, what /achievements displays. Earned state reads straight
-    # off card_unlocks, the exact same table (and same itemType='title'
-    # shape) getUnlockedCardTitles already reads for tier rewards,
-    # special grants, and shop purchases.
+    # earned, progress}, what /achievements displays. Earned state reads
+    # straight off card_unlocks, the exact same table (and same
+    # itemType='title' shape) getUnlockedCardTitles already reads for
+    # tier rewards, special grants, and shop purchases. progress is None
+    # once earned (nothing left to show) or for a key _achievementProgress
+    # has no fraction for at all, otherwise a (current, threshold) pair.
     def getAchievementCatalog(self, guild_id, user_id):
         self.cursor.execute(
             "SELECT itemKey FROM card_unlocks WHERE guildId=? AND userId=? AND itemType='title'",
             (guild_id, user_id)
         )
         earned_keys = {row[0] for row in self.cursor.fetchall()}
+        progress_by_key = self._achievementProgress(guild_id, user_id)
         return [
             {
                 "key": key, "name": name, "description": CARD_ACHIEVEMENT_DESCRIPTIONS.get(key, ""),
                 "earned": key in earned_keys,
+                "progress": None if key in earned_keys else progress_by_key.get(key),
             }
             for key, name in CARD_ACHIEVEMENT_TITLES.items()
         ]
@@ -13069,7 +13553,11 @@ class helpers():
         def render(key):
             item = catalog[key]
             status = "✅" if item["earned"] else "🔒"
-            return f"{status} **{item['name']}** - {item['description']}"
+            line = f"{status} **{item['name']}** - {item['description']}"
+            if item["progress"] is not None:
+                current, threshold = item["progress"]
+                line += f" ({min(current, threshold)}/{threshold})"
+            return line
 
         embed = discord.Embed(title="Achievements", color=discord.Color.gold())
 
