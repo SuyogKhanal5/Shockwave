@@ -41,12 +41,14 @@ class Team:
         self.size = 0
         self.voice_channel = ""
         self.captain = None
-        # Frozen/unused going forward - nothing in helper.py reads or writes
-        # these anymore (see team_game_stats in bot.py, the per-game
-        # replacement, and _hydrateTeamGameRecord). Kept only so
-        # serializeTeam/deserializeTeam still round-trip an older team's
-        # data unchanged, and as the one-time migration source for
-        # team_game_stats.
+        # Per-game win/loss record, read constantly for display (/team
+        # list, /team stats, the team card). No longer persisted through
+        # serializeTeam/deserializeTeam - helper.py's
+        # _hydrateTeamGameRecord overwrites these fresh from
+        # team_game_stats right after every deserialize, since a team's
+        # record is now tracked per game (/set game), not as one number
+        # embedded in the team itself. Just a sane default here for a
+        # brand new Team before that first hydration ever runs.
         self.wins = 0
         self.losses = 0
         # Target roster size for a persistent team, set via /team-create.
@@ -72,12 +74,6 @@ class Team:
 
     def set_name(self, name: str) -> None:
         self.name = name
-
-    def addWin(self) -> None:
-        self.wins += 1
-
-    def addLoss(self) -> None:
-        self.losses += 1
 
     def set_voice_channel(self, voice_channel: discord.VoiceChannel) -> None:
         self.voice_channel = str(voice_channel)
@@ -132,10 +128,9 @@ class Team:
         if self.captain is not None and isinstance(self.captain, Player):
             captain = self.captain.serializePlayer()
 
-        return '[{}, {}, {}, {}, {}, {}, {}, {}, {}, {}]'.format(
+        return '[{}, {}, {}, {}, {}, {}, {}, {}]'.format(
             self.id, self.name, playerString, self.size,
-            self.voice_channel, captain, self.wins, self.losses, self.team_size,
-            self.logo_path
+            self.voice_channel, captain, self.team_size, self.logo_path
         )
 
     def deserializeTeam(self, serialized: str) -> None:
@@ -187,23 +182,8 @@ class Team:
         else:
             self.captain = None
 
-        self.wins = int(serializedArr[6]) if serializedArr[6] not in ('', 'None') else 0
-        self.losses = int(serializedArr[7]) if serializedArr[7] not in ('', 'None') else 0
-
-        # team_size was added after this format was already in use. Older
-        # serialized teams won't have a 9th field, so this indexes
-        # defensively instead of assuming it's there.
-        if len(serializedArr) > 8 and serializedArr[8] not in ('', 'None'):
-            self.team_size = int(serializedArr[8])
-        else:
-            self.team_size = None
-
-        # Same defensive treatment for logo_path, added as a 10th field
-        # after team_size. Older serialized teams have neither.
-        if len(serializedArr) > 9 and serializedArr[9] not in ('', 'None'):
-            self.logo_path = serializedArr[9]
-        else:
-            self.logo_path = None
+        self.team_size = int(serializedArr[6]) if serializedArr[6] not in ('', 'None') else None
+        self.logo_path = serializedArr[7] if serializedArr[7] not in ('', 'None') else None
 
 
 class Tournament:

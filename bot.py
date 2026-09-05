@@ -205,22 +205,18 @@ def ensure_column(table, column, coltype="", default=None):
 if not db_already_existed:
     cursor.execute(
         "CREATE TABLE servers(guildId, serverName, original_channel, team1, team2, "
-        "players, channel1, channel2, mode, turn, team_size, tournament, elo, "
-        "result1, result2, captain1, captain2, "
+        "players, channel1, channel2, mode, turn, team_size, "
+        "captain1, captain2, "
         "betting_state, betting_message_id, betting_channel_id, is_ranked, "
         "active_tournament_match_id, wager_channel, betting_timer_seconds, "
         "roster_team1_message_id, roster_team2_message_id, roster_channel_id, roster_use_roles, "
         "default_elo, betting_opened_at, disliked_role_user_ids, draft_pick_page, "
         "draft_players_message_id, draft_snake, betting_closed_message_id, make_teams_message_ids, "
         "matchup_message_id, roster_starting, roster_permissions_strict, max_wager, betting_enabled, "
-        "matchup_channel, current_game, game, draft_picker_message_id)"
+        "matchup_channel, current_game, game, draft_picker_message_id, welcome_message_enabled)"
     )
     mainDB.commit()
 else:
-    # result1/result2 are unused now (nothing reads or writes them). Kept
-    # only so an older database's schema still matches.
-    ensure_column("servers", "result1", "TEXT")
-    ensure_column("servers", "result2", "TEXT")
     # captain1/captain2 are read and written by captainsHelper and the
     # draft-pick handlers (the /make-teams draft flow). They weren't part
     # of the original CREATE TABLE above, so a pre-existing database needs
@@ -367,6 +363,12 @@ else:
     # fully clickable, resolving picks against whatever draft happens to
     # be current instead of the one actually shown.
     ensure_column("servers", "draft_picker_message_id", "INTEGER")
+    # /set welcome-message: whether on_guild_join's one-time "thanks for
+    # adding Shockwave, run /setup" post (welcomeNewGuildHelper) fires.
+    # Defaults to on (1) so a fresh install's behavior is unchanged from
+    # before this setting existed; an admin who doesn't want it can turn
+    # it off, same shape as /set betting.
+    ensure_column("servers", "welcome_message_enabled", "INTEGER", "1")
 
 # Per-member currency: gold balance plus win/loss and wagering stats, one
 # row per (guild, user). Shared across every game a server plays - elo and
@@ -377,53 +379,19 @@ cursor.execute(
     "PRIMARY KEY(guildId, userId))"
 )
 # "CREATE TABLE IF NOT EXISTS" above does nothing on a database that
-# already has an `economy` table from before these columns existed.
-# ensure_column() is what actually adds them there.
+# already has an `economy` table from before this column existed.
+# ensure_column() is what actually adds it there.
 ensure_column("economy", "gold_lost", "INTEGER", "0")
-ensure_column("economy", "game_wins", "INTEGER", "0")
-ensure_column("economy", "game_losses", "INTEGER", "0")
-ensure_column("economy", "elo", "INTEGER", str(helper.DEFAULT_ELO))
-# The ranked-only subset of game_wins/game_losses (a casual game bumps
-# game_wins/game_losses but not these). /stats and /leaderboard use them to
-# break a player's record into casual vs. ranked instead of one combined
-# total.
-ensure_column("economy", "ranked_wins", "INTEGER", "0")
-ensure_column("economy", "ranked_losses", "INTEGER", "0")
-# Consecutive game wins right now, backing the "on_fire" achievement (see
-# CARD_ACHIEVEMENT_TITLES in helper.py). Unlike every other economy column,
-# this isn't a simple additive delta, so applyGameDeltas updates it with
-# its own separate UPDATE (increment on a win, reset to 0 on a loss)
-# instead of folding it into computeGameDeltas' delta dict.
-ensure_column("economy", "current_win_streak", "INTEGER", "0")
-# elo/game_wins/game_losses/ranked_wins/ranked_losses/current_win_streak
-# above are unused now (nothing reads or writes them going forward) - see
-# game_stats below, the per-game replacement. Kept, like result1/result2,
-# only so an older database's schema still matches, and as the one-time
-# migration source right below.
 
 # Elo and game-record stats, one row per (guild, user, game) - see /set
-# game. Split out of `economy` (which stays the single shared gold/bet
-# ledger regardless of which game is current) since an elo rating or win
-# streak from one game means nothing mixed into another's.
-_game_stats_already_existed = cursor.execute(
-    "SELECT name FROM sqlite_master WHERE type='table' AND name='game_stats'"
-).fetchone() is not None
+# game. Kept separate from `economy` (which stays the single shared
+# gold/bet ledger regardless of which game is current) since an elo
+# rating or win streak from one game means nothing mixed into another's.
 cursor.execute(
     "CREATE TABLE IF NOT EXISTS game_stats("
     "guildId, userId, game, username, elo, game_wins, game_losses, ranked_wins, ranked_losses, "
     "current_win_streak, PRIMARY KEY(guildId, userId, game))"
 )
-if not _game_stats_already_existed:
-    # One-time backfill: every existing player's economy-side elo/record
-    # becomes their "League" stats, since League was the only game this
-    # bot ever tracked before /set game existed.
-    cursor.execute(
-        "INSERT INTO game_stats(guildId, userId, game, username, elo, game_wins, game_losses, "
-        "ranked_wins, ranked_losses, current_win_streak) "
-        "SELECT guildId, userId, 'League', username, elo, game_wins, game_losses, ranked_wins, "
-        "ranked_losses, current_win_streak FROM economy"
-    )
-    mainDB.commit()
 
 # Which game names /set game's autocomplete offers for a server, beyond
 # typing a brand new one: every game that server has ever set itself to.
@@ -475,19 +443,6 @@ cursor.execute(
 )
 ensure_column("leaderboards", "cards", "INTEGER", "0")
 ensure_column("leaderboards", "cardShown", "INTEGER", "0")
-# One row per posted /team lookup message, same paging idea as
-# leaderboards above, but scoped to a single caller (userId) instead of the
-# whole guild's stats, since each page here is one of that player's own
-# teams, not a page of many players.
-cursor.execute(
-    "CREATE TABLE IF NOT EXISTS my_team_views("
-    "messageId INTEGER PRIMARY KEY, guildId, channelId, userId, page)"
-)
-# Whether this /team lookup page is currently showing the paged team's
-# actual trading card instead of its plain stats embed - same Card/Back
-# toggle team_list_views.cardShown backs for /team list cards:true, now at
-# parity here too.
-ensure_column("my_team_views", "cardShown", "INTEGER", "0")
 # One row per posted /stats message, so we can recognize that a click
 # landed on a real /stats embed (see StatsView).
 cursor.execute(
@@ -565,8 +520,8 @@ cursor.execute(
     "cards INTEGER DEFAULT 0, cardShown INTEGER DEFAULT 0, memberIds, memberNames)"
 )
 # cards is 1 when a posted /team list message is in "cards" mode: one
-# team's full stats card per page (same shape as /team lookup), sourced
-# from the same filtered/sorted team list a plain /team list would show,
+# team's full stats card per page, sourced from the same filtered/sorted
+# team list a plain /team list would show,
 # instead of the default summary-list mode. _handleTeamListPageClick reads
 # this back to know which of the two ways to re-render on a page flip.
 # cardShown further narrows cards mode: 0 for that team's plain stats
@@ -681,33 +636,14 @@ ensure_column("tournament_matches", "roundBettingClosedMessageId", "INTEGER")
 # tracked results for.
 ensure_column("tournament_matches", "game", "TEXT", "'League'")
 # Persistent team win/loss records, one row per (guild, team, game) - see
-# /set game. Split out of Team.wins/Team.losses (still embedded in `teams`.
-# data, now frozen/unused going forward - see game_stats' own comment for
-# the same pattern) so a team's record only reflects matches played in the
-# same game, the same reasoning that split game_stats off of `economy`.
-_team_game_stats_already_existed = cursor.execute(
-    "SELECT name FROM sqlite_master WHERE type='table' AND name='team_game_stats'"
-).fetchone() is not None
+# /set game. Kept separate from Team.wins/Team.losses (the in-memory
+# attribute display code reads; see helper.py's _hydrateTeamGameRecord)
+# so a team's record only reflects matches played in the same game, the
+# same reasoning game_stats is kept separate from economy.
 cursor.execute(
     "CREATE TABLE IF NOT EXISTS team_game_stats("
     "guildId, teamId, game, wins, losses, PRIMARY KEY(guildId, teamId, game))"
 )
-if not _team_game_stats_already_existed:
-    # One-time backfill: every existing persistent team's embedded
-    # wins/losses becomes its "League" record, since League was the only
-    # game tournaments ever tracked results for before /set game existed.
-    # Read through TourneyClasses.Team rather than a plain SQL SELECT since
-    # wins/losses live inside the serialized `data` blob, not their own
-    # columns.
-    for _team_id, _team_guild_id, _team_data in cursor.execute(
-        "SELECT id, guildId, data FROM teams"
-    ).fetchall():
-        _team = Team()
-        _team.deserializeTeam(_team_data)
-        cursor.execute(
-            "INSERT INTO team_game_stats(guildId, teamId, game, wins, losses) VALUES(?, ?, 'League', ?, ?)",
-            (_team_guild_id, _team_id, _team.wins, _team.losses)
-        )
 # Wagers on one specific tournament match. Unlike `wagers` above (one bet
 # per user per guild, tied to whichever single casual/ranked game or
 # sequential-mode tournament match is currently active), simultaneous-mode
@@ -845,6 +781,27 @@ class LoggingCommandTree(app_commands.CommandTree):
                 logger.exception("LoggingCommandTree.interaction_check failed, continuing without logging this call")
         except Exception:
             logger.exception("LoggingCommandTree.interaction_check failed, continuing without logging this call")
+
+        # Every command here reads or writes guild-scoped state (a
+        # roster, elo, a tournament, ...); none of them mean anything run
+        # as a DM to the bot itself, so a DM attempt is rejected here,
+        # the one hook every command already passes through, rather than
+        # adding the same "ctx.guild is None" guard to each command
+        # individually. interaction.guild is None precisely for a DM
+        # interaction; a real guild command always has it by the time it
+        # reaches here. Returning False alone from this hook leaves a DM
+        # caller with no response at all - CommandTree._call just sets
+        # command_failed and returns, nothing gets dispatched to
+        # on_app_command_error - so the message has to be sent here.
+        if interaction.type is discord.InteractionType.application_command and interaction.guild is None:
+            try:
+                await interaction.response.send_message(
+                    "This only works in a server, not in a DM - try it there instead.", ephemeral=True
+                )
+            except discord.HTTPException:
+                pass
+            return False
+
         return True
 
 
@@ -1041,9 +998,9 @@ def ensure_guild_row(guild_id, guild_name):
         return
     cursor.execute(
         "INSERT INTO servers VALUES(?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, "
-        "NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'NONE', NULL, NULL, 0, NULL, NULL, ?, "
+        "NULL, NULL, NULL, 'NONE', NULL, NULL, 0, NULL, NULL, ?, "
         "NULL, NULL, NULL, 0, NULL, NULL, NULL, 0, NULL, 0, NULL, NULL, NULL, 0, 0, NULL, 1, NULL, "
-        "'League', NULL, NULL)",
+        "'League', NULL, NULL, 1)",
         (guild_id, guild_name, helper.BETTING_DURATION_SECONDS)
     )
     cursor.execute("INSERT OR IGNORE INTO guild_games(guildId, game) VALUES(?, 'League')", (guild_id,))
@@ -1093,7 +1050,6 @@ def registerPersistentViews():
     client.add_view(helper.StatsView(helperObj))
     client.add_view(helper.TeamStatsView(helperObj))
     client.add_view(helper.LeaderboardPagingView(helperObj))
-    client.add_view(helper.MyTeamsPagingView(helperObj))
     client.add_view(helper.TeamListPagingView(helperObj))
     _persistent_views_registered = True
 
@@ -1102,6 +1058,7 @@ def registerPersistentViews():
 async def on_guild_join(ctx):
     await syncCommandsToGuild(ctx)
     ensure_guild_row(ctx.id, ctx.name)
+    await helperObj.welcomeNewGuildHelper(ctx)
 
 
 @client.event
@@ -1330,6 +1287,20 @@ async def setBetting(ctx, enabled: bool):
     await helperObj.setBettingHelper(ctx, enabled)
 
 setBetting.error(_setAdminPermissionError)
+
+
+@setGroup.command(
+    name="welcome-message",
+    description="Admin: turn the one-time join welcome message on or off for this server"
+)
+@app_commands.describe(
+    enabled="True: post it if Shockwave ever joins this server again (the default). False: don't."
+)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def setWelcomeMessage(ctx, enabled: bool):
+    await helperObj.setWelcomeMessageHelper(ctx, enabled)
+
+setWelcomeMessage.error(_setAdminPermissionError)
 
 
 @setGroup.command(
@@ -1630,6 +1601,7 @@ COMMAND_HELP = {
     "set roster-permissions": "Controls who can use the Start/Start (no move)/Random Roles/Balanced Roles buttons on a posted roster. strict:true restricts them to a rostered player or a Manage Server admin, matching how the winner-report buttons already work; strict:false (the default) leaves them open to anyone who can see the message. Requires the Manage Server permission.",
     "set max-wager": "Caps how much gold a single /wager team or /wager against bet can be. Omit amount to remove the cap. Requires the Manage Server permission.",
     "set betting": "Turns /wager team and /wager against on or off for this server. Games, elo, and reporting a winner all still work the same either way; this only gates the wagering layer on top of them. Requires the Manage Server permission.",
+    "set welcome-message": "Turns the one-time join welcome message (posted the moment Shockwave is added, pointing at /setup and /help) on or off for this server. On by default; only matters if Shockwave is ever removed and re-added. Requires the Manage Server permission.",
     "set matchup-channel": "Redirects every matchup graphic (a game's own, and a tournament match's ready-check/report graphic) and the winner-report message to one specific text channel, no matter where the roster or match actually started. Omit channel to use wherever this command is run. Independent of set wager-channel, which only redirects the betting-open/closed notices; the two can point at different channels. Requires the Manage Server permission.",
     "set game": "Sets which game this server's next roster tracks elo and stats for. Type a brand new name to start tracking it, or pick a previously-used one from the autocomplete list. Elo, game record, and ranked record are all tracked per game, so switching games doesn't touch another game's numbers. Only affects the next roster formed; whatever's currently in progress keeps resolving under whichever game it actually started as. League is the default, and the only game with role-based team balancing. Requires the Manage Server permission.",
     "clear teams": "Wipes the current teams/draft so you can start a fresh session. Requires the Manage Server permission.",
@@ -1649,13 +1621,13 @@ COMMAND_HELP = {
     "daily": "Claims 1000 free gold. Once per calendar day, per player.",
     "give": "Gives some of your gold to another player. Immediate, no confirmation from either side needed.",
     "current-game": "Shows which game this server is currently tracking (see /set game).",
-    "stats": "Shows a player's elo, ranked/casual/game record, betting record, balance, and net gold; defaults to you. Press Avatar to toggle the shown avatar between this server's own profile picture and their regular account-wide one, or Card to replace the whole embed with a customizable trading card; Back swaps back.",
+    "stats": "Shows a player's elo, ranked/casual/game record, betting record, balance, and net gold; defaults to you. Press Avatar to toggle between this server's own identity (nickname and profile picture) and their regular Discord one (display name and account-wide avatar) - the two always switch together, or Card to replace the whole embed with a customizable trading card; Back swaps back.",
     "card-set": "Equips your unlocked trading-card title, color scheme, and/or font in one go (see /stats' Card button); set any combination of the three at once. Reaching Diamond, Master, Grandmaster, or Challenger permanently unlocks that tier's own title and scheme, even if you derank afterward; \"Default\" is always available for both. Fonts are purchased from /shop buy.",
     "shop preview": "Shows every option for one customization type (Logos, Card Titles, Color Schemes, or Fonts) in a single gallery image (a few images only if there are too many to fit), regardless of what you've personally unlocked yet.",
     "shop browse": "Browse every trading-card title, color scheme, and font purchasable with gold, with a ✅ next to anything you already own. Sort: Price / Sort: Owned buttons under the listing re-sort each category (Ascending/Descending toggle which way) without needing to re-run the command.",
     "achievements": "Browse every gameplay achievement, what it takes to earn it, whether you already have, and your current progress toward the ones you don't. Earning one unlocks its title for /card-set and posts a one-time announcement in the channel.",
     "shop buy": "Purchases a trading-card cosmetic with gold, permanently unlocking it for /card-set. Refuses if you already own it or can't afford it.",
-    "leaderboard": "Ranks the server by a stat, including ranked-only and casual-only wins/losses/win rate. Omit filter for an elo-sorted overview. Players with a 0W-0L record in the selected stat's category (or who've never played a game at all, for the overview and elo views) are left off, so a currency-based stat like balance still shows everyone. Buttons page through the results, and Ascending/Descending buttons flip the sort direction without re-running the command. Press Cards to flip through each player's full stats card one at a time instead, same as /team lookup but ranked; a Card button on that view swaps the current player's stats card for their actual trading card, and List brings you back to the ranked list.",
+    "leaderboard": "Ranks the server by a stat, including ranked-only and casual-only wins/losses/win rate. Omit filter for an elo-sorted overview. Players with a 0W-0L record in the selected stat's category (or who've never played a game at all, for the overview and elo views) are left off, so a currency-based stat like balance still shows everyone. Buttons page through the results, and Ascending/Descending buttons flip the sort direction without re-running the command. Press Cards to flip through each player's full stats card one at a time instead; a Card button on that view swaps the current player's stats card for their actual trading card, and List brings you back to the ranked list.",
     "team create": "Creates a persistent team with you as its captain, or captain as its captain if given.",
     "team save": "Saves Team 1 or Team 2 from the last game in this server as a new persistent team, with you as its captain. You must have actually been rostered on that side to save it, and the new name can't already belong to another team here.",
     "team set": "Sets a persistent team's voice channel and/or logo, any combination in one call. new_voice_channel creates a fresh one named after the team. The team's captain, or anyone with Manage Server, can do this.",
@@ -1665,9 +1637,8 @@ COMMAND_HELP = {
     "team invite": "Invites one or more members (up to 5 per call) to a team. Each invitee must accept before joining. The team's captain, or anyone with Manage Server, can do this. Skips anyone who already has a pending invite to the same team instead of sending a second one. force (Manage Server only) skips the invitee's confirmation and adds them straight to the roster. Cancel invite on the posted invite retracts it for everyone still pending, same captain/Manage Server permission.",
     "team remove": "Removes a player from a team's roster who won't (or can't) leave themselves. The team's captain, or anyone with Manage Server, can do this. Can't be used on the captain - use /team transfer or /team delete instead.",
     "team leave": "Removes you from a persistent team's roster. Anyone rostered can do this to themselves, no permission needed, except the team's captain, who has to use /team delete instead since there's no one to hand the captaincy to.",
-    "team lookup": "Lists the teams you're a rostered player on in this server, with paging to flip through each one's full stats card.",
     "team stats": "Shows a persistent team's captain, roster, voice channel, and win/loss record. Press Card to swap it for a team card: its logo as the focal point, colors sampled from that logo, captain/roster/record/win rate. Back swaps back.",
-    "team list": "Browse every team in the server with filtering (name search, recruiting-only, up to 5 members who all have to be on the roster) and sorting (name, wins, losses, win rate, roster size; sort:\"Win Rate\" order:\"Descending\" to rank teams by win rate). Buttons page through it. cards:true flips through each team's full stats card one at a time instead, same as /team lookup but for every team in the server; a Card button on that view swaps the current team's stats card for its actual trading card, and stays selected as you keep paging.",
+    "team list": "Browse every team in the server with filtering (name search, recruiting-only, mine:true for just your own teams, up to 5 members who all have to be on the roster together) and sorting (name, wins, losses, win rate, roster size; sort:\"Win Rate\" order:\"Descending\" to rank teams by win rate). Buttons page through it. cards:true flips through each team's full stats card one at a time instead of a summary list; a Card button on that view swaps the current team's stats card for its actual trading card, and stays selected as you keep paging. mine:true with no other filters is the quickest way to flip through just your own teams.",
     "tournament create": "Creates an empty tournament shell for this server: name, team size, and bracket size. One tournament per server.",
     "tournament register": "Registers one of your teams for the server's tournament. The team's captain, or anyone with Manage Server, can do this.",
     "tournament unregister": "Unregisters a team from the server's tournament. The team's captain, or anyone with Manage Server, can do this. Only works before the bracket is built.",
@@ -2377,15 +2348,6 @@ async def teamStats(ctx, team: str):
 
 
 @teamGroup.command(
-    name="lookup",
-    description="List the teams you (or another player) belong to and flip through their stats"
-)
-@app_commands.describe(member="Whose teams to look up; defaults to you")
-async def teamLookup(ctx, member: discord.Member = None):
-    await helperObj.myTeamsHelper(ctx, member)
-
-
-@teamGroup.command(
     name="list",
     description="Browse every team in this server, with filtering and sorting; buttons to page through it"
 )
@@ -2394,7 +2356,8 @@ async def teamLookup(ctx, member: discord.Member = None):
     recruiting_only="Only show teams still short of their target roster size",
     sort="What to sort by; defaults to name",
     order="Ascending or descending; defaults to ascending",
-    cards="Flip through each team's full stats card one at a time, like /team lookup, instead of a summary list",
+    cards="Flip through each team's full stats card one at a time instead of a summary list",
+    mine="Only show teams you're rostered on",
     member_1="Only show teams that have this member on their roster",
     member_2="Also required on the roster (optional)",
     member_3="Also required on the roster (optional)",
@@ -2415,13 +2378,14 @@ async def teamLookup(ctx, member: discord.Member = None):
 async def teamList(
     ctx, search: str = None, recruiting_only: bool = False,
     sort: app_commands.Choice[str] = None, order: app_commands.Choice[str] = None, cards: bool = False,
+    mine: bool = False,
     member_1: discord.Member = None, member_2: discord.Member = None, member_3: discord.Member = None,
     member_4: discord.Member = None, member_5: discord.Member = None,
 ):
     sort_value = sort.value if sort is not None else "name"
     order_value = order.value if order is not None else "asc"
     members = [m for m in (member_1, member_2, member_3, member_4, member_5) if m is not None]
-    await helperObj.teamListHelper(ctx, search, recruiting_only, sort_value, order_value, cards, members)
+    await helperObj.teamListHelper(ctx, search, recruiting_only, sort_value, order_value, cards, members, mine)
 
 
 tree.add_command(teamGroup)

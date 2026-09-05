@@ -315,14 +315,14 @@ DUEL_CONFIRM_TIMEOUT_SECONDS = 30
 # keeps the button interactive.
 WAGER_CANCEL_VIEW_TIMEOUT_SECONDS = 600
 
-# /stats: press to toggle the shown avatar between this server's own
-# per-server profile picture (if the player has set one, same as the
-# card/embed shows by default) and their regular, account-wide avatar (see
-# StatsView/_resolveGlobalAvatarUrl). It's the same button either
-# direction, flipping based on whichever's currently showing. Both are
-# resolved live (not snapshotted at /stats time), so a player who changes
-# either avatar later and toggles sees their current one, same as a fresh
-# /stats would.
+# /stats: press to toggle between this server's own identity (per-server
+# nickname and profile picture, if the player has set either, same as the
+# card/embed shows by default) and their regular, account-wide one
+# (Discord display name and avatar - see StatsView/_resolveGlobalUser).
+# It's the same button either direction, flipping based on whichever's
+# currently showing. Both are resolved live (not snapshotted at /stats
+# time), so a player who changes their nickname/avatar later and toggles
+# sees their current one, same as a fresh /stats would.
 STATS_AVATAR_TOGGLE_EMOJI = "\U0001f5bc️"  # 🖼️ decorates StatsView's Avatar button
 # /stats: press to blow the whole embed away and replace it with the
 # player's trading card (see _renderTradingCardImage). Both this and the
@@ -768,9 +768,9 @@ CARD_BACKGROUND_DARKEN_RATIO = 0.28
 
 # /leaderboard: paged via LeaderboardPagingView's buttons rather than
 # re-running the command. Clicking one edits the existing message instead
-# of posting a new one. These also decorate MyTeamsPagingView/
-# TeamListPagingView's own button labels, the same First/Prev/Next/Last
-# shape reused for /team lookup and /team list.
+# of posting a new one. These also decorate TeamListPagingView's own
+# button labels, the same First/Prev/Next/Last shape reused for
+# /team list.
 LEADERBOARD_PAGE_SIZE = 10
 LEADERBOARD_FIRST_EMOJI = "⏮️"  # ⏮️ jump to the first page
 LEADERBOARD_PREV_EMOJI = "◀️"   # ◀️ previous page
@@ -2077,9 +2077,9 @@ class TeamStatsView(discord.ui.View):
 
 
 # A button can't take free text, so the "Page #" button on each of the
-# three paging views below opens this instead. Whichever handler_name
-# names (one of _handleLeaderboardPageClick/_handleMyTeamsPageClick/
-# _handleTeamListPageClick) gets called with target_page set to the
+# paging views below opens this instead. Whichever handler_name names
+# (one of _handleLeaderboardPageClick/_handleTeamListPageClick) gets
+# called with target_page set to the
 # 0-based page the user typed, the same call shape a Prev/Next click
 # already uses (see _computeNewPage's own target= branch). total_pages
 # here is only a snapshot from whenever "Page #" was clicked, used for
@@ -2109,11 +2109,11 @@ class _PageJumpModal(discord.ui.Modal):
         await handler(interaction, target_page=int(raw) - 1)
 
 
-# /leaderboard, /team lookup, and /team list all page the exact same way:
-# First/Prev/Next/Last/Page#, one shared view per guild/caller/search
-# rather than re-running the command. So all three views below are the
-# same button shape, just wired to a different helper.py handler and
-# table. Persistent (custom_id, timeout=None, registered once via
+# /leaderboard and /team list both page the exact same way:
+# First/Prev/Next/Last/Page#, one shared view per guild/search rather
+# than re-running the command. So both views below are the same button
+# shape, just wired to a different helper.py handler and table.
+# Persistent (custom_id, timeout=None, registered once via
 # client.add_view) since nothing ever expires one of these pages on its
 # own, the same open-ended reasoning as WinnerReportView.
 class LeaderboardPagingView(discord.ui.View):
@@ -2205,55 +2205,6 @@ class LeaderboardPagingView(discord.ui.View):
     )
     async def returnToStats(self, interaction, button):
         await self.helperObj._handleLeaderboardReturnClick(interaction)
-
-
-# See LeaderboardPagingView, same shape, /team lookup's own table/handler.
-# Also offers the same Card/Back toggle TeamListPagingView's cards:true mode
-# does (see that class's own comment), so a team's actual trading card is
-# reachable from here too, not just from /team list cards:true.
-class MyTeamsPagingView(discord.ui.View):
-    def __init__(self, helperObj, card_shown=False):
-        super().__init__(timeout=None)
-        self.helperObj = helperObj
-        if card_shown:
-            self.remove_item(self.showCard)
-        else:
-            self.remove_item(self.returnToStats)
-
-    @discord.ui.button(label=LEADERBOARD_FIRST_EMOJI, style=discord.ButtonStyle.secondary, custom_id="shockwave:my_teams:first")
-    async def first(self, interaction, button):
-        await self.helperObj._handleMyTeamsPageClick(interaction, "first")
-
-    @discord.ui.button(label=LEADERBOARD_PREV_EMOJI, style=discord.ButtonStyle.secondary, custom_id="shockwave:my_teams:prev")
-    async def prev(self, interaction, button):
-        await self.helperObj._handleMyTeamsPageClick(interaction, "prev")
-
-    @discord.ui.button(label=LEADERBOARD_NEXT_EMOJI, style=discord.ButtonStyle.secondary, custom_id="shockwave:my_teams:next")
-    async def next(self, interaction, button):
-        await self.helperObj._handleMyTeamsPageClick(interaction, "next")
-
-    @discord.ui.button(label=LEADERBOARD_LAST_EMOJI, style=discord.ButtonStyle.secondary, custom_id="shockwave:my_teams:last")
-    async def last(self, interaction, button):
-        await self.helperObj._handleMyTeamsPageClick(interaction, "last")
-
-    @discord.ui.button(
-        label=f"Page # {LEADERBOARD_JUMP_EMOJI}", style=discord.ButtonStyle.secondary,
-        custom_id="shockwave:my_teams:jump",
-    )
-    async def jump(self, interaction, button):
-        await self.helperObj._handleMyTeamsJumpClick(interaction)
-
-    @discord.ui.button(
-        label=f"Card {TEAM_CARD_EMOJI}", style=discord.ButtonStyle.primary, custom_id="shockwave:my_teams:show_card",
-    )
-    async def showCard(self, interaction, button):
-        await self.helperObj._handleMyTeamsShowCardClick(interaction)
-
-    @discord.ui.button(
-        label=f"Back {TEAM_CARD_RETURN_EMOJI}", style=discord.ButtonStyle.primary, custom_id="shockwave:my_teams:return",
-    )
-    async def returnToStats(self, interaction, button):
-        await self.helperObj._handleMyTeamsReturnClick(interaction)
 
 
 # See LeaderboardPagingView for the paging buttons, /team list's own
@@ -3481,6 +3432,19 @@ class helpers():
             message = "Betting is disabled. /wager team and /wager against will no longer accept bets."
         await ctx.response.send_message(message)
 
+    # Toggles welcomeNewGuildHelper's one-time on_guild_join post. Only
+    # ever matters for a future join (this server already got its own
+    # welcome message, or didn't, when the bot first joined - this can't
+    # retroactively post or unpost that), but the bot can rejoin a server
+    # it was removed from, so it's not purely theoretical.
+    async def setWelcomeMessageHelper(self, ctx, enabled):
+        self.update(ctx.guild.id, "welcome_message_enabled", 1 if enabled else 0)
+        if enabled:
+            message = "The welcome message is enabled. Shockwave will post it if it ever joins this server again."
+        else:
+            message = "The welcome message is disabled. Shockwave won't post it if it ever joins this server again."
+        await ctx.response.send_message(message)
+
     # Points every future betting posting (open/closed, see _openBetting)
     # at a specific text channel instead of wherever a game or a
     # tournament match happens to run. Independent of /set matchup-channel,
@@ -3610,16 +3574,12 @@ class helpers():
         except discord.HTTPException:
             logger.exception("_editRosterTeamEmbeds: team2 embed edit failed (guild %s)", guild_id)
 
-    # Random Roles' whole implementation. Genuinely shuffles both teams'
-    # player order, unlike the old randomRoleHelper this replaces, which
-    # computed a shuffled result1/result2 text pair that nothing displayed
-    # and never wrote the shuffle back to team1/team2 at all. /make-teams'
-    # own embeds silently kept showing the un-shuffled split order no
-    # matter how many times /randomize-roles ran. This one persists the
-    # shuffle to team1/team2 and edits both live embeds in place, so
-    # what's on screen is always what a /start-equivalent click would
-    # actually use. Also what turns roles on in the first place for a 5v5
-    # roster that was never posted with use_roles to begin with.
+    # Random Roles' whole implementation. Shuffles both teams' player
+    # order, persists the shuffle to team1/team2, and edits both live
+    # embeds in place, so what's on screen is always what a
+    # /start-equivalent click would actually use. Also what turns roles
+    # on in the first place for a 5v5 roster that was never posted with
+    # use_roles to begin with.
     async def _rerollRoster(self, guild_id, channel):
         team1_msg_id = self.get(guild_id, "roster_team1_message_id")
         team2_msg_id = self.get(guild_id, "roster_team2_message_id")
@@ -4514,8 +4474,9 @@ class helpers():
     # Resets EARNED ACHIEVEMENTS for a guild. Deletes only the
     # card_unlocks rows whose itemKey is a CARD_ACHIEVEMENT_TITLES key,
     # leaving every other unlock (tier rewards, special grants, shop
-    # purchases) and the underlying economy stats those achievements were
-    # computed from (game_wins, current_win_streak, etc.) untouched.
+    # purchases) and the underlying stats those achievements were computed
+    # from (economy.wins/gold_*, game_stats.game_wins/current_win_streak,
+    # etc.) untouched.
     # `user_id=None` (the default) resets every player in the guild, the
     # /clear counterpart to resetEconomyHelper/resetEloHelper above. A
     # real `user_id` narrows it to just that one player instead, for
@@ -7754,10 +7715,10 @@ class helpers():
         return teams
 
     # Every team in the guild `user_id` is a rostered player on (captain
-    # or not), what /team lookup pages through. Sorted by team_id so
-    # paging stays stable across clicks even though this is recomputed
-    # fresh from the DB on every page flip (see
-    # _handleMyTeamsPageClick), the same way getLeaderboardEntries is
+    # or not), what /team list mine:true (and cards:true) pages through.
+    # Sorted by team_id so paging stays stable across clicks even though
+    # this is recomputed fresh from the DB on every page flip (see
+    # _handleTeamListPageClick), the same way getLeaderboardEntries is
     # recomputed fresh rather than snapshotted.
     def getTeamsForPlayer(self, guild_id, user_id):
         teams = self.getTeamsForGuild(guild_id)
@@ -7872,31 +7833,45 @@ class helpers():
         return embed
 
     # Posts the first page with its own TeamListPagingView, same pattern
-    # as leaderboardHelper/myTeamsHelper. Clicking a button
-    # (_handleTeamListPageClick) edits this same message. `cards`
-    # switches to the exact same one-team-full-stats-card-per-page
-    # rendering /team lookup uses (_renderMyTeamsEmbed/_myTeamsPageCount
-    # take a plain list of (team_id, team) tuples and don't care where
-    # it came from), just sourced from every team matching
-    # search/recruiting_only/sort/order/members instead of one player's
-    # own teams. /team lookup for the whole server, in effect. `members`
-    # (a list of up to 5 discord.Member, possibly empty) is stored as
-    # two parallel CSV columns rather than re-derived on every page
-    # flip: memberIds is what _filterAndSortTeams actually filters on,
-    # memberNames is purely the footer's display text. Resolving live
-    # Discord members back from bare stored ids on every click would be
-    # needless API calls for something that never changes for the life
-    # of this message.
-    async def teamListHelper(self, ctx, search, recruiting_only, sort, order, cards=False, members=None):
+    # as leaderboardHelper. Clicking a button (_handleTeamListPageClick)
+    # edits this same message. `cards` switches to the exact same
+    # one-team-full-stats-card-per-page rendering
+    # (_renderMyTeamsEmbed/_myTeamsPageCount take a plain list of
+    # (team_id, team) tuples and don't care where it came from) instead
+    # of the default summary-list mode. `members` (a list of up to 5
+    # discord.Member, possibly empty) is stored as two parallel CSV
+    # columns rather than re-derived on every page flip: memberIds is
+    # what _filterAndSortTeams actually filters on, memberNames is purely
+    # the footer's display text. Resolving live Discord members back from
+    # bare stored ids on every click would be needless API calls for
+    # something that never changes for the life of this message. `mine`
+    # folds the caller into that same member filter rather than being its
+    # own separate code path - this used to be the standalone /team
+    # lookup command (its own helper, view, and my_team_views table), but
+    # everything it did (a single member's teams, paged one full stats
+    # card at a time) was already just this command's own member filter
+    # plus cards:true, so `mine` is the whole of what's left: the
+    # "without having to mention yourself" convenience, nothing else.
+    async def teamListHelper(self, ctx, search, recruiting_only, sort, order, cards=False, members=None, mine=False):
         guild_id = ctx.guild.id
-        members = members or []
+        members = list(members or [])
+        if mine and not any(m.id == ctx.user.id for m in members):
+            members.append(ctx.user)
         member_ids = {m.id for m in members}
         member_names = [m.display_name for m in members]
 
         teams_sorted = self._filterAndSortTeams(guild_id, search, recruiting_only, sort, order, member_ids)
         if not teams_sorted:
-            message = "No teams have been created in this server yet!" \
-                if not (search or recruiting_only or member_ids) else "No teams match those filters."
+            if not search and not recruiting_only and len(member_ids) == 1:
+                only_member = members[0]
+                if mine and only_member.id == ctx.user.id:
+                    message = "You're not on any teams in this server."
+                else:
+                    message = f"{only_member.display_name} isn't on any teams in this server."
+            elif not (search or recruiting_only or member_ids):
+                message = "No teams have been created in this server yet!"
+            else:
+                message = "No teams match those filters."
             await ctx.response.send_message(message, ephemeral=True)
             return
 
@@ -7978,9 +7953,7 @@ class helpers():
             # _renderTeamListEmbed tolerates an empty list gracefully (its
             # own "No teams match those filters" text), but
             # _renderMyTeamsEmbed/_renderTeamListCardEmbed both index
-            # straight into teams[page] and would raise on an empty list,
-            # same guard _handleMyTeamsPageClick already needs for the
-            # same reason.
+            # straight into teams[page] and would raise on an empty list.
             await interaction.response.defer()
             return
         total_pages = self._myTeamsPageCount(teams_sorted) if cards else self._teamListPageCount(teams_sorted)
@@ -8167,11 +8140,11 @@ class helpers():
         self.cursor.execute("UPDATE teams SET data=? WHERE id=?", (team.serializeTeam(), team_id))
         self.db.commit()
 
-    # Per-game team win/loss record - see /set game. Split out of
-    # Team.wins/Team.losses (now frozen/unused, see bot.py's
-    # team_game_stats comment) the same way game_stats split off of
-    # economy.elo, so a team's record only reflects matches played under
-    # the same game.
+    # Per-game team win/loss record - see /set game. Kept separate from
+    # Team.wins/Team.losses (the in-memory attribute display code reads;
+    # see _hydrateTeamGameRecord below) the same way game_stats is kept
+    # separate from economy, so a team's record only reflects matches
+    # played under the same game.
     def ensureTeamGameStatsRow(self, guild_id, team_id, game):
         self.cursor.execute(
             "INSERT OR IGNORE INTO team_game_stats(guildId, teamId, game, wins, losses) "
@@ -8197,24 +8170,25 @@ class helpers():
         )
         self.db.commit()
 
-    # Overwrites a freshly-deserialized Team's in-memory wins/losses with
-    # its team_game_stats record for the guild's current game, so every
-    # display site that already reads team.wins/team.losses (the team
-    # list, /team stats, the trading card) shows the per-game record
-    # without needing its own game-scoping logic. Only ever touches the
-    # in-memory object - never persisted back through updateTeamData - so
-    # Team.wins/Team.losses stays whatever was embedded in `teams`.data
-    # (frozen, unused going forward) on disk. Called from every loader
-    # that deserializes a Team (getTeamRow/getTeamById/getTeamsForGuild)
-    # right after _ensureLogo, the other per-load enrichment step.
+    # Sets a freshly-deserialized Team's in-memory wins/losses from its
+    # team_game_stats record for the guild's current game, so every
+    # display site that reads team.wins/team.losses (the team list,
+    # /team stats, the trading card) shows the per-game record without
+    # needing its own game-scoping logic. Team.wins/Team.losses are pure
+    # display state - never part of serializeTeam/deserializeTeam, never
+    # persisted back through updateTeamData - so this always has to run
+    # again after every fresh deserialize rather than being settable
+    # once. Called from every loader that deserializes a Team
+    # (getTeamRow/getTeamById/getTeamsForGuild) right after _ensureLogo,
+    # the other per-load enrichment step.
     def _hydrateTeamGameRecord(self, guild_id, team_id, team):
         game = self._currentGame(guild_id)
         team.wins = self.getTeamGameStat(guild_id, team_id, game, "wins") or 0
         team.losses = self.getTeamGameStat(guild_id, team_id, game, "losses") or 0
 
     # Records one played tournament match against each side's PERSISTENT
-    # team record (the one /team list, /team lookup, and /team stats
-    # actually read), called from every match-resolution path (winners
+    # team record (the one /team list and /team stats actually read),
+    # called from every match-resolution path (winners
     # bracket, losers bracket, Grand Finals). Looked up by name rather
     # than trusting the bracket node's own embedded Team object: that's
     # just a snapshot from whenever the bracket was last serialized, not
@@ -8685,6 +8659,43 @@ class helpers():
             (guild_id, user_id)
         )
         return self.cursor.fetchone() is not None
+
+    # bot.py's on_guild_join: posts a one-time pointer toward /setup and
+    # /help right when the bot's added, instead of a brand new admin
+    # having to already know either command exists. Without this, there
+    # was no in-Discord signal at all that Shockwave had joined beyond it
+    # showing up in the member list - /help's own "New here? Run /setup
+    # first." note only reaches someone who already thought to run
+    # /help. /set welcome-message (welcome_message_enabled, on by
+    # default) is the opt-out for a server that doesn't want it; ensure_
+    # guild_row has already run by the time on_guild_join calls this, so
+    # the row (and its default) always exists here. system_channel (the
+    # "#general"-equivalent Discord itself designates when a server sets
+    # one) is preferred since it's the channel most members already have
+    # open; guild.text_channels (falling back to whichever one the bot
+    # can actually post in) covers a server with no system channel
+    # configured, or one the bot can't post in for some reason. Silently
+    # does nothing rather than raising if there's genuinely nowhere
+    # postable - a server that locks every channel down before granting
+    # roles is unusual but not a reason to fail the join itself.
+    async def welcomeNewGuildHelper(self, guild):
+        if not self.get(guild.id, "welcome_message_enabled"):
+            return
+
+        channel = guild.system_channel
+        if channel is None or not channel.permissions_for(guild.me).send_messages:
+            channel = next(
+                (c for c in guild.text_channels if c.permissions_for(guild.me).send_messages), None
+            )
+        if channel is None:
+            return
+        try:
+            await channel.send(
+                "\U0001f44b Thanks for adding **Shockwave**! Run `/setup` to create your solo team and "
+                "set your role preferences, or `/help` for the full command list."
+            )
+        except discord.HTTPException:
+            pass
 
     # /setup: a one-stop first command for a new player: a short
     # explanation of what Shockwave actually does (pointing at /help for
@@ -9685,11 +9696,12 @@ class helpers():
         )
         self.db.commit()
 
-    # ---------------- /team lookup ----------------
-
     # One team per "page" rather than a batch of rows like /leaderboard;
-    # /team lookup is for flipping through each of a player's teams' full
-    # stats cards one at a time, not scanning a ranked list.
+    # /team list cards:true is for flipping through each matching team's
+    # full stats card one at a time, not scanning a ranked list. Shared
+    # by /leaderboard's own Cards mode too (see LeaderboardPagingView),
+    # since a page-per-entry is a page-per-entry regardless of whether
+    # the entries are teams or players.
     def _myTeamsPageCount(self, teams):
         return max(1, len(teams))
 
@@ -9702,11 +9714,10 @@ class helpers():
         embed.set_footer(text=f"Team {page + 1}/{len(teams)}")
         return embed, file
 
-    # Shared by every LeaderboardPagingView/MyTeamsPagingView/
-    # TeamListPagingView button callback. First/Prev/Next/Last all
-    # reduce to the same arithmetic regardless of which of the three
-    # tables/render functions the caller actually pages through.
-    # `target`, when given (a 0-based page from
+    # Shared by every LeaderboardPagingView/TeamListPagingView button
+    # callback. First/Prev/Next/Last all reduce to the same arithmetic
+    # regardless of which of the two tables/render functions the caller
+    # actually pages through. `target`, when given (a 0-based page from
     # _PageJumpModal.on_submit), skips direction entirely and just
     # clamps straight to it, the same "landing on the nearest valid
     # page instead of erroring" behavior Last already gives you when
@@ -9721,187 +9732,6 @@ class helpers():
         if direction == "next":
             return min(total_pages - 1, page + 1)
         return total_pages - 1
-
-    async def myTeamsHelper(self, ctx, member=None):
-        target = member if member is not None else ctx.user
-        guild_id = ctx.guild.id
-        user_id = target.id
-
-        teams = self.getTeamsForPlayer(guild_id, user_id)
-        if not teams:
-            if member is None:
-                await ctx.response.send_message("You're not on any teams in this server.", ephemeral=True)
-            else:
-                await ctx.response.send_message(
-                    f"{target.display_name} isn't on any teams in this server.", ephemeral=True
-                )
-            return
-
-        embed, file = self._renderMyTeamsEmbed(teams, page=0)
-        view = MyTeamsPagingView(self)
-        if file is not None:
-            await ctx.response.send_message(embed=embed, file=file, view=view)
-        else:
-            await ctx.response.send_message(embed=embed, view=view)
-        msg = await ctx.original_response()
-
-        self.cursor.execute(
-            "INSERT OR REPLACE INTO my_team_views(messageId, guildId, channelId, userId, page) "
-            "VALUES(?, ?, ?, ?, 0)",
-            (msg.id, guild_id, ctx.channel.id, user_id)
-        )
-        self.db.commit()
-
-    # MyTeamsPagingView's button callback, no-ops (with a plain ephemeral
-    # note) unless the interaction's message still matches an active
-    # /team lookup page view. The stored userId is whoever the list is
-    # ABOUT (the looked-up member, /team lookup's own optional `member`
-    # param, defaulting to whoever ran the command), not whoever clicks
-    # the button. The button itself is clickable by anyone, and
-    # re-derives the team list from that stored userId regardless of who
-    # actually clicked, so anyone else's click still moves the same
-    # shared view. That matches how /leaderboard's own paging already
-    # behaves (any clicker can page a guild-wide view). A personal view
-    # being paged by someone else just steps through the looked-up
-    # player's teams, not the clicker's. cardShown carries across the
-    # flip the same way team_list_views' own does, see
-    # _handleTeamListPageClick.
-    async def _handleMyTeamsPageClick(self, interaction, direction=None, target_page=None):
-        guild_id = interaction.guild_id
-        if guild_id is None:
-            return
-
-        self.cursor.execute(
-            "SELECT userId, page, cardShown FROM my_team_views WHERE guildId=? AND messageId=?",
-            (guild_id, interaction.message.id)
-        )
-        row = self.cursor.fetchone()
-        if row is None:
-            await interaction.response.send_message("This view is no longer live.", ephemeral=True)
-            return
-        user_id, page, card_shown = row
-
-        teams = self.getTeamsForPlayer(guild_id, user_id)
-        if not teams:
-            await interaction.response.defer()
-            return
-        total_pages = self._myTeamsPageCount(teams)
-        page = min(page, total_pages - 1)
-        new_page = self._computeNewPage(direction, page, total_pages, target_page)
-
-        if new_page == page:
-            await interaction.response.defer()
-            return
-
-        if card_shown:
-            guild_name = interaction.guild.name if interaction.guild is not None else ""
-            embed, file = await self._renderTeamListCardEmbed(guild_name, teams, new_page)
-            await interaction.response.edit_message(embed=embed, attachments=[file])
-        else:
-            embed, file = self._renderMyTeamsEmbed(teams, new_page)
-            if file is not None:
-                await interaction.response.edit_message(embed=embed, attachments=[file])
-            else:
-                await interaction.response.edit_message(embed=embed, attachments=[])
-
-        self.cursor.execute(
-            "UPDATE my_team_views SET page=? WHERE guildId=? AND messageId=?",
-            (new_page, guild_id, interaction.message.id)
-        )
-        self.db.commit()
-
-    # MyTeamsPagingView's Card button callback, swaps the currently-paged
-    # team's plain stats card for its actual trading card - see
-    # _handleTeamListShowCardClick, same idea, just re-deriving the team
-    # list from my_team_views' own stored userId instead of a stored
-    # search/sort/filter.
-    async def _handleMyTeamsShowCardClick(self, interaction):
-        guild_id = interaction.guild_id
-        message = interaction.message
-
-        self.cursor.execute(
-            "SELECT userId, page FROM my_team_views WHERE guildId=? AND messageId=? AND cardShown=0",
-            (guild_id, message.id)
-        )
-        row = self.cursor.fetchone()
-        if row is None:
-            await interaction.response.send_message("This view is no longer live.", ephemeral=True)
-            return
-        user_id, page = row
-
-        teams = self.getTeamsForPlayer(guild_id, user_id)
-        if not teams:
-            await interaction.response.send_message("This view is no longer live.", ephemeral=True)
-            return
-        page = min(page, len(teams) - 1)
-
-        await interaction.response.defer()
-        guild_name = interaction.guild.name if interaction.guild is not None else ""
-        embed, file = await self._renderTeamListCardEmbed(guild_name, teams, page)
-        await message.edit(embed=embed, attachments=[file], view=MyTeamsPagingView(self, card_shown=True))
-        self.cursor.execute(
-            "UPDATE my_team_views SET cardShown=1 WHERE guildId=? AND messageId=?",
-            (guild_id, message.id)
-        )
-        self.db.commit()
-
-    # MyTeamsPagingView's Back button callback, the reverse swap.
-    async def _handleMyTeamsReturnClick(self, interaction):
-        guild_id = interaction.guild_id
-        message = interaction.message
-
-        self.cursor.execute(
-            "SELECT userId, page FROM my_team_views WHERE guildId=? AND messageId=? AND cardShown=1",
-            (guild_id, message.id)
-        )
-        row = self.cursor.fetchone()
-        if row is None:
-            await interaction.response.send_message("This view is no longer live.", ephemeral=True)
-            return
-        user_id, page = row
-
-        teams = self.getTeamsForPlayer(guild_id, user_id)
-        if not teams:
-            await interaction.response.send_message("This view is no longer live.", ephemeral=True)
-            return
-        page = min(page, len(teams) - 1)
-
-        await interaction.response.defer()
-        embed, file = self._renderMyTeamsEmbed(teams, page)
-        edit_kwargs = {"embed": embed, "attachments": [file] if file is not None else []}
-        edit_kwargs["view"] = MyTeamsPagingView(self, card_shown=False)
-        await message.edit(**edit_kwargs)
-        self.cursor.execute(
-            "UPDATE my_team_views SET cardShown=0 WHERE guildId=? AND messageId=?",
-            (guild_id, message.id)
-        )
-        self.db.commit()
-
-    # MyTeamsPagingView's Page # button: see _handleLeaderboardJumpClick,
-    # same "no longer live"/empty guards _handleMyTeamsPageClick needs.
-    async def _handleMyTeamsJumpClick(self, interaction):
-        guild_id = interaction.guild_id
-        if guild_id is None:
-            return
-
-        self.cursor.execute(
-            "SELECT userId FROM my_team_views WHERE guildId=? AND messageId=?",
-            (guild_id, interaction.message.id)
-        )
-        row = self.cursor.fetchone()
-        if row is None:
-            await interaction.response.send_message("This view is no longer live.", ephemeral=True)
-            return
-        user_id, = row
-
-        teams = self.getTeamsForPlayer(guild_id, user_id)
-        if not teams:
-            await interaction.response.defer()
-            return
-        total_pages = self._myTeamsPageCount(teams)
-        await interaction.response.send_modal(
-            _PageJumpModal(self, "_handleMyTeamsPageClick", total_pages)
-        )
 
     # Per-team win/loss record scoped to just THIS tournament, computed
     # from resolved tournament_matches rows rather than each team's own
@@ -12378,35 +12208,17 @@ class helpers():
             return None
         return member.display_avatar.with_format("png").url
 
-    # The regular/global half of the same toggle: the account-wide
-    # avatar a discord.User carries, deliberately bypassing any
-    # per-server override a discord.Member might have (that's the whole
-    # point of this half). Cached users are used first. A real fetch
-    # only happens for someone not already in the client's cache. None
-    # if the user can't be resolved at all (e.g. their account no
-    # longer exists).
-    async def _resolveGlobalAvatarUrl(self, user_id):
-        user = self.client.get_user(user_id) if self.client is not None else None
-        if user is None:
-            try:
-                user = await self.client.fetch_user(user_id)
-            except discord.HTTPException:
-                return None
-        return user.display_avatar.with_format("png").url
-
-    # _resolveGuildMember first, falling back to a plain discord.User
-    # (the same global-account resolution _resolveGlobalAvatarUrl's own
-    # fallback uses) if they've left the guild. /leaderboard's
-    # cards:true mode needs a real target for _buildStatsEmbed
-    # regardless of current guild membership, unlike /stats itself
-    # (only ever reachable by someone currently in the guild to run the
-    # command at all, and never paged through a whole roster the way a
-    # leaderboard is). None only if the Discord account itself no
-    # longer resolves either way.
-    async def _resolveGuildMemberOrUser(self, guild_id, user_id):
-        member = await self._resolveGuildMember(guild_id, user_id)
-        if member is not None:
-            return member
+    # The plain discord.User behind any user_id, bypassing whatever
+    # per-server Member overrides (nickname, server avatar) a guild might
+    # have - the shared "global identity" resolution every
+    # server-vs-global toggle in this file (the /stats avatar toggle, its
+    # trading-card twin, /leaderboard cards:true for someone who's left)
+    # needs for both the avatar AND the name shown, so the two can never
+    # drift out of sync with each other. Cached users are used first. A
+    # real fetch only happens for someone not already in the client's
+    # cache. None if the user can't be resolved at all (e.g. their
+    # account no longer exists).
+    async def _resolveGlobalUser(self, user_id):
         if self.client is None:
             return None
         user = self.client.get_user(user_id)
@@ -12416,6 +12228,20 @@ class helpers():
             return await self.client.fetch_user(user_id)
         except discord.HTTPException:
             return None
+
+
+    # _resolveGuildMember first, falling back to _resolveGlobalUser if
+    # they've left the guild. /leaderboard's cards:true mode needs a real
+    # target for _buildStatsEmbed regardless of current guild membership,
+    # unlike /stats itself (only ever reachable by someone currently in
+    # the guild to run the command at all, and never paged through a
+    # whole roster the way a leaderboard is). None only if the Discord
+    # account itself no longer resolves either way.
+    async def _resolveGuildMemberOrUser(self, guild_id, user_id):
+        member = await self._resolveGuildMember(guild_id, user_id)
+        if member is not None:
+            return member
+        return await self._resolveGlobalUser(user_id)
 
     # Converts a "#RRGGBB" hex string (trading_cards' own storage
     # format, portable and human-editable, unlike a raw RGB tuple) back
@@ -13823,25 +13649,16 @@ class helpers():
         return image
 
     # The avatar-fetching half shared by _swapStatsForTradingCard and
-    # its own avatar-toggle re-render. `use_global_avatar` picks
-    # between `member`'s per-server picture (the default) and the
-    # account-wide one a plain discord.User carries, mirroring
-    # _resolveMemberAvatarUrl/_resolveGlobalAvatarUrl's own
-    # server-vs-global split for the plain /stats embed's thumbnail
-    # toggle. Falls back to None (caller draws a plain tile) rather
-    # than failing the whole card over one image request. A
-    # missing/unfetchable avatar shouldn't be fatal.
-    async def _resolveCardAvatarImage(self, member, use_global_avatar):
-        source = member
-        if use_global_avatar and member is not None:
-            global_user = self.client.get_user(member.id) if self.client is not None else None
-            if global_user is None:
-                try:
-                    global_user = await self.client.fetch_user(member.id)
-                except discord.HTTPException:
-                    global_user = None
-            if global_user is not None:
-                source = global_user
+    # _renderLeaderboardCardEmbed. `source` (a discord.Member or
+    # discord.User, whichever identity the caller has already decided
+    # is the one to show - see _swapStatsForTradingCard's own
+    # server-vs-global resolution) is fetched as-is, not re-resolved
+    # here, so the avatar this returns always matches whatever `source`
+    # the caller also pulls the display name from. Falls back to None
+    # (caller draws a plain tile) rather than failing the whole card
+    # over one image request. A missing/unfetchable avatar shouldn't be
+    # fatal.
+    async def _resolveCardAvatarImage(self, source):
         if source is None:
             return None
         try:
@@ -13851,27 +13668,31 @@ class helpers():
             return None
 
     # The async half of the trading card: gathers everything
-    # _renderTradingCardImage needs (a live member for the avatar/display
-    # name, fresh economy stats, persistent teams, and card_settings)
-    # and posts the result in place of the /stats embed. A
-    # missing/unfetchable avatar falls back to a plain tile rather than
-    # failing the whole card over one image request. `use_global_avatar`
-    # is the trading-card half of the same STATS_AVATAR_TOGGLE_EMOJI
-    # button the plain embed uses, see _handleStatsAvatarToggleClick,
-    # which re-calls this in place to redraw the card with the other
-    # avatar rather than posting a new message. `view`, when given, is
-    # included in the same edit call that swaps the image in, see
-    # TeamStatsView helpers' own `view` param for why view=None (the
-    # default) omits the kwarg rather than passing it through.
+    # _renderTradingCardImage needs (an avatar/display name, fresh
+    # economy stats, persistent teams, and card_settings) and posts the
+    # result in place of the /stats embed. A missing/unfetchable avatar
+    # falls back to a plain tile rather than failing the whole card over
+    # one image request. `use_global_avatar` is the trading-card half of
+    # the same STATS_AVATAR_TOGGLE_EMOJI button the plain embed uses,
+    # see _handleStatsAvatarToggleClick, which re-calls this in place to
+    # redraw the card with the other avatar rather than posting a new
+    # message. `view`, when given, is included in the same edit call
+    # that swaps the image in, see TeamStatsView helpers' own `view`
+    # param for why view=None (the default) omits the kwarg rather than
+    # passing it through.
     async def _swapStatsForTradingCard(
         self, message, guild_id, guild_name, target_user_id, use_global_avatar=False, view=None
     ):
         member = await self._resolveGuildMember(guild_id, target_user_id)
-        display_name = member.display_name if member is not None else f"Player {target_user_id}"
+        # This server's own best-known name for the row (economy/
+        # game_stats' own `username` column), independent of which
+        # avatar the toggle currently shows - a cosmetic view flip
+        # shouldn't change what gets stored for this player.
+        stored_name = member.display_name if member is not None else f"Player {target_user_id}"
 
         game = self._currentGame(guild_id)
-        self.ensureEconomyRow(guild_id, target_user_id, display_name)
-        self.ensureGameStatsRow(guild_id, target_user_id, display_name, game)
+        self.ensureEconomyRow(guild_id, target_user_id, stored_name)
+        self.ensureGameStatsRow(guild_id, target_user_id, stored_name, game)
         self.cursor.execute(
             "SELECT elo, ranked_wins, ranked_losses FROM game_stats WHERE guildId=? AND userId=? AND game=?",
             (guild_id, target_user_id, game)
@@ -13887,11 +13708,26 @@ class helpers():
         teams = [team for _, team in self.getTeamsForPlayer(guild_id, target_user_id)]
         settings = self.getCardSettings(guild_id, target_user_id)
 
-        avatar_image = await self._resolveCardAvatarImage(member, use_global_avatar)
+        # Whichever identity the toggle currently shows - this server's
+        # Member (nickname + server avatar) or the plain global User
+        # (Discord display name + account-wide avatar) - is what both
+        # the avatar AND the displayed name come from, so the two can
+        # never mismatch (a global avatar next to a server nickname, or
+        # vice versa). Independent of member's own resolution, so this
+        # still works for someone who's since left the guild.
+        avatar_source = await self._resolveGlobalUser(target_user_id) if use_global_avatar else member
+        display_name = avatar_source.display_name if avatar_source is not None else stored_name
+
+        avatar_image = await self._resolveCardAvatarImage(avatar_source)
         if avatar_image is None:
             avatar_image = Image.new("RGBA", (CARD_AVATAR_SIZE, CARD_AVATAR_SIZE), BRACKET_BACKGROUND_CENTER)
 
-        username = member.name if member is not None else None
+        # The account's own unique handle, unlike display_name never
+        # server-specific, so it's the same either way the toggle is
+        # set - falls back to member only if the toggle's own global
+        # lookup came up empty.
+        username_source = avatar_source if avatar_source is not None else member
+        username = username_source.name if username_source is not None else None
         card_image = await asyncio.to_thread(
             self._renderTradingCardImage,
             guild_name, display_name, avatar_image, settings, stats, teams, username=username
@@ -13912,18 +13748,25 @@ class helpers():
     # message currently has the card's PNG attached, and message.edit()
     # otherwise leaves existing attachments alone. See
     # _swapStatsForTradingCard on `view`. `use_global_avatar` carries the
-    # card's own avatar choice over onto the embed's thumbnail
-    # (_buildStatsEmbed itself always starts on the server avatar, same
-    # as a fresh /stats post), see _handleStatsReturnClick.
+    # card's own avatar choice over onto the embed - built from whichever
+    # identity (server Member or global User) that choice actually
+    # means, the same "name and avatar always come from the same
+    # resolved identity" rule _handleStatsAvatarToggleClick's own embed
+    # branch and _swapStatsForTradingCard follow, rather than building
+    # from the server Member and only patching the thumbnail after,
+    # which left the title's name mismatched against a global avatar.
+    # Falls back to the server Member if the global lookup comes up
+    # empty, so a still-broken account doesn't blank the embed entirely.
     async def _swapTradingCardForStats(self, message, guild_id, target_user_id, use_global_avatar=False, view=None):
         member = await self._resolveGuildMember(guild_id, target_user_id)
-        if member is None:
-            return
-        embed = self._buildStatsEmbed(guild_id, member)
+        target = member
         if use_global_avatar:
-            global_url = await self._resolveGlobalAvatarUrl(target_user_id)
-            if global_url is not None:
-                embed.set_thumbnail(url=global_url)
+            global_user = await self._resolveGlobalUser(target_user_id)
+            if global_user is not None:
+                target = global_user
+        if target is None:
+            return
+        embed = self._buildStatsEmbed(guild_id, target)
         edit_kwargs = {"embed": embed, "attachments": []}
         if view is not None:
             edit_kwargs["view"] = view
@@ -14000,15 +13843,22 @@ class helpers():
         )
         self.db.commit()
 
-    # StatsView's Avatar button callback, branches on cardShown. Off
-    # the card, it flips the embed's thumbnail between the per-server
-    # and regular avatar (comparing the embed's own thumbnail URL
-    # against a freshly-resolved server URL). On the card, it flips
-    # cardAvatarGlobal and re-renders the whole card image in place,
-    # since the avatar there is baked into a PNG rather than a
-    # swappable embed thumbnail URL. Available on both sides, unlike
-    # Card/Back, since both the embed and the card have their own
-    # avatar to toggle.
+    # StatsView's Avatar button callback, branches on cardShown. Off the
+    # card, it rebuilds the whole embed via _buildStatsEmbed against
+    # whichever identity (this server's Member, or the plain global
+    # User) isn't currently showing, comparing the embed's own thumbnail
+    # URL against a freshly-resolved server URL to tell which one that
+    # is - a full rebuild rather than just swapping the thumbnail URL in
+    # place, so the title's name always matches whichever avatar comes
+    # with it (this server's nickname next to the server avatar, or the
+    # Discord display name next to the account-wide one - never one
+    # from each). On the card, it flips cardAvatarGlobal and re-renders
+    # the whole card image in place, since the avatar there is baked
+    # into a PNG rather than a swappable embed thumbnail URL;
+    # _swapStatsForTradingCard resolves that same identity itself and
+    # pulls both the avatar and the displayed name from it for the same
+    # reason. Available on both sides, unlike Card/Back, since both the
+    # embed and the card have their own avatar to toggle.
     async def _handleStatsAvatarToggleClick(self, interaction):
         guild_id = interaction.guild_id
         message = interaction.message
@@ -14048,14 +13898,13 @@ class helpers():
         currently_server = embed.thumbnail is not None and embed.thumbnail.url == server_url
 
         if currently_server:
-            new_url = await self._resolveGlobalAvatarUrl(target_user_id)
-            if new_url is None:
-                return
+            target = await self._resolveGlobalUser(target_user_id)
         else:
-            new_url = server_url
+            target = await self._resolveGuildMember(guild_id, target_user_id)
+        if target is None:
+            return
 
-        embed.set_thumbnail(url=new_url)
-        await message.edit(embed=embed)
+        await message.edit(embed=self._buildStatsEmbed(guild_id, target))
 
     # ---------------- Leaderboard ----------------
 
@@ -14227,9 +14076,10 @@ class helpers():
     # messageId here. Always starts as the ranked list. The view's own
     # Cards button (_handleLeaderboardViewCardsClick) is what switches
     # over to _renderLeaderboardEntryStatsEmbed's one-player-per-page
-    # rendering, /team lookup-style, with its own Card/Back toggle over
-    # to that player's actual trading card. No longer something you
-    # have to pre-select before the command even runs.
+    # rendering, same one-entry-per-page shape /team list cards:true
+    # uses, with its own Card/Back toggle over to that player's actual
+    # trading card. No longer something you have to pre-select before
+    # the command even runs.
     async def leaderboardHelper(self, ctx, stat, order):
         guild_id = ctx.guild.id
 
@@ -14439,7 +14289,7 @@ class helpers():
         teams = [team for _, team in self.getTeamsForPlayer(guild_id, user_id)]
         settings = self.getCardSettings(guild_id, user_id)
 
-        avatar_image = await self._resolveCardAvatarImage(target, False)
+        avatar_image = await self._resolveCardAvatarImage(target)
         if avatar_image is None:
             avatar_image = Image.new("RGBA", (CARD_AVATAR_SIZE, CARD_AVATAR_SIZE), BRACKET_BACKGROUND_CENTER)
 

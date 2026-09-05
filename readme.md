@@ -186,12 +186,9 @@ invoked the command yet. `interaction_check` also fires for autocomplete
 interactions, i.e. typing into a field with `@app_commands.autocomplete`,
 which would otherwise turn every keystroke into a logged "command called".
 That's filtered out by checking
-`interaction.type is discord.InteractionType.application_command`. The
-override always returns `True`, matching the default implementation's
-behavior, so it never blocks anything. Per-command checks like `/clear`'s
-`has_permissions` still run separately afterward, unaffected.
+`interaction.type is discord.InteractionType.application_command`.
 
-The whole body is wrapped in its own `try`/`except Exception`, logging and
+The logging half is wrapped in its own `try`/`except Exception`, logging and
 swallowing rather than letting anything through. `interaction.command`/
 `.namespace` run discord.py's real option-resolution machinery, which is
 nothing a `FakeInteraction`-based test can faithfully exercise.
@@ -202,6 +199,24 @@ interaction failed", and neither `on_app_command_error` nor this file's own
 log sees it. A logging-only hook has no business reason to ever fail, so it
 needs to be structurally unable to take down the feature it's just supposed
 to be watching.
+
+After that, one real check: every command here reads or writes guild-scoped
+state (a roster, elo, a tournament, ...), none of which mean anything run as
+a DM to the bot itself, so `interaction.guild is None` (true precisely for a
+DM interaction) on a real application command gets an explicit "This only
+works in a server, not in a DM" reply and a `False` return, instead of the
+confusing generic error a DM attempt used to hit once the command's own
+`ctx.guild.id` access raised. This lives here, the one hook every command
+already passes through, rather than as a repeated guard on each command
+individually. Returning `False` alone from this hook isn't enough on its
+own: `CommandTree._call` just sets `interaction.command_failed = True` and
+returns, nothing gets dispatched to `on_app_command_error`, so a bare
+`False` would leave a DM caller looking at a stuck "thinking..." state with
+no reply at all - the message has to be sent from right here. Every other
+interaction (a real guild command, a button click, a ping) still always
+returns `True`, matching the default implementation's own behavior for
+everything this new check doesn't apply to. Per-command checks like
+`/clear`'s `has_permissions` still run separately afterward, unaffected.
 
 A successful completion is logged separately, from
 `on_app_command_completion`. This is an event discord.py dispatches itself
@@ -1086,24 +1101,20 @@ gold, or gold wagered, still show everyone.
 new. `_handleLeaderboardPageClick` looks up the stored filter/order/page
 for that message id in the `leaderboards` table, recomputes the requested
 page, and edits the original message via
-`interaction.response.edit_message()`. `/team lookup` and `/team list` page
-the exact same way, through their own
-`MyTeamsPagingView`/`TeamListPagingView` and
-`my_team_views`/`team_list_views` tables. All three share a single
-`_computeNewPage(direction, page, total_pages)` helper for the
-First/Prev/Next/Last arithmetic itself, so that part can't drift out of
-sync between them. All three paging views are persistent too, for the same
-"shouldn't die across a restart" reasoning as everything else long-lived in
-this file.
+`interaction.response.edit_message()`. `/team list` pages the exact same
+way, through its own `TeamListPagingView` and `team_list_views` table.
+Both share a single `_computeNewPage(direction, page, total_pages)`
+helper for the First/Prev/Next/Last arithmetic itself, so that part
+can't drift out of sync between them. Both paging views are persistent
+too, for the same "shouldn't die across a restart" reasoning as
+everything else long-lived in this file.
 
-`MyTeamsPagingView` also carries the same Card/Back toggle
-`TeamListPagingView` offers in `cards:true` mode: `_handleMyTeamsShowCardClick`/
-`_handleMyTeamsReturnClick` swap the currently-paged team's plain stats card
-for its actual trading card and back, `my_team_views.cardShown` tracks which
-is up, and `_handleMyTeamsPageClick` reads that same column so paging while a
-card is shown keeps landing on cards instead of snapping back to stats -
-exactly the pattern `_handleTeamListPageClick` already established for
-`team_list_views.cardShown`.
+`TeamListPagingView` also carries a Card/Back toggle in `cards:true`
+mode: `_handleTeamListShowCardClick`/`_handleTeamListReturnClick` swap
+the currently-paged team's plain stats card for its actual trading card
+and back, `team_list_views.cardShown` tracks which is up, and
+`_handleTeamListPageClick` reads that same column so paging while a card
+is shown keeps landing on cards instead of snapping back to stats.
 
 Missing stats (a win rate with zero games played, for example) sort to the
 bottom regardless of ascending/descending order, rather than a `None`/0 value
@@ -1477,6 +1488,79 @@ snapshots a copy of the `Team` at registration time, not a live reference back
 into the `teams` table, so the bracket entry plays out exactly as registered
 either way.
 
+### Consolidating `/team lookup` into `/team list`
+
+`/team list`'s `mine` param ("Only show teams you're rostered on") is the
+whole surface of what used to be a separate `/team lookup` command:
+`teamListHelper` folds the caller straight into the same `members` list
+`member_1`..`member_5` already build (`if mine and not any(m.id ==
+ctx.user.id for m in members): members.append(ctx.user)`), so it's not a
+parallel code path at all - just one more way that list ends up with a
+member in it. Since `member_ids` is an AND filter
+(`_filterAndSortTeams` keeps a team only if every given id is rostered on
+it), `mine:true member_1:<X>` composes naturally into "teams X and I are
+both on together," not a conflict to resolve.
+
+The old `/team lookup` had two things `/team list` didn't already cover
+on its own: not having to mention yourself, and a friendlier "you're/
+they're not on any teams" message instead of the generic "no teams match
+those filters." `mine` is the first. The second is now just part of
+`teamListHelper`'s own empty-result branch: a bare single-member filter
+(`mine`, or a lone `member_1`, with no `search`/`recruiting_only` also
+narrowing it) gets the personalized message; anything with `search` or
+more than one member falls through to the generic one, since "no
+results" there could just as easily mean the filters didn't match as
+mean the one person has no teams at all.
+
+Both of `/team lookup`'s posted-message shapes - the plain stats
+embed, and (its whole reason for existing rather than just running
+`/team stats` per team) the one-team-per-page `cards`-mode paging - were
+already exactly what `/team list cards:true` renders
+(`_renderMyTeamsEmbed`/`_myTeamsPageCount`, shared with `/leaderboard`'s
+own Cards mode too, take a plain list of `(team_id, team)` tuples and
+never cared where it came from). So folding lookup in didn't need a new
+rendering path either, just `mine` feeding the existing one. The
+now-redundant `MyTeamsPagingView`/`myTeamsHelper`/`my_team_views` (a
+whole second persistent view, handler set, and backing table duplicating
+`TeamListPagingView`/`team_list_views`) are gone; a pre-existing
+`my_team_views` table in an already-deployed database is simply never
+written to or read from again, not worth a migration to drop.
+
+### Welcoming a new server
+
+`on_guild_join` posts a one-time message pointing a brand new server at
+`/setup` and `/help` (`welcomeNewGuildHelper`), instead of the bot just
+silently showing up in the member list with nothing telling anyone it's
+there beyond that. `/help`'s own no-argument reply already says "New
+here? Run /setup first.", but that only reaches someone who's already
+thought to run `/help` - this reaches whoever's watching the server's
+main channel the moment the bot's actually added, without needing to
+know either command exists first.
+
+`guild.system_channel` (the "server's main channel" Discord itself lets
+an admin designate) is preferred, since it's the one channel most
+members already have open. If there isn't one, or the bot can't post
+there, it falls back to the first of `guild.text_channels` it actually
+has `send_messages` permission in (`channel.permissions_for(guild.me)`).
+No channel at all postable - every channel locked down before roles are
+granted, or a server with no text channels yet - just skips the message
+entirely rather than raising; a `discord.HTTPException` from the send
+itself (a permission edge case the upfront check didn't catch) is
+swallowed the same way.
+
+`/set welcome-message` (`servers.welcome_message_enabled`, on by
+default) is the per-server opt-out, same `has_permissions(manage_guild=
+True)` gate and confirmation-message shape as `/set betting`. It can't
+retroactively post or unpost a message the server already got (or
+didn't) the moment Shockwave first joined - `welcomeNewGuildHelper`
+checks it right at the top, before even looking for a channel, and
+`ensure_guild_row` has always already run by the time `on_guild_join`
+reaches that call, so the row (and its default) exists. Practically,
+this only ever matters for a *future* join: the bot can be removed from
+a server and re-added later, and this is what lets an admin who didn't
+want the message the first time make sure a second one doesn't show up
+either.
+
 ### Setup and role preferences
 
 `/setup` is a one-stop first command for a new player: a short explanation of
@@ -1800,7 +1884,7 @@ A team with no logo set gets one assigned randomly the moment it's next loaded.
 `getTeamsForGuild`) as well as `_saveNewTeam`, so a team just self-heals the
 first time it's touched rather than needing a one-off migration.
 
-`/team stats` and `/team lookup` attach a logo as an embed thumbnail via
+`/team stats` and `/team list` attach a logo as an embed thumbnail via
 Discord's `attachment://<filename>` scheme. The matchup graphic pastes it
 directly into the rendered image instead.
 
@@ -1820,12 +1904,16 @@ falls back to the ring only if the built-in set itself is unavailable.
 `/stats` posts a `StatsView` alongside the embed: Avatar, Card, and (once the
 card is up) Back buttons. `StatsView` is persistent, same reasoning as
 `WinnerReportView`: nothing ever expires a `/stats` view on its own. Avatar
-toggles the thumbnail between this server's own profile picture for that
-player and their regular, account-wide one. `_resolveMemberAvatarUrl` handles
-the server half (`member.display_avatar`, which already resolves a per-server
-override if one's set), and `_resolveGlobalAvatarUrl` handles the regular half
-by fetching the plain `discord.User` behind the member, bypassing any guild
-avatar override.
+toggles the *whole identity* shown - this server's own (nickname and
+per-server profile picture, if either is set) versus the player's regular,
+account-wide one (Discord display name and account-wide avatar) - never just
+the picture on its own. `_resolveGlobalUser` is the shared "resolve the plain
+`discord.User` behind this id" helper (cached users first, a real fetch only
+for someone not already in the client's cache) every server-vs-global switch
+in this file goes through, so the same account resolution can't drift between
+them. `_resolveMemberAvatarUrl` is the server-only half used just to tell
+which one an embed's thumbnail is currently showing (`member.display_avatar`,
+which already resolves a per-server override if one's set).
 
 Card throws the whole embed away and replaces it with a rendered trading card
 (`_renderTradingCardImage`): Shockwave's logo and the server's name across the
@@ -1855,22 +1943,36 @@ or omitted.) Pressing Back rebuilds the plain `/stats` embed
 `stats_views.cardShown` back to 0, and swaps Back back out for Card: a real
 back-and-forth toggle.
 
-`_handleStatsAvatarToggleClick` branches on `cardShown`, and once a card is up
-the toggle re-renders the whole card image in place instead of swapping an
-embed thumbnail URL, since the avatar is baked into the PNG.
-`_resolveCardAvatarImage` picks between `member`'s per-server avatar and a
-plain `discord.User`'s account-wide one, and `stats_views.cardAvatarGlobal`
-tracks which one is currently showing. Both swaps carry that choice across the
-embed/card divide instead of resetting it: `_handleStatsShowCardClick` reads
-whichever avatar the embed's own thumbnail is currently showing (comparing its
-URL against a freshly-resolved server URL, the same comparison the toggle
-itself uses) and renders the card with that avatar and `cardAvatarGlobal` set
-to match; `_handleStatsReturnClick` does the reverse, reading
-`cardAvatarGlobal` and passing it into `_swapTradingCardForStats`, which
-swaps the freshly-built embed's thumbnail to the global avatar when it's set
-rather than leaving `_buildStatsEmbed`'s own server-avatar default in place.
-Only a brand new `/stats` post (`statsHelper`) starts on the server avatar;
-switching back and forth after that keeps whatever was last chosen.
+`_handleStatsAvatarToggleClick` branches on `cardShown`. Off the card, it
+resolves whichever identity isn't currently showing (comparing the embed's
+own thumbnail URL against a freshly-resolved server URL to tell which one
+that is) and rebuilds the *whole* embed against it through `_buildStatsEmbed`
+- the same function a fresh `/stats` post uses - rather than just swapping the
+thumbnail URL in place. `_buildStatsEmbed` takes any target with
+`.id`/`.name`/`.display_name`/`.display_avatar` (a `discord.Member` or a
+plain `discord.User` both qualify) and always derives the title *and* the
+thumbnail from that one object, so the name and the avatar can never end up
+showing two different identities against each other. Once a card is up, the
+toggle re-renders the whole card image in place instead (the avatar's baked
+into the PNG, no swappable thumbnail URL to just patch), and
+`stats_views.cardAvatarGlobal` tracks which identity is currently showing.
+`_swapStatsForTradingCard` resolves that same identity itself
+(`_resolveGlobalUser` if the toggle's on, otherwise the server `Member`) and
+pulls both the avatar (`_resolveCardAvatarImage`, now just "fetch this
+already-resolved identity's avatar" with no member-vs-global logic of its
+own) and the displayed name from it, for the same never-mismatched reason.
+
+Both swaps carry the current choice across the embed/card divide instead of
+resetting it: `_handleStatsShowCardClick` reads whichever identity the
+embed's own thumbnail is currently showing and renders the card with that
+same one, setting `cardAvatarGlobal` to match; `_handleStatsReturnClick` does
+the reverse, reading `cardAvatarGlobal` and resolving the matching identity
+(falling back to the server `Member` if the global lookup comes up empty)
+before calling `_buildStatsEmbed` with it - again a full rebuild from the
+right identity, not `_buildStatsEmbed`'s own server-identity default patched
+after the fact. Only a brand new `/stats` post (`statsHelper`) starts on the
+server identity; switching back and forth after that keeps whatever was last
+chosen.
 
 A card's look lives in `trading_cards` (one row per guild/player pair, same
 self-healing "insert defaults on first read" shape `ensureEconomyRow` uses for
@@ -2281,11 +2383,10 @@ round that never got a row as resolved once play has moved past it.
 | `tournament_wagers` | active simultaneous-tournament-match bets (one per match/player) | cleared out once that specific match resolves |
 | `duels` | active `/wager against` challenges | one row per challenge, several can be open at once. `createdAt` backs `expireStalePendingInvites`' 24-hour cleanup, only ever for a still-`PENDING_ACCEPT` row |
 | `leaderboards` | posted `/leaderboard` messages | which filter/order/page each message is currently showing, plus `cards`/`cardShown` for the Cards-button view |
-| `my_team_views` | posted `/team lookup` messages | which page (and whose team list) each message is currently showing, plus `cardShown` for the Card/Back toggle |
-| `team_list_views` | posted `/team list` messages | which filter/sort/page each message is currently showing (`memberIds`/`memberNames` for the member filter), plus `cards`/`cardShown` for cards:true mode |
+| `team_list_views` | posted `/team list` messages | which filter/sort/page each message is currently showing (`memberIds`/`memberNames` for the member filter, `mine` folded straight into it - see "Consolidating /team lookup into /team list" below), plus `cards`/`cardShown` for cards:true mode |
 | `last_result` | one row per guild | a snapshot of the most recently resolved game, for `/set correct-winner` |
-| `teams` | persistent named teams | one row per team: captain, roster, target size, voice channel, `logo_path`. `wins`/`losses` embedded in its serialized data are frozen/unused now, see `team_game_stats` below |
-| `team_game_stats` | one row per (guild, team, game) | a persistent team's win/loss record, scoped per game the same way `game_stats` scopes a player's - split out of `teams`' embedded `wins`/`losses` since a team's record shouldn't mix results from different games |
+| `teams` | persistent named teams | one row per team: captain, roster, target size, voice channel, `logo_path` |
+| `team_game_stats` | one row per (guild, team, game) | a persistent team's win/loss record, scoped per game the same way `game_stats` scopes a player's |
 | `tournaments` | one row per guild | name, team/bracket size, elimination type, registered teams, the winners bracket, and (double elimination only) the losers bracket |
 | `team_invites` | pending `/team invite`s | one row per invitee per invite. Several invitees from one `/team invite` call share a `messageId`, each accepting independently. `createdAt` backs `expireStalePendingInvites`' 24-hour cleanup |
 | `team_transfers` | pending `/team transfer` offers | at most one per `(guildId, teamId)`; a second offer while one's outstanding is refused rather than creating a competing row. No row at all for a `force` transfer. `createdAt` backs the same 24-hour cleanup |

@@ -65,8 +65,8 @@ GUILD_ID = 555000111
 
 SERVERS_SCHEMA = (
     "CREATE TABLE servers(guildId, serverName, original_channel, team1, team2, "
-    "players, channel1, channel2, mode, turn, team_size, tournament, elo, "
-    "result1, result2, captain1, captain2, "
+    "players, channel1, channel2, mode, turn, team_size, "
+    "captain1, captain2, "
     "betting_state, betting_message_id, betting_channel_id, is_ranked, "
     "active_tournament_match_id, wager_channel, betting_timer_seconds, "
     "roster_team1_message_id, roster_team2_message_id, roster_channel_id, "
@@ -74,12 +74,11 @@ SERVERS_SCHEMA = (
     "draft_pick_page DEFAULT 0, draft_players_message_id, draft_snake DEFAULT 0, "
     "betting_closed_message_id, make_teams_message_ids, matchup_message_id, roster_starting DEFAULT 0, "
     "roster_permissions_strict DEFAULT 0, max_wager, betting_enabled DEFAULT 1, matchup_channel, "
-    "current_game DEFAULT 'League', game, draft_picker_message_id)"
+    "current_game DEFAULT 'League', game, draft_picker_message_id, welcome_message_enabled DEFAULT 1)"
 )
 ECONOMY_SCHEMA = (
     "CREATE TABLE economy(guildId, userId, username, balance, wins, losses, "
-    "gold_wagered, gold_won, gold_lost, game_wins, game_losses, elo, last_daily, "
-    "ranked_wins DEFAULT 0, ranked_losses DEFAULT 0, current_win_streak DEFAULT 0, "
+    "gold_wagered, gold_won, gold_lost, last_daily, "
     "PRIMARY KEY(guildId, userId))"
 )
 GAME_STATS_SCHEMA = (
@@ -99,10 +98,6 @@ DUELS_SCHEMA = (
 LEADERBOARDS_SCHEMA = (
     "CREATE TABLE leaderboards(messageId INTEGER PRIMARY KEY, guildId, channelId, "
     "filter, sort_order, page, cards INTEGER DEFAULT 0, cardShown INTEGER DEFAULT 0)"
-)
-MY_TEAM_VIEWS_SCHEMA = (
-    "CREATE TABLE my_team_views(messageId INTEGER PRIMARY KEY, guildId, channelId, userId, page, "
-    "cardShown INTEGER DEFAULT 0)"
 )
 TEAM_LIST_VIEWS_SCHEMA = (
     "CREATE TABLE team_list_views(messageId INTEGER PRIMARY KEY, guildId, channelId, "
@@ -175,7 +170,6 @@ def make_db():
     cursor.execute(LAST_RESULT_SCHEMA)
     cursor.execute(DUELS_SCHEMA)
     cursor.execute(LEADERBOARDS_SCHEMA)
-    cursor.execute(MY_TEAM_VIEWS_SCHEMA)
     cursor.execute(TEAM_LIST_VIEWS_SCHEMA)
     cursor.execute(STATS_VIEWS_SCHEMA)
     cursor.execute(TRADING_CARDS_SCHEMA)
@@ -197,9 +191,9 @@ def make_db():
 def insert_guild_row(cursor, db, guild_id=GUILD_ID, name="Test Guild"):
     cursor.execute(
         "INSERT INTO servers VALUES(?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, "
-        "NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'NONE', NULL, NULL, 0, NULL, NULL, ?, "
+        "NULL, NULL, NULL, 'NONE', NULL, NULL, 0, NULL, NULL, ?, "
         "NULL, NULL, NULL, 0, NULL, NULL, NULL, 0, NULL, 0, NULL, NULL, NULL, 0, 0, NULL, 1, NULL, "
-        "'League', NULL, NULL)",
+        "'League', NULL, NULL, 1)",
         (guild_id, name, helper_module.BETTING_DURATION_SECONDS),
     )
     cursor.execute("INSERT OR IGNORE INTO guild_games(guildId, game) VALUES(?, 'League')", (guild_id,))
@@ -296,8 +290,8 @@ class FakeMember:
 
 
 # The account-wide identity behind a FakeMember, distinct from it (a real
-# discord.Member wraps a discord.User the same way). It has its OWN avatar
-# so the per-server/global avatar toggle (see _resolveGlobalAvatarUrl/
+# discord.Member wraps a discord.User the same way). It has its OWN name
+# and avatar so the per-server/global toggle (see _resolveGlobalUser/
 # _resolveCardAvatarImage) has something genuinely different to switch to
 # in tests.
 class FakeUser:
@@ -364,17 +358,30 @@ class FakeChannel:
         self.send = AsyncMock(side_effect=_send)
         self.create_invite = AsyncMock(return_value="https://discord.gg/fake-invite")
         self.fetch_message = AsyncMock(side_effect=_fetch_message)
+        # Controls what permissions_for() below reports. True by default
+        # (the common case in tests that don't care), settable per test
+        # for the "bot can't post here" path (see welcomeNewGuildHelper).
+        self.send_messages_allowed = True
+
+    def permissions_for(self, member):
+        return SimpleNamespace(send_messages=self.send_messages_allowed)
 
     def __str__(self):
         return self.name
 
 
 class FakeGuild:
-    def __init__(self, id=GUILD_ID, name="Test Guild", channels=None, members=None):
+    def __init__(self, id=GUILD_ID, name="Test Guild", channels=None, members=None, system_channel=None):
         self.id = id
         self.name = name
         self.channels = channels if channels is not None else []
         self.members = members if members is not None else []
+        self.system_channel = system_channel
+        # The bot's own member in this guild (discord.py's Guild.me),
+        # what permissions_for() checks are actually made against. Just a
+        # placeholder identity - no test currently varies it, only
+        # channel.send_messages_allowed.
+        self.me = FakeMember("Shockwave", id=999999, bot=True)
 
     @property
     def text_channels(self):
@@ -493,9 +500,6 @@ class TeamTests(unittest.TestCase):
         team.set_name("Team 1")
         team.add_player(Player(1, "Alice"))
         team.add_player(Player(2, "Bob"))
-        team.addWin()
-        team.addWin()
-        team.addLoss()
 
         restored = Team()
         restored.deserializeTeam(team.serializeTeam())
@@ -504,8 +508,24 @@ class TeamTests(unittest.TestCase):
         self.assertEqual({p.get_id() for p in restored.get_players()}, {1, 2})
         self.assertEqual({p.get_name() for p in restored.get_players()}, {"Alice", "Bob"})
         self.assertEqual(restored.get_size(), 2)
-        self.assertEqual(restored.wins, 2)
-        self.assertEqual(restored.losses, 1)
+
+    def test_wins_and_losses_are_not_part_of_serialization(self):
+        # wins/losses are pure display state, set by
+        # helper._hydrateTeamGameRecord from team_game_stats after every
+        # load, never round-tripped through serializeTeam/deserializeTeam
+        # itself - a freshly-deserialized Team (bypassing that hydration
+        # step, as this test does) always starts at the plain 0 default.
+        team = Team()
+        team.set_id(1)
+        team.set_name("Team 1")
+        team.wins = 7
+        team.losses = 3
+
+        restored = Team()
+        restored.deserializeTeam(team.serializeTeam())
+
+        self.assertEqual(restored.wins, 0)
+        self.assertEqual(restored.losses, 0)
 
     def test_deserialize_empty_team_has_no_players(self):
         team = Team()
@@ -561,17 +581,6 @@ class TeamTests(unittest.TestCase):
         restored.deserializeTeam(team.serializeTeam())
 
         self.assertEqual(restored.get_team_size(), 5)
-
-    def test_deserialize_tolerates_data_from_before_team_size_existed(self):
-        # Simulates a team serialized by older code, before the team_size
-        # field was appended to the format.
-        old_format = "[1, Legacy Team, , 0, , , 0, 0]"
-
-        restored = Team()
-        restored.deserializeTeam(old_format)
-
-        self.assertIsNone(restored.get_team_size())
-        self.assertEqual(restored.get_name(), "Legacy Team")
 
 
 class TournamentTests(unittest.TestCase):
@@ -1765,10 +1774,10 @@ class ApplyBalancedRolesToRosterTests(HelperTestCase):
         disliked = self.helperObj._dislikedRoleUserIds(GUILD_ID)
         self.assertEqual(disliked, {p.get_id() for p in team1.get_players()})
 
-    # Regression: this used to read economy.elo directly, which is now a
-    # frozen/unused column (see /set game) rather than the live per-game
-    # rating - reading it here would silently balance roles off stale
-    # elo, never updated by a real result again.
+    # Regression: role balancing needs the active game's own elo
+    # (game_stats), not economy - a guild can track several games at
+    # once (see /set game), and only game_stats scopes a rating to one
+    # of them.
     async def test_reads_elo_from_the_active_games_game_stats_not_economy(self):
         team1, team2 = self._seed_roster()
 
@@ -4544,6 +4553,102 @@ class TeamRemoveHelperTests(HelperTestCase):
         self.assertEqual(sorted(p.get_id() for p in team.get_players()), [901, 903])
 
 
+class WelcomeNewGuildHelperTests(HelperTestCase):
+    async def test_posts_to_the_system_channel_when_postable(self):
+        system = FakeChannel("general", kind="text")
+        other = FakeChannel("random", kind="text")
+        guild = FakeGuild(channels=[system, other], system_channel=system)
+
+        await self.helperObj.welcomeNewGuildHelper(guild)
+
+        system.send.assert_awaited_once()
+        other.send.assert_not_awaited()
+
+    async def test_falls_back_to_a_text_channel_when_there_is_no_system_channel(self):
+        voice = FakeChannel("Lobby", kind="voice")
+        text = FakeChannel("general", kind="text")
+        guild = FakeGuild(channels=[voice, text], system_channel=None)
+
+        await self.helperObj.welcomeNewGuildHelper(guild)
+
+        text.send.assert_awaited_once()
+
+    async def test_falls_back_when_the_system_channel_is_not_postable(self):
+        system = FakeChannel("announcements", kind="text")
+        system.send_messages_allowed = False
+        other = FakeChannel("general", kind="text")
+        guild = FakeGuild(channels=[system, other], system_channel=system)
+
+        await self.helperObj.welcomeNewGuildHelper(guild)
+
+        system.send.assert_not_awaited()
+        other.send.assert_awaited_once()
+
+    async def test_skips_a_text_channel_the_bot_cannot_post_in(self):
+        locked = FakeChannel("staff-only", kind="text")
+        locked.send_messages_allowed = False
+        open_channel = FakeChannel("general", kind="text")
+        guild = FakeGuild(channels=[locked, open_channel], system_channel=None)
+
+        await self.helperObj.welcomeNewGuildHelper(guild)
+
+        locked.send.assert_not_awaited()
+        open_channel.send.assert_awaited_once()
+
+    async def test_does_nothing_when_no_channel_is_postable(self):
+        locked = FakeChannel("staff-only", kind="text")
+        locked.send_messages_allowed = False
+        guild = FakeGuild(channels=[locked], system_channel=None)
+
+        await self.helperObj.welcomeNewGuildHelper(guild)  # must not raise
+
+        locked.send.assert_not_awaited()
+
+    async def test_does_nothing_when_the_guild_has_no_channels_at_all(self):
+        guild = FakeGuild(channels=[], system_channel=None)
+        await self.helperObj.welcomeNewGuildHelper(guild)  # must not raise
+
+    async def test_swallows_a_failed_send(self):
+        system = FakeChannel("general", kind="text")
+        system.send.side_effect = discord.HTTPException(
+            SimpleNamespace(status=403, reason="Forbidden"), "missing access"
+        )
+        guild = FakeGuild(channels=[system], system_channel=system)
+
+        await self.helperObj.welcomeNewGuildHelper(guild)  # must not raise
+
+    async def test_does_nothing_when_disabled_via_set_welcome_message(self):
+        self.helperObj.update(GUILD_ID, "welcome_message_enabled", 0)
+        system = FakeChannel("general", kind="text")
+        guild = FakeGuild(channels=[system], system_channel=system)
+
+        await self.helperObj.welcomeNewGuildHelper(guild)
+
+        system.send.assert_not_awaited()
+
+
+class SetWelcomeMessageHelperTests(HelperTestCase):
+    def _ctx(self, user_id=901, name="Alice"):
+        return FakeInteraction(self.guild, FakeMember(name, id=user_id))
+
+    async def test_disabling_updates_the_setting_and_confirms(self):
+        ctx = self._ctx()
+        await self.helperObj.setWelcomeMessageHelper(ctx, False)
+
+        self.assertEqual(self.helperObj.get(GUILD_ID, "welcome_message_enabled"), 0)
+        ctx.response.send_message.assert_awaited_once()
+        self.assertIn("disabled", ctx.response.send_message.call_args.args[0])
+
+    async def test_enabling_updates_the_setting_and_confirms(self):
+        self.helperObj.update(GUILD_ID, "welcome_message_enabled", 0)
+        ctx = self._ctx()
+        await self.helperObj.setWelcomeMessageHelper(ctx, True)
+
+        self.assertEqual(self.helperObj.get(GUILD_ID, "welcome_message_enabled"), 1)
+        ctx.response.send_message.assert_awaited_once()
+        self.assertIn("enabled", ctx.response.send_message.call_args.args[0])
+
+
 class SetupHelperTests(HelperTestCase):
     def _ctx(self, user_id=901, name="Alice", channel=None, message=None):
         return FakeInteraction(self.guild, FakeMember(name, id=user_id), channel=channel, message=message)
@@ -5108,9 +5213,8 @@ class RenderTeamCardImageTests(_FakeLogoDirTestCase):
             FakeInteraction(self.guild, FakeMember("Alice", id=901)), "Red", 5
         )
         _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
-        team.addWin()
-        team.addWin()
-        team.addLoss()
+        team.wins = 2
+        team.losses = 1
 
         image = self.helperObj._renderTeamCardImage("Test Guild", team)
         self.assertGreater(image.width, 0)
@@ -5379,82 +5483,6 @@ class GetTeamsCaptainedByTests(HelperTestCase):
         self.assertEqual(self.helperObj.getTeamsCaptainedBy(GUILD_ID, 999), [])
 
 
-class MyTeamsHelperTests(_FakeLogoDirTestCase):
-    def _ctx(self, user_id=901, name="Alice"):
-        return FakeInteraction(self.guild, FakeMember(name, id=user_id))
-
-    async def test_no_teams_sends_a_message(self):
-        ctx = self._ctx()
-        await self.helperObj.myTeamsHelper(ctx)
-        ctx.response.send_message.assert_awaited_once_with("You're not on any teams in this server.", ephemeral=True)
-
-    async def test_no_teams_for_another_member_names_them_instead_of_you(self):
-        other = FakeMember("Bob", id=902)
-        ctx = self._ctx()  # caller is Alice (901)
-        await self.helperObj.myTeamsHelper(ctx, other)
-        ctx.response.send_message.assert_awaited_once_with("Bob isn't on any teams in this server.", ephemeral=True)
-
-    async def test_looks_up_another_members_teams(self):
-        other = FakeMember("Bob", id=902)
-        await self.helperObj.createTeamHelper(self._ctx(902, "Bob"), "Red", 5)
-
-        ctx = self._ctx()  # caller is Alice (901), who is on no teams
-        posted = FakeMessage(id=5252)
-        ctx.original_response.return_value = posted
-        await self.helperObj.myTeamsHelper(ctx, other)
-
-        kwargs = ctx.response.send_message.call_args.kwargs
-        embed = kwargs["embed"]
-        self.assertEqual(embed.title, "Red Stats")
-
-        self.cursor.execute(
-            "SELECT guildId, channelId, userId, page FROM my_team_views WHERE messageId=5252"
-        )
-        self.assertEqual(self.cursor.fetchone(), (GUILD_ID, ctx.channel.id, 902, 0))
-        if "file" in kwargs:
-            kwargs["file"].close()
-
-    async def test_posts_the_first_team_reacts_and_tracks_the_view(self):
-        await self.helperObj.createTeamHelper(self._ctx(), "Red", 5)
-        await self.helperObj.createTeamHelper(self._ctx(), "Blue", 5)
-
-        ctx = self._ctx()
-        posted = FakeMessage(id=4242)
-        ctx.original_response.return_value = posted
-        await self.helperObj.myTeamsHelper(ctx)
-
-        kwargs = ctx.response.send_message.call_args.kwargs
-        embed = kwargs["embed"]
-        self.assertEqual(embed.title, "Red Stats")
-        self.assertIn("Team 1/2", embed.footer.text)
-        view = kwargs["view"]
-        self.assertIsInstance(view, helper_module.MyTeamsPagingView)
-        # Card is offered from the start, Back only once a card is
-        # actually up - see MyTeamsPagingViewTests for the toggle itself.
-        self.assertIn(view.showCard, view.children)
-        self.assertNotIn(view.returnToStats, view.children)
-
-        self.cursor.execute(
-            "SELECT guildId, channelId, userId, page FROM my_team_views WHERE messageId=4242"
-        )
-        self.assertEqual(self.cursor.fetchone(), (GUILD_ID, ctx.channel.id, 901, 0))
-        if "file" in kwargs:
-            kwargs["file"].close()
-
-    async def test_teams_are_ordered_by_team_id(self):
-        await self.helperObj.createTeamHelper(self._ctx(), "Zeta", 5)
-        await self.helperObj.createTeamHelper(self._ctx(), "Alpha", 5)
-
-        ctx = self._ctx()
-        await self.helperObj.myTeamsHelper(ctx)
-
-        embed = ctx.response.send_message.call_args.kwargs["embed"]
-        self.assertEqual(embed.title, "Zeta Stats")
-        kwargs = ctx.response.send_message.call_args.kwargs
-        if "file" in kwargs:
-            kwargs["file"].close()
-
-
 class TeamListHelperTests(HelperTestCase):
     def _ctx(self, user_id=901, name="Alice"):
         return FakeInteraction(self.guild, FakeMember(name, id=user_id))
@@ -5559,13 +5587,108 @@ class TeamListHelperTests(HelperTestCase):
         self.assertNotIn("Blue", embed.description)
         self.assertIn("with Alice, Bob", embed.footer.text)
 
-    async def test_member_filter_that_matches_nothing_sends_the_filtered_message(self):
+    async def test_single_member_filter_that_matches_nothing_names_them(self):
+        # Same friendly "isn't on any teams" message /team lookup used to
+        # give for a single looked-up member, not the generic filtered
+        # message - see test_multi_member_filter_that_matches_nothing_
+        # sends_the_generic_message below for where that generic message
+        # still applies.
         await self.helperObj.createTeamHelper(self._ctx(901, "Alice"), "Red", 5)
 
         ctx = self._ctx()
         await self.helperObj.teamListHelper(ctx, None, False, "name", "asc", members=[FakeMember("Bob", id=902)])
 
+        ctx.response.send_message.assert_awaited_once_with(
+            "Bob isn't on any teams in this server.", ephemeral=True
+        )
+
+    async def test_multi_member_filter_that_matches_nothing_sends_the_generic_message(self):
+        await self.helperObj.createTeamHelper(self._ctx(901, "Alice"), "Red", 5)
+
+        ctx = self._ctx()
+        await self.helperObj.teamListHelper(
+            ctx, None, False, "name", "asc",
+            members=[FakeMember("Bob", id=902), FakeMember("Cleo", id=903)],
+        )
+
         ctx.response.send_message.assert_awaited_once_with("No teams match those filters.", ephemeral=True)
+
+    async def test_search_alongside_a_single_member_filter_keeps_the_generic_message(self):
+        # The friendly single-member message is only for a bare member
+        # filter with nothing else narrowing it - combined with search,
+        # "no results" could just as easily mean the search text didn't
+        # match, not that the member has no teams at all.
+        await self.helperObj.createTeamHelper(self._ctx(901, "Alice"), "Red", 5)
+
+        ctx = self._ctx()
+        await self.helperObj.teamListHelper(
+            ctx, "Nonexistent", False, "name", "asc", members=[FakeMember("Alice", id=901)]
+        )
+
+        ctx.response.send_message.assert_awaited_once_with("No teams match those filters.", ephemeral=True)
+
+    async def test_mine_with_no_teams_sends_a_message(self):
+        ctx = self._ctx()
+        await self.helperObj.teamListHelper(ctx, None, False, "name", "asc", mine=True)
+        ctx.response.send_message.assert_awaited_once_with(
+            "You're not on any teams in this server.", ephemeral=True
+        )
+
+    async def test_mine_filters_to_just_the_callers_own_teams(self):
+        await self.helperObj.createTeamHelper(self._ctx(901, "Alice"), "Red", 5)
+        await self.helperObj.createTeamHelper(self._ctx(902, "Bob"), "Blue", 5)
+
+        ctx = self._ctx()
+        await self.helperObj.teamListHelper(ctx, None, False, "name", "asc", mine=True)
+
+        embed = ctx.response.send_message.call_args.kwargs["embed"]
+        self.assertIn("Red", embed.description)
+        self.assertNotIn("Blue", embed.description)
+        self.assertIn("with Alice", embed.footer.text)
+
+    async def test_mine_combines_with_an_explicit_member_filter(self):
+        # mine folds the caller into the same member filter rather than
+        # being mutually exclusive with member_1..5 - "teams Alice and
+        # Bob are both rostered on together."
+        await self.helperObj.createTeamHelper(self._ctx(901, "Alice"), "Red", 5)
+        team_id, red = self.helperObj.getTeamRow(GUILD_ID, "Red")
+        red.add_player(Player(902, "Bob"))
+        self.helperObj.updateTeamData(team_id, red)
+        await self.helperObj.createTeamHelper(self._ctx(902, "Bob"), "Blue", 5)
+
+        ctx = self._ctx()  # Alice
+        await self.helperObj.teamListHelper(
+            ctx, None, False, "name", "asc", members=[FakeMember("Bob", id=902)], mine=True
+        )
+
+        embed = ctx.response.send_message.call_args.kwargs["embed"]
+        self.assertIn("Red", embed.description)
+        self.assertNotIn("Blue", embed.description)
+
+    async def test_mine_does_not_duplicate_the_caller_if_also_given_explicitly(self):
+        await self.helperObj.createTeamHelper(self._ctx(901, "Alice"), "Red", 5)
+        ctx = self._ctx()
+        posted = FakeMessage(id=4343)
+        ctx.original_response.return_value = posted
+
+        await self.helperObj.teamListHelper(
+            ctx, None, False, "name", "asc", members=[FakeMember("Alice", id=901)], mine=True
+        )
+
+        self.cursor.execute("SELECT memberIds, memberNames FROM team_list_views WHERE messageId=4343")
+        self.assertEqual(self.cursor.fetchone(), ("901", "Alice"))
+
+    async def test_mine_with_cards_pages_through_the_callers_own_teams_as_cards(self):
+        await self.helperObj.createTeamHelper(self._ctx(901, "Alice"), "Red", 5)
+        await self.helperObj.createTeamHelper(self._ctx(902, "Bob"), "Blue", 5)
+
+        ctx = self._ctx()
+        posted = FakeMessage(id=4242)
+        ctx.original_response.return_value = posted
+        await self.helperObj.teamListHelper(ctx, None, False, "name", "asc", cards=True, mine=True)
+
+        self.cursor.execute("SELECT memberIds FROM team_list_views WHERE messageId=4242")
+        self.assertEqual(self.cursor.fetchone(), ("901",))
 
     async def test_posts_and_reacts_and_stores_the_view(self):
         await self.helperObj.createTeamHelper(self._ctx(901, "Alice"), "Red", 5)
@@ -11818,10 +11941,17 @@ class StatsViewTests(HelperTestCase):
         fetched_message.edit.assert_awaited_once()
         edited_embed = fetched_message.edit.call_args.kwargs["embed"]
         # fetch_user auto-generates a FakeUser(901) with its own distinct
-        # global avatar URL (see FakeClient.fetch_user). This is that URL.
+        # name and global avatar URL (see FakeClient.fetch_user). This is
+        # that URL.
         self.assertEqual(edited_embed.thumbnail.url, "https://cdn.discordapp.com/avatars/901/global.png")
-        # everything else on the embed is untouched
-        self.assertEqual(edited_embed.title, original_embed.title)
+        # The title's name switches right along with the avatar - the
+        # server nickname ("Alice") and the global identity's own name
+        # ("User901") should never be shown mismatched against each
+        # other's avatar.
+        self.assertEqual(edited_embed.title, "User901's Stats - League")
+        self.assertNotEqual(edited_embed.title, original_embed.title)
+        # the underlying stats themselves are unaffected by which
+        # identity's name/avatar is showing
         self.assertEqual(edited_embed.fields, original_embed.fields)
 
     async def test_avatar_toggle_click_on_an_unknown_message_is_rejected(self):
@@ -11958,7 +12088,11 @@ class StatsViewTests(HelperTestCase):
         # silently ignored the way it used to be once the card was shown.
         fetched_message.edit.assert_awaited_once()
         fetched_message.edit.call_args.kwargs["attachments"][0].close()
-        self.assertTrue(mock_resolve.call_args.args[1])  # use_global_avatar=True this time
+        # fetch_user auto-generates a FakeUser(901) named "User901" (see
+        # FakeClient.fetch_user) - resolved and passed straight through,
+        # confirming the card's avatar comes from the global identity
+        # this time, not Alice's server one.
+        self.assertEqual(mock_resolve.call_args.args[0].name, "User901")
 
         self.cursor.execute("SELECT cardAvatarGlobal FROM stats_views WHERE messageId=?", (msg.id,))
         self.assertEqual(self.cursor.fetchone(), (1,))
@@ -11986,7 +12120,9 @@ class StatsViewTests(HelperTestCase):
 
         fetched_message.edit.assert_awaited_once()
         fetched_message.edit.call_args.kwargs["attachments"][0].close()
-        self.assertFalse(mock_resolve.call_args.args[1])  # use_global_avatar=False this time
+        # Alice's own server Member, not the global FakeUser - confirms
+        # the avatar switched back to the server identity.
+        self.assertEqual(mock_resolve.call_args.args[0].name, "Alice")
 
         self.cursor.execute("SELECT cardAvatarGlobal FROM stats_views WHERE messageId=?", (msg.id,))
         self.assertEqual(self.cursor.fetchone(), (0,))
@@ -12023,6 +12159,10 @@ class StatsViewTests(HelperTestCase):
         self.assertEqual(self.cursor.fetchone(), (0, 1))
         returned_embed = fetched_message.edit.call_args.kwargs["embed"]
         self.assertEqual(returned_embed.thumbnail.url, "https://cdn.discordapp.com/avatars/901/global.png")
+        # The title's name has to carry over with it - showing Alice's
+        # server nickname next to the global avatar would be exactly the
+        # mismatch this is meant to avoid.
+        self.assertEqual(returned_embed.title, "User901's Stats - League")
 
     async def test_showing_the_card_keeps_the_global_avatar_from_the_embed(self):
         alice = FakeMember("Alice", id=901)
@@ -12047,7 +12187,9 @@ class StatsViewTests(HelperTestCase):
             await embed_view.showCard.callback(self._click(fetched_message))
         fetched_message.edit.call_args.kwargs["attachments"][0].close()
 
-        self.assertTrue(mock_resolve.call_args.args[1])  # use_global_avatar=True, carried from the embed
+        # global identity carried over from the embed, confirmed the same
+        # way as the other avatar-toggle tests above
+        self.assertEqual(mock_resolve.call_args.args[0].name, "User901")
         self.cursor.execute("SELECT cardAvatarGlobal FROM stats_views WHERE messageId=?", (msg.id,))
         self.assertEqual(self.cursor.fetchone(), (1,))
 
@@ -16322,218 +16464,6 @@ class TeamListPagingViewTests(HelperTestCase):
         self.assertIn("Page 2/2", embed.footer.text)
 
 
-class MyTeamsPagingViewTests(_FakeLogoDirTestCase):
-    def _ctx(self, user_id=901, name="Alice"):
-        return FakeInteraction(self.guild, FakeMember(name, id=user_id))
-
-    async def asyncSetUp(self):
-        # _FakeLogoDirTestCase.setUp (sync) already ran by this point
-        # (IsolatedAsyncioTestCase calls setUp() then asyncSetUp()). So
-        # this only needs to handle the parts that require awaiting.
-        self.channel = FakeChannel("my-teams-chat")
-        self.helperObj.client = FakeClient(channels=[self.channel], guilds=[self.guild])
-
-        await self.helperObj.createTeamHelper(self._ctx(), "Alpha", 5)
-        await self.helperObj.createTeamHelper(self._ctx(), "Bravo", 5)
-        await self.helperObj.createTeamHelper(self._ctx(), "Charlie", 5)
-
-        self.message = FakeMessage(id=8888)
-        self.cursor.execute(
-            "INSERT INTO my_team_views(messageId, guildId, channelId, userId, page) "
-            "VALUES(8888, ?, ?, 901, 1)",
-            (GUILD_ID, self.channel.id)
-        )
-        self.db.commit()
-
-    def _page(self):
-        self.cursor.execute("SELECT page FROM my_team_views WHERE messageId=8888")
-        return self.cursor.fetchone()[0]
-
-    def _click(self, message=None, user_id=1):
-        return FakeInteraction(
-            self.guild, FakeMember("Clicker", id=user_id), channel=self.channel,
-            message=message if message is not None else self.message,
-        )
-
-    async def test_ignores_unknown_message(self):
-        click = self._click(message=FakeMessage(id=12345))
-        view = helper_module.MyTeamsPagingView(self.helperObj)
-        await view.next.callback(click)
-        self.assertTrue(click.response.send_message.call_args.kwargs.get("ephemeral"))
-
-    async def test_next_advances_to_the_next_team_and_edits_message(self):
-        view = helper_module.MyTeamsPagingView(self.helperObj)
-        click = self._click()
-        await view.next.callback(click)
-
-        self.assertEqual(self._page(), 2)
-        click.response.edit_message.assert_awaited_once()
-        embed = click.response.edit_message.call_args.kwargs["embed"]
-        self.assertEqual(embed.title, "Charlie Stats")
-        self.assertIn("Team 3/3", embed.footer.text)
-        for f in click.response.edit_message.call_args.kwargs["attachments"]:
-            f.close()
-
-    async def test_prev_goes_back_a_team(self):
-        view = helper_module.MyTeamsPagingView(self.helperObj)
-        click = self._click()
-        await view.prev.callback(click)
-        self.assertEqual(self._page(), 0)
-        for f in click.response.edit_message.call_args.kwargs["attachments"]:
-            f.close()
-
-    async def test_first_jumps_to_page_zero(self):
-        view = helper_module.MyTeamsPagingView(self.helperObj)
-        click = self._click()
-        await view.first.callback(click)
-        self.assertEqual(self._page(), 0)
-        for f in click.response.edit_message.call_args.kwargs["attachments"]:
-            f.close()
-
-    async def test_last_jumps_to_final_team(self):
-        view = helper_module.MyTeamsPagingView(self.helperObj)
-        click = self._click()
-        await view.last.callback(click)
-        self.assertEqual(self._page(), 2)
-        for f in click.response.edit_message.call_args.kwargs["attachments"]:
-            f.close()
-
-    async def test_next_at_last_team_is_a_noop(self):
-        self.cursor.execute("UPDATE my_team_views SET page=2 WHERE messageId=8888")
-        self.db.commit()
-        view = helper_module.MyTeamsPagingView(self.helperObj)
-        click = self._click()
-        await view.next.callback(click)
-        self.assertEqual(self._page(), 2)
-        click.response.edit_message.assert_not_awaited()
-
-    async def test_click_from_a_different_user_still_pages_the_owners_view(self):
-        # Matches /leaderboard's existing behavior: paging a shared view
-        # isn't restricted to whoever posted it. _handleMyTeamsPageClick
-        # re-derives the team list from the view's stored userId (901,
-        # Alice), not from interaction.user.id (a stranger here). So the
-        # page still steps through ALICE's teams either way.
-        view = helper_module.MyTeamsPagingView(self.helperObj)
-        click = self._click(user_id=999)
-        await view.next.callback(click)
-        embed = click.response.edit_message.call_args.kwargs["embed"]
-        self.assertEqual(embed.title, "Charlie Stats")
-        for f in click.response.edit_message.call_args.kwargs["attachments"]:
-            f.close()
-
-    async def test_jump_button_opens_a_modal_sized_to_the_team_count(self):
-        view = helper_module.MyTeamsPagingView(self.helperObj)
-        click = self._click()
-        await view.jump.callback(click)
-
-        click.response.send_modal.assert_awaited_once()
-        modal = click.response.send_modal.call_args.args[0]
-        self.assertIsInstance(modal, helper_module._PageJumpModal)
-        self.assertIn("1-3", modal.page_input.label)
-
-    async def test_jump_ignores_unknown_message(self):
-        click = self._click(message=FakeMessage(id=12345))
-        view = helper_module.MyTeamsPagingView(self.helperObj)
-        await view.jump.callback(click)
-        click.response.send_modal.assert_not_awaited()
-        self.assertTrue(click.response.send_message.call_args.kwargs.get("ephemeral"))
-
-    async def test_modal_submit_jumps_straight_to_the_typed_team(self):
-        click = self._click()
-        modal = helper_module._PageJumpModal(self.helperObj, "_handleMyTeamsPageClick", 3)
-        modal.page_input._value = "3"
-
-        await modal.on_submit(click)
-
-        self.assertEqual(self._page(), 2)
-        embed = click.response.edit_message.call_args.kwargs["embed"]
-        self.assertEqual(embed.title, "Charlie Stats")
-        for f in click.response.edit_message.call_args.kwargs["attachments"]:
-            f.close()
-
-    # /team lookup used to have no way to view a team's actual trading
-    # card, unlike /team list cards:true browsing the exact same content -
-    # see TeamListPagingViewCardsModeTests for the sibling tests these
-    # mirror.
-    async def test_card_click_swaps_the_current_team_to_its_trading_card(self):
-        view = helper_module.MyTeamsPagingView(self.helperObj)
-        click = self._click()
-
-        await view.showCard.callback(click)
-
-        self.message.edit.assert_awaited_once()
-        new_embed = self.message.edit.call_args.kwargs["embed"]
-        self.assertEqual(len(new_embed.fields), 0)
-        self.assertTrue(new_embed.image.url.startswith("attachment://"))
-        self.assertIn("Team 2/3", new_embed.footer.text)
-        attached_files = self.message.edit.call_args.kwargs["attachments"]
-        self.assertEqual(len(attached_files), 1)
-        attached_files[0].close()
-        new_view = self.message.edit.call_args.kwargs["view"]
-        self.assertIn(new_view.returnToStats, new_view.children)
-        self.assertNotIn(new_view.showCard, new_view.children)
-
-        self.cursor.execute("SELECT cardShown FROM my_team_views WHERE messageId=8888")
-        self.assertEqual(self.cursor.fetchone(), (1,))
-
-    async def test_return_click_swaps_back_to_the_stats_card(self):
-        show_view = helper_module.MyTeamsPagingView(self.helperObj)
-        await show_view.showCard.callback(self._click())
-        self.message.edit.reset_mock()
-
-        return_view = helper_module.MyTeamsPagingView(self.helperObj, card_shown=True)
-        await return_view.returnToStats.callback(self._click())
-
-        self.message.edit.assert_awaited_once()
-        new_embed = self.message.edit.call_args.kwargs["embed"]
-        self.assertEqual(new_embed.title, "Bravo Stats")
-        self.assertIn("Team 2/3", new_embed.footer.text)
-        new_view = self.message.edit.call_args.kwargs["view"]
-        self.assertIn(new_view.showCard, new_view.children)
-        self.assertNotIn(new_view.returnToStats, new_view.children)
-
-        self.cursor.execute("SELECT cardShown FROM my_team_views WHERE messageId=8888")
-        self.assertEqual(self.cursor.fetchone(), (0,))
-
-    async def test_return_click_is_rejected_before_the_card_is_shown(self):
-        view = helper_module.MyTeamsPagingView(self.helperObj, card_shown=True)
-        click = self._click()
-
-        await view.returnToStats.callback(click)
-
-        self.message.edit.assert_not_awaited()
-        self.assertTrue(click.response.send_message.call_args.kwargs.get("ephemeral"))
-
-    async def test_card_click_on_an_unknown_message_is_rejected(self):
-        view = helper_module.MyTeamsPagingView(self.helperObj)
-        click = self._click(message=FakeMessage(id=424242))
-
-        await view.showCard.callback(click)
-
-        self.assertTrue(click.response.send_message.call_args.kwargs.get("ephemeral"))
-
-    async def test_paging_while_card_is_shown_keeps_showing_cards(self):
-        # cardShown carries across a page flip. Next while looking at
-        # Bravo's trading card should land on Charlie's trading card, not
-        # Charlie's plain stats card.
-        self.cursor.execute("UPDATE my_team_views SET cardShown=1 WHERE messageId=8888")
-        self.db.commit()
-        view = helper_module.MyTeamsPagingView(self.helperObj, card_shown=True)
-        click = self._click()
-
-        await view.next.callback(click)
-
-        self.assertEqual(self._page(), 2)
-        new_embed = click.response.edit_message.call_args.kwargs["embed"]
-        self.assertEqual(len(new_embed.fields), 0)
-        self.assertTrue(new_embed.image.url.startswith("attachment://"))
-        self.assertIn("Team 3/3", new_embed.footer.text)
-        for f in click.response.edit_message.call_args.kwargs["attachments"]:
-            f.close()
-        self.cursor.execute("SELECT cardShown FROM my_team_views WHERE messageId=8888")
-        self.assertEqual(self.cursor.fetchone(), (1,))
-
-
 class LeaderboardPagingViewTests(HelperTestCase):
     def setUp(self):
         super().setUp()
@@ -16987,7 +16917,13 @@ class BotModuleTestCase(unittest.IsolatedAsyncioTestCase):
         return ctx
 
     async def _insert_guild_row(self, guild_id, name="Test Guild"):
-        await self.bot.on_guild_join(SimpleNamespace(id=guild_id, name=name))
+        # A real FakeGuild rather than a bare SimpleNamespace: on_guild_join
+        # now also calls welcomeNewGuildHelper, which reads
+        # system_channel/text_channels/me. FakeGuild's own empty-channels
+        # default means that call harmlessly no-ops (no channel to post
+        # in) for the many unrelated tests that call this just for the
+        # servers-row side effect.
+        await self.bot.on_guild_join(FakeGuild(id=guild_id, name=name))
 
 
 class CommandRegistrationTests(BotModuleTestCase):
@@ -17056,7 +16992,7 @@ class CommandRegistrationTests(BotModuleTestCase):
         names = {c.name for c in self._command("team").commands}
         self.assertEqual(names, {
             "create", "save", "invite", "remove", "leave", "set", "rename", "delete", "transfer", "stats",
-            "lookup", "list",
+            "list",
         })
 
     def test_tournament_group_has_the_expected_subcommands(self):
@@ -17072,6 +17008,7 @@ class CommandRegistrationTests(BotModuleTestCase):
             {
                 "channels", "team-size", "betting-timer", "wager-channel", "elo", "default-elo",
                 "correct-winner", "roster-permissions", "max-wager", "betting", "matchup-channel", "game",
+                "welcome-message",
             },
         )
 
@@ -17084,7 +17021,7 @@ class CommandRegistrationTests(BotModuleTestCase):
         self.assertNotIn("move", names)
 
     async def test_on_guild_join_publishes_commands_to_the_new_guild(self):
-        await self.bot.on_guild_join(SimpleNamespace(id=999, name="New Guild"))
+        await self.bot.on_guild_join(FakeGuild(id=999, name="New Guild"))
         self.bot.tree.sync.assert_awaited_once()
         synced_guild = self.bot.tree.sync.call_args.kwargs["guild"]
         self.assertEqual(synced_guild.id, 999)
@@ -17417,15 +17354,26 @@ class ShopBuyAutocompleteTests(BotModuleTestCase):
 
 class GuildLifecycleEventTests(BotModuleTestCase):
     async def test_on_guild_join_inserts_default_row(self):
-        await self.bot.on_guild_join(SimpleNamespace(id=777, name="New Guild"))
+        await self.bot.on_guild_join(FakeGuild(id=777, name="New Guild"))
 
         self.bot.cursor.execute(
             "SELECT serverName, betting_state FROM servers WHERE guildId=?", (777,)
         )
         self.assertEqual(self.bot.cursor.fetchone(), ("New Guild", "NONE"))
 
+    async def test_on_guild_join_posts_a_welcome_message(self):
+        system = FakeChannel("general", kind="text")
+        guild = FakeGuild(id=781, name="New Guild", channels=[system], system_channel=system)
+
+        await self.bot.on_guild_join(guild)
+
+        system.send.assert_awaited_once()
+        message = system.send.call_args.args[0]
+        self.assertIn("/setup", message)
+        self.assertIn("/help", message)
+
     async def test_on_guild_remove_deletes_row(self):
-        await self.bot.on_guild_join(SimpleNamespace(id=778, name="Leaving Guild"))
+        await self.bot.on_guild_join(FakeGuild(id=778, name="Leaving Guild"))
         await self.bot.on_guild_remove(SimpleNamespace(id=778, name="Leaving Guild"))
 
         self.bot.cursor.execute("SELECT * FROM servers WHERE guildId=?", (778,))
@@ -17457,7 +17405,7 @@ class GuildLifecycleEventTests(BotModuleTestCase):
                 self.bot.helper.TeamInviteAcceptView, self.bot.helper.TeamTransferAcceptView,
                 self.bot.helper.StatsView, self.bot.helper.TeamStatsView,
                 self.bot.helper.CaptainsDraftPickView,
-                self.bot.helper.LeaderboardPagingView, self.bot.helper.MyTeamsPagingView,
+                self.bot.helper.LeaderboardPagingView,
                 self.bot.helper.TeamListPagingView,
             },
         )
@@ -17477,7 +17425,7 @@ class GuildLifecycleEventTests(BotModuleTestCase):
         self.assertEqual(self.bot.cursor.fetchone(), ("Already Joined", "NONE"))
 
     async def test_ensure_guild_row_does_not_duplicate_an_existing_row(self):
-        await self.bot.on_guild_join(SimpleNamespace(id=780, name="Existing"))
+        await self.bot.on_guild_join(FakeGuild(id=780, name="Existing"))
         self.bot.ensure_guild_row(780, "Existing")
 
         self.bot.cursor.execute("SELECT COUNT(*) FROM servers WHERE guildId=?", (780,))
@@ -17498,6 +17446,7 @@ class LoggingCommandTreeTests(BotModuleTestCase):
             user=FakeMember("Alice", id=901),
             guild=FakeGuild(id=GUILD_ID) if guild == "default" else guild,
             data=data if data is not None else {"name": "unknown"},
+            response=AsyncMock(),
         )
 
     async def test_logs_a_real_command_invocation(self):
@@ -17547,10 +17496,24 @@ class LoggingCommandTreeTests(BotModuleTestCase):
 
         self.assertIn("guild=DM", cm.output[0])
 
-    async def test_always_returns_true(self):
+    async def test_dm_interaction_is_rejected_with_a_friendly_message(self):
+        command = SimpleNamespace(qualified_name="roll")
+        interaction = self._interaction(discord.InteractionType.application_command, command=command, guild=None)
+
+        result = await self.bot.tree.interaction_check(interaction)
+
+        self.assertFalse(result)
+        interaction.response.send_message.assert_awaited_once()
+        args, kwargs = interaction.response.send_message.call_args
+        self.assertIn("only works in a server", args[0])
+        self.assertTrue(kwargs.get("ephemeral"))
+
+    async def test_returns_true_for_a_non_application_command_interaction(self):
         # The default implementation this overrides is a no-op check that
-        # always allows the interaction through. Logging must never
-        # change that.
+        # always allows the interaction through. Logging (and the DM
+        # guild-check below) are both scoped to
+        # InteractionType.application_command, so a ping (or any other
+        # non-command interaction) must still sail through untouched.
         interaction = self._interaction(discord.InteractionType.ping)
         result = await self.bot.tree.interaction_check(interaction)
         self.assertTrue(result)
@@ -18611,7 +18574,7 @@ class HelpCommandAutocompleteTests(BotModuleTestCase):
 class AdminSetCommandTests(BotModuleTestCase):
     SET_SUBCOMMANDS = [
         "channels", "team-size", "betting-timer", "wager-channel", "elo", "default-elo",
-        "roster-permissions", "max-wager", "betting", "matchup-channel", "game",
+        "roster-permissions", "max-wager", "betting", "matchup-channel", "game", "welcome-message",
     ]
 
     def test_every_subcommand_requires_manage_guild_permission(self):
@@ -18723,6 +18686,13 @@ class AdminSetCommandTests(BotModuleTestCase):
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "setBettingHelper", mock):
             await self._command("set betting").callback(ctx, enabled=False)
+        mock.assert_awaited_once_with(ctx, False)
+
+    async def test_welcome_message_delegates_enabled(self):
+        ctx = self._ctx()
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "setWelcomeMessageHelper", mock):
+            await self._command("set welcome-message").callback(ctx, enabled=False)
         mock.assert_awaited_once_with(ctx, False)
 
     async def test_max_wager_updates_end_to_end(self):
@@ -19845,37 +19815,27 @@ class StatsCommandTests(BotModuleTestCase):
         mock.assert_awaited_once_with(ctx, target)
 
 
-class MyTeamsCommandTests(BotModuleTestCase):
-    async def test_defaults_to_the_caller(self):
-        ctx = self._ctx()
-        mock = AsyncMock()
-        with patch.object(self.bot.helperObj, "myTeamsHelper", mock):
-            await self._command("team lookup").callback(ctx, member=None)
-        mock.assert_awaited_once_with(ctx, None)
-
-    async def test_looks_up_another_member(self):
-        ctx = self._ctx()
-        target = FakeMember("Target")
-        mock = AsyncMock()
-        with patch.object(self.bot.helperObj, "myTeamsHelper", mock):
-            await self._command("team lookup").callback(ctx, member=target)
-        mock.assert_awaited_once_with(ctx, target)
-
-
 class TeamListCommandTests(BotModuleTestCase):
     async def test_defaults_to_cards_false(self):
         ctx = self._ctx()
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "teamListHelper", mock):
             await self._command("team list").callback(ctx)
-        mock.assert_awaited_once_with(ctx, None, False, "name", "asc", False, [])
+        mock.assert_awaited_once_with(ctx, None, False, "name", "asc", False, [], False)
 
     async def test_forwards_cards_true(self):
         ctx = self._ctx()
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "teamListHelper", mock):
             await self._command("team list").callback(ctx, cards=True)
-        mock.assert_awaited_once_with(ctx, None, False, "name", "asc", True, [])
+        mock.assert_awaited_once_with(ctx, None, False, "name", "asc", True, [], False)
+
+    async def test_forwards_mine_true(self):
+        ctx = self._ctx()
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "teamListHelper", mock):
+            await self._command("team list").callback(ctx, mine=True)
+        mock.assert_awaited_once_with(ctx, None, False, "name", "asc", False, [], True)
 
     async def test_collects_given_members_and_skips_unset_slots(self):
         ctx = self._ctx()
@@ -19884,7 +19844,7 @@ class TeamListCommandTests(BotModuleTestCase):
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "teamListHelper", mock):
             await self._command("team list").callback(ctx, member_1=alice, member_3=bob)
-        mock.assert_awaited_once_with(ctx, None, False, "name", "asc", False, [alice, bob])
+        mock.assert_awaited_once_with(ctx, None, False, "name", "asc", False, [alice, bob], False)
 
 
 class SetCorrectWinnerCommandTests(BotModuleTestCase):
