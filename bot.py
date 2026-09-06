@@ -1338,6 +1338,14 @@ async def setGame(ctx, game: str):
 setGame.error(_setAdminPermissionError)
 
 
+@setGroup.command(
+    name="view",
+    description="See this server's current settings in one place"
+)
+async def setView(ctx):
+    await helperObj.viewSettingsHelper(ctx)
+
+
 tree.add_command(setGroup)
 
 
@@ -1604,6 +1612,7 @@ COMMAND_HELP = {
     "set welcome-message": "Turns the one-time join welcome message (posted the moment Shockwave is added, pointing at /setup and /help) on or off for this server. On by default; only matters if Shockwave is ever removed and re-added. Requires the Manage Server permission.",
     "set matchup-channel": "Redirects every matchup graphic (a game's own, and a tournament match's ready-check/report graphic) and the winner-report message to one specific text channel, no matter where the roster or match actually started. Omit channel to use wherever this command is run. Independent of set wager-channel, which only redirects the betting-open/closed notices; the two can point at different channels. Requires the Manage Server permission.",
     "set game": "Sets which game this server's next roster tracks elo and stats for. Type a brand new name to start tracking it, or pick a previously-used one from the autocomplete list. Elo, game record, and ranked record are all tracked per game, so switching games doesn't touch another game's numbers. Only affects the next roster formed; whatever's currently in progress keeps resolving under whichever game it actually started as. League is the default, and the only game with role-based team balancing. Requires the Manage Server permission.",
+    "set view": "Shows this server's current settings in one embed: team channels, team size, current game, default starting elo, roster button permissions, betting on/off and its timer, max wager, wager/matchup channels, and the welcome message toggle. Read-only, so anyone can check it.",
     "clear teams": "Wipes the current teams/draft so you can start a fresh session. Requires the Manage Server permission.",
     "clear channels": "Wipes the current teams/draft, and also forgets the saved team channel names. Requires the Manage Server permission.",
     "clear tournament": "Wipes the current teams/draft, and deletes this server's tournament entirely: bracket, registrations, match history. Can't be undone. Confirmation required. Requires the Manage Server permission.",

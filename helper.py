@@ -3484,6 +3484,70 @@ class helpers():
             f"Matchup graphics and winner-report messages will now go to {channel.mention}."
         )
 
+    # Resolves a stored channel-name column back to a live mention for
+    # display in /set view, since the column only ever holds a name (see
+    # setWagerChannelHelper/setMatchupChannelHelper), not an id. Falls back
+    # to a plain "#name" if the channel's since been renamed or deleted,
+    # rather than silently showing nothing for a setting that IS configured.
+    def _formatConfiguredChannelForDisplay(self, guild, name):
+        if not name:
+            return None
+        channel = discord.utils.get(guild.channels, name=name)
+        return channel.mention if channel is not None else f"#{name}"
+
+    # /set view: every /set subcommand only ever changes one setting and
+    # confirms the new value in its own response - there was never one
+    # place to see them all together afterward, so checking a server's
+    # current configuration meant either remembering what was last set or
+    # digging back through old command responses. Read-only, so no
+    # permission gate: anyone curious what a server's currently configured
+    # to do can just check, the same way /current-game already works.
+    async def viewSettingsHelper(self, ctx):
+        guild = ctx.guild
+        guild_id = guild.id
+
+        channel1 = self.get(guild_id, "channel1")
+        channel2 = self.get(guild_id, "channel2")
+        team_size = self.get(guild_id, "team_size")
+        betting_timer = self.get(guild_id, "betting_timer_seconds")
+        wager_channel = self._formatConfiguredChannelForDisplay(guild, self.get(guild_id, "wager_channel"))
+        matchup_channel = self._formatConfiguredChannelForDisplay(guild, self.get(guild_id, "matchup_channel"))
+        max_wager = self.get(guild_id, "max_wager")
+
+        embed = discord.Embed(title=f"{guild.name}'s Settings", color=discord.Color.gold())
+        embed.add_field(
+            name="Team channels",
+            value=f"{channel1} / {channel2}" if channel1 and channel2 else "Not set - teams show as \"Team 1\"/\"Team 2\"",
+            inline=False,
+        )
+        embed.add_field(name="Team size", value=str(team_size) if team_size else "Not set", inline=True)
+        embed.add_field(name="Current game", value=self._currentGame(guild_id), inline=True)
+        embed.add_field(name="Default starting elo", value=str(self._defaultEloForGuild(guild_id)), inline=True)
+        embed.add_field(
+            name="Roster button permissions",
+            value="Rostered players/admins only" if self.get(guild_id, "roster_permissions_strict") else "Anyone",
+            inline=True,
+        )
+        embed.add_field(
+            name="Betting",
+            value="Enabled" if self.get(guild_id, "betting_enabled") else "Disabled",
+            inline=True,
+        )
+        embed.add_field(
+            name="Max wager",
+            value=f"{max_wager} gold" if max_wager is not None else "No cap",
+            inline=True,
+        )
+        embed.add_field(name="Betting timer", value=f"{betting_timer} seconds", inline=True)
+        embed.add_field(name="Wager channel", value=wager_channel or "Wherever /wager runs", inline=True)
+        embed.add_field(name="Matchup channel", value=matchup_channel or "Wherever a game starts", inline=True)
+        embed.add_field(
+            name="Welcome message",
+            value="Enabled" if self.get(guild_id, "welcome_message_enabled") else "Disabled",
+            inline=True,
+        )
+        await ctx.response.send_message(embed=embed)
+
     # Turns a just-posted, actually-final roster (not a captains draft
     # still mid-pick) into a live control: Random Roles/Balanced Roles to
     # assign or reassign roles (only if the roster is exactly 5v5, see
@@ -6501,6 +6565,20 @@ class helpers():
             )
             return
 
+        # Checked before the placeholder/render dance below, not left to
+        # renderBracketText's own "No bracket has been created yet."
+        # fallback - that message is correct either way, but reaching it
+        # only after posting "Creating bracket, please wait..." and
+        # actually rendering an empty tree is misleading (nothing was
+        # created) and wastes a Pillow render on nothing.
+        if not tournament.get_bracket():
+            await ctx.response.send_message(
+                f"No bracket has been created yet for **{tournament.get_name()}**. Use "
+                "/tournament create-bracket first.",
+                ephemeral=True,
+            )
+            return
+
         # Rendering the whole bracket (Pillow, possibly several rounds
         # and teams) can take longer than Discord's ~3 second ack
         # window. Post a placeholder immediately and edit it in place
@@ -8720,6 +8798,15 @@ class helpers():
         guild_id = ctx.guild.id
         user_id = ctx.user.id
 
+        # hasCompletedSetup reflects whether this player has ever actually
+        # confirmed the role picker before (see _confirmSetupRoleStep's
+        # own _unlockAchievement("onboarded") call, at the end of this
+        # same flow), not just whether they currently have a solo team -
+        # those can drift apart (a deleted solo team, say), so this is
+        # the more reliable "is this a repeat run" signal. Captured up
+        # front, before anything below can change it.
+        is_first_run = not self.hasCompletedSetup(guild_id, user_id)
+
         solo_team = next(
             (team for _team_id, team in self.getTeamsCaptainedBy(guild_id, user_id) if team.get_team_size() == 1),
             None
@@ -8773,17 +8860,24 @@ class helpers():
         else:
             team_note = f"Your solo team is still **{solo_team_name}**."
 
-        blurb = (
-            "**Shockwave** splits your voice channel into two teams (randomly, by live captain "
-            "draft, or roughly elo-balanced for ranked play) and moves everyone into the right "
-            "channel automatically. It also runs a gold economy (betting, a daily allowance, a "
-            "leaderboard) and tournaments (persistent teams, a real bracket, sequential or "
-            "simultaneous matches). Run **/daily** now to claim your first gold, and **/help** "
-            "any time for the full command list."
-        )
+        # The full pitch only makes sense the first time - someone
+        # re-running /setup later to just rename their solo team or
+        # tweak role preferences already knows all this, and doesn't
+        # need it repeated back to them every single time.
+        if is_first_run:
+            blurb = (
+                "**Shockwave** splits your voice channel into two teams (randomly, by live captain "
+                "draft, or roughly elo-balanced for ranked play) and moves everyone into the right "
+                "channel automatically. It also runs a gold economy (betting, a daily allowance, a "
+                "leaderboard) and tournaments (persistent teams, a real bracket, sequential or "
+                "simultaneous matches). Run **/daily** now to claim your first gold, and **/help** "
+                "any time for the full command list.\n\n"
+            )
+        else:
+            blurb = ""
         view = SetupRoleSelectionView(self, guild_id, user_id)
         await ctx.response.send_message(
-            f"{blurb}\n\n{team_note}\n\n"
+            f"{blurb}{team_note}\n\n"
             f"Press the roles you **like** playing ({', '.join(SETUP_ROLE_NAMES)}) to toggle them on, "
             "then press Confirm.",
             view=view,

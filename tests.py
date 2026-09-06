@@ -4649,6 +4649,62 @@ class SetWelcomeMessageHelperTests(HelperTestCase):
         self.assertIn("enabled", ctx.response.send_message.call_args.args[0])
 
 
+class ViewSettingsHelperTests(HelperTestCase):
+    def _ctx(self):
+        return FakeInteraction(self.guild, FakeMember("Alice", id=901))
+
+    async def test_shows_defaults_when_nothing_has_been_configured(self):
+        ctx = self._ctx()
+        await self.helperObj.viewSettingsHelper(ctx)
+
+        embed = ctx.response.send_message.call_args.kwargs["embed"]
+        values = {f.name: f.value for f in embed.fields}
+        self.assertEqual(values["Team channels"], "Not set - teams show as \"Team 1\"/\"Team 2\"")
+        self.assertEqual(values["Team size"], "Not set")
+        self.assertEqual(values["Current game"], "League")
+        self.assertEqual(values["Default starting elo"], str(helper_module.DEFAULT_ELO))
+        self.assertEqual(values["Roster button permissions"], "Anyone")
+        self.assertEqual(values["Betting"], "Enabled")
+        self.assertEqual(values["Max wager"], "No cap")
+        self.assertEqual(values["Wager channel"], "Wherever /wager runs")
+        self.assertEqual(values["Matchup channel"], "Wherever a game starts")
+        self.assertEqual(values["Welcome message"], "Enabled")
+
+    async def test_reflects_configured_values(self):
+        self.helperObj.update(GUILD_ID, "channel1", "Blue")
+        self.helperObj.update(GUILD_ID, "channel2", "Red")
+        self.helperObj.update(GUILD_ID, "team_size", 5)
+        self.helperObj.update(GUILD_ID, "default_elo", 1200)
+        self.helperObj.update(GUILD_ID, "roster_permissions_strict", 1)
+        self.helperObj.update(GUILD_ID, "betting_enabled", 0)
+        self.helperObj.update(GUILD_ID, "max_wager", 500)
+        self.helperObj.update(GUILD_ID, "welcome_message_enabled", 0)
+        wager_channel = FakeChannel("bets", kind="text")
+        self.guild.channels.append(wager_channel)
+        self.helperObj.update(GUILD_ID, "wager_channel", "bets")
+
+        ctx = self._ctx()
+        await self.helperObj.viewSettingsHelper(ctx)
+
+        values = {f.name: f.value for f in ctx.response.send_message.call_args.kwargs["embed"].fields}
+        self.assertEqual(values["Team channels"], "Blue / Red")
+        self.assertEqual(values["Team size"], "5")
+        self.assertEqual(values["Default starting elo"], "1200")
+        self.assertEqual(values["Roster button permissions"], "Rostered players/admins only")
+        self.assertEqual(values["Betting"], "Disabled")
+        self.assertEqual(values["Max wager"], "500 gold")
+        self.assertEqual(values["Wager channel"], wager_channel.mention)
+        self.assertEqual(values["Welcome message"], "Disabled")
+
+    async def test_a_deleted_configured_channel_falls_back_to_a_plain_name(self):
+        self.helperObj.update(GUILD_ID, "matchup_channel", "gone-now")
+        ctx = self._ctx()
+        await self.helperObj.viewSettingsHelper(ctx)
+
+        values = {f.name: f.value for f in ctx.response.send_message.call_args.kwargs["embed"].fields}
+        self.assertEqual(values["Matchup channel"], "#gone-now")
+
+
 class SetupHelperTests(HelperTestCase):
     def _ctx(self, user_id=901, name="Alice", channel=None, message=None):
         return FakeInteraction(self.guild, FakeMember(name, id=user_id), channel=channel, message=message)
@@ -4714,6 +4770,19 @@ class SetupHelperTests(HelperTestCase):
         self.assertIn("Your solo team is still **Alice's Team**", text)
         self.cursor.execute("SELECT COUNT(*) FROM teams WHERE guildId=?", (GUILD_ID,))
         self.assertEqual(self.cursor.fetchone()[0], 1)
+
+    async def test_repeat_run_after_completing_setup_before_skips_the_intro_blurb(self):
+        await self.helperObj.setupHelper(self._ctx(), "Alice's Team")
+        self.helperObj._unlockAchievement(GUILD_ID, 901, "onboarded")
+
+        ctx = self._ctx()
+        await self.helperObj.setupHelper(ctx)
+
+        text = ctx.response.send_message.call_args.args[0]
+        self.assertNotIn("**Shockwave** splits your voice channel", text)
+        self.assertNotIn("/help", text)
+        self.assertIn("Your solo team is still **Alice's Team**", text)
+        self.assertIn("Press the roles you", text)
 
     async def test_rerun_with_the_same_name_does_not_create_a_second_team(self):
         await self.helperObj.setupHelper(self._ctx(), "Alice's Team")
@@ -7039,6 +7108,21 @@ class PrintBracketHelperTests(HelperTestCase):
         ctx.response.send_message.assert_awaited_once_with(
             "No tournament set up for this server. Use /tournament create first.", ephemeral=True
         )
+
+    async def test_rejects_immediately_when_no_bracket_has_been_built_yet(self):
+        tournament = Tournament("Cup", 2, 4)
+        self.helperObj.saveTournament(GUILD_ID, tournament)
+
+        ctx = self._ctx()
+        await self.helperObj.printBracketHelper(ctx)
+
+        # No "Creating bracket, please wait..." placeholder, and no
+        # rendering attempted - a single, immediate, accurate reply.
+        ctx.response.send_message.assert_awaited_once_with(
+            "No bracket has been created yet for **Cup**. Use /tournament create-bracket first.",
+            ephemeral=True,
+        )
+        ctx.edit_original_response.assert_not_awaited()
 
     async def test_prints_the_bracket(self):
         tournament = Tournament("Cup", 2, 4)
@@ -17008,7 +17092,7 @@ class CommandRegistrationTests(BotModuleTestCase):
             {
                 "channels", "team-size", "betting-timer", "wager-channel", "elo", "default-elo",
                 "correct-winner", "roster-permissions", "max-wager", "betting", "matchup-channel", "game",
-                "welcome-message",
+                "welcome-message", "view",
             },
         )
 

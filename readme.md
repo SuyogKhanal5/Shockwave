@@ -1306,6 +1306,24 @@ all, but overwriting an existing one checks
 `ctx.user.guild_permissions.manage_guild` before it will even show the
 confirmation view.
 
+### Viewing current settings (`/set view`)
+
+Every other `/set` subcommand only ever changes one setting and confirms the
+new value in its own response - there was never one place to see them all
+together afterward, so checking a server's current configuration meant
+either remembering what was last set or digging back through old command
+responses. `/set view` (`viewSettingsHelper`) posts a single read-only embed
+covering team channels/size, the current game, default starting elo, roster
+button permissions, betting on/off plus its timer and cap, the wager and
+matchup channel redirects, and the welcome-message toggle. Unlike the rest of
+`/set`, it takes no Manage Server permission - it changes nothing, so anyone
+curious what a server's configured to do can just check, the same way
+`/current-game` already works for that one setting on its own.
+`_formatConfiguredChannelForDisplay` resolves `wager_channel`/`matchup_channel`
+back to a live mention when the channel still exists, falling back to a plain
+`#name` if it's since been renamed or deleted rather than showing nothing for
+a setting that IS configured.
+
 ### Persistent teams
 
 Separate from the ephemeral `team1`/`team2` a `/make-teams random` or
@@ -1567,7 +1585,10 @@ either.
 what Shockwave does (pointing at `/help` for the rest), a personal "solo team"
 (a persistent, team-size-1 team with just them on it), and their liked/disliked
 roles for future role-aware matchmaking, picked by pressing role buttons on a
-posted message rather than typing role names.
+posted message rather than typing role names. That explanation only shows up
+the first time - `setupHelper` checks `hasCompletedSetup` (whether the
+"onboarded" achievement's already been unlocked) up front, and skips straight
+to the solo-team line and role picker on every later run.
 
 `solo_team_name` is only required the very first time. The solo team is looked
 up by captaincy plus size rather than remembered in a separate column:
