@@ -2018,7 +2018,7 @@ something and actually wearing it are different concerns.
 
 `CARD_TIER_REWARD_TITLES` is the tier-reward catalog: reaching Diamond, Master,
 Grandmaster, or Challenger for the first time unlocks that tier's own title
-(Diamond gives "Diamond Mind") and a matching color scheme whose accent is that
+(Diamond gives "Unbreakable") and a matching color scheme whose accent is that
 tier's own `ELO_TIER_BADGE_COLORS` entry, looked up from `ELO_TIERS` itself
 rather than duplicated.
 
@@ -2204,7 +2204,7 @@ from `/shop` (Big Spender). A single-match elo swing of
 `CARD_ACHIEVEMENT_UNDERDOG_ELO_GAIN` (20)+ (Giant Slayer). Winning a single
 `CARD_ACHIEVEMENT_HIGH_ROLLER_GOLD` (5000)+ gold bet (High Roller) or one paying
 out `CARD_ACHIEVEMENT_JACKPOT_PAYOUT_MULTIPLIER` (3)x+ the wager (Jackpot).
-Placing `CARD_ACHIEVEMENT_GAMBLER_BETS` (25)+ total bets (Frequent Bettor).
+Placing `CARD_ACHIEVEMENT_GAMBLER_BETS` (25)+ total bets (Frequent Better).
 Racking up `CARD_ACHIEVEMENT_IRON_WILL_LOSSES` (20)+ game losses without giving
 up (Iron Will). Running `/setup` for the first time (Onboarded).
 
@@ -2257,7 +2257,7 @@ threshold)}` for every achievement that has a plain accumulating count
 behind it: the Veteran and On Fire ladders (`game_wins`/
 `current_win_streak`, scoped to whichever game `/set game` currently
 tracks, matching `_checkAchievements`' own default), Iron Will
-(`game_losses`), Frequent Bettor (`bet_wins + bet_losses`), Team Player
+(`game_losses`), Frequent Better (`bet_wins + bet_losses`), Team Player
 (rostered-team count), and Big Spender (shop-purchase count). Left out
 entirely, just the description with no fraction, for anything binary or
 event-tied rather than accumulating: First Blood, The Captain, High

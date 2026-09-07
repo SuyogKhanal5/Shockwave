@@ -538,7 +538,7 @@ ELO_BADGE_DIR = os.path.join(os.path.dirname(__file__), "assets", "elo-badges")
 # up reward anything. Iron through Platinum are the "everyone passes
 # through these" tiers with nothing special to commemorate.
 CARD_TIER_REWARD_TITLES = {
-    "Diamond": "Diamond Mind",
+    "Diamond": "Unbreakable",
     "Master": "Mastermind",
     "Grandmaster": "Grandmaster",
     "Challenger": "The Challenger",
@@ -714,7 +714,7 @@ CARD_ACHIEVEMENT_TITLES = {
     "team_player": "Team Player",
     "captain": "The Captain",
     "big_spender": "Big Spender",
-    "gambler": "Frequent Bettor",
+    "gambler": "Frequent Better",
     "iron_will": "Iron Will",
     "tournament_champion": "Tournament Champion",
     "onboarded": "Onboarded",

@@ -17160,18 +17160,18 @@ class CardTitleAutocompleteTests(BotModuleTestCase):
         ctx = self._ctx()
         with patch.object(
             self.bot.helperObj, "getAvailableCardTitles",
-            return_value=["Rookie", "Diamond Mind", "Mastermind"]
+            return_value=["Rookie", "Unbreakable", "Mastermind"]
         ):
-            choices = await self.bot.cardTitleAutocomplete(ctx, "DIA")
-        self.assertEqual([c.value for c in choices], ["Diamond Mind"])
+            choices = await self.bot.cardTitleAutocomplete(ctx, "UNB")
+        self.assertEqual([c.value for c in choices], ["Unbreakable"])
 
     async def test_empty_input_returns_every_available_title(self):
         ctx = self._ctx()
         with patch.object(
-            self.bot.helperObj, "getAvailableCardTitles", return_value=["Rookie", "Diamond Mind"]
+            self.bot.helperObj, "getAvailableCardTitles", return_value=["Rookie", "Unbreakable"]
         ):
             choices = await self.bot.cardTitleAutocomplete(ctx, "")
-        self.assertEqual(sorted(c.value for c in choices), ["Diamond Mind", "Rookie"])
+        self.assertEqual(sorted(c.value for c in choices), ["Rookie", "Unbreakable"])
 
     async def test_caps_results_at_25(self):
         ctx = self._ctx()
