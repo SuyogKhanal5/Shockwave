@@ -43,7 +43,7 @@ class Team:
         self.captain = None
         # Per-game win/loss record, read constantly for display (/team
         # list, /team stats, the team card). No longer persisted through
-        # serializeTeam/deserializeTeam - helper.py's
+        # serializeTeam/deserializeTeam. helper.py's
         # _hydrateTeamGameRecord overwrites these fresh from
         # team_game_stats right after every deserialize, since a team's
         # record is now tracked per game (/set game), not as one number
@@ -51,10 +51,10 @@ class Team:
         # brand new Team before that first hydration ever runs.
         self.wins = 0
         self.losses = 0
-        # Target roster size for a persistent team, set via /team-create.
+        # Target roster size for a persistent team, set via /team create.
         # Distinct from `size`, which just mirrors len(players). Ephemeral
-        # game-formation teams (/make-teams, /captains, /ranked, ...) never
-        # set this and leave it None.
+        # game-formation teams (/make-teams random, /make-teams draft,
+        # ranked:true or not) never set this and leave it None.
         self.team_size = None
         # Local file path to this team's uploaded logo image, or None if it
         # hasn't set one. Just a path (e.g. into a saved-uploads folder),

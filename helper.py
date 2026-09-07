@@ -206,7 +206,7 @@ _role_icon_cache = {}
 BETTING_DURATION_SECONDS = 60
 # How long a /team invite or /wager against challenge sits waiting on the
 # other side before expireStalePendingInvites cleans it up (see that
-# method's own comment). Both are otherwise indefinite - the posted view
+# method's own comment). Both are otherwise indefinite: the posted view
 # is persistent (timeout=None) and nothing else ever revisits a row nobody
 # acted on.
 PENDING_INVITE_EXPIRY_SECONDS = 24 * 60 * 60
@@ -219,7 +219,7 @@ DAILY_GOLD_AMOUNT = 1000
 # Reward every rostered player gets in computeGameDeltas for simply
 # finishing a game (casual or ranked, regardless of anything they bet
 # themselves), split by whether their side won or lost. This is separate
-# from gold_won/gold_wagered/gold_lost (those are wager-specific); it's
+# from gold_won/gold_wagered/gold_lost (those are wager-specific). It's
 # just balance.
 GAME_WIN_GOLD = 300
 GAME_LOSS_GOLD = 150
@@ -252,7 +252,7 @@ ELO_K_FACTOR = 32
 ELO_BALANCE_JITTER = 100
 # Role-aware ranked balancing (/make-teams ranked:true use_roles:true, 5v5
 # only, see _assignRolesForBalance). Neither penalty touches a player's
-# real elo at all; both only shape which role/team split the balancer
+# real elo at all. Both only shape which role/team split the balancer
 # picks, the same way ELO_BALANCE_JITTER's own nudge does.
 #
 # A player sitting in a role they didn't mark as liked (and didn't mark
@@ -274,8 +274,8 @@ ROLE_BALANCE_DISLIKED_ROLE_PENALTY = 200
 # row's label from.
 ROLE_BALANCE_FILL_ORDER = ["Jungle", "Top", "Mid", "Bottom", "Support"]
 # _refineRoleBalance's cap on hill-climb passes over every pairwise role
-# swap. It already stops as soon as a full pass finds no improving swap;
-# this only guards against a pathological input oscillating forever.
+# swap. It already stops as soon as a full pass finds no improving swap.
+# This only guards against a pathological input oscillating forever.
 ROLE_BALANCE_MAX_REFINE_PASSES = 5
 # Unlike the two penalties above, this one DOES touch real elo. A player
 # who wins while playing a role they marked disliked gets their normal
@@ -306,8 +306,8 @@ SHOP_SORT_TIMEOUT_SECONDS = 180
 # before gold actually changes hands.
 DUEL_CONFIRM_TIMEOUT_SECONDS = 30
 # How long /wager team's own "Cancel bet" button (see WagerCancelView)
-# stays clickable. Not a confirm/cancel dialog like the ones above - just
-# the button's own lifetime - so it's set to /set betting-timer's own max
+# stays clickable. Not a confirm/cancel dialog like the ones above, just
+# the button's own lifetime, so it's set to /set betting-timer's own max
 # (600s) rather than a short 30s window: a bet should stay cancellable for
 # as long as betting could plausibly still be open. Server-side (see
 # _handleWagerCancelClick) is what actually decides whether betting's
@@ -318,7 +318,7 @@ WAGER_CANCEL_VIEW_TIMEOUT_SECONDS = 600
 # /stats: press to toggle between this server's own identity (per-server
 # nickname and profile picture, if the player has set either, same as the
 # card/embed shows by default) and their regular, account-wide one
-# (Discord display name and avatar - see StatsView/_resolveGlobalUser).
+# (Discord display name and avatar, see StatsView/_resolveGlobalUser).
 # It's the same button either direction, flipping based on whichever's
 # currently showing. Both are resolved live (not snapshotted at /stats
 # time), so a player who changes their nickname/avatar later and toggles
@@ -391,7 +391,7 @@ CARD_DEFAULT_ACCENT_COLOR = "#EDC643"      # --gold, same as BRACKET_TITLE_COLOR
 # distinct background rather than just "dark".
 CARD_DEFAULT_BACKGROUND_COLOR = "#251A5B"
 CARD_DEFAULT_TEXT_COLOR = "#F3EFFA"        # --text, same as BRACKET_TEXT_COLOR
-CARD_DEFAULT_FONT_STYLE = "Default"        # Chakra Petch + IBM Plex Sans - see _cardFontPaths
+CARD_DEFAULT_FONT_STYLE = "Default"        # Chakra Petch + IBM Plex Sans, see _cardFontPaths
 # /card-set's name for reverting to the palette above. Always offered
 # (see getAvailableCardColorSchemes) the same way CARD_DEFAULT_TITLE
 # always is, since it needs no unlocking either.
@@ -483,7 +483,7 @@ CARD_MIN_ACCENT_CONTRAST = 45
 
 # League-style rank tiers for /stats. Each tier spans 250 elo, with
 # DEFAULT_ELO (1000) landing every new player in the middle at Platinum.
-# That's a global fallback; a guild can override its own starting elo via
+# That's a global fallback. A guild can override its own starting elo via
 # /set default-elo (see _defaultEloForGuild) without changing this ladder.
 # Ascending order, each entry is (elo threshold, tier name, emoji, badge
 # color). The trading card (_drawEloBadge) pastes the tier's own real
@@ -499,7 +499,7 @@ ELO_TIERS = [
     (250, "Bronze", "\U0001f949", (205, 127, 50)),
     (500, "Silver", "\U0001f948", (192, 192, 192)),
     (750, "Gold", "\U0001f947", (255, 204, 51)),
-    # A clear blue (matching \U0001f537 itself), not cyan/teal; cyan reads
+    # A clear blue (matching \U0001f537 itself), not cyan/teal. Cyan reads
     # as "Diamond" at a glance.
     (1000, "Platinum", "\U0001f537", (41, 121, 255)),
     (1250, "Diamond", "\U0001f48e", (137, 207, 240)),
@@ -512,7 +512,7 @@ ELO_TIERS = [
 # League uses, with "I" nearest promotion into the next tier up.
 ELO_DIVISIONS = ["IV", "III", "II", "I"]
 
-# Only the first this-many tiers (Iron through Diamond) show a division;
+# Only the first this-many tiers (Iron through Diamond) show a division.
 # Master and above show just the tier, same as League showing raw LP
 # instead of I-IV once you hit Master.
 ELO_DIVISIONED_TIER_COUNT = 6
@@ -543,7 +543,7 @@ CARD_TIER_REWARD_TITLES = {
     "Grandmaster": "Grandmaster",
     "Challenger": "The Challenger",
 }
-# Titles granted directly rather than earned by reaching an elo tier - not
+# Titles granted directly rather than earned by reaching an elo tier, not
 # something _checkTierRewardUnlocks ever awards on its own. Right now the
 # only grant is SHOCKWAVE_DEVELOPER_ID's own "Developer" title (see
 # getUnlockedCardTitles). Kept as its own small catalog rather than folded
@@ -1026,8 +1026,8 @@ class ConfirmResetView(discord.ui.View):
         self.stop()
         # Also clears the current teams/draft (and cancels/refunds any
         # in-progress game first), same as ConfirmClearActionView's own
-        # Confirm does - only now, not before this prompt even posted, so
-        # Cancel below genuinely leaves everything untouched.
+        # Confirm does. It only happens now, not before this prompt even
+        # posted, so Cancel below genuinely leaves everything untouched.
         await self.helperObj.clearTeamsHelper(interaction)
         await interaction.response.edit_message(content=result, view=self)
 
@@ -1050,7 +1050,7 @@ class ConfirmResetView(discord.ui.View):
 
 
 # Confirm/cancel buttons for /tournament create when a tournament already
-# exists for the server; creating one is destructive (it replaces the
+# exists for the server. Creating one is destructive (it replaces the
 # only tournament a server can have), so it doesn't happen until whoever
 # ran the command clicks "Overwrite tournament" here.
 class ConfirmTournamentOverwriteView(discord.ui.View):
@@ -1111,8 +1111,8 @@ class ConfirmTournamentOverwriteView(discord.ui.View):
 
 
 # Confirm/cancel for /tournament create-bracket when this guild already has
-# match history (tournament_matches rows) from a previous bracket -
-# rebuilding erases it outright (results, and any bets that were never
+# match history (tournament_matches rows) from a previous bracket.
+# Rebuilding erases it outright (results, and any bets that were never
 # settled). Same "only gate what's actually destructive" reasoning
 # ConfirmTournamentOverwriteView's own ownership check applies: a bracket
 # built (or rerolled) before /tournament start has ever run has no history
@@ -1418,7 +1418,7 @@ class _WinnerReportButton(discord.ui.Button):
 # handleGameReportReaction (the reaction handler this replaces) already
 # used. team1_name/team2_name default to "Team 1"/"Team 2" for the
 # generic instance client.add_view registers at startup (routing only,
-# never actually shown); every real send passes the game's actual names
+# never actually shown). Every real send passes the game's actual names
 # in.
 class WinnerReportView(discord.ui.View):
     def __init__(self, helperObj, team1_name="Team 1", team2_name="Team 2"):
@@ -1521,11 +1521,11 @@ class ConfirmWinnerReportView(discord.ui.View):
 
 # /set correct-winner's own confirmation, for its last-game path (the
 # match_id path gets its own ConfirmTournamentMatchCorrectionView instead,
-# a different enough shape - bracket propagation, wager-only reversal - not
+# a different enough shape, bracket propagation, wager-only reversal, not
 # to share this one). Reverses and reapplies a real game's payouts/elo/
 # records the same way ConfirmWinnerReportView's own Confirm applies them
 # in the first place, so this shouldn't hinge on one accidental click
-# either, even though it's a typed command rather than a stray button - the
+# either. Even though it's a typed command rather than a stray button, the
 # blast radius (every player in the game, potentially) is the same. Stores
 # the exact last_result snapshot the warning was built from (not just a
 # guild_id) so Confirm can detect a newer game having resolved in between
@@ -1959,7 +1959,7 @@ class RosterActionView(discord.ui.View):
 # targetId=interaction.user.id, is what tells several different invited
 # members' clicks apart, not anything about the button or view. Cancel is
 # the odd one out of the three: unlike Accept/Decline (each scoped to
-# whichever invitee clicked), it's for the team's own captain/admin side -
+# whichever invitee clicked), it's for the team's own captain/admin side,
 # retracting the whole invite, every remaining invitee on the message at
 # once, not just one of them (see _handleTeamInviteCancelClick).
 class TeamInviteAcceptView(discord.ui.View):
@@ -1988,7 +1988,7 @@ class TeamInviteAcceptView(discord.ui.View):
 # TeamInviteAcceptView and for the same reason: an offer can sit
 # unanswered indefinitely. Accept/Decline are scoped to the one player
 # being offered the captaincy (toCaptainId), Cancel transfer to whoever's
-# captain right now (or a Manage Server admin) - the exact same
+# captain right now (or a Manage Server admin), the exact same
 # three-button shape TeamInviteAcceptView already uses, just for handing
 # off captaincy instead of joining a roster.
 class TeamTransferAcceptView(discord.ui.View):
@@ -2191,7 +2191,7 @@ class LeaderboardPagingView(discord.ui.View):
         await self.helperObj._handleLeaderboardBackToListClick(interaction)
 
     # /team list's own Card/Back toggle (see TeamListPagingView), carried
-    # over here; cards mode swaps the summary list for one player's full
+    # over here. Cards mode swaps the summary list for one player's full
     # /stats embed per page, and this additionally lets that flip over to
     # their actual trading card. Never shown at all outside cards mode.
     @discord.ui.button(
@@ -2369,8 +2369,8 @@ class WagerCancelView(discord.ui.View):
 # player can make an unwanted challenge go away instead of it just sitting
 # there forever (no gold is ever escrowed until Accept, so there's nothing
 # to refund on a decline). Cancel challenge is the challenger's own side of
-# that same idea - retracting a challenge they regret sending, mirroring
-# TeamInviteAcceptView's Cancel invite button - distinct from
+# that same idea, retracting a challenge they regret sending, mirroring
+# TeamInviteAcceptView's Cancel invite button. It's distinct from
 # DuelResultView's "Cancel Duel" below (custom_id
 # shockwave:duel:cancel, note the different id), which only applies once a
 # duel's already been accepted and gold's actually at stake.
@@ -2403,8 +2403,8 @@ class DuelAcceptView(discord.ui.View):
 # mirrors WinnerReportView's own Cancel Game button (see
 # ConfirmDuelCancelView below): once gold is actually escrowed (see
 # DuelAcceptView's own Decline, which only covers before that point),
-# there was otherwise no way back for a duel neither side wants finished -
-# a disagreement, someone leaving, or it just being forgotten would leave
+# there was otherwise no way back for a duel neither side wants finished.
+# A disagreement, someone leaving, or it just being forgotten would leave
 # both stakes stuck with no refund and no admin override either.
 class DuelResultView(discord.ui.View):
     def __init__(self, helperObj):
@@ -2613,7 +2613,7 @@ class _DraftPickSlotButton(discord.ui.DynamicItem[discord.ui.Button], template=r
 # 2, recomputed fresh every render, never toggled in place), a Random
 # button that's always present, and First/Prev/Next/Last only once the
 # pool no longer fits on one page (see DRAFT_PICK_MAX_UNPAGINATED). No
-# on_timeout at all; timeout=None like WinnerReportView, since a draft
+# on_timeout at all: timeout=None like WinnerReportView, since a draft
 # waiting on a captain shouldn't quietly lock up mid-pick the way a
 # confirm dialog reasonably can.
 class CaptainsDraftPickView(discord.ui.View):
@@ -2666,10 +2666,10 @@ class helpers():
     def __init__(self, cursor, db) -> None:
         self.cursor = cursor
         self.db = db
-        # Set by bot.py once the discord.Client exists. Needed so the
-        # background betting timer and the raw-reaction handler (neither
-        # of which run inside an Interaction) can still fetch channels and
-        # send messages.
+        # Set by bot.py once the discord.Client exists. Needed so
+        # background tasks like the betting timer and tournament-round
+        # transitions (none of which run inside an Interaction) can still
+        # fetch channels and send messages.
         self.client = None
         # guildId -> asyncio.Task for the currently running betting timer,
         # so CANCEL_GAME_EMOJI (or a fresh ▶️ click) mid-game can cancel it
@@ -3034,7 +3034,7 @@ class helpers():
     # the game as ranked, so elo actually gets updated when the winner is
     # eventually reported (see computeGameDeltas/recordResult). Everything
     # else (moving players, opening betting) is still the posted roster's
-    # ▶️ reaction's job, same as /make-teams.
+    # own Start button's job, same as /make-teams.
     #
     # use_roles=True additionally tries to assign Top/Jungle/Mid/Bottom/
     # Support (see formRoleBalancedTeams), only possible with exactly 10
@@ -3118,7 +3118,7 @@ class helpers():
                 "time. Showing the roster as normal instead. "
             )
         elif role_split is not None and not_setup_note:
-            # Only relevant once roles actually got assigned; the
+            # Only relevant once roles actually got assigned. The
             # exactly-10 fallback above already explains why nobody's
             # preferences mattered this time.
             message += f"{not_setup_note} "
@@ -3420,7 +3420,7 @@ class helpers():
     # /set betting: a hard on/off switch for the whole wagering layer
     # (/wager team, /wager against), for a server that doesn't want
     # anything gambling-adjacent even with fictional gold. Games, elo, and
-    # the winner-report flow all work exactly the same either way; see
+    # the winner-report flow all work exactly the same either way. See
     # wagerHelper/challengeDuelHelper for where this actually gets
     # enforced, and _openBetting/reconcileStaleBettingWindows for how the
     # betting-open message and its timer adapt when this is off.
@@ -3434,7 +3434,7 @@ class helpers():
 
     # Toggles welcomeNewGuildHelper's one-time on_guild_join post. Only
     # ever matters for a future join (this server already got its own
-    # welcome message, or didn't, when the bot first joined - this can't
+    # welcome message, or didn't, when the bot first joined, so this can't
     # retroactively post or unpost that), but the bot can rejoin a server
     # it was removed from, so it's not purely theoretical.
     async def setWelcomeMessageHelper(self, ctx, enabled):
@@ -3448,7 +3448,7 @@ class helpers():
     # Points every future betting posting (open/closed, see _openBetting)
     # at a specific text channel instead of wherever a game or a
     # tournament match happens to run. Independent of /set matchup-channel,
-    # which only redirects the matchup graphic/winner-report message; the
+    # which only redirects the matchup graphic/winner-report message. The
     # two can point at different channels.
     async def setWagerChannelHelper(self, ctx, channel_name=None):
         guild = ctx.guild
@@ -3468,7 +3468,7 @@ class helpers():
     # _postMatchReport) at one specific text channel instead of wherever
     # the roster or tournament match happens to run. Independent of /set
     # wager-channel, which only redirects the betting-open/closed
-    # notices; the two can point at different channels.
+    # notices. The two can point at different channels.
     async def setMatchupChannelHelper(self, ctx, channel_name=None):
         guild = ctx.guild
         if channel_name is None:
@@ -3496,7 +3496,7 @@ class helpers():
         return channel.mention if channel is not None else f"#{name}"
 
     # /set view: every /set subcommand only ever changes one setting and
-    # confirms the new value in its own response - there was never one
+    # confirms the new value in its own response. There was never one
     # place to see them all together afterward, so checking a server's
     # current configuration meant either remembering what was last set or
     # digging back through old command responses. Read-only, so no
@@ -3582,7 +3582,7 @@ class helpers():
     async def _finalizeRoster(self, guild_id, team1_message, team2_message, team1, team2, use_roles, intro_messages=None):
         size_eligible = len(team1.get_players()) == 5 and len(team2.get_players()) == 5
         # Random Roles/Balanced Roles (and so role-labelled embeds/icons
-        # entirely) are League-only - see /set game. roles_eligible, not
+        # entirely) are League-only, see /set game. roles_eligible, not
         # size_eligible alone, is what actually gates both the buttons
         # and whether use_roles is honored at all here.
         roles_eligible = size_eligible and self._gameSupportsRoles(self._activeGame(guild_id))
@@ -3602,7 +3602,7 @@ class helpers():
 
     # The voice channel to send everyone back to once the game ends (see
     # moveMembersToOriginalChannel). The old /start command took this from
-    # ctx.user.voice.channel, but the ▶️ reaction can be clicked by anyone
+    # ctx.user.voice.channel, but the Start button can be clicked by anyone
     # (not necessarily someone in voice, see the design discussion this
     # feature shipped with). So this scans the roster itself for the first
     # rostered player who's actually sitting in a voice channel right now.
@@ -3728,20 +3728,10 @@ class helpers():
 
         return channel1, channel2
 
-    # ▶️'s whole implementation, everything the old /start command did
-    # (movefunc + sendCurrentMatchupImage + startBettingHelper), just
-    # working from guild/channel directly instead of an Interaction, since
-    # a reaction handler has neither. `move=False` is ⚡'s version of the
-    # same thing: posts the matchup image and opens betting exactly the
-    # same way, but skips the whole "find where to move everyone" dance.
-    # Nobody has to be in a voice channel at all to click it, and there's
-    # no "original channel" to send anyone back to once the game ends
-    # (moveMembersToOriginalChannel simply no-ops for a game started this
-    # way).
     # RosterActionView's Random Roles button callback.
     # Shared by _handleRosterRerollClick/_handleRosterBalanceRolesClick/
     # _handleRosterStartClick. A no-op (returns True) unless the guild has
-    # opted into /set roster-permissions strict mode; once it has, only a
+    # opted into /set roster-permissions strict mode. Once it has, only a
     # rostered player or a Manage Server admin can actually use these
     # buttons, the same _isAdminOrInCurrentGame gate the winner-report
     # buttons already enforce unconditionally.
@@ -3880,7 +3870,7 @@ class helpers():
         # _handleRosterRerollClick/_handleRosterBalanceRolesClick check it
         # too (not just this handler), since the message id alone staying
         # valid post-Start would otherwise leave those two fully clickable
-        # on an already-started game - and recordResult reads team1/team2/
+        # on an already-started game. recordResult reads team1/team2/
         # disliked_role_user_ids live at result time, not from a Start-time
         # snapshot, so a late reroll/rebalance would silently change who
         # actually gets credited for the game already in progress.
@@ -4066,8 +4056,8 @@ class helpers():
     # time, since there's no per-instance state to trust on a persistent
     # view. Checked against draft_picker_message_id first, the same
     # "an older message's buttons stop working once a newer one takes
-    # over" role roster_team2_message_id plays for the roster buttons -
-    # without it, a draft abandoned via /clear teams (or superseded by a
+    # over" role roster_team2_message_id plays for the roster buttons.
+    # Without it, a draft abandoned via /clear teams (or superseded by a
     # fresh /make-teams draft/random) left its old picker message fully
     # clickable, and if the same person happened to be captain1 again in
     # the new draft, a click on it would resolve against the NEW draft's
@@ -4227,7 +4217,7 @@ class helpers():
         self.update(guild_id, "draft_pick_page", 0)
 
         # Also wrap up once both teams reach team_size, even if the pool
-        # still has people left in it; a voice channel with more people
+        # still has people left in it. A voice channel with more people
         # than team_size * 2 is expected to leave spectators undrafted, so
         # waiting on the pool to fully empty would never fire at all.
         team_size = self.get(guild_id, "team_size") or 0
@@ -4309,7 +4299,7 @@ class helpers():
         # eventually reported.
         self.update(guild_id, "is_ranked", 0)
         # Goes stale the moment team1/team2 do, same as disliked_role_user_ids
-        # above - whichever team-formation helper runs next re-stamps it
+        # above. Whichever team-formation helper runs next re-stamps it
         # from current_game.
         self.update(guild_id, "game", None)
 
@@ -4411,7 +4401,7 @@ class helpers():
     def _gameNote(self, guild_id):
         return f"\U0001f3ae Playing **{self._activeGame(guild_id)}**. Use `/set game` to switch."
 
-    # Only "League" gets role-based team balancing/role icons - simpler to
+    # Only "League" gets role-based team balancing/role icons. It's simpler to
     # link this to the game itself than maintain a separate per-game flag.
     # Takes the game string directly (not guild_id) since callers need
     # this at two different points with two different notions of "the
@@ -4446,7 +4436,7 @@ class helpers():
     # /set game itself: registers `game` as known for this guild (so it
     # shows up in gameAutocomplete from now on, same as any other saved
     # game) and points current_game at it. Only affects the NEXT roster
-    # formed (see servers.game's own comment) - whatever's currently in
+    # formed (see servers.game's own comment). Whatever's currently in
     # progress keeps resolving against whichever game it actually started
     # under.
     async def setGameHelper(self, ctx, game):
@@ -4470,7 +4460,7 @@ class helpers():
     # configured, without needing to run an admin-only command or dig a
     # roster's own _gameNote out of chat history. Also flags it when an
     # in-progress roster (_activeGame) is still tracking a different game
-    # than current_game - possible since /set game only ever applies to
+    # than current_game. That's possible since /set game only ever applies to
     # the NEXT roster formed, so switching mid-game doesn't retroactively
     # change which game the one already running affects (see
     # _activeGame's own comment).
@@ -4488,9 +4478,9 @@ class helpers():
         await ctx.response.send_message(message)
 
     # Every game this guild has ever set itself to via /set game (always
-    # includes "League", seeded per-guild - see guild_games), for
+    # includes "League", seeded per-guild, see guild_games), for
     # gameAutocomplete in bot.py. Typing something not in this list is
-    # still accepted outright; this is a convenience list, not a
+    # still accepted outright. This is a convenience list, not a
     # restriction.
     def listKnownGames(self, guild_id):
         self.cursor.execute("SELECT game FROM guild_games WHERE guildId=? ORDER BY game", (guild_id,))
@@ -4506,7 +4496,7 @@ class helpers():
     def resetEconomyHelper(self, guild_id, user_id=None):
         if user_id is None:
             self.cursor.execute("DELETE FROM economy WHERE guildId=?", (guild_id,))
-            # Every game's elo/record, not just the current one - a full
+            # Every game's elo/record, not just the current one. A full
             # economy wipe means everything, unlike resetEloHelper's own
             # current-game-only reset.
             self.cursor.execute("DELETE FROM game_stats WHERE guildId=?", (guild_id,))
@@ -4520,7 +4510,7 @@ class helpers():
     # untouched, unlike resetEconomyHelper, which wipes the whole row. Or
     # just one player's elo if `user_id` is given, same narrowing as
     # resetEconomyHelper above. Resets the CURRENT game's elo only (see
-    # /set game) - a server running several games shouldn't have resetting
+    # /set game). A server running several games shouldn't have resetting
     # League's ladder also wipe Valorant's.
     def resetEloHelper(self, guild_id, user_id=None):
         if user_id is None:
@@ -4861,7 +4851,7 @@ class helpers():
     # The reverse of registerTeamHelper: same captain-or-admin gate, but
     # refuses once a bracket exists (get_bracket() is non-empty), since a
     # registered team's roster is what buildBracket actually seeded into
-    # the tree - unregistering after that would leave the bracket
+    # the tree. Unregistering after that would leave the bracket
     # referencing a team the tournament no longer considers entered.
     # /tournament create-bracket (its own Confirm-gated reroll once real
     # match history exists) is the way to change the lineup past that
@@ -5127,7 +5117,7 @@ class helpers():
         )
 
     # The actual bracket build/save behind /tournament create-bracket, with
-    # no messaging of its own - shared by createBracketHelper's direct path
+    # no messaging of its own. Shared by createBracketHelper's direct path
     # (nothing to lose yet) and ConfirmBracketOverwriteView's Confirm button
     # (rebuilding over real match history), which announce the result two
     # different ways (a fresh response vs. editing the confirmation prompt
@@ -5172,7 +5162,7 @@ class helpers():
             return
 
         # Only actually destructive once there's real match history to
-        # lose (see ConfirmBracketOverwriteView's own comment) - a bracket
+        # lose (see ConfirmBracketOverwriteView's own comment). A bracket
         # built or rerolled before /tournament start has ever run needs
         # neither Manage Server nor a confirmation.
         self.cursor.execute("SELECT COUNT(*) FROM tournament_matches WHERE guildId=?", (guild_id,))
@@ -5883,7 +5873,7 @@ class helpers():
         final_connector_x = merge_x + max(merge_width, other_width) + BRACKET_PADDING * 3
         champion_x = final_connector_x + BRACKET_PADDING + BRACKET_CHAMPION_BADGE_GAP
         # Right_half sits past the champion, not immediately across
-        # connector_x from left_half; otherwise its own top node reads as
+        # connector_x from left_half. Otherwise its own top node reads as
         # a second, unrelated match crowded right next to the merge_node/
         # other_child/champion hop instead of a clearly separate half of
         # the bracket.
@@ -6314,7 +6304,7 @@ class helpers():
         # see _sendMatchupImage, which just omits the "Match #N" part of
         # the subtitle. use_roles is always False for a tournament match
         # (registered teams aren't formed with /make-teams' role balancing
-        # at all); only _sendMatchupImage's own caller ever passes True.
+        # at all). Only _sendMatchupImage's own caller ever passes True.
         name_font = self._loadFont(IBM_PLEX_SANS, BRACKET_FONT_SIZE, "Regular")
         team_font = self._loadFont(CHAKRA_PETCH_BOLD, BRACKET_TITLE_FONT_SIZE)
         vs_font = self._loadFont(CHAKRA_PETCH_BOLD, MATCHUP_VS_FONT_SIZE)
@@ -6548,7 +6538,7 @@ class helpers():
         await channel.send(self.renderBracketText(tournament, guild_id), files=bracket_files)
         if guild_id is not None:
             # The DB read half runs here, not inside the offloaded thread
-            # (self.cursor is thread-affined); only the pure drawing that
+            # (self.cursor is thread-affined). Only the pure drawing that
             # depends on it is actually offloaded.
             finals_inputs = self._grandFinalsRenderInputs(guild_id, tournament)
             if finals_inputs is not None:
@@ -6567,7 +6557,7 @@ class helpers():
 
         # Checked before the placeholder/render dance below, not left to
         # renderBracketText's own "No bracket has been created yet."
-        # fallback - that message is correct either way, but reaching it
+        # fallback. That message is correct either way, but reaching it
         # only after posting "Creating bracket, please wait..." and
         # actually rendering an empty tree is misleading (nothing was
         # created) and wastes a Pillow render on nothing.
@@ -6626,12 +6616,12 @@ class helpers():
         team1.deserializeTeam(team1_ser)
         team2.deserializeTeam(team2_ser)
 
-        # /set matchup-channel redirects this graphic (and, since every
-        # later step in this match's own life - the ready click, the
-        # betting/report cycle, the bracket update - is threaded through
-        # wherever the ready-check interaction itself came from) the rest
-        # of the match's own postings too, there instead of wherever the
-        # round happened to start.
+        # /set matchup-channel redirects this graphic there instead of
+        # wherever the round happened to start. Since every later step in
+        # this match's own life (the ready click, the betting/report
+        # cycle, the bracket update) is threaded through wherever the
+        # ready-check interaction itself came from, the rest of the
+        # match's own postings follow the same channel too.
         channel = self._resolveConfiguredChannel(guild_id, "matchup_channel", channel)
         tournament = self.getTournament(guild_id)
         round_label = f"{self._currentGame(guild_id)} - {self._matchRoundLabel(tournament, round_index, bracket_type)}"
@@ -6668,7 +6658,7 @@ class helpers():
         team2.deserializeTeam(team2_ser)
 
         # /set matchup-channel redirects this graphic there instead of
-        # wherever the round happened to start; _resolveTournamentMatch
+        # wherever the round happened to start. _resolveTournamentMatch
         # (reached from the report click on this same message) then just
         # follows the same channel through for the match's own result.
         channel = self._resolveConfiguredChannel(guild_id, "matchup_channel", channel)
@@ -6706,7 +6696,7 @@ class helpers():
     async def _openConcurrentTournamentBetting(self, guild_id, match_ids, channel):
         # /set wager-channel redirects this round-wide notice (and the
         # "now closed" one below) there instead of wherever the round
-        # happened to start - independent of /set matchup-channel, which
+        # happened to start. Independent of /set matchup-channel, which
         # only affects each match's own graphic/report message
         # (_postMatchReport). Resolved once here and threaded through to
         # _concurrentBettingTimer so the open/closed pair always lands in
@@ -6722,7 +6712,7 @@ class helpers():
             f"`/wager team <amount> <team> match_id:<id>` to bet on one. Betting closes in {duration} seconds."
         )
         # Shared across every match in this round (see the column's own
-        # comment in bot.py); read back and deleted once the round's last
+        # comment in bot.py). Read back and deleted once the round's last
         # match resolves, whichever of _resolveTournamentMatch/
         # _resolveLosersMatch/_resolveFinalsMatch that ends up being.
         placeholders = ",".join("?" * len(match_ids))
@@ -6995,7 +6985,7 @@ class helpers():
         # Interleaved timing: a losers round that's now unlocked plays
         # before winners moves on to round_index, "winners await the
         # previous round's losers." Not checked for the terminal
-        # round_index itself; see the branch below for what interleaved
+        # round_index itself. See the branch below for what interleaved
         # mode does once winners is actually done.
         if interleaved and round_index < len(rounds) - 1:
             ready_ri = self._readyUnstartedLosersRoundIndex(guild_id, tournament)
@@ -7231,7 +7221,7 @@ class helpers():
     # Starts (or restarts, if the whole tournament is idle) the current
     # round. Refuses to run while a round is already in progress, or once
     # a champion has already been decided. Only ever kicks off winners
-    # bracket round 0; a double-elimination tournament's losers bracket
+    # bracket round 0. A double-elimination tournament's losers bracket
     # and Grand Finals play out on their own from there, driven entirely
     # by match resolution (_resolveTournamentMatch), no repeat command
     # needed.
@@ -7343,9 +7333,9 @@ class helpers():
         self.db.commit()
 
     # TournamentMatchReportView's Team 1/Team 2 button callback. A pick no
-    # longer resolves the match immediately; it posts a
+    # longer resolves the match immediately. It posts a
     # ConfirmTournamentMatchReportView instead (Confirm actually calls
-    # _resolveTournamentMatch; Cancel/timeout restores the match via
+    # _resolveTournamentMatch. Cancel/timeout restores the match via
     # _restoreTournamentMatchAwaitingResult so its buttons work again),
     # matching WinnerReportView/ConfirmWinnerReportView's two-step shape.
     async def _handleTournamentMatchReportClick(self, interaction, winning_team):
@@ -7408,9 +7398,9 @@ class helpers():
     # either starts the next queued match (sequential, round not done),
     # or moves on to the next round once every match in this one has
     # resolved. Shared by both modes, reached via recordResult's hook for
-    # sequential, or directly from a result reaction for simultaneous.
-    # Dispatches to the losers-bracket / Grand Finals equivalents below
-    # for anything that isn't a winners-bracket match.
+    # sequential, or directly from a winner-report button click for
+    # simultaneous. Dispatches to the losers-bracket / Grand Finals
+    # equivalents below for anything that isn't a winners-bracket match.
     async def _resolveTournamentMatch(self, guild_id, match_id, winning_team, channel_id):
         self.cursor.execute(
             "SELECT roundIndex, nodeIndex, mode, state, bracketType, game FROM tournament_matches WHERE id=?",
@@ -7456,7 +7446,7 @@ class helpers():
         if node_a.next is not None:
             node_a.next.team = winner_node.team
             # Only a REAL match (both sides had a team) has an actual
-            # loser to drop into the losers bracket; a bye pairing's
+            # loser to drop into the losers bracket. A bye pairing's
             # "winner" never played anyone, so node_a.next.drop_to (if
             # this is a double-elimination tournament) is simply left
             # unfilled, same as the equivalent losers-bracket slot.
@@ -7496,8 +7486,8 @@ class helpers():
         # (below) is what actually announces the champion once there's
         # no round left to start. This is purely the "round N is over"
         # transition message, distinct from the per-match update above.
-        # No sleeps or blocking waits anywhere in this chain: reactions
-        # are handled by discord.py as their own tasks, so a round
+        # No sleeps or blocking waits anywhere in this chain: discord.py
+        # handles each button click as its own task, so a round
         # transition (even one that recurses through several bye rounds)
         # never blocks other users from placing bets or running other
         # commands meanwhile.
@@ -7629,8 +7619,8 @@ class helpers():
         return self.cursor.fetchone()[0] > 0
 
     # The actual bracket-propagation/wager-reversal work behind /set
-    # correct-winner's match_id path, with no messaging of its own -
-    # shared by nothing else, but kept separate from
+    # correct-winner's match_id path, with no messaging of its own.
+    # Shared by nothing else, but kept separate from
     # _correctTournamentMatchHelper so ConfirmTournamentMatchCorrectionView's
     # Confirm button can re-verify the match is still in the exact state
     # the warning was built from (see its own comment) before calling this.
@@ -7677,13 +7667,13 @@ class helpers():
     # and reapplying them against the right one, using the settledWagers
     # snapshot _settleMatchWagers leaves behind, since tournament_wagers'
     # own rows are long gone by the time a match is old enough to need
-    # correcting) immediately - the same "a real payout/bracket change
+    # correcting) immediately. Same "a real payout/bracket change
     # shouldn't hinge on one click" reasoning every other winner-report
     # flow in this file already follows. Independent of the guild-wide
     # last_result correction (which only ever covers the single
     # most-recently-resolved team game). Refuses once the next round has
     # already started, rather than risk silently corrupting a bracket
-    # that's already moved on; ConfirmTournamentMatchCorrectionView
+    # that's already moved on. ConfirmTournamentMatchCorrectionView
     # re-checks that (and the match's own state) again at Confirm time,
     # in case either changed while the prompt was sitting there.
     async def _correctTournamentMatchHelper(self, ctx, match_id, correct_team):
@@ -7924,7 +7914,7 @@ class helpers():
     # bare stored ids on every click would be needless API calls for
     # something that never changes for the life of this message. `mine`
     # folds the caller into that same member filter rather than being its
-    # own separate code path - this used to be the standalone /team
+    # own separate code path. This used to be the standalone /team
     # lookup command (its own helper, view, and my_team_views table), but
     # everything it did (a single member's teams, paged one full stats
     # card at a time) was already just this command's own member filter
@@ -8218,8 +8208,8 @@ class helpers():
         self.cursor.execute("UPDATE teams SET data=? WHERE id=?", (team.serializeTeam(), team_id))
         self.db.commit()
 
-    # Per-game team win/loss record - see /set game. Kept separate from
-    # Team.wins/Team.losses (the in-memory attribute display code reads;
+    # Per-game team win/loss record, see /set game. Kept separate from
+    # Team.wins/Team.losses (the in-memory attribute display code reads,
     # see _hydrateTeamGameRecord below) the same way game_stats is kept
     # separate from economy, so a team's record only reflects matches
     # played under the same game.
@@ -8253,8 +8243,8 @@ class helpers():
     # display site that reads team.wins/team.losses (the team list,
     # /team stats, the trading card) shows the per-game record without
     # needing its own game-scoping logic. Team.wins/Team.losses are pure
-    # display state - never part of serializeTeam/deserializeTeam, never
-    # persisted back through updateTeamData - so this always has to run
+    # display state. They're never part of serializeTeam/deserializeTeam,
+    # never persisted back through updateTeamData, so this always has to run
     # again after every fresh deserialize rather than being settable
     # once. Called from every loader that deserializes a Team
     # (getTeamRow/getTeamById/getTeamsForGuild) right after _ensureLogo,
@@ -8549,7 +8539,7 @@ class helpers():
         rostered_ids = {player.get_id() for player in team.get_players()}
         # force skips the whole invite mechanism entirely (no team_invites
         # row ever gets written for it), so an existing pending invite is
-        # irrelevant to it - re-checking here would wrongly block an admin
+        # irrelevant to it. Re-checking here would wrongly block an admin
         # from force-adding someone who happens to already have one
         # outstanding.
         if force:
@@ -8632,10 +8622,10 @@ class helpers():
     # /team invite force is the captain/admin counterpart to a normal
     # (self-accepted) invite: a captain or a Manage Server admin can
     # remove someone from the roster who won't (or can't) run /team leave
-    # themselves. No confirmation, same as force-inviting - easily undone
+    # themselves. No confirmation, same as force-inviting: easily undone
     # either way (re-invite, or leave). The captain themselves can't be
     # removed this way, same "no captain-less non-empty team" reasoning
-    # teamLeaveHelper's own captain guard has below; /team transfer or
+    # teamLeaveHelper's own captain guard has below. /team transfer or
     # /team delete are what that situation actually needs.
     async def teamRemoveHelper(self, ctx, team_name, member):
         guild_id = ctx.guild.id
@@ -8742,19 +8732,19 @@ class helpers():
     # /help right when the bot's added, instead of a brand new admin
     # having to already know either command exists. Without this, there
     # was no in-Discord signal at all that Shockwave had joined beyond it
-    # showing up in the member list - /help's own "New here? Run /setup
+    # showing up in the member list. /help's own "New here? Run /setup
     # first." note only reaches someone who already thought to run
     # /help. /set welcome-message (welcome_message_enabled, on by
-    # default) is the opt-out for a server that doesn't want it; ensure_
+    # default) is the opt-out for a server that doesn't want it. ensure_
     # guild_row has already run by the time on_guild_join calls this, so
     # the row (and its default) always exists here. system_channel (the
     # "#general"-equivalent Discord itself designates when a server sets
     # one) is preferred since it's the channel most members already have
-    # open; guild.text_channels (falling back to whichever one the bot
+    # open. guild.text_channels (falling back to whichever one the bot
     # can actually post in) covers a server with no system channel
     # configured, or one the bot can't post in for some reason. Silently
     # does nothing rather than raising if there's genuinely nowhere
-    # postable - a server that locks every channel down before granting
+    # postable. A server that locks every channel down before granting
     # roles is unusual but not a reason to fail the join itself.
     async def welcomeNewGuildHelper(self, guild):
         if not self.get(guild.id, "welcome_message_enabled"):
@@ -8801,8 +8791,8 @@ class helpers():
         # hasCompletedSetup reflects whether this player has ever actually
         # confirmed the role picker before (see _confirmSetupRoleStep's
         # own _unlockAchievement("onboarded") call, at the end of this
-        # same flow), not just whether they currently have a solo team -
-        # those can drift apart (a deleted solo team, say), so this is
+        # same flow), not just whether they currently have a solo team.
+        # Those can drift apart (a deleted solo team, say), so this is
         # the more reliable "is this a repeat run" signal. Captured up
         # front, before anything below can change it.
         is_first_run = not self.hasCompletedSetup(guild_id, user_id)
@@ -8860,7 +8850,7 @@ class helpers():
         else:
             team_note = f"Your solo team is still **{solo_team_name}**."
 
-        # The full pitch only makes sense the first time - someone
+        # The full pitch only makes sense the first time. Someone
         # re-running /setup later to just rename their solo team or
         # tweak role preferences already knows all this, and doesn't
         # need it repeated back to them every single time.
@@ -8893,7 +8883,7 @@ class helpers():
         self.db.commit()
 
     # Overwrites `player_role_preferences` for `user_id` with exactly
-    # `liked`/`disliked`. The reaction-based flow always walks both
+    # `liked`/`disliked`. The button-based flow always walks both
     # steps in full each run (no way to leave a side untouched the way
     # the old string-param version allowed), so a plain replace is
     # correct: a role that's in neither list just ends up with no row,
@@ -8929,13 +8919,13 @@ class helpers():
     #
     # First confirm: snapshots the currently-toggled roles as the liked
     # set, flips the session to the disliked step, and re-poses the same
-    # message/reactions for the second round. Second confirm: any role
-    # toggled in BOTH rounds is a contradiction. "Can't like and dislike
-    # the same role" is enforced by simply leaving that role out of
-    # both final sets (neutral, no player_role_preferences row at all)
-    # rather than rejecting the whole thing, with the summary telling
-    # the caller which role(s) that happened to and pointing them at
-    # /setup again to fix it.
+    # message with its buttons reset for the second round. Second
+    # confirm: any role toggled in BOTH rounds is a contradiction.
+    # "Can't like and dislike the same role" is enforced by simply
+    # leaving that role out of both final sets (neutral, no
+    # player_role_preferences row at all) rather than rejecting the
+    # whole thing, with the summary telling the caller which role(s)
+    # that happened to and pointing them at /setup again to fix it.
     async def _confirmSetupRoleStep(self, interaction, view):
         guild_id, user_id = view.guild_id, view.user_id
         message = interaction.message
@@ -9112,7 +9102,7 @@ class helpers():
     # rather than waiting on someone's response. set_captain() itself
     # still enforces "captain must be a roster player" (see
     # TourneyClasses.Team) either way, so the new captain has to already
-    # be rostered - inviting them first is on the caller, not something
+    # be rostered. Inviting them first is on the caller, not something
     # this quietly does for them. This is what /team leave's own "you're
     # the captain, there's nobody to hand it to" block needed to exist
     # before a captain could ever use it.
@@ -9228,7 +9218,7 @@ class helpers():
         player = next((p for p in team.get_players() if p.get_id() == to_captain_id), None)
         if player is None:
             # Left the roster (or was removed) between the offer going out
-            # and this accept - nothing left to actually transfer.
+            # and this accept. Nothing left to actually transfer.
             await interaction.response.send_message(
                 f"You're no longer on **{team_name}**'s roster, so there's nothing to accept.",
                 ephemeral=True,
@@ -9243,7 +9233,7 @@ class helpers():
         )
 
     # TeamTransferAcceptView's Decline button callback. Only the offered
-    # player can press it, same as _handleTeamInviteDeclineClick; nothing
+    # player can press it, same as _handleTeamInviteDeclineClick. Nothing
     # was ever moved, so declining is just deleting the row.
     async def _handleTeamTransferDeclineClick(self, interaction):
         guild_id = interaction.guild_id
@@ -9275,7 +9265,7 @@ class helpers():
             f"**{from_captain_name}** is still captain."
         )
 
-    # TeamTransferAcceptView's Cancel transfer button callback - the
+    # TeamTransferAcceptView's Cancel transfer button callback. The
     # current captain's (or a Manage Server admin's) own side, mirroring
     # _handleTeamInviteCancelClick: retracting an offer before the other
     # side has answered, rather than leaving them to accept or decline
@@ -9429,7 +9419,7 @@ class helpers():
     # TeamInviteAcceptView's Cancel invite button callback. Unlike Accept/
     # Decline (each scoped to targetId=interaction.user.id, one invitee's
     # own row), this retracts every remaining invitee's row for this
-    # message at once - the captain/admin side undoing the whole /team
+    # message at once. It's the captain/admin side undoing the whole /team
     # invite call, not any one invitee's individual response to it.
     async def _handleTeamInviteCancelClick(self, interaction):
         guild_id = interaction.guild_id
@@ -9790,7 +9780,7 @@ class helpers():
         )
         self.db.commit()
 
-    # One team per "page" rather than a batch of rows like /leaderboard;
+    # One team per "page" rather than a batch of rows like /leaderboard.
     # /team list cards:true is for flipping through each matching team's
     # full stats card one at a time, not scanning a ranked list. Shared
     # by /leaderboard's own Cards mode too (see LeaderboardPagingView),
@@ -9800,8 +9790,8 @@ class helpers():
         return max(1, len(teams))
 
     # Same embed /team stats uses, plus a "Team X/N" footer so paging has
-    # something to orient by (team-stats itself doesn't need one; there's
-    # only ever the one team on screen there).
+    # something to orient by (team-stats itself doesn't need one, since
+    # there's only ever the one team on screen there).
     def _renderMyTeamsEmbed(self, teams, page):
         team_id, team = teams[page]
         embed, file = self._renderTeamStatsEmbed(team)
@@ -9908,14 +9898,15 @@ class helpers():
 
     # Loads two persistent teams straight into team1/team2 for a casual
     # or ranked game, the "quickly reuse a tournament team" path,
-    # skipping /make-teams'/`/ranked`'s random-split-or-draft entirely.
-    # Same "build the roster, then click ▶️" contract as those commands:
-    # nobody is moved and no elo/betting starts until the roster's ▶️
-    # reaction (see _finalizeRoster) is clicked.
+    # skipping /make-teams random's or /make-teams draft's own
+    # random-split-or-draft entirely. Same "build the roster, then press
+    # Start" contract as those commands: nobody is moved and no
+    # elo/betting starts until the roster's own Start button (see
+    # _finalizeRoster) is clicked.
     async def useTeamsHelper(self, ctx, team1_name, team2_name, ranked):
         guild_id = ctx.guild.id
 
-        # Case-insensitive, matching getTeamRow's own lookup; "Red" and
+        # Case-insensitive, matching getTeamRow's own lookup. "Red" and
         # "red" resolve to the same team, so comparing the raw strings
         # byte-for-byte would let that pair slip through as "different"
         # right up until both getTeamRow calls below returned the exact
@@ -10077,14 +10068,14 @@ class helpers():
         )
 
     # /give: a plain, immediate gold transfer between two players, no
-    # accept step needed (unlike /wager against - the recipient never has
+    # accept step needed (unlike /wager against, the recipient never has
     # to consent to being given gold, the same way nobody has to consent
     # to /notify DMing them an invite). Deliberately NOT capped by /set
-    # max-wager (that's a per-bet risk limit; a transfer isn't a wager,
+    # max-wager (that's a per-bet risk limit, and a transfer isn't a wager:
     # there's no outcome to hedge against) and not gated by
     # betting_enabled either (moving gold between players isn't betting,
     # so turning betting off on a server shouldn't also turn this off).
-    # Doesn't touch wins/losses/gold_wagered/gold_won/gold_lost - those
+    # Doesn't touch wins/losses/gold_wagered/gold_won/gold_lost. Those
     # are bet-outcome-only columns, and a gift is even less bet-like than
     # a cancelled duel (see _finishDuelCancellation, which already
     # doesn't touch them for the same reason).
@@ -10186,8 +10177,8 @@ class helpers():
         return discord.utils.escape_markdown(name)
 
     # True if `user_id` is a rostered player (either side) in the game the
-    # roster's ▶️ reaction most recently moved into channels, used to stop
-    # players from betting on their own game.
+    # roster's own Start button most recently moved into channels, used to
+    # stop players from betting on their own game.
     def isPlayerInCurrentGame(self, guild_id, user_id):
         player_ids = {uid for uid, _name in self.getRosterPlayers(guild_id, "team1")}
         player_ids |= {uid for uid, _name in self.getRosterPlayers(guild_id, "team2")}
@@ -10442,9 +10433,9 @@ class helpers():
     # game path (match_id is None) and the tournament-match path. Only the
     # bettor themselves can cancel their own bet (interaction.user.id is
     # checked, not just whoever's looking at the message), and only while
-    # betting's genuinely still open - the view's own timeout
+    # betting's genuinely still open. The view's own timeout
     # (WAGER_CANCEL_VIEW_TIMEOUT_SECONDS) just bounds how long Discord
-    # keeps the button clickable at all; this is what actually decides a
+    # keeps the button clickable at all. This is what actually decides a
     # given click. The lookup+delete+refund below has no `await` in
     # between, so nothing else can interleave and double-refund a rapid
     # double-click the way BUG-PRONE PATTERN AVOIDED comments elsewhere in
@@ -10539,7 +10530,7 @@ class helpers():
     # resolved channel a betting round's open/closed notices actually
     # live in) back to a channel object, best-effort. Needed wherever a
     # caller only has the id on hand rather than the channel the
-    # interaction itself came from - e.g. recordResult, whose own
+    # interaction itself came from, e.g. recordResult, whose own
     # `channel` param now follows /set matchup-channel instead, a
     # possibly different channel than where the betting-closed notice
     # this deletes was actually posted.
@@ -10570,8 +10561,8 @@ class helpers():
     # it calls _openBetting, and still set when recordResult later
     # resolves that same game) means a sequential tournament match, same
     # per-match row lookup as above. Otherwise it's a casual/ranked game,
-    # which has no channel of its own tracked for matchup_message_id -
-    # it's always wherever /set matchup-channel most recently resolved
+    # which has no channel of its own tracked for matchup_message_id.
+    # It's always wherever /set matchup-channel most recently resolved
     # to, the same place a caller of this already has on hand.
     #
     # None from any of these paths if nothing's actually resolvable.
@@ -10625,7 +10616,7 @@ class helpers():
 
     # Core of the above, taking guild_id/channel directly rather than a
     # full Interaction. /tournament start's sequential mode calls this
-    # too, from a reaction handler that has no ctx to hand it. Cancels
+    # too, from a button callback that has no ctx to hand it. Cancels
     # and refunds any previous unresolved game first so re-opening
     # never leaves an orphaned timer or stranded bets behind.
     #
@@ -10643,7 +10634,7 @@ class helpers():
         # /set wager-channel redirects the betting-open/closed notices to
         # one channel. /set matchup-channel redirects the winner-report
         # message (with its Team 1/Team 2/Cancel Game buttons) to another,
-        # independently - these can point at two different channels now.
+        # independently. These can point at two different channels now.
         # Once betting_channel_id below points at the wager one,
         # everything downstream that's about the WAGER side (the timer,
         # the closed notice, reconcileStaleBettingWindows) just follows it
@@ -10659,7 +10650,7 @@ class helpers():
         self.update(guild_id, "betting_channel_id", wager_channel.id)
         # Read back by reconcileStaleBettingWindows (called from on_ready)
         # to work out how much of the window was actually left if the bot
-        # restarts mid-window; the in-memory timer task below doesn't
+        # restarts mid-window. The in-memory timer task below doesn't
         # survive that, only a process reconnect.
         self.update(guild_id, "betting_opened_at", int(time.time()))
 
@@ -10756,7 +10747,7 @@ class helpers():
     # enough that a coarse periodic sweep is plenty, and it means a
     # pending invite doesn't need any reconciliation on restart the way an
     # in-flight betting countdown does. Only ever touches PENDING_ACCEPT
-    # duels - an accepted one has real gold escrowed and stays open
+    # duels. An accepted one has real gold escrowed and stays open
     # indefinitely regardless of age, same as today. A NULL createdAt (a
     # row from before that column existed) counts as already expired
     # rather than guessing how old it actually is. Returns
@@ -10808,13 +10799,13 @@ class helpers():
                 # there's nothing to resume, and closing it now would post
                 # a "Betting is now closed!" notice for wagering that was
                 # never actually open. betting_state stays OPEN either way
-                # (reporting a winner still works fine); it's just never
+                # (reporting a winner still works fine). It's just never
                 # this function's job to touch a betting-disabled guild.
                 continue
             channel = client.get_channel(channel_id) if channel_id is not None else None
             if channel is None:
                 # Channel deleted, or not yet in cache, leave the window
-                # open rather than guessing; it's still fully resolvable
+                # open rather than guessing. It's still fully resolvable
                 # by hand via the report/cancel buttons either way.
                 continue
 
@@ -10968,7 +10959,7 @@ class helpers():
     # WinnerReportView's Team 1/Team 2 button callback. A pick no longer
     # records the result immediately. It posts a ConfirmWinnerReportView
     # instead (Confirm actually calls recordResult, then strips this
-    # message's own buttons via _clearMessageButtons; Cancel/timeout
+    # message's own buttons via _clearMessageButtons. Cancel/timeout
     # restores the report message via _restoreWinnerReportMessage so its
     # buttons work again). A real elo/payout/game-record change
     # shouldn't hinge on a single accidental click. Valid while
@@ -11036,7 +11027,7 @@ class helpers():
 
     # WinnerReportView's Cancel Game button callback. A click no longer
     # cancels immediately. It posts a ConfirmCancelGameView instead
-    # (Confirm actually calls _finishGameCancel; Cancel/timeout restores
+    # (Confirm actually calls _finishGameCancel. Cancel/timeout restores
     # the report message via _restoreWinnerReportMessage so its buttons
     # work again), the same two-step shape _handleWinnerReportPick
     # uses, since this button sits on the exact same message and
@@ -11081,7 +11072,7 @@ class helpers():
     # ConfirmCancelGameView's Confirm button callback, refunds any open
     # bets and moves everyone back to the original channel (the same two
     # things the old /return command did), then deletes the original
-    # report message outright - it has nothing left to say once the game
+    # report message outright. It has nothing left to say once the game
     # it was reporting on is gone. (ConfirmCancelGameView.confirm itself
     # deletes the confirmation prompt.)
     async def _finishGameCancel(self, guild_id, channel, guild, report_message=None):
@@ -11097,7 +11088,7 @@ class helpers():
     async def cancelGameHelper(self, guild_id, channel, guild):
         # Same "stay visually anchored to the graphic" reasoning
         # recordResult's own result message follows (see
-        # _matchupMessageLocation); best-effort, so a game that never
+        # _matchupMessageLocation). Best-effort, so a game that never
         # actually got a matchup graphic just falls back to a plain send.
         matchup_message = await self._fetchMatchupMessage(guild_id, channel)
         await channel.send(f"{CANCEL_GAME_EMOJI} Game cancelled.", reference=matchup_message)
@@ -11157,7 +11148,7 @@ class helpers():
 
         # Replies to the game/match's own matchup graphic (_sendMatchupImage
         # for a casual/ranked game, _postReadyCheck's ready-check message
-        # for a sequential tournament match - see _matchupMessageLocation)
+        # for a sequential tournament match, see _matchupMessageLocation)
         # when there is one, so the result stays visually anchored to it
         # instead of just landing further down the channel. Best-effort:
         # an already-deleted message just falls back to a plain,
@@ -11176,7 +11167,7 @@ class helpers():
         # Confirm view called into this (it's the one holding that
         # message, not this function). This is just the separate
         # "Betting is now closed!" notice _closeBettingWindow may have
-        # posted after it, if the timer beat the report to it - in the
+        # posted after it, if the timer beat the report to it, in the
         # wager-channel-resolved channel (betting_channel_id), which
         # /set matchup-channel can now leave pointed somewhere other than
         # `channel` (the report message's own channel) above.
@@ -11315,7 +11306,7 @@ class helpers():
     # DuelAcceptView's Decline button callback, the reverse of Accept
     # above: same "only the challenged player" gate, but just deletes the
     # pending duel row outright rather than moving it forward. No gold to
-    # refund - _acceptDuel is the only place a duel's amount ever actually
+    # refund: _acceptDuel is the only place a duel's amount ever actually
     # leaves anyone's balance.
     async def _handleDuelDeclineClick(self, interaction):
         guild_id = interaction.guild_id
@@ -11354,7 +11345,7 @@ class helpers():
     # own side of _handleDuelDeclineClick right above: retracting a
     # challenge they regret sending rather than leaving it for the target
     # to either accept or decline. Same "no gold escrowed yet" reasoning
-    # as Decline - nothing to refund, just a row to delete.
+    # as Decline: nothing to refund, just a row to delete.
     async def _handleDuelRetractClick(self, interaction):
         guild_id = interaction.guild_id
         if guild_id is None:
@@ -11390,7 +11381,7 @@ class helpers():
     # DuelResultView's Challenger Won/Target Won button callback. A
     # result no longer pays out immediately. It posts a
     # ConfirmDuelResultView instead (Confirm actually pays out via
-    # _finishDuelResolution; Cancel/timeout restores the duel via
+    # _finishDuelResolution. Cancel/timeout restores the duel via
     # _restoreDuelAwaitingResult so its buttons work again), matching
     # WinnerReportView/ConfirmWinnerReportView's two-step shape for the
     # exact same reason: a real gold transfer shouldn't hinge on a
@@ -11520,7 +11511,7 @@ class helpers():
     # ConfirmDuelCancelView's Confirm button callback, the refund
     # counterpart to _finishDuelResolution's payout. Re-fetches the duel's
     # own row by id the same way. Doesn't touch wins/losses/gold_won/
-    # gold_lost - a cancelled duel never happened, unlike a resolved one.
+    # gold_lost. A cancelled duel never happened, unlike a resolved one.
     async def _finishDuelCancellation(self, duel_id):
         self.cursor.execute(
             "SELECT guildId, channelId, challengerId, challengerName, targetId, targetName, amount "
@@ -11661,13 +11652,13 @@ class helpers():
     # Returns (deltas, summary):
     #   deltas: user_id -> {username, balance, wins, losses, gold_wagered,
     #           gold_won, gold_lost, game_wins, game_losses, ranked_wins,
-    #           ranked_losses, elo}; all values are deltas to ADD to that
+    #           ranked_losses, elo}. All values are deltas to ADD to that
     #           user's economy row. `balance` here is bet payouts/losses
     #           AND GAME_WIN_GOLD/GAME_LOSS_GOLD combined, not just one or
-    #           the other; gold_wagered/gold_won/gold_lost stay wager-only.
+    #           the other. gold_wagered/gold_won/gold_lost stay wager-only.
     #           ranked_wins/ranked_losses are the
     #           RANKED subset of game_wins/game_losses (0 for a casual
-    #           game); a casual win/loss count is just game_wins minus
+    #           game). A casual win/loss count is just game_wins minus
     #           ranked_wins (see getLeaderboardEntries), so there's nothing
     #           separate to track for that side.
     #   summary: display-only info for formatResultMessage().
@@ -11789,7 +11780,7 @@ class helpers():
     # Returns the (user_id, achievement_key) pairs newly unlocked while
     # applying these deltas, always [] on a reversal (sign<0), same
     # reasoning as the elo-tier check below. Callers with a channel handy
-    # pass this straight to _announceAchievements; callers that don't
+    # pass this straight to _announceAchievements. Callers that don't
     # (or a reversal, which never populates it) just ignore it.
     def applyGameDeltas(self, guild_id, deltas, game=None, sign=1):
         if game is None:
@@ -12028,9 +12019,9 @@ class helpers():
     # The actual reverse-and-reapply (or invalidate) work behind
     # ConfirmCorrectWinnerView's Confirm button, with no messaging of its
     # own. `snapshot` is the exact last_result dict the warning was built
-    # from - the caller has already checked it's still current (see that
+    # from. The caller has already checked it's still current (see that
     # view's own comment) before calling this. Returns (result_text,
-    # summary, newly_unlocked); `summary` is None for an invalidation
+    # summary, newly_unlocked). `summary` is None for an invalidation
     # (nothing further to announce), a computeGameDeltas summary dict
     # otherwise, for the caller to post via formatResultMessage.
     def _applyCorrectWinner(self, guild_id, snapshot, correct_team, invalidate):
@@ -12304,7 +12295,7 @@ class helpers():
 
     # The plain discord.User behind any user_id, bypassing whatever
     # per-server Member overrides (nickname, server avatar) a guild might
-    # have - the shared "global identity" resolution every
+    # have. It's the shared "global identity" resolution every
     # server-vs-global toggle in this file (the /stats avatar toggle, its
     # trading-card twin, /leaderboard cards:true for someone who's left)
     # needs for both the avatar AND the name shown, so the two can never
@@ -12458,10 +12449,10 @@ class helpers():
     # defaults (CARD_DEFAULT_*) the first time it's needed, same
     # self-healing "insert if missing, read either way" shape
     # ensureEconomyRow uses. So a card can be customized (by hand in
-    # the database today; a future /card-customize-style command could
-    # write the same columns, and should set customized=1 when it
-    # does) without ever needing a one-off migration for players who
-    # predate that.
+    # the database today, or by a future /card-customize-style command
+    # that writes the same columns and sets customized=1 when it does)
+    # without ever needing a one-off migration for players who predate
+    # that.
     #
     # INSERT OR IGNORE alone would leave an existing row frozen at
     # whatever CARD_DEFAULT_* was the day it was first created. Since
@@ -12756,7 +12747,7 @@ class helpers():
         return titles
 
     # /card-set's own title choice list: CARD_DEFAULT_TITLE (always
-    # available; it needs no unlocking, it's just the base title) plus
+    # available, it needs no unlocking, it's just the base title) plus
     # whatever this player has actually unlocked.
     def getAvailableCardTitles(self, guild_id, user_id):
         return [CARD_DEFAULT_TITLE] + self.getUnlockedCardTitles(guild_id, user_id)
@@ -12971,8 +12962,8 @@ class helpers():
     # How many of `items` fit on one page before PREVIEW_MAX_PAGE_HEIGHT
     # is exceeded, given a PREVIEW_COLUMNS-wide grid of
     # PREVIEW_CELL_SIZE cells. Used by both the logo and color-scheme
-    # previews (the two that are actually grids; titles/fonts are
-    # short one-column lists that never come close to needing this).
+    # previews (the two that are actually grids). Titles/fonts are
+    # short one-column lists that never come close to needing this.
     def _paginateGridItems(self, items):
         row_height = PREVIEW_CELL_SIZE + PREVIEW_CELL_LABEL_HEIGHT + PREVIEW_CELL_GAP
         header_height = PREVIEW_MARGIN * 2 + PREVIEW_TITLE_FONT_SIZE + PREVIEW_CELL_GAP
@@ -13173,7 +13164,7 @@ class helpers():
         await ctx.response.send_message(f"**{preview_type}** preview{page_note}:", files=files)
 
     # Sets `user_id`'s equipped trading-card font. Trusts `font_style` is
-    # already validated (see cardSetHelper); this is the internal
+    # already validated (see cardSetHelper). This is the internal
     # write half only, same shape setCardTitle/setCardColorScheme have.
     # Also marks the row customized=1 for the same reason those two do.
     def setCardFontStyle(self, guild_id, user_id, font_style):
@@ -13367,7 +13358,7 @@ class helpers():
         view.message = await ctx.original_response()
 
     # {key: (current, threshold)} for every achievement that has a plain
-    # numeric progress toward it - the same snapshot _checkAchievements
+    # numeric progress toward it. The same snapshot _checkAchievements
     # itself gathers to decide who's newly qualified, reused here instead
     # of re-deriving it, so the two can't quietly drift apart. Left out
     # entirely for a key with no meaningful fraction: first_blood and
@@ -13745,7 +13736,7 @@ class helpers():
     # The avatar-fetching half shared by _swapStatsForTradingCard and
     # _renderLeaderboardCardEmbed. `source` (a discord.Member or
     # discord.User, whichever identity the caller has already decided
-    # is the one to show - see _swapStatsForTradingCard's own
+    # is the one to show, see _swapStatsForTradingCard's own
     # server-vs-global resolution) is fetched as-is, not re-resolved
     # here, so the avatar this returns always matches whatever `source`
     # the caller also pulls the display name from. Falls back to None
@@ -13780,7 +13771,7 @@ class helpers():
         member = await self._resolveGuildMember(guild_id, target_user_id)
         # This server's own best-known name for the row (economy/
         # game_stats' own `username` column), independent of which
-        # avatar the toggle currently shows - a cosmetic view flip
+        # avatar the toggle currently shows. A cosmetic view flip
         # shouldn't change what gets stored for this player.
         stored_name = member.display_name if member is not None else f"Player {target_user_id}"
 
@@ -13802,9 +13793,9 @@ class helpers():
         teams = [team for _, team in self.getTeamsForPlayer(guild_id, target_user_id)]
         settings = self.getCardSettings(guild_id, target_user_id)
 
-        # Whichever identity the toggle currently shows - this server's
+        # Whichever identity the toggle currently shows, this server's
         # Member (nickname + server avatar) or the plain global User
-        # (Discord display name + account-wide avatar) - is what both
+        # (Discord display name + account-wide avatar), is what both
         # the avatar AND the displayed name come from, so the two can
         # never mismatch (a global avatar next to a server nickname, or
         # vice versa). Independent of member's own resolution, so this
@@ -13818,7 +13809,7 @@ class helpers():
 
         # The account's own unique handle, unlike display_name never
         # server-specific, so it's the same either way the toggle is
-        # set - falls back to member only if the toggle's own global
+        # set. Falls back to member only if the toggle's own global
         # lookup came up empty.
         username_source = avatar_source if avatar_source is not None else member
         username = username_source.name if username_source is not None else None
@@ -13842,7 +13833,7 @@ class helpers():
     # message currently has the card's PNG attached, and message.edit()
     # otherwise leaves existing attachments alone. See
     # _swapStatsForTradingCard on `view`. `use_global_avatar` carries the
-    # card's own avatar choice over onto the embed - built from whichever
+    # card's own avatar choice over onto the embed. It's built from whichever
     # identity (server Member or global User) that choice actually
     # means, the same "name and avatar always come from the same
     # resolved identity" rule _handleStatsAvatarToggleClick's own embed
@@ -13869,7 +13860,7 @@ class helpers():
     # StatsView's Card button callback, swaps the plain embed for the
     # trading-card image and re-renders with a Back button in place of
     # Card (see StatsView). Whichever avatar the embed happened to be
-    # showing (server or global - see _handleStatsAvatarToggleClick's own
+    # showing (server or global, see _handleStatsAvatarToggleClick's own
     # embed-thumbnail comparison, mirrored here) carries straight over
     # onto the card, rather than always starting the card back on the
     # server avatar.
@@ -13911,7 +13902,7 @@ class helpers():
     # _swapTradingCardForStats) rather than resetting to the server
     # avatar, and is deliberately left untouched here (not reset to 0 the
     # way it used to be) so a later Card press picks the same avatar back
-    # up too - see _handleStatsShowCardClick.
+    # up too, see _handleStatsShowCardClick.
     async def _handleStatsReturnClick(self, interaction):
         guild_id = interaction.guild_id
         message = interaction.message
@@ -13942,13 +13933,13 @@ class helpers():
     # whichever identity (this server's Member, or the plain global
     # User) isn't currently showing, comparing the embed's own thumbnail
     # URL against a freshly-resolved server URL to tell which one that
-    # is - a full rebuild rather than just swapping the thumbnail URL in
+    # is. A full rebuild rather than just swapping the thumbnail URL in
     # place, so the title's name always matches whichever avatar comes
     # with it (this server's nickname next to the server avatar, or the
-    # Discord display name next to the account-wide one - never one
+    # Discord display name next to the account-wide one, never one
     # from each). On the card, it flips cardAvatarGlobal and re-renders
     # the whole card image in place, since the avatar there is baked
-    # into a PNG rather than a swappable embed thumbnail URL;
+    # into a PNG rather than a swappable embed thumbnail URL.
     # _swapStatsForTradingCard resolves that same identity itself and
     # pulls both the avatar and the displayed name from it for the same
     # reason. Available on both sides, unlike Card/Back, since both the
@@ -14012,7 +14003,7 @@ class helpers():
     # Scoped to the server's CURRENT game (see /set game): a player who's
     # never played it (only ever bet, or only played a different game)
     # still has an economy row, so a LEFT JOIN (rather than requiring a
-    # game_stats row to exist) is what lets them show up at all - with
+    # game_stats row to exist) is what lets them show up at all, with
     # elo/game_wins/etc. all reading as 0/default, the same "hasn't
     # played this game" shape _filterLeaderboardEntries already treats as
     # not belonging on a game-record-based leaderboard.
@@ -14369,7 +14360,7 @@ class helpers():
         display_name = target.display_name if target is not None else entry["username"]
 
         # entry already carries the current game's elo/ranked record
-        # (see getLeaderboardEntries), no separate query needed - and,
+        # (see getLeaderboardEntries), no separate query needed. And
         # unlike re-querying game_stats directly, it's already
         # None-tolerant for a player with no row for this game yet.
         elo, ranked_wins, ranked_losses = entry["elo"], entry["ranked_wins"], entry["ranked_losses"]

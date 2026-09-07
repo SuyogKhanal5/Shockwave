@@ -201,7 +201,7 @@ def insert_guild_row(cursor, db, guild_id=GUILD_ID, name="Test Guild"):
 
 
 # Test-only stand-in for the manual "special" title grant (e.g. "Developer")
-# production never actually exercises - the only real grant of one
+# production never actually exercises. The only real grant of one
 # (SHOCKWAVE_DEVELOPER_ID's own "Developer" title) is done in memory by
 # getUnlockedCardTitles, not written to card_unlocks. Several test classes
 # still need a persisted itemType='title' row to set up "this player already
@@ -377,9 +377,9 @@ class FakeGuild:
         self.channels = channels if channels is not None else []
         self.members = members if members is not None else []
         self.system_channel = system_channel
-        # The bot's own member in this guild (discord.py's Guild.me),
-        # what permissions_for() checks are actually made against. Just a
-        # placeholder identity - no test currently varies it, only
+        # The bot's own member in this guild (discord.py's Guild.me). This is
+        # what permissions_for() checks are actually made against, but it's
+        # just a placeholder identity: no test currently varies it, only
         # channel.send_messages_allowed.
         self.me = FakeMember("Shockwave", id=999999, bot=True)
 
@@ -510,11 +510,11 @@ class TeamTests(unittest.TestCase):
         self.assertEqual(restored.get_size(), 2)
 
     def test_wins_and_losses_are_not_part_of_serialization(self):
-        # wins/losses are pure display state, set by
-        # helper._hydrateTeamGameRecord from team_game_stats after every
-        # load, never round-tripped through serializeTeam/deserializeTeam
-        # itself - a freshly-deserialized Team (bypassing that hydration
-        # step, as this test does) always starts at the plain 0 default.
+        # wins/losses are pure display state. helper._hydrateTeamGameRecord
+        # sets them from team_game_stats after every load. They never
+        # round-trip through serializeTeam/deserializeTeam itself, so a
+        # freshly-deserialized Team (bypassing that hydration step, as this
+        # test does) always starts at the plain 0 default.
         team = Team()
         team.set_id(1)
         team.set_name("Team 1")
@@ -737,7 +737,7 @@ class FinalizeRosterTests(HelperTestCase):
         self.assertEqual(self.helperObj.get(GUILD_ID, "roster_use_roles"), 1)
 
     async def test_omits_role_buttons_for_a_five_a_side_non_league_roster(self):
-        # Role-based team balancing is League-only (see /set game); a
+        # Role-based team balancing is League-only (see /set game). A
         # non-League 5v5 roster shouldn't even offer the buttons, not
         # just reject clicking them.
         self.helperObj.update(GUILD_ID, "game", "Valorant")
@@ -757,7 +757,7 @@ class FinalizeRosterTests(HelperTestCase):
 
     # A plain (non-ranked) 5v5 split never had use_roles=True to begin
     # with, but the role buttons must still show so it can be turned on
-    # after the fact; the embeds themselves stay roleless until one of
+    # after the fact. The embeds themselves stay roleless until one of
     # them is actually clicked.
     async def test_includes_role_buttons_for_a_five_a_side_roster_that_never_used_roles(self):
         channel = FakeChannel("game-chat")
@@ -808,7 +808,7 @@ class FinalizeRosterTests(HelperTestCase):
     async def test_no_intro_messages_leaves_the_column_untouched(self):
         # The draft flow tracks make_teams_message_ids itself (see
         # captainsHelper/_applyDraftPick) well before _finalizeRoster ever
-        # runs for it; passing nothing here must not wipe that out.
+        # runs for it. Passing nothing here must not wipe that out.
         channel = FakeChannel("game-chat")
         team1_message = FakeMessage()
         team2_message = FakeMessage()
@@ -1092,7 +1092,7 @@ class RosterActionViewTests(HelperTestCase):
         click.response.send_message.assert_awaited_once()
         self.assertIn("voice channel", click.response.send_message.call_args.args[0])
         self.assertNotIn("ephemeral", click.response.send_message.call_args.kwargs)
-        # Not consumed; the same click's intent should still be retryable.
+        # Not consumed. The same click's intent should still be retryable.
         self.assertEqual(self.helperObj.get(GUILD_ID, "roster_team2_message_id"), 112)
 
     async def test_missing_team_channels_self_heals_onto_defaults(self):
@@ -1146,7 +1146,7 @@ class RosterActionViewTests(HelperTestCase):
             await self.helperObj._handleRosterRerollClick(click)
         reroll.assert_awaited_once_with(GUILD_ID, self.channel)
 
-    # roster_use_roles=0 used to reject a reroll click outright; now Random
+    # roster_use_roles=0 used to reject a reroll click outright. Now Random
     # Roles is also how a never-role-labelled 5v5 roster turns roles on for
     # the first time, so it must still go through regardless.
     async def test_reroll_click_triggers_reroll_even_when_roster_never_used_roles(self):
@@ -1161,7 +1161,7 @@ class RosterActionViewTests(HelperTestCase):
     # intact (see _handleRosterStartClick's own comment) so
     # recordResult can still find the roster message later. Reroll/
     # Balanced Roles used to only check the message id, so they stayed
-    # fully clickable on an already-started game - and recordResult
+    # fully clickable on an already-started game. recordResult
     # reads team1/team2/disliked_role_user_ids live at result time, so a
     # late reroll would silently change who gets credited for the game
     # already in progress.
@@ -1705,7 +1705,7 @@ class FixedTeamRoleAssignmentTests(HelperTestCase):
         team2_members = self._members(5, 910)
 
         # team1_members[0] (the Jungle-disliker) is deliberately placed on
-        # Jungle itself; everyone else gets whatever's left in
+        # Jungle itself. Everyone else gets whatever's left in
         # SETUP_ROLE_NAMES order.
         team1_roles = ["Jungle"] + [r for r in helper_module.SETUP_ROLE_NAMES if r != "Jungle"]
         team1_assigned = [
@@ -1775,7 +1775,7 @@ class ApplyBalancedRolesToRosterTests(HelperTestCase):
         self.assertEqual(disliked, {p.get_id() for p in team1.get_players()})
 
     # Regression: role balancing needs the active game's own elo
-    # (game_stats), not economy - a guild can track several games at
+    # (game_stats), not economy. A guild can track several games at
     # once (see /set game), and only game_stats scopes a rating to one
     # of them.
     async def test_reads_elo_from_the_active_games_game_stats_not_economy(self):
@@ -1920,7 +1920,7 @@ class CaptainsHelperTests(HelperTestCase):
         await self.helperObj.captainsHelper(ctx, captain1, captain1)
 
         ctx.response.send_message.assert_awaited_once_with("Mention two different people!", ephemeral=True)
-        # nothing should have been written; clearTeamsHelper never ran
+        # nothing should have been written: clearTeamsHelper never ran
         self.assertIsNone(self.helperObj.get(GUILD_ID, "team1"))
 
     async def test_missing_captain_rejected_without_crashing(self):
@@ -2162,7 +2162,7 @@ class CaptainsDraftPickTests(HelperTestCase):
     # Regression: a draft abandoned via /clear teams (or superseded by a
     # fresh draft) used to leave its old picker message fully clickable.
     # If the same person happened to be captain1 again in the new draft
-    # (a common case - the same organizer running back-to-back games),
+    # (a common case: the same organizer running back-to-back games),
     # a click on the OLD message would resolve against the NEW draft's
     # pool instead of being rejected outright.
     async def test_a_superseded_drafts_old_picker_message_is_rejected(self):
@@ -2466,7 +2466,7 @@ class ClearTeamsHelperTests(HelperTestCase):
     # _applyDraftPick's draft-stop condition, so this made /set team-size
     # never actually take effect). Every other /set value (channels,
     # betting-timer, wager-channel, elo, default-elo) already survives a
-    # fresh roster; team_size should too.
+    # fresh roster. team_size should too.
     async def test_preserves_a_configured_team_size(self):
         self.helperObj.update(GUILD_ID, "team_size", 6)
 
@@ -2612,7 +2612,7 @@ class ResetEloHelperTests(HelperTestCase):
 
         self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 901, "League", "elo"), helper_module.DEFAULT_ELO)
         self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 902, "League", "elo"), helper_module.DEFAULT_ELO)
-        # balance/wins are untouched; only elo resets
+        # balance/wins are untouched: only elo resets
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "balance"), 500)
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "wins"), 3)
         # other guild's elo is untouched
@@ -2689,7 +2689,7 @@ class ConfirmDestructiveClearHelperTests(HelperTestCase):
         view = ctx.followup.send.call_args.kwargs["view"]
         self.assertIsInstance(view, helper_module.ConfirmResetView)
         self.assertIs(view.message, posted)
-        # not actually reset yet; only queued behind confirmation
+        # not actually reset yet: only queued behind confirmation
         self.assertEqual(self.helperObj.getGameStat(GUILD_ID, 901, "League", "elo"), 1400)
 
     async def test_confirming_applies_the_reset(self):
@@ -2850,7 +2850,7 @@ class CreateTournamentHelperTests(HelperTestCase):
         ctx.response.send_message.assert_awaited_once_with(
             "Only a member with the Manage Server permission can overwrite an existing tournament.", ephemeral=True
         )
-        # nothing changed; the old tournament is still there untouched
+        # nothing changed: the old tournament is still there untouched
         self.assertEqual(self.helperObj.getTournament(GUILD_ID).get_name(), "Old Cup")
 
     async def test_creating_fresh_does_not_require_manage_guild_permission(self):
@@ -3031,7 +3031,7 @@ class SaveTeamHelperTests(HelperTestCase):
         self.assertIsNone(self.helperObj.getTeamRow(GUILD_ID, "Red"))
 
     async def test_checks_only_the_requested_side(self):
-        # Caller was rostered on team2, not team1; asking to save "Team 1"
+        # Caller was rostered on team2, not team1. Asking to save "Team 1"
         # must still reject even though they played that game.
         self._seed_roster("team1", [(902, "Bob")])
         self._seed_roster("team2", [(901, "Alice")])
@@ -3259,7 +3259,7 @@ class TeamTransferHelperTests(HelperTestCase):
             ctx.response.send_message.call_args.kwargs["view"], helper_module.TeamTransferAcceptView
         )
 
-        # captaincy hasn't actually moved yet - it's still just an offer
+        # captaincy hasn't actually moved yet: it's still just an offer
         _, team = self.helperObj.getTeamRow(GUILD_ID, "Red")
         self.assertTrue(self.helperObj.isTeamCaptain(team, 901))
         self.assertFalse(self.helperObj.isTeamCaptain(team, 902))
@@ -3331,7 +3331,7 @@ class TeamTransferHelperTests(HelperTestCase):
         self.assertTrue(self.helperObj.isTeamCaptain(team, 901))
 
     async def test_transferred_captain_can_then_use_team_delete(self):
-        # Regression: /team-leave used to be a dead end for a captain
+        # Regression: /team leave used to be a dead end for a captain
         # ("nobody to hand it to yet"). This confirms the old captain, no
         # longer captain after a transfer, isn't stuck on that team either.
         # force=True here since this test is about /team leave afterward,
@@ -3495,7 +3495,7 @@ class TeamDeleteHelperTests(HelperTestCase):
         self.assertIn("Red", text)
         view = ctx.response.send_message.call_args.kwargs["view"]
         self.assertIs(view.message, posted_message)
-        # not deleted yet; only queued behind confirmation
+        # not deleted yet: only queued behind confirmation
         self.assertIsNotNone(self.helperObj.getTeamRow(GUILD_ID, "Red"))
 
     async def test_non_captain_admin_can_also_trigger_the_prompt(self):
@@ -3834,7 +3834,7 @@ class TeamSetHelperTests(_FakeLogoDirTestCase):
         kwargs = ctx.response.send_message.call_args.kwargs
         self.assertIn("Demacia", kwargs["content"])
         self.assertIsInstance(kwargs["file"], discord.File)
-        # discord.File keeps its underlying fp open; close it so Windows
+        # discord.File keeps its underlying fp open. Close it so Windows
         # doesn't hold the temp logo dir locked when tearDown deletes it.
         kwargs["file"].close()
 
@@ -4045,7 +4045,7 @@ class TeamInviteHelperTests(HelperTestCase):
         self.assertEqual(self.cursor.fetchone()[0], 0)
 
     async def test_force_rejects_a_captain_who_is_not_also_an_admin(self):
-        # force is Manage Server only; even the team's own captain can't
+        # force is Manage Server only. Even the team's own captain can't
         # use it without also being an admin, unlike an ordinary invite.
         await self._make_team()
         ctx = self._ctx(manage_guild=False)  # Alice, the captain, but no Manage Server
@@ -4452,7 +4452,7 @@ class TeamLeaveHelperTests(HelperTestCase):
         self.assertEqual(sorted(p.get_id() for p in team.get_players()), [901, 903])
 
 
-# The captain/admin counterpart to /team leave - a rostered player who
+# The captain/admin counterpart to /team leave. A rostered player who
 # won't (or can't) run /team leave themselves used to have no way off a
 # roster short of the whole team being deleted.
 class TeamRemoveHelperTests(HelperTestCase):
@@ -5209,7 +5209,7 @@ class TeamGameStatsScopingTests(_FakeLogoDirTestCase):
 
     # _recordMatchResult is fed tournament_matches.game (stamped at
     # match-creation time), not whatever the server's current_game
-    # happens to be by the time the match actually resolves - see
+    # happens to be by the time the match actually resolves. See
     # servers.game/_activeGame's own comment for why "the game a match
     # was played under" and "the game a server is set to right now" are
     # deliberately allowed to diverge.
@@ -5638,7 +5638,7 @@ class TeamListHelperTests(HelperTestCase):
         team_id, red = self.helperObj.getTeamRow(GUILD_ID, "Red")
         red.add_player(Player(902, "Bob"))
         self.helperObj.updateTeamData(team_id, red)
-        # Bob is also on Blue, alone with its own captain; Alice+Bob
+        # Bob is also on Blue, alone with its own captain. Alice+Bob
         # together should only ever match Red.
         await self.helperObj.createTeamHelper(self._ctx(903, "Charlie"), "Blue", 5)
         blue_id, blue = self.helperObj.getTeamRow(GUILD_ID, "Blue")
@@ -5659,7 +5659,7 @@ class TeamListHelperTests(HelperTestCase):
     async def test_single_member_filter_that_matches_nothing_names_them(self):
         # Same friendly "isn't on any teams" message /team lookup used to
         # give for a single looked-up member, not the generic filtered
-        # message - see test_multi_member_filter_that_matches_nothing_
+        # message. See test_multi_member_filter_that_matches_nothing_
         # sends_the_generic_message below for where that generic message
         # still applies.
         await self.helperObj.createTeamHelper(self._ctx(901, "Alice"), "Red", 5)
@@ -5684,7 +5684,7 @@ class TeamListHelperTests(HelperTestCase):
 
     async def test_search_alongside_a_single_member_filter_keeps_the_generic_message(self):
         # The friendly single-member message is only for a bare member
-        # filter with nothing else narrowing it - combined with search,
+        # filter with nothing else narrowing it. Combined with search,
         # "no results" could just as easily mean the search text didn't
         # match, not that the member has no teams at all.
         await self.helperObj.createTeamHelper(self._ctx(901, "Alice"), "Red", 5)
@@ -5717,7 +5717,7 @@ class TeamListHelperTests(HelperTestCase):
 
     async def test_mine_combines_with_an_explicit_member_filter(self):
         # mine folds the caller into the same member filter rather than
-        # being mutually exclusive with member_1..5 - "teams Alice and
+        # being mutually exclusive with member_1..5: "teams Alice and
         # Bob are both rostered on together."
         await self.helperObj.createTeamHelper(self._ctx(901, "Alice"), "Red", 5)
         team_id, red = self.helperObj.getTeamRow(GUILD_ID, "Red")
@@ -5801,9 +5801,9 @@ class TeamListHelperTests(HelperTestCase):
         self.assertEqual(member_names_raw, "Alice,Bob")
 
 
-# cards:true mode: this is /my-teams' own one-team-full-stats-card-per-page
-# rendering, but sourced from every team matching /team-list's filters
-# instead of one player's teams. Needs _FakeLogoDirTestCase since the
+# cards:true mode: this is /team lookup's own one-team-full-stats-card-
+# per-page rendering, but sourced from every team matching /team list's
+# filters instead of one player's teams. Needs _FakeLogoDirTestCase since the
 # underlying render (_renderTeamStatsEmbed) falls back to a random built-in
 # logo for any team without one of its own, the same reason
 # MyTeamsHelperTests needs it.
@@ -5930,7 +5930,7 @@ class TeamListPagingViewCardsModeTests(_FakeLogoDirTestCase):
         click.response.edit_message.assert_not_awaited()
 
     async def test_list_mode_and_cards_mode_views_dont_cross_wires(self):
-        # A second, plain (non-cards) /team-list message posted in the same
+        # A second, plain (non-cards) /team list message posted in the same
         # guild must still render as a summary list, not a card. That
         # proves _handleTeamListPageClick actually branches per-message on
         # the stored `cards` flag rather than some shared/global mode.
@@ -6171,7 +6171,7 @@ class ReuseTeamsHelperTests(HelperTestCase):
         self.assertEqual(embed2.title, "Blue")
         self.assertIn("Bob", embed2.description)
 
-        # the stored roster itself is untouched; same teams as before
+        # the stored roster itself is untouched: same teams as before
         team1 = Team()
         team1.deserializeTeam(self.helperObj.get(GUILD_ID, "team1"))
         self.assertEqual(team1.get_name(), "Red")
@@ -6283,7 +6283,7 @@ class ReuseTeamsHelperTests(HelperTestCase):
         self.assertTrue(any("cancelled" in m for m in messages))
         self.assertTrue(any("Moved everyone back" in m for m in messages))
 
-        # unlike /clear, the teams themselves are NOT wiped; they're what
+        # unlike /clear, the teams themselves are NOT wiped: they're what
         # gets reposted right after
         self.assertEqual(self.helperObj.get(GUILD_ID, "betting_state"), "NONE")
         team1 = Team()
@@ -6415,7 +6415,7 @@ class RegisterTeamHelperTests(HelperTestCase):
         self.assertEqual(tournament.get_teams()[0].get_name(), "Red")
 
 
-# Registering the wrong team used to have no lightweight undo - only
+# Registering the wrong team used to have no lightweight undo, only
 # /tournament create again (wipes every team's registration, not just
 # one) or /clear tournament (deletes the whole bracket/history).
 class UnregisterTeamHelperTests(HelperTestCase):
@@ -6427,7 +6427,7 @@ class UnregisterTeamHelperTests(HelperTestCase):
         await self.helperObj.createTeamHelper(ctx, team_name, size)
         team_id, team = self.helperObj.getTeamRow(GUILD_ID, team_name)
         # Filler ids are offset by captain_id so two different teams'
-        # fillers never collide - register_team's own "no shared players"
+        # fillers never collide. register_team's own "no shared players"
         # check would otherwise reject the second team registered.
         while team.get_size() < size:
             team.add_player(Player(captain_id * 1000 + team.get_size(), f"Filler{team.get_size()}"))
@@ -6484,7 +6484,7 @@ class UnregisterTeamHelperTests(HelperTestCase):
 
         ctx.response.send_message.assert_awaited_once()
         self.assertIn("bracket has already been built", ctx.response.send_message.call_args.args[0])
-        # still registered - nothing changed
+        # still registered: nothing changed
         self.assertEqual(len(self.helperObj.getTournament(GUILD_ID).get_teams()), 2)
 
     async def test_non_captain_admin_can_unregister(self):
@@ -6791,7 +6791,7 @@ class RenderBracketTextTests(HelperTestCase):
         self.assertIn("Cup", text)
         self.assertIn("Champion:** TBD", text)
         # the tree itself (team names, connectors) lives in the image now
-        # (renderBracketImages); the text is just a short status line
+        # (renderBracketImages). The text is just a short status line
         self.assertNotIn("```", text)
 
     async def test_resolved_winner_shows_real_name_instead_of_tbd(self):
@@ -7117,7 +7117,7 @@ class PrintBracketHelperTests(HelperTestCase):
         await self.helperObj.printBracketHelper(ctx)
 
         # No "Creating bracket, please wait..." placeholder, and no
-        # rendering attempted - a single, immediate, accurate reply.
+        # rendering attempted: a single, immediate, accurate reply.
         ctx.response.send_message.assert_awaited_once_with(
             "No bracket has been created yet for **Cup**. Use /tournament create-bracket first.",
             ephemeral=True,
@@ -7206,9 +7206,10 @@ class RenderMatchupImageTests(_FakeLogoDirTestCase):
         self.assertGreater(image.height, 0)
 
     def test_team_with_no_logo_gets_a_random_built_in_one_instead_of_a_bare_ring(self):
-        # /make-teams, /captains, etc. build ad-hoc Team objects that never
-        # go through _ensureLogo (that's only ever called for persistent
-        # teams), so team.get_logo_path() is None for them. This is what
+        # /make-teams random, /make-teams draft, etc. build ad-hoc Team
+        # objects that never go through _ensureLogo (that's only ever
+        # called for persistent teams), so team.get_logo_path() is None
+        # for them. This is what
         # picks a stand-in logo for the matchup graphic instead of just
         # drawing an empty ring.
         team1 = self._team("Red", captain_id=901, captain_name="Alice")
@@ -7338,7 +7339,7 @@ class _FakeRoleIconDirTestCase(_FakeLogoDirTestCase):
             )
         self._role_icon_dir_patch = patch.object(helper_module, "ROLE_ICON_DIR", self._role_icon_dir.name)
         self._role_icon_dir_patch.start()
-        # Keyed by (path, size); a fresh tempdir every test means a cache
+        # Keyed by (path, size). A fresh tempdir every test means a cache
         # entry left over from an earlier test would resolve to a path
         # that no longer exists.
         helper_module._role_icon_cache.clear()
@@ -7828,7 +7829,7 @@ class ImageRenderThreadOffloadTests(HelperTestCase):
             )
             await asyncio.to_thread(render_started.wait, 5)
 
-            # The render is now blocked inside its worker thread; the event
+            # The render is now blocked inside its worker thread. The event
             # loop itself must still be free to run something else.
             await other_work()
             self.assertEqual(progress, [0, 1, 2])
@@ -8133,7 +8134,7 @@ class TournamentReadyAndReportViewTests(HelperTestCase):
         round_open_message = await self.channel.fetch_message(round_msg_id)
 
         # Resolving only the first of two matches shouldn't touch the
-        # shared round-betting message; the round isn't done yet.
+        # shared round-betting message: the round isn't done yet.
         click1 = await self._click_report(message1_id, 1)
         await self._confirm_report(click1)
         round_open_message.delete.assert_not_awaited()
@@ -8333,7 +8334,7 @@ class CorrectTournamentMatchHelperTests(HelperTestCase):
         ctx = self._ctx()
         await self.helperObj.reportCorrectWinnerHelper(ctx, 2, match_id=match_id)
 
-        # not applied yet - only a confirmation prompt posted
+        # not applied yet: only a confirmation prompt posted
         ctx.response.send_message.assert_awaited_once()
         view = ctx.response.send_message.call_args.kwargs["view"]
         self.cursor.execute("SELECT winner FROM tournament_matches WHERE id=?", (match_id,))
@@ -8407,7 +8408,7 @@ class CorrectTournamentMatchHelperTests(HelperTestCase):
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 903, "losses"), 1)
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 904, "wins"), 1)
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 904, "losses"), 0)
-        # gold_wagered reflects each bettor's one real 100-gold bet; the
+        # gold_wagered reflects each bettor's one real 100-gold bet. The
         # reverse-then-reapply round trip doesn't double (or zero) it out.
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 903, "gold_wagered"), 100)
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 904, "gold_wagered"), 100)
@@ -8424,7 +8425,7 @@ class CorrectTournamentMatchHelperTests(HelperTestCase):
 
     # Regression: /set correct-winner's match_id path used to reverse and
     # reapply payouts and re-propagate the bracket the instant the command
-    # ran, no confirmation at all - the same one-accidental-click risk
+    # ran, no confirmation at all. Same one-accidental-click risk
     # every other winner-report flow in the bot already guards against.
     async def test_cancelling_leaves_the_match_and_bracket_untouched(self):
         match_id = await self._resolved_match(winner=1)
@@ -8524,7 +8525,7 @@ class BuildLosersBracketTests(HelperTestCase):
         return team
 
     def test_degenerate_two_team_bracket_has_no_real_match(self):
-        # Only one winners-bracket match exists at all; its loser has
+        # Only one winners-bracket match exists at all. Its loser has
         # nobody left to play, so they become the losers-bracket "champion"
         # directly, with no match ever created for them.
         teams = [self._team(f"T{i}") for i in range(2)]
@@ -8652,7 +8653,7 @@ class CreateBracketHelperDoubleEliminationTests(HelperTestCase):
         # around to confuse the NEXT tournament's own completion check.
         # Existing match rows mean this rebuild is destructive, so it goes
         # through ConfirmBracketOverwriteView now instead of clearing
-        # immediately - see CreateBracketOverwriteConfirmationTests.
+        # immediately. See CreateBracketOverwriteConfirmationTests.
         tournament = Tournament("Cup", 1, 2)
         tournament.register_team(self._team("Red"))
         tournament.register_team(self._team("Blue"))
@@ -9233,7 +9234,7 @@ class DoubleEliminationMatchFlowTests(HelperTestCase):
 
         messages = [c.args[0] for c in self.channel.send.call_args_list if c.args]
         self.assertTrue(any("Grand Finals" in m for m in messages))
-        # no losers-bracket ROUND ever plays; there's nothing to queue
+        # no losers-bracket ROUND ever plays: there's nothing to queue
         self.assertFalse(any("Losers Bracket Round" in m for m in messages))
 
 
@@ -9296,7 +9297,7 @@ class InterleavedLosersBracketTimingTests(HelperTestCase):
             await self._resolve(match_id, 1)
 
         self.assertEqual(len(self._matches(bracket_type="losers", round_index=0)), 1)
-        # winners round 1 (the final) must NOT have started yet; it's
+        # winners round 1 (the final) must NOT have started yet. It's
         # paused behind the now-unlocked losers round.
         self.assertEqual(len(self._matches(bracket_type="winners", round_index=1)), 0)
 
@@ -9365,7 +9366,7 @@ class InterleavedLosersBracketTimingTests(HelperTestCase):
         )
         self.assertEqual(self.cursor.fetchone()[0], 1)
 
-    # after_winners is still the default; an interleaved-mode helper
+    # after_winners is still the default. An interleaved-mode helper
     # wasn't accidentally wired in as the new default for every double
     # elimination bracket.
     async def test_after_winners_is_still_the_default_timing(self):
@@ -9880,7 +9881,7 @@ class CurrentGameHelperTests(HelperTestCase):
 
     async def test_notes_when_an_in_progress_roster_is_on_a_different_game(self):
         # servers.game (stamped when a roster forms) can diverge from
-        # current_game once /set game runs again mid-game - see
+        # current_game once /set game runs again mid-game. See
         # _activeGame's own comment.
         self.helperObj.update(GUILD_ID, "game", "Valorant")
         self.helperObj.update(GUILD_ID, "current_game", "League")
@@ -9912,7 +9913,7 @@ class GameNoteTests(HelperTestCase):
 
     def test_reflects_the_stamped_roster_game_over_a_since_changed_current_game(self):
         # servers.game (stamped when a roster forms) wins over
-        # current_game once they diverge - see reuseTeamsHelper, which
+        # current_game once they diverge. See reuseTeamsHelper, which
         # deliberately never re-stamps it.
         self.helperObj.update(GUILD_ID, "game", "Valorant")
         self.helperObj.update(GUILD_ID, "current_game", "League")
@@ -10251,7 +10252,7 @@ class GiveGoldHelperTests(HelperTestCase):
 
     async def test_transfer_does_not_touch_wins_losses_or_wager_columns(self):
         # A gift is even less bet-like than a cancelled duel (see
-        # _finishDuelCancellation) - nothing here was ever wagered.
+        # _finishDuelCancellation): nothing here was ever wagered.
         self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
         self.cursor.execute("UPDATE economy SET balance=1000 WHERE guildId=? AND userId=?", (GUILD_ID, 901))
         self.db.commit()
@@ -10660,7 +10661,7 @@ class RecordResultTests(HelperTestCase):
         await self.helperObj.recordResult(GUILD_ID, 1, channel)
 
         # Unraked pari-mutuel would pay 300 + (300/300)*100 = 400 (escrowed
-        # 1000-300=700, so balance 1100); the 0.25 rake fraction at this
+        # 1000-300=700, so balance 1100). The 0.25 rake fraction at this
         # imbalance instead pays 300 + (300/300)*75 = 375, landing on 1075.
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "balance"), 1075)
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "gold_won"), 75)
@@ -10785,7 +10786,7 @@ class RecordResultTests(HelperTestCase):
         channel = FakeChannel("game-chat")
         await self.helperObj.recordResult(GUILD_ID, 1, channel)
 
-        # Equal starting elo -> a plain 50/50 win is +16; P1 played a
+        # Equal starting elo -> a plain 50/50 win is +16. P1 played a
         # disliked role and won, so ROLE_BALANCE_DISLIKED_ROLE_WIN_ELO_MULTIPLIER
         # applies on top of that.
         boosted = round(16 * helper_module.ROLE_BALANCE_DISLIKED_ROLE_WIN_ELO_MULTIPLIER)
@@ -10846,10 +10847,10 @@ class RecordResultTests(HelperTestCase):
         self.assertNotIn("Elo:", message)
 
     async def test_casual_game_with_roster_does_not_touch_elo(self):
-        # Regression test: /make-teams and /captains form rosters just
-        # like /ranked does, but is_ranked defaults to 0 for them. Elo
-        # must stay untouched even though game_wins/game_losses still
-        # update.
+        # Regression test: /make-teams random and /make-teams draft form
+        # rosters just like ranked:true does, but is_ranked defaults to 0
+        # for them. Elo must stay untouched even though
+        # game_wins/game_losses still update.
         team1 = Team(); team1.name = "Team 1"
         team1.add_player(Player(701, "P1"))
         team2 = Team(); team2.name = "Team 2"
@@ -11033,7 +11034,7 @@ class RecordResultTests(HelperTestCase):
         # active_tournament_match_id being set means recordResult looks up
         # THAT match's own row instead (see _matchupMessageLocation), so a
         # matchup_message_id left over from some earlier, unrelated casual
-        # game never wins out - even though it's left untouched, since
+        # game never wins out. It's left untouched, since
         # it's not this function's own message to manage when the game it
         # belongs to was never even a real match.
         channel = FakeChannel("game-chat")
@@ -11041,7 +11042,7 @@ class RecordResultTests(HelperTestCase):
         channel._sent_messages[stale_matchup.id] = stale_matchup
         self.helperObj.update(GUILD_ID, "matchup_message_id", stale_matchup.id)
         # No tournament_matches row for id 555 in this test's DB, so the
-        # match's own graphic isn't resolvable either - reference is None,
+        # match's own graphic isn't resolvable either: reference is None,
         # not stale_matchup.
         self.helperObj.update(GUILD_ID, "active_tournament_match_id", 555)
 
@@ -11721,12 +11722,12 @@ class ReportCorrectWinnerHelperTests(HelperTestCase):
         self.assertIn("Team 2", result_text)
         self.assertIn("invalidated", result_text)
 
-        # nothing left to correct further; the last result is gone entirely
+        # nothing left to correct further: the last result is gone entirely
         self.assertIsNone(self.helperObj.getLastResult(GUILD_ID))
 
     # Regression: /set correct-winner's last-game path (correcting or
     # invalidating) used to reverse and reapply real payouts/elo/records
-    # the instant the command ran, no confirmation at all - the same
+    # the instant the command ran, no confirmation at all. Same
     # one-accidental-click risk every other winner-report flow in the bot
     # already guards against.
     async def test_cancelling_leaves_the_correction_unapplied(self):
@@ -11758,7 +11759,7 @@ class ReportCorrectWinnerHelperTests(HelperTestCase):
         # The prompt was built from a snapshot of the last game. If a
         # newer game resolves (replacing last_result) before Confirm is
         # pressed, applying the stale snapshot's deltas would corrupt the
-        # newer game's own numbers - so this refuses instead.
+        # newer game's own numbers, so this refuses instead.
         self.helperObj.saveLastResult(GUILD_ID, winning_team=1, wagers=[], team1_roster=[], team2_roster=[], deltas={})
         ctx = FakeInteraction(self.guild, FakeMember("Admin"))
         await self.helperObj.reportCorrectWinnerHelper(ctx, 2)
@@ -12028,7 +12029,7 @@ class StatsViewTests(HelperTestCase):
         # name and global avatar URL (see FakeClient.fetch_user). This is
         # that URL.
         self.assertEqual(edited_embed.thumbnail.url, "https://cdn.discordapp.com/avatars/901/global.png")
-        # The title's name switches right along with the avatar - the
+        # The title's name switches right along with the avatar: the
         # server nickname ("Alice") and the global identity's own name
         # ("User901") should never be shown mismatched against each
         # other's avatar.
@@ -12173,7 +12174,7 @@ class StatsViewTests(HelperTestCase):
         fetched_message.edit.assert_awaited_once()
         fetched_message.edit.call_args.kwargs["attachments"][0].close()
         # fetch_user auto-generates a FakeUser(901) named "User901" (see
-        # FakeClient.fetch_user) - resolved and passed straight through,
+        # FakeClient.fetch_user). It's resolved and passed straight through,
         # confirming the card's avatar comes from the global identity
         # this time, not Alice's server one.
         self.assertEqual(mock_resolve.call_args.args[0].name, "User901")
@@ -12204,7 +12205,7 @@ class StatsViewTests(HelperTestCase):
 
         fetched_message.edit.assert_awaited_once()
         fetched_message.edit.call_args.kwargs["attachments"][0].close()
-        # Alice's own server Member, not the global FakeUser - confirms
+        # Alice's own server Member, not the global FakeUser. Confirms
         # the avatar switched back to the server identity.
         self.assertEqual(mock_resolve.call_args.args[0].name, "Alice")
 
@@ -12237,13 +12238,13 @@ class StatsViewTests(HelperTestCase):
         await card_view.returnToStats.callback(self._click(fetched_message))
 
         # cardShown flips back off, but cardAvatarGlobal is deliberately
-        # NOT reset - the embed keeps showing the same avatar the card
+        # NOT reset: the embed keeps showing the same avatar the card
         # just had, rather than snapping back to the server one.
         self.cursor.execute("SELECT cardShown, cardAvatarGlobal FROM stats_views WHERE messageId=?", (msg.id,))
         self.assertEqual(self.cursor.fetchone(), (0, 1))
         returned_embed = fetched_message.edit.call_args.kwargs["embed"]
         self.assertEqual(returned_embed.thumbnail.url, "https://cdn.discordapp.com/avatars/901/global.png")
-        # The title's name has to carry over with it - showing Alice's
+        # The title's name has to carry over with it: showing Alice's
         # server nickname next to the global avatar would be exactly the
         # mismatch this is meant to avoid.
         self.assertEqual(returned_embed.title, "User901's Stats - League")
@@ -12260,7 +12261,7 @@ class StatsViewTests(HelperTestCase):
 
         embed_view = helper_module.StatsView(self.helperObj, card_shown=False)
         await embed_view.avatarToggle.callback(self._click(fetched_message))
-        # avatarToggle edits the embed via message.edit; FakeMessage doesn't
+        # avatarToggle edits the embed via message.edit. FakeMessage doesn't
         # apply that automatically, so mirror it back onto .embeds the way a
         # real Discord message would already reflect it by the next click.
         fetched_message.embeds = [fetched_message.edit.call_args.kwargs["embed"]]
@@ -12438,7 +12439,7 @@ class CheckAchievementsTests(HelperTestCase):
             self.db.commit()
             self.assertIn(key, self.helperObj._checkAchievements(GUILD_ID, 901))
 
-        # Every tier's title is distinct; reaching Immortal doesn't just
+        # Every tier's title is distinct. Reaching Immortal doesn't just
         # mean four copies of "Veteran".
         unlocked = self.helperObj.getUnlockedCardTitles(GUILD_ID, 901)
         for _, key in ladder:
@@ -13051,7 +13052,7 @@ class CardSetHelperTests(HelperTestCase):
         await self.helperObj.cardSetHelper(ctx, helper_module.CARD_TIER_REWARD_TITLES["Diamond"], None, None)
         message = ctx.response.send_message.call_args.args[0]
         self.assertIn("haven't unlocked", message)
-        # never touched; still whatever ensureCardSettings' own default is
+        # never touched: still whatever ensureCardSettings' own default is
         settings = self.helperObj.getCardSettings(GUILD_ID, 901)
         self.assertEqual(settings["title"], helper_module.CARD_DEFAULT_TITLE)
 
@@ -13095,7 +13096,7 @@ class CardSetHelperTests(HelperTestCase):
         await self.helperObj.cardSetHelper(ctx, None, "Diamond", None)
         message = ctx.response.send_message.call_args.args[0]
         self.assertIn("haven't unlocked", message)
-        # never touched; still whatever ensureCardSettings' own default is
+        # never touched: still whatever ensureCardSettings' own default is
         settings = self.helperObj.getCardSettings(GUILD_ID, 901)
         self.assertEqual(settings["accent_color"], helper_module.CARD_DEFAULT_ACCENT_COLOR)
 
@@ -13266,7 +13267,7 @@ class ResetCardUnlocksHelperTests(HelperTestCase):
         self.assertEqual(settings["accent_color"], helper_module.CARD_DEFAULT_ACCENT_COLOR)
         self.assertEqual(settings["background_color"], helper_module.CARD_DEFAULT_BACKGROUND_COLOR)
 
-        # customized=0 again; a later /stats call's own default-resync
+        # customized=0 again. A later /stats call's own default-resync
         # logic won't be refused by a stale customized flag.
         self.cursor.execute(
             "SELECT customized, color_scheme_name FROM trading_cards WHERE guildId=? AND userId=?",
@@ -13503,7 +13504,7 @@ class ShopTests(HelperTestCase):
         self.assertIn("isn't in the shop", message)
 
     def test_shop_titles_have_more_than_one_price_point(self):
-        # /shop titles shouldn't all be flatly priced the same; there
+        # /shop titles shouldn't all be flatly priced the same. There
         # should be real spread between the cheapest and priciest one.
         prices = set(helper_module.CARD_SHOP_TITLES.values())
         self.assertGreater(len(prices), 1)
@@ -14098,7 +14099,7 @@ class OpenBettingTests(HelperTestCase):
 
     async def test_redirects_the_open_notice_to_the_configured_wager_channel(self):
         # matchup_channel isn't set here, so the report message still
-        # falls back to the origin channel; only the "betting is open"
+        # falls back to the origin channel. Only the "betting is open"
         # text moves to the wager channel.
         origin_channel = FakeChannel("game-chat")
         wager_channel = FakeChannel("bets", kind="text")
@@ -14120,7 +14121,7 @@ class OpenBettingTests(HelperTestCase):
 
     async def test_redirects_the_report_message_to_the_configured_matchup_channel(self):
         # wager_channel isn't set here, so the "betting is open" text
-        # still falls back to the origin channel; only the report
+        # still falls back to the origin channel. Only the report
         # message (with its buttons) moves to the matchup channel.
         origin_channel = FakeChannel("game-chat")
         matchup_channel = FakeChannel("results", kind="text")
@@ -14271,7 +14272,7 @@ class OpenBettingTests(HelperTestCase):
         await self.helperObj.bettingTasks[GUILD_ID]
 
         # The report message (with its reactions) was already posted by
-        # _openBetting itself. The timer firing only closes betting; it
+        # _openBetting itself. The timer firing only closes betting. It
         # doesn't post or replace anything report-related.
         self.assertEqual(self.helperObj.get(GUILD_ID, "betting_state"), "CLOSED")
         self.assertEqual(self.helperObj.get(GUILD_ID, "betting_message_id"), 12345)
@@ -15526,7 +15527,7 @@ class DuelAcceptViewTests(HelperTestCase):
 
     # Regression: a pending challenge used to have no way to make it go
     # away short of the target just accepting it or leaving it sitting
-    # there forever - see DuelAcceptView's own comment.
+    # there forever. See DuelAcceptView's own comment.
     async def test_decline_from_target_deletes_the_pending_duel(self):
         click = self._click(555, 902)
         await helper_module.DuelAcceptView(self.helperObj).decline.callback(click)
@@ -15974,7 +15975,7 @@ class LeaderboardHelperTests(HelperTestCase):
             "UPDATE game_stats SET elo=900, game_wins=1, game_losses=6 "
             "WHERE guildId=? AND userId=902 AND game='League'", (GUILD_ID,)
         )
-        # Cleo has no bets/games played yet; her win rates should be None.
+        # Cleo has no bets/games played yet, so her win rates should be None.
         self.cursor.execute(
             "UPDATE economy SET balance=0 WHERE guildId=? AND userId=903", (GUILD_ID,)
         )
@@ -16150,7 +16151,7 @@ class LeaderboardHelperTests(HelperTestCase):
         self.assertIn(f"Ranked: {alice['ranked_wins']}W-{alice['ranked_losses']}L", lines[0])
 
 
-# Cards mode: /my-teams-style one-player-full-/stats-embed-per-page
+# Cards mode: /team lookup-style one-player-full-/stats-embed-per-page
 # rendering, sourced from the same sorted/filtered entries a plain
 # /leaderboard would list, plus a Card/Back toggle over to that player's
 # actual trading card (see LeaderboardPagingView). /leaderboard itself
@@ -16482,7 +16483,7 @@ class TeamListPagingViewTests(HelperTestCase):
         click.response.edit_message.assert_not_awaited()
 
     async def test_preserves_sort_order_across_a_page_flip(self):
-        # sort_order='desc' with sort='name' reverses the alphabet; all 12
+        # sort_order='desc' with sort='name' reverses the alphabet. All 12
         # fake teams stay eligible (no search/recruiting_only filter here),
         # so there's still a real second page to flip to.
         self.cursor.execute(
@@ -16992,7 +16993,7 @@ class BotModuleTestCase(unittest.IsolatedAsyncioTestCase):
     # .voice = None by default, which would trip those guards. Defaults to
     # two members (not zero) so make-teams random's own "Not enough
     # players" guard doesn't trip every test that doesn't care about the
-    # roster - pass members= explicitly for a test that does.
+    # roster. Pass members= explicitly for a test that does.
     def _ctx_in_voice(self, guild_id=GUILD_ID, members=None):
         ctx = self._ctx(guild_id=guild_id)
         if members is None:
@@ -17012,7 +17013,7 @@ class BotModuleTestCase(unittest.IsolatedAsyncioTestCase):
 
 class CommandRegistrationTests(BotModuleTestCase):
     # Regression: tree.sync() is mocked out in every BotModuleTestCase
-    # test (see its own setUp comment - a real sync makes a network
+    # test (see its own setUp comment: a real sync makes a network
     # call), so Discord's own server-side validation of command/param
     # name and description length (1-100 characters each) never actually
     # runs against these commands anywhere else in the suite. A
@@ -17637,8 +17638,8 @@ class LoggingCommandTreeTests(BotModuleTestCase):
     async def test_stale_bytecode_not_callable_typeerror_is_silently_skipped(self):
         # "'NoneType' object is not callable" specifically (not any other
         # exception) is the signature left behind when this process is
-        # still running on bytecode compiled before a live edit to bot.py
-        # - see the comment on the except TypeError branch just above this
+        # still running on bytecode compiled before a live edit to bot.py.
+        # See the comment on the except TypeError branch just above this
         # method in bot.py. Nothing else in this code path should be able
         # to produce that exact message, so it's deliberately not logged,
         # unlike every other exception here.
@@ -17784,7 +17785,7 @@ class DeveloperDMHandlerTests(BotModuleTestCase):
 
     def test_emit_ignores_info_level_records(self):
         # setLevel(WARNING) on the handler itself is what filters these
-        # out; nothing about the record's own logger name/level does that
+        # out. Nothing about the record's own logger name/level does that
         # on its own.
         with patch.object(self.bot.client, "is_ready", return_value=True), \
              patch.object(self.bot.asyncio, "run_coroutine_threadsafe") as mock_schedule:
@@ -18001,8 +18002,8 @@ class ExpireInvitesTaskTests(BotModuleTestCase):
             self.bot.helperObj, "expireStalePendingInvites", MagicMock(return_value=(0, 0, 0))
         ):
             # assertNoLogs isn't available on this Python version's
-            # unittest, so this just confirms the call completes cleanly;
-            # the "if invites_expired or duels_expired or transfers_expired"
+            # unittest, so this just confirms the call completes cleanly.
+            # The "if invites_expired or duels_expired or transfers_expired"
             # guard itself is what keeps this quiet in practice.
             await self.bot.expireInvitesTask.coro()
 
@@ -18921,7 +18922,7 @@ class ClearCommandTests(BotModuleTestCase):
 
         # Regression: clear_tournament used to write to a dead
         # servers.tournament column and never actually touch a real
-        # /tournament-create tournament.
+        # /tournament create tournament.
         self.assertIsNotNone(self.bot.helperObj.getTournament(guild_id))
         view = ctx.response.send_message.call_args.kwargs["view"]
 
@@ -19079,7 +19080,7 @@ class ClearCommandTests(BotModuleTestCase):
         self.assertEqual(
             self.bot.helperObj.getGameStat(guild_id, 901, "League", "elo"), helper_module.DEFAULT_ELO
         )
-        # balance is untouched; clear elo only resets elo
+        # balance is untouched: clear elo only resets elo
         self.assertEqual(self.bot.helperObj.getEconomy(guild_id, 901, "balance"), 250)
 
     # Regression: /clear elo and /clear economy used to have no way to
@@ -19185,7 +19186,7 @@ class ClearCommandTests(BotModuleTestCase):
 
     # Regression: /clear elo (and economy/achievements/card-unlocks) used
     # to clear the current teams/draft immediately, before this prompt
-    # even posted - so Cancel's "Nothing was reset" was a lie whenever a
+    # even posted, so Cancel's "Nothing was reset" was a lie whenever a
     # draft was in progress. It's gated behind confirmation now too, same
     # as /clear teams itself (see ConfirmResetView.confirm).
     async def test_clear_elo_does_not_wipe_the_draft_until_confirmed(self):
@@ -19383,7 +19384,7 @@ class NotifyCommandTests(BotModuleTestCase):
 
     # Regression: an empty role used to fall through to the same success
     # branch a real send does (0 sent, 0 failures), reporting "Sent an
-    # invite to 0 members in Squad!" - a false success for nothing that
+    # invite to 0 members in Squad!", a false success for nothing that
     # was actually sent.
     async def test_notify_role_with_no_members_reports_nobody_to_invite(self):
         guild_id = 919
@@ -19547,7 +19548,7 @@ class MakeTeamsCommandTests(BotModuleTestCase):
         )
 
     # Regression: unlike /make-teams draft, random used to have no
-    # "not enough players" guard at all - a lone caller got "Teams
+    # "not enough players" guard at all. A lone caller got "Teams
     # created!" with one whole side left empty instead of this message.
     async def test_rejects_when_not_enough_players_in_voice_channel(self):
         ctx = self._ctx_in_voice(members=[FakeMember("Solo")])
@@ -19639,8 +19640,8 @@ class MakeTeamsCommandTests(BotModuleTestCase):
     async def test_use_roles_proceeds_and_notes_who_has_not_run_setup(self):
         # getRolePreferences already treats a player with no rows as
         # neutral on every role, the same as someone who ran /setup and
-        # marked everything neutral, so this doesn't block team formation
-        # - it just names whoever's missing it in the response.
+        # marked everything neutral, so this doesn't block team formation.
+        # It just names whoever's missing it in the response.
         guild_id = 914
         await self._setup_five_a_side_teams(guild_id)
         ctx = self._ctx_in_voice(guild_id=guild_id)
@@ -19726,7 +19727,7 @@ class RankedCommandTests(BotModuleTestCase):
     async def test_make_teams_ranked_passes_use_roles_through(self):
         # ranked=True short-circuits before the random-split flow even
         # runs (randomizeTeamHelper must never be touched). use_roles is
-        # forwarded into rankedTeamHelper instead of being dropped; whatever
+        # forwarded into rankedTeamHelper instead of being dropped. Whatever
         # not_setup_note comes along with it isn't this test's concern.
         ctx = self._ctx_in_voice()
         mock = AsyncMock()
@@ -19739,7 +19740,7 @@ class RankedCommandTests(BotModuleTestCase):
 
     async def test_ranked_use_roles_proceeds_and_notes_who_has_not_run_setup(self):
         # Same "note, don't block" behavior as the random-split path (see
-        # test_use_roles_proceeds_and_notes_who_has_not_run_setup) - roles
+        # test_use_roles_proceeds_and_notes_who_has_not_run_setup). Roles
         # just balance a little worse for whoever hasn't run /setup,
         # rather than the whole command refusing to run.
         guild_id = 918

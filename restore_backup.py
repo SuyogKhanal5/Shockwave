@@ -1,6 +1,6 @@
 """
 Restores main.db from one of backupDatabaseTask's daily snapshots (see
-_backupDatabase in bot.py). Run this with the bot stopped - it works
+_backupDatabase in bot.py). Run this with the bot stopped. It works
 directly on the database file on disk, the same one mainDB holds a live
 connection to while the bot is running, and copying over a file a running
 process still has open risks corrupting it.
@@ -11,8 +11,9 @@ Usage:
     python restore_backup.py main-20260819-030000.db   # restores by filename
 
 Before overwriting main.db, the current live database is itself copied into
-the backups folder as "main-before-restore-<timestamp>.db" - so restoring
-the wrong backup, or restoring at all, is itself undoable the same way.
+the backups folder as "main-before-restore-<timestamp>.db". That way
+restoring the wrong backup, or restoring at all, is itself undoable the
+same way.
 """
 
 import os
@@ -97,7 +98,7 @@ def main():
         safety_path = os.path.join(BACKUP_DIR, f"main-before-restore-{timestamp}.db")
         shutil.copy2(DB_PATH, safety_path)
         # main.db runs in WAL mode (see bot.py), which keeps recent commits
-        # in main.db-wal until a checkpoint folds them back in - a clean
+        # in main.db-wal until a checkpoint folds them back in. A clean
         # bot shutdown does that automatically, but a crash or a forgotten
         # "stop the bot first" wouldn't, and a raw copy of main.db alone
         # would then silently miss whatever's still sitting in the WAL.

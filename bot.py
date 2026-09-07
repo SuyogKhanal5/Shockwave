@@ -326,7 +326,7 @@ else:
     ensure_column("servers", "max_wager", "INTEGER")
     # /set betting: whether /wager team and /wager against actually accept
     # bets at all. Games, elo, and the winner-report flow all work exactly
-    # the same either way; this only gates the wagering layer on top of
+    # the same either way. This only gates the wagering layer on top of
     # them, for a server that doesn't want anything gambling-adjacent even
     # with fictional gold. Defaults to 1 (enabled), today's behavior.
     ensure_column("servers", "betting_enabled", "INTEGER", "1")
@@ -334,8 +334,8 @@ else:
     # own and a tournament match's ready-check/report graphic) and the
     # winner-report message (with its buttons) go here instead of
     # wherever the roster or match happened to start. Independent of
-    # /set wager-channel, which still redirects only the betting-open/
-    # closed notices - the two can point at different channels.
+    # /set wager-channel, which still redirects only the betting-open and
+    # closed notices. The two can point at different channels.
     ensure_column("servers", "matchup_channel", "TEXT")
     # /set game: which game (League, Valorant, any free-text name an admin
     # types) new rosters get formed for going forward. NULL treated as
@@ -348,8 +348,8 @@ else:
     # useTeamsHelper, _handleReadyClick) from current_game at the moment
     # it forms, and cleared by clearTeamsHelper. Read by recordResult (via
     # _activeGame) so switching current_game mid-game doesn't retroactively
-    # change which game's elo/stats an already-in-progress game affects -
-    # /set game only ever applies to the NEXT roster formed after it runs.
+    # change which game's elo/stats an already-in-progress game affects.
+    # /set game only ever applies to the next roster formed after it runs.
     ensure_column("servers", "game", "TEXT")
     # The draft picker's own posted message id (CaptainsDraftPickView),
     # edited in place on every pick rather than reposted, the same way
@@ -357,21 +357,21 @@ else:
     # against the clicked message by _isDraftPickTurn (the shared gate
     # every draft-pick button routes through), the same "an older
     # message's buttons stop working once a newer one takes over" role
-    # roster_team2_message_id already plays for the roster buttons - a
-    # draft abandoned via /clear teams or superseded by a fresh
-    # /make-teams draft/random otherwise left its old picker message
-    # fully clickable, resolving picks against whatever draft happens to
-    # be current instead of the one actually shown.
+    # roster_team2_message_id already plays for the roster buttons. Without
+    # this, a draft abandoned via /clear teams or superseded by a fresh
+    # /make-teams draft/random would leave its old picker message fully
+    # clickable, resolving picks against whatever draft happens to be
+    # current instead of the one actually shown.
     ensure_column("servers", "draft_picker_message_id", "INTEGER")
     # /set welcome-message: whether on_guild_join's one-time "thanks for
     # adding Shockwave, run /setup" post (welcomeNewGuildHelper) fires.
     # Defaults to on (1) so a fresh install's behavior is unchanged from
-    # before this setting existed; an admin who doesn't want it can turn
+    # before this setting existed. An admin who doesn't want it can turn
     # it off, same shape as /set betting.
     ensure_column("servers", "welcome_message_enabled", "INTEGER", "1")
 
 # Per-member currency: gold balance plus win/loss and wagering stats, one
-# row per (guild, user). Shared across every game a server plays - elo and
+# row per (guild, user). Shared across every game a server plays. Elo and
 # game-record stats are NOT here, see game_stats below.
 cursor.execute(
     "CREATE TABLE IF NOT EXISTS economy("
@@ -383,9 +383,9 @@ cursor.execute(
 # ensure_column() is what actually adds it there.
 ensure_column("economy", "gold_lost", "INTEGER", "0")
 
-# Elo and game-record stats, one row per (guild, user, game) - see /set
+# Elo and game-record stats, one row per (guild, user, game). See /set
 # game. Kept separate from `economy` (which stays the single shared
-# gold/bet ledger regardless of which game is current) since an elo
+# gold/bet ledger regardless of which game is current), since an elo
 # rating or win streak from one game means nothing mixed into another's.
 cursor.execute(
     "CREATE TABLE IF NOT EXISTS game_stats("
@@ -427,7 +427,7 @@ cursor.execute(
 )
 # When this challenge was created, so expireStalePendingInvites can clean
 # up one nobody ever answered (see PENDING_INVITE_EXPIRY_SECONDS). Only
-# ever read for a still-PENDING_ACCEPT row - an accepted duel has real gold
+# ever read for a still-PENDING_ACCEPT row. An accepted duel has real gold
 # escrowed and is never auto-expired, regardless of age.
 ensure_column("duels", "createdAt", "INTEGER")
 # One row per posted /leaderboard message, tracking which page it's
@@ -574,10 +574,10 @@ cursor.execute(
 )
 # When this invite was sent, so expireStalePendingInvites can clean up one
 # nobody ever answered (see PENDING_INVITE_EXPIRY_SECONDS). NULL for an
-# invite sent before this column existed - treated as already expired
+# invite sent before this column existed. Treated as already expired
 # rather than guessing how long ago it actually went out.
 ensure_column("team_invites", "createdAt", "INTEGER")
-# At most one pending /team transfer per team (guildId, teamId) - a second
+# At most one pending /team transfer per team (guildId, teamId). A second
 # transfer request while one's already outstanding is refused rather than
 # creating a competing one. Not `force`'s concern at all: force skips this
 # table entirely, transferring immediately with no row ever written, the
@@ -635,9 +635,9 @@ ensure_column("tournament_matches", "roundBettingClosedMessageId", "INTEGER")
 # before this column did, since League was the only game tournaments ever
 # tracked results for.
 ensure_column("tournament_matches", "game", "TEXT", "'League'")
-# Persistent team win/loss records, one row per (guild, team, game) - see
+# Persistent team win/loss records, one row per (guild, team, game). See
 # /set game. Kept separate from Team.wins/Team.losses (the in-memory
-# attribute display code reads; see helper.py's _hydrateTeamGameRecord)
+# attribute display code reads. See helper.py's _hydrateTeamGameRecord)
 # so a team's record only reflects matches played in the same game, the
 # same reasoning game_stats is kept separate from economy.
 cursor.execute(
@@ -726,7 +726,7 @@ def _errorVariableDump(interaction):
 
 
 # Logs every real command invocation (name, params, who, where) in one
-# place, instead of adding logging to each of the roughly 40 @tree.command
+# place, instead of adding logging to each of the roughly 60 @tree.command
 # functions individually. interaction_check is a global hook that
 # discord.py's own CommandTree._call runs before dispatching any
 # application command in the tree. interaction.command and .namespace are
@@ -783,16 +783,16 @@ class LoggingCommandTree(app_commands.CommandTree):
             logger.exception("LoggingCommandTree.interaction_check failed, continuing without logging this call")
 
         # Every command here reads or writes guild-scoped state (a
-        # roster, elo, a tournament, ...); none of them mean anything run
+        # roster, elo, a tournament, ...). None of them mean anything run
         # as a DM to the bot itself, so a DM attempt is rejected here,
         # the one hook every command already passes through, rather than
         # adding the same "ctx.guild is None" guard to each command
         # individually. interaction.guild is None precisely for a DM
-        # interaction; a real guild command always has it by the time it
+        # interaction. A real guild command always has it by the time it
         # reaches here. Returning False alone from this hook leaves a DM
-        # caller with no response at all - CommandTree._call just sets
-        # command_failed and returns, nothing gets dispatched to
-        # on_app_command_error - so the message has to be sent here.
+        # caller with no response at all. CommandTree._call just sets
+        # command_failed and returns, and nothing gets dispatched to
+        # on_app_command_error, so the message has to be sent here.
         if interaction.type is discord.InteractionType.application_command and interaction.guild is None:
             try:
                 await interaction.response.send_message(
@@ -825,7 +825,7 @@ client.helperObj = helperObj
 _developerAlertsEnabled = True
 
 # emit() can run before client.run() ever connects (e.g. a warning from
-# _runStartupSelfTests, which runs before that call) - queued here instead
+# _runStartupSelfTests, which runs before that call). Queued here instead
 # of just dropped, and flushed once on_ready first fires and there's
 # actually a connection to send a DM over.
 _pendingDeveloperDMs = []
@@ -955,7 +955,7 @@ async def backupDatabaseTask():
 
 # Runs immediately on .start(), then hourly after. Hourly rather than once
 # a day like backupDatabaseTask above, since PENDING_INVITE_EXPIRY_SECONDS
-# is a per-item deadline, not a retention window - checking only once a
+# is a per-item deadline, not a retention window. Checking only once a
 # day could leave an already-stale invite/challenge sitting for up to
 # another 23 hours before this notices.
 @tasks.loop(hours=1)
@@ -1759,7 +1759,7 @@ async def makeTeamsRandom(ctx, use_roles: bool = False, ranked: bool = False):
     # neutral on every role (see _roleTier), the same tier as someone who
     # ran /setup and genuinely marked every role neutral, so role-aware
     # team formation doesn't actually need everyone to have run /setup
-    # first - it just balances a little worse for whoever hasn't, the same
+    # first. It just balances a little worse for whoever hasn't, the same
     # as it would for anyone else sitting neutral on everything. Rather
     # than blocking the whole command over it (locking role-based
     # matchmaking behind every single voice-channel member's own
@@ -1812,7 +1812,7 @@ async def makeTeamsRandom(ctx, use_roles: bool = False, ranked: bool = False):
     # Role-based team balancing is League-only (see /set game). Gated
     # here, right after randomizeTeamHelper stamps servers.game for this
     # roster, rather than up front, since ranked:true's own use_roles
-    # gating lives inside rankedTeamHelper instead - this command has two
+    # gating lives inside rankedTeamHelper instead. This command has two
     # genuinely separate formation paths below the shared not_setup_note
     # check above.
     game = helperObj._activeGame(ctx.guild.id)
@@ -1842,7 +1842,7 @@ async def makeTeamsRandom(ctx, use_roles: bool = False, ranked: bool = False):
             ))
         elif not_setup_note:
             # Only relevant once roles actually got assigned (both teams
-            # landed at 5); the unroled case above already explains why
+            # landed at 5). The unroled case above already explains why
             # nobody's preferences mattered this time.
             intro_messages.append(await ctx.channel.send(not_setup_note))
 
@@ -2505,7 +2505,7 @@ async def roll(ctx, *, num: int):
 # types "/" in any server the bot is in, whether or not they can actually
 # run it, and there's no way to hide one from Discord's own command picker
 # short of registering it to a private guild. A DM the developer sends the
-# bot directly has none of that - it's invisible to literally everyone
+# bot directly has none of that. It's invisible to literally everyone
 # else, no registration involved. Gated on SHOCKWAVE_DEVELOPER_ID (token.
 # txt's second line) rather than manage_guild for the same reason the
 # removed slash-command version was: this isn't a per-guild admin setting,
