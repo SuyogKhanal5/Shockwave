@@ -525,7 +525,7 @@ the same organizer running back-to-back games), a click on the old
 message's stale button could silently draft a different, unrelated player
 from the new pool at that same position instead of being rejected outright.
 
-`CaptainsDraftPickView` picked up a fifth button, Undo last pick, backed by
+`CaptainsDraftPickView` picked up a sixth button, Undo last pick, backed by
 `_handleDraftUndoClick`/`_isDraftUndoAllowed` - the reason it needed its own
 per-button checks in the first place. Undo's permission rule is the
 deliberate *opposite* of `_isDraftPickTurn`: by the time Undo would ever be
@@ -552,7 +552,7 @@ players), Discord's own per-row cap, so Undo simply doesn't render then,
 even with a pick genuinely waiting to be undone. It's built as a plain
 `discord.ui.Button` (`_DraftUndoButton`), manually `add_item`'d after
 computing whether row 4 actually has room, rather than declared via the
-`@discord.ui.button` decorator the other four fixed buttons use - a 6th
+`@discord.ui.button` decorator the other five fixed buttons use - a 6th
 decorator-declared `row=4` button would overflow immediately at
 `super().__init__()` time, before there's ever a chance to remove it.
 
@@ -1036,9 +1036,11 @@ the list of ones it has - unlike `/set game` itself, which deliberately
 accepts any new name to start tracking it, a typo'd game name here would
 otherwise silently create a brand new, all-zero `game_stats` row via
 `ensureGameStatsRow`'s own self-heal and just look like "you have no
-stats," not "you mistyped the name." The other four `_buildStatsEmbed`
-call sites (the Avatar-toggle handlers, `_swapTradingCardForStats`, the
-card-to-embed return path) all still pass no `game` at all, so re-rendering
+stats," not "you mistyped the name." The other three `_buildStatsEmbed`
+call sites (`_handleStatsAvatarToggleClick`, `_swapTradingCardForStats` -
+the card-to-embed/Back-button return path - and
+`_renderLeaderboardEntryStatsEmbed`'s own leaderboard card view) all still
+pass no `game` at all, so re-rendering
 an existing `/stats` post always tracks whatever the CURRENT game is, even
 if the post itself was opened with an explicit `game` override - a
 deliberate simplification, not an oversight: persisting an arbitrary
@@ -1673,7 +1675,7 @@ at all, since it never touches an existing team's roster or captaincy. Its
 only real check is that the caller was actually playing on the game roster
 it's copying.
 
-`myCaptainedTeamAutocomplete` (the suggestion list backing all six of those
+`myCaptainedTeamAutocomplete` (the suggestion list backing all eight of those
 commands' `team` param) checks the same permission and switches from
 `getTeamsCaptainedBy` to `getTeamsForGuild` for an admin, so they can actually
 find a team they don't captain to type in. `myTeamAutocomplete` (an empty box's
@@ -2619,7 +2621,7 @@ round that never got a row as resolved once play has moved past it.
 
 | Table | Scope | Holds |
 |---|---|---|
-| `servers` | one row per guild | current team rosters, channel names, betting state, `is_ranked`, `wager_channel`, `active_tournament_match_id`, `betting_timer_seconds`, `current_game`/`game` (all admin-configurable via `/set`) |
+| `servers` | one row per guild | current team rosters, betting state, `is_ranked`, `active_tournament_match_id`, and `game` (all internal, in-progress-game state), plus channel names, `wager_channel`, `betting_timer_seconds`, and `current_game` (the admin-configurable subset, all set via `/set`) |
 | `economy` | one row per (guild, player) | balance, bet win/loss counts, gold wagered/won/lost, shared across every game a server plays (see `/set game`) |
 | `game_stats` | one row per (guild, player, game) | elo, game win/loss counts, ranked win/loss counts, current win streak, split from `economy` since these mean nothing mixed across different games |
 | `guild_games` | one row per (guild, game) | every game name a server has ever run `/set game` to, for its autocomplete suggestions; always seeded with `"League"` |
