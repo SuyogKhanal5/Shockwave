@@ -1,5 +1,7 @@
 token.txt
 shockwave.log
+*.pem
+*.ppk
 *.pyc
 __pycache__/
 .pytest_cache/
