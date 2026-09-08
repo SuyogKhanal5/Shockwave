@@ -408,6 +408,25 @@ cancelled first (`cancelGameHelper`: refund plus move back), the same safety net
 `clearTeamsHelper` uses, just without the `team1`/`team2` wipe that comes with
 it, since reusing them is the entire point.
 
+### Inviting players to voice (`/notify`)
+
+`notifyHelper` DMs a one-time invite link (`create_invite(max_uses=1,
+unique=True)`) to a member, or to every member of a role in a loop (bot.py's
+own `notify` command). Each target needs their *own* invite rather than
+sharing one - `max_uses=1` means a single invite only ever admits the first
+person who clicks it - so this can't be hoisted out of the per-target loop
+the way a shared resource could be.
+
+`create_invite` is wrapped in try/except, distinct from the DM send just
+after it: a closed-DMs `Forbidden` on the send is per-target (returns
+`False`, tallied by the caller, the rest of the batch still goes out), but a
+missing Create Instant Invite permission on the caller's own voice channel
+is channel-level - it'll fail identically for every remaining target too, so
+`notifyHelper` returns `None` for that case specifically, and `notify` stops
+the loop immediately with a specific "I don't have permission to create an
+invite link in your voice channel" message the first time it sees one,
+rather than quietly repeating the same failure through an entire role.
+
 ### Voice moves and the betting window
 
 There's no standalone `/start` command. Moving players and opening betting both
@@ -442,12 +461,35 @@ For Start, the "channel to send everyone back to later" is found by scanning
 the roster's own players for whichever one is currently sitting in a voice
 channel (`_findRosterVoiceChannel`), rather than assuming the clicker
 themselves is in voice. Anyone can click it, not just someone at the table.
+That only guarantees *someone* rostered is in voice, not everyone: a
+drafted or randomly-teamed player can leave voice (or a captains-drafted
+captain never join it at all - nothing checks that) between the roster
+posting and Start being clicked. `member.move_to` raises
+`discord.HTTPException` for anyone not currently connected to a voice
+channel, so the actual move loop wraps each call in its own try/except and
+collects the names that failed rather than letting one bad `move_to` crash
+the whole handler. This matters more than it might sound like: by the point
+the loop runs, `interaction.response.defer()` has already fired and no
+`View` in this file overrides `on_error`, so an uncaught exception here used
+to die silently mid-move - some players moved, others not, no matchup image,
+no betting opened, and nothing shown to the user at all. `channel.send`
+now reports "Moved everyone else! Couldn't move X, Y (not currently in a
+voice channel)." when that happens, and the rest of the flow (matchup
+image, betting) always still runs regardless - the same way the "nobody
+in voice at all" case already degrades gracefully instead of refusing to
+start.
 
 `channel1`/`channel2` (set by `/set channels`' `team1`/`team2` params, admin-only) are
 looked up next. If either is missing, `_ensureDefaultTeamChannels` self-heals
 onto `DEFAULT_TEAM_CHANNEL_NAMES` (`"Team-1"`/`"Team-2"`), creating whichever
 one doesn't already exist and writing them back to `channel1`/`channel2` so this
-only happens once per guild.
+only happens once per guild. This is a fresh server's likely first-ever Start
+click, and it runs before `interaction.response.defer()` further down - a
+missing Manage Channels permission raises `discord.HTTPException` right here,
+caught by `_handleRosterStartClick` itself (not `_ensureDefaultTeamChannels`,
+which has no `interaction` to respond with) and turned into a specific "I
+need Manage Channels" message instead of propagating uncaught to Discord's
+own generic "This interaction failed."
 
 Start (no move) skips all of that, since nobody has to be in a voice channel
 at all to click it. It also explicitly clears `original_channel` back to
@@ -462,20 +504,57 @@ earlier Start game is possible too.
 message (`CaptainsDraftPickView`), edited in place on every pick rather
 than reposted, the same way `roster_team1_message_id`/
 `roster_team2_message_id` already are for the roster buttons.
-`_isDraftPickTurn` is the shared gate both `CaptainsDraftPickView.
-interaction_check` and `_DraftPickSlotButton`'s own `interaction_check`
-route through. It checks the clicked message against it before checking
-whose turn it is, since a `DynamicItem` reconstructed after a restart isn't
-necessarily attached to a live `View` instance. Without that check,
-a draft abandoned via `/clear teams` (or superseded by a fresh
-`/make-teams draft`/`random`) left its old picker message fully clickable:
-`_handleDraftPickSlotClick` re-resolves the clicked slot's position
-against whichever pool is *currently* stored, not the pool that was
-current when that stale message was rendered, so if the same person
-happened to be captain1 again in the new draft (a common case: the same
-organizer running back-to-back games), a click on the old message's stale
-button could silently draft a different, unrelated player from the new
-pool at that same position instead of being rejected outright.
+
+`CaptainsDraftPickView` has no view-level `interaction_check` of its own,
+unlike most persistent views in this file: its buttons don't share one
+permission rule. `_isDraftPickTurn` gates `_DraftPickSlotButton`'s own
+`interaction_check` directly, and is also called inline at the top of
+`_handleDraftPickRandomClick`/`_handleDraftPickPageClick` (plain buttons
+have no independent `interaction_check` of their own the way a
+`DynamicItem` does, so without this they'd have nothing gating them once
+the view stopped providing a blanket check). It checks the clicked message
+against `draft_picker_message_id` before checking whose turn it is, since a
+`DynamicItem` reconstructed after a restart isn't necessarily attached to a
+live `View` instance. Without that check, a draft abandoned via `/clear
+teams` (or superseded by a fresh `/make-teams draft`/`random`) left its old
+picker message fully clickable: `_handleDraftPickSlotClick` re-resolves the
+clicked slot's position against whichever pool is *currently* stored, not
+the pool that was current when that stale message was rendered, so if the
+same person happened to be captain1 again in the new draft (a common case:
+the same organizer running back-to-back games), a click on the old
+message's stale button could silently draft a different, unrelated player
+from the new pool at that same position instead of being rejected outright.
+
+`CaptainsDraftPickView` picked up a fifth button, Undo last pick, backed by
+`_handleDraftUndoClick`/`_isDraftUndoAllowed` - the reason it needed its own
+per-button checks in the first place. Undo's permission rule is the
+deliberate *opposite* of `_isDraftPickTurn`: by the time Undo would ever be
+pressed, `turn` has already flipped away from whoever just picked, so
+`_isDraftUndoAllowed` checks against `draft_last_pick_team`'s own captain
+instead of the current turn's. `draft_last_pick_team`/`draft_last_pick_player`
+(the latter a `serializePlayer()`'d `"(id,name)"`, same format
+`captain1`/`captain2` already use) are stamped by `_applyDraftPick` on every
+pick, overwritten each time so only the single most recent pick is ever
+undo-able - not a multi-level stack - and cleared by `clearTeamsHelper`
+alongside `team1`/`team2`/`players`, so a stale value from an abandoned
+draft can never be undone into a brand new one. `_handleDraftUndoClick`
+moves the player back from whichever team drafted them into the pool,
+restores `turn` to that same team directly (correct regardless of
+straight/snake order, since it replays the exact team recorded rather than
+recomputing "whose turn comes next" from scratch), and clears the two
+`draft_last_pick_*` columns so a second consecutive Undo press just gets
+"Nothing to undo yet."
+
+Undo only shows up once there's actually a pick to undo AND row 4 has a
+free slot for it: Random + First/Prev/Next/Last already fill row 4
+completely the moment the pool needs paging (`DRAFT_PICK_PAGE_SIZE`
+players), Discord's own per-row cap, so Undo simply doesn't render then,
+even with a pick genuinely waiting to be undone. It's built as a plain
+`discord.ui.Button` (`_DraftUndoButton`), manually `add_item`'d after
+computing whether row 4 actually has room, rather than declared via the
+`@discord.ui.button` decorator the other four fixed buttons use - a 6th
+decorator-declared `row=4` button would overflow immediately at
+`super().__init__()` time, before there's ever a chance to remove it.
 
 A dedicated `roster_starting` column on `servers` is flipped to `1`
 synchronously, before any `await`, the moment the checks above it pass.
@@ -528,6 +607,20 @@ entry, trying a short list of filename variants per role
 icon set doesn't need renaming to match exactly. A missing icon file just
 degrades to no icon and no extra row width, the same "off until the assets
 exist" shape `TEAM_LOGO_DIR`/`ELO_BADGE_DIR` already use elsewhere.
+
+`_sendMatchupImage`'s own `channel.send(file=...)` is wrapped in try/except:
+by the point it runs, `_handleRosterStartClick` has already moved players
+and set `roster_starting`, so a missing Attach Files permission raising
+uncaught here used to propagate straight to Discord's own default
+`View.on_error` (no view in this file overrides it) - no matchup image, no
+fallback text, `_deleteMakeTeamsIntroMessages`/`_openBetting` right after it
+never run, and `roster_starting` stuck at `1` forever, since every other
+roster button checks it and refuses ("This roster is no longer live") once
+it's set. A failed send now falls back to a plain "(Couldn't post the
+matchup image here...)" notice (itself best-effort - a channel without
+Attach Files might still allow Send Messages, but not always) and lets the
+rest of the flow run regardless, the same "report and continue" shape the
+move loop above already uses.
 
 It then calls `_openBetting`. Betting stays open for a configurable window
 while the bot keeps responding to other commands, so the countdown runs as
@@ -678,7 +771,9 @@ Confirm on the cancel side calls `_finishGameCancel`, which is just
 `cancelGameHelper`: the refund via `cancelBettingHelper`, also clearing
 `active_tournament_match_id` so an abandoned tournament match's
 bracket-advance hook can't fire against whatever unrelated game starts
-next, plus the move back to the original channel. That's followed by
+next, plus the move back to the original channel
+(`moveMembersToOriginalChannel`, shared with `recordResult`'s own
+identical move-back below). That's followed by
 deleting the original report message outright (`_deleteMessageSafely`),
 the same "nothing left to say" treatment the winner-report side gives it;
 `ConfirmCancelGameView.confirm` itself then deletes the confirmation
@@ -687,6 +782,21 @@ prompt too, mirroring `ConfirmWinnerReportView.confirm` exactly.
 keeps instead, replying to the same matchup graphic the result message
 would have (`_fetchMatchupMessage`, best-effort, same as everywhere else
 that reply lives) so a cancelled game stays visually anchored to it too.
+
+`moveMembersToOriginalChannel`'s own move loop is wrapped per-member in
+try/except, the same shape `_handleRosterStartClick`'s move loop already
+uses, rather than a bare loop. It's called from deep inside both
+`recordResult` and `cancelGameHelper`, well before either function's own
+remaining cleanup: in `recordResult` specifically, tournament bracket
+advancement (`_resolveTournamentMatch`) and the betting-closed-message/
+make-teams-message cleanup all come *after* this call. A member who's left
+voice entirely by the time the result comes in used to raise
+`discord.HTTPException` uncaught here, which - same as the matchup-image
+send above - skipped everything after it, including bracket advancement,
+leaving a tournament match stuck with no error shown anywhere. It now
+returns `(moved, not_moved)` instead of a plain bool; both callers report
+who couldn't be moved ("Moved everyone else back... Couldn't move X, Y")
+when that happens, and either way the rest of the function always runs.
 
 Cancel and a timeout on either confirmation view instead call
 `_restoreWinnerReportMessage`, which puts the original report message's id
@@ -815,6 +925,16 @@ never anyone's already-tracked rating. Unlike elo itself, `default_elo` isn't
 split per game: every game a server plays starts new players at the same
 configured value.
 
+Every `ranked:true` path shows each side's average elo up front, in the
+confirmation message itself, not just after the fact in the post-result
+"Elo: TeamA +12, TeamB -12" line - `rankedTeamHelper` (`/make-teams
+random`) always has, and `useTeamsHelper` (`/make-teams saved`) computes
+the identical `team1_avg`/`team2_avg` via the same `averageElo`, since both
+already have the two fully-resolved rosters in hand by the time they post.
+Without it, two persistent teams loading into a ranked game gave no clue
+whether it was a coin flip or a lopsided matchup until the result was
+already in.
+
 ### Multiple games (`/set game`)
 
 Elo and game-record stats (`game_wins`/`game_losses`/`ranked_wins`/
@@ -896,12 +1016,35 @@ on the current game only, not every game a player's ever touched;
 `/clear economy` still wipes every game's `game_stats` rows outright
 (`resetEconomyHelper`), matching its own "wipe everything" scope.
 
-`getLeaderboardEntries`/`_buildStatsEmbed` both scope to `_currentGame`,
-LEFT JOINing `game_stats` onto `economy` (so a player who's only ever bet,
-or only played a different game, still shows up with 0s/defaults rather
-than being excluded outright) rather than requiring a `game_stats` row to
-already exist. `/stats`' embed title and `/leaderboard`'s own title both
-say which game they're for.
+`getLeaderboardEntries` scopes to `_currentGame`, LEFT JOINing `game_stats`
+onto `economy` (so a player who's only ever bet, or only played a different
+game, still shows up with 0s/defaults rather than being excluded outright)
+rather than requiring a `game_stats` row to already exist. `/leaderboard`'s
+own title says which game it's for.
+
+`_buildStatsEmbed(guild_id, target, game=None)` defaults to `_currentGame`
+the same way, but `/stats` (`statsHelper`) can override it with its own
+optional `game` param, autocompleted from `listKnownGames` (the same list
+`/set game`'s own autocomplete offers). Without this, switching
+`current_game` didn't just deprioritize an earlier game's stats, it made
+them permanently unreachable from any player-facing command - the data was
+never actually lost (`game_stats` keys on `game` already), just stranded
+behind whatever `/set game` happened to be pointed at. `statsHelper`
+validates the given `game` against `listKnownGames` before ever calling
+`_buildStatsEmbed` with it, rejecting one this server's never tracked with
+the list of ones it has - unlike `/set game` itself, which deliberately
+accepts any new name to start tracking it, a typo'd game name here would
+otherwise silently create a brand new, all-zero `game_stats` row via
+`ensureGameStatsRow`'s own self-heal and just look like "you have no
+stats," not "you mistyped the name." The other four `_buildStatsEmbed`
+call sites (the Avatar-toggle handlers, `_swapTradingCardForStats`, the
+card-to-embed return path) all still pass no `game` at all, so re-rendering
+an existing `/stats` post always tracks whatever the CURRENT game is, even
+if the post itself was opened with an explicit `game` override - a
+deliberate simplification, not an oversight: persisting an arbitrary
+game selection across every button click on that message would need its
+own `stats_views` column for a case that's genuinely rare (looking up a
+non-current game's stats AND then also toggling the same view's avatar).
 
 Role-based team balancing (Random Roles/Balanced Roles, role icons on the
 matchup graphic, `use_roles`) is League-only. It's simpler to link it to the
@@ -939,6 +1082,21 @@ saved deltas with `sign=-1` to undo them exactly, recomputing fresh deltas
 against the now-restored elo values for the correct winner, applying those, and
 saving a new snapshot. That way a second correction is possible from the new
 baseline too.
+
+`team` is free text with autocomplete (`correctWinnerTeamAutocomplete`),
+not a static "Team 1"/"Team 2" `Choice` - the same fix `/wager team` already
+has for the identical problem, since a static `Choice`'s labels can't be
+made dynamic per-invocation the way autocomplete's own suggestion list can.
+`getCorrectWinnerTeamNames(guild_id, match_id=None)` supplies the real
+names either way: `getWagerTeamNames` outright for a specific `match_id`
+(a resolved tournament match's teams never change), or `last_result`'s own
+`team1_name`/`team2_name` for the no-`match_id` case - deliberately NOT the
+live `team1`/`team2` roster columns `getWagerTeamNames`' own no-`match_id`
+branch reads, since a new game may well have started by the time someone
+gets around to correcting an earlier one, and the correction needs to name
+the teams that were actually IN that earlier game. `resolveWagerTeamValue`
+is fully generic (nothing wager-specific in it), so it's reused as-is to
+resolve the caller's answer against whichever pair of names applies.
 
 `team` and `invalidate` are mutually exclusive. `reportCorrectWinnerHelper`
 rejects giving both, or neither. `invalidate` stops after the undo step:
@@ -1098,6 +1256,15 @@ with a 0W-0L record in whichever category the selected stat is about.
 e.g. bet wins/losses for a bet stat, or the combined game record for the
 elo-sorted overview.) Stats with no wins/losses concept, like balance, net
 gold, or gold wagered, still show everyone.
+
+When filtering leaves nothing (a server that's simply never played ranked
+games, say, viewing `stat:Ranked Win Rate`), `leaderboardHelper` names the
+specific stat in the reply - `f"Nobody has any {LEADERBOARD_STAT_LABELS[stat]}
+stats to show yet in this server!"` - rather than the plain, `stat`-less
+wording a genuinely empty server (no economy rows at all) gets. Without that,
+the exact same "nobody has any stats" message would cover both cases, reading
+as "the bot is broken" for a server that actually has a full, populated
+overview leaderboard one filter away.
 
 `LeaderboardPagingView`'s First/Prev/Next/Last buttons don't post anything
 new. `_handleLeaderboardPageClick` looks up the stored filter/order/page
@@ -1349,6 +1516,15 @@ they asked to save gets rejected outright, so a spectator can't claim a
 team they never played on. The new team's `team_size` is stamped to its
 current roster size, so it's saved already full rather than recruiting.
 
+`/team create`'s `name`, `/team save`'s `name`, `/team rename`'s `new_name`,
+and `/tournament create`'s `name` are all `app_commands.Range[str, 1, 90]`
+rather than a bare `str` - otherwise-unbounded user text that can end up
+inside something with a real Discord length limit: a voice channel name
+(`/team set`'s own conflict-resolution path can create one named after the
+team, and channel names cap at 100 characters) or an embed title (`/team
+stats`, 256 characters). Capped once at the command boundary instead of
+patching every downstream site that might render a name individually.
+
 Team names are unique per guild case-insensitively. `getTeamRow` looks a team up
 with `name = ? COLLATE NOCASE`, so "red" finds "Red", and `/team create`'s (and
 `/team save`'s and `/team rename`'s) own uniqueness check rejects "red" as
@@ -1403,7 +1579,25 @@ independent invite message instead of pointing back at the first one.
 querying at all, since it writes no `team_invites` row in the first place
 and skips the whole mechanism the check exists to protect: re-checking
 there would wrongly block an admin from force-adding someone who happens
-to have one outstanding. `challengeDuelHelper` gets the same treatment for
+to have one outstanding.
+
+Neither the invite nor the accept path ever checks the roster count against
+the team's own declared `team_size` - it's a soft target, not a hard cap, the
+same way `/team list`'s `recruiting_only` already treats it. But
+`teamInviteHelper` now appends a heads-up when the math would push things
+past that target: for a normal invite, `len(rostered_ids) + len(valid) >
+team.get_team_size()` checked against what accepting *every* pending invite
+would produce; for `force`, the roster's already been updated by that point,
+so it just checks `team.get_size() > team.get_team_size()` directly. This
+matters later because `/tournament register` (`registerTeamHelper`) *does*
+require the roster's actual headcount to equal the tournament's `team_size`
+exactly - without any warning beforehand, a captain who built a roster of 6
+"just in case" would only find out at registration time, with an error that
+didn't even say how to fix it. `registerTeamHelper`'s own rejection message
+now points at the actual remedy too: `/team remove` when the roster's too big,
+`/team invite` when it's too small.
+
+`challengeDuelHelper` gets the same pending-invite treatment for
 the exact same reason: a `SELECT 1 FROM duels WHERE ...
 state='PENDING_ACCEPT'` check for that same (challenger, target) pair
 before ever touching gold, so a second `/wager against` call against
@@ -1482,10 +1676,22 @@ it's copying.
 `myCaptainedTeamAutocomplete` (the suggestion list backing all six of those
 commands' `team` param) checks the same permission and switches from
 `getTeamsCaptainedBy` to `getTeamsForGuild` for an admin, so they can actually
-find a team they don't captain to type in. `myTeamAutocomplete` (backing
-`/team stats` and `/make-teams saved`'s `team1`/`team2` params, none of which
-require captaincy/rostering at all) gets the same admin carve-out, swapping
-`getTeamsForPlayer` for `getTeamsForGuild`.
+find a team they don't captain to type in. `myTeamAutocomplete` (an empty box's
+suggestions for `/team stats` and `/make-teams saved`'s `team1`/`team2` params,
+none of which require captaincy/rostering at all) gets the same admin
+carve-out, swapping `getTeamsForPlayer` for `getTeamsForGuild`.
+
+Both of those params actually go through `teamStatsAutocomplete`, not
+`myTeamAutocomplete` directly: an empty box defers straight to
+`myTeamAutocomplete` (just the caller's own teams, so a large server's full
+roster list doesn't bury the ones they're actually on), but the moment
+something's typed, it widens to every team in the guild matching it, the same
+search `/team list` itself would do. `/make-teams saved` needs this widening
+specifically for its opponent side: the whole point of the command is loading
+a game against someone *else's* team, so scoping suggestions to the caller's
+own teams the way `myTeamAutocomplete` alone does would hide the opponent from
+the picker entirely, forcing a trip to `/team list` just to get its exact
+spelling.
 
 Discord's autocomplete is only a suggestion list, not a hard restriction. Typing
 a name that isn't offered still submits fine, so this doesn't (and shouldn't)
@@ -1815,6 +2021,18 @@ and, if set, hands off to `_resolveTournamentMatch` to advance the bracket.
 `TournamentReadyView`, like every other view backing a flow that can sit open
 indefinitely, is persistent.
 
+`_handleReadyClick` also accepts `manage_guild`, not just the match's own
+two captains - the same escape hatch `_handleTournamentMatchReportClick`
+already has for reporting a winner. Without it, an AFK or unavailable
+captain left a match stuck in `PENDING_READY` forever: the view is
+deliberately `timeout=None` (a ready check shouldn't quietly lock up the
+way a confirm dialog reasonably can), `startTournamentHelper` refuses to
+advance the round while any match in it isn't yet `RESOLVED`, and
+`/set correct-winner` only fixes an already-resolved match - so there was
+no admin command anywhere that could force a stuck match past the ready
+check short of `/clear tournament`, which wipes the entire bracket,
+every registration, and all match history just to unstick one match.
+
 Simultaneous mode can't reuse that cycle, since `team1`/`team2` and
 `betting_state` are guild-wide singletons and simultaneous mode needs several
 matches live at once. It skips movement entirely and posts every match's own
@@ -1889,6 +2107,16 @@ casual/ranked game or a sequential-mode match. Each match settles its own bets
 independently
 (`_settleMatchWagers`, same pari-mutuel formula `computeGameDeltas` uses) the
 instant it resolves, rather than waiting on the rest of the round.
+
+`match_id` has its own autocomplete, `wagerMatchIdAutocomplete`, backed by
+`getOpenTournamentMatchesForBetting` - every match with `state != 'RESOLVED'`
+and `bettingClosed=0`, the exact same "still open" condition
+`_placeTournamentWager` itself checks before accepting a bet, so the list can
+never suggest an id that would just bounce back with "Betting is closed for
+match #N." Each suggestion reads `"Match #N: TeamA vs TeamB"`, deserializing
+`tournament_matches.team1`/`team2` the same way `getWagerTeamNames` does, so
+the id and the actual matchup are both visible in the picker instead of
+requiring a separate `/tournament print-bracket` just to look up a number.
 
 ### Team logos
 

@@ -74,7 +74,8 @@ SERVERS_SCHEMA = (
     "draft_pick_page DEFAULT 0, draft_players_message_id, draft_snake DEFAULT 0, "
     "betting_closed_message_id, make_teams_message_ids, matchup_message_id, roster_starting DEFAULT 0, "
     "roster_permissions_strict DEFAULT 0, max_wager, betting_enabled DEFAULT 1, matchup_channel, "
-    "current_game DEFAULT 'League', game, draft_picker_message_id, welcome_message_enabled DEFAULT 1)"
+    "current_game DEFAULT 'League', game, draft_picker_message_id, welcome_message_enabled DEFAULT 1, "
+    "draft_last_pick_team, draft_last_pick_player)"
 )
 ECONOMY_SCHEMA = (
     "CREATE TABLE economy(guildId, userId, username, balance, wins, losses, "
@@ -193,7 +194,7 @@ def insert_guild_row(cursor, db, guild_id=GUILD_ID, name="Test Guild"):
         "INSERT INTO servers VALUES(?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, "
         "NULL, NULL, NULL, 'NONE', NULL, NULL, 0, NULL, NULL, ?, "
         "NULL, NULL, NULL, 0, NULL, NULL, NULL, 0, NULL, 0, NULL, NULL, NULL, 0, 0, NULL, 1, NULL, "
-        "'League', NULL, NULL, 1)",
+        "'League', NULL, NULL, 1, NULL, NULL)",
         (guild_id, name, helper_module.BETTING_DURATION_SECONDS),
     )
     cursor.execute("INSERT OR IGNORE INTO guild_games(guildId, game) VALUES(?, 'League')", (guild_id,))
@@ -944,6 +945,30 @@ class RosterActionViewTests(HelperTestCase):
         self.assertEqual(self.helperObj.get(GUILD_ID, "roster_starting"), 1)
         self.assertEqual(self.helperObj.get(GUILD_ID, "original_channel"), "Lobby")
 
+    # _findRosterVoiceChannel only guarantees SOMEONE from the roster is
+    # in voice, not everyone - a player who's left voice (or a drafted
+    # captain who was never in it) between the roster posting and Start
+    # being clicked makes move_to raise. This has to degrade the same way
+    # "nobody in voice at all" already does, not die mid-move with
+    # nothing shown to the user.
+    async def test_a_player_who_left_voice_does_not_crash_the_rest_of_the_start_flow(self):
+        self.member2.move_to.side_effect = discord.HTTPException(
+            SimpleNamespace(status=400, reason="Bad Request"), "Target user is not connected to voice"
+        )
+        with patch.object(self.helperObj, "_openBetting", AsyncMock()) as open_betting, \
+             patch.object(self.helperObj, "_sendMatchupImage", AsyncMock()) as matchup:
+            await self.helperObj._handleRosterStartClick(self._click(), move=True)
+
+        self.member1.move_to.assert_awaited_once_with(self.channel1)
+        self.member2.move_to.assert_awaited_once_with(self.channel2)
+        # the flow still completes - betting opens and the matchup image
+        # still posts - instead of the handler dying on member2's failure
+        open_betting.assert_awaited_once_with(GUILD_ID, self.channel)
+        matchup.assert_awaited_once()
+        sent = "\n".join(c.args[0] for c in self.channel.send.call_args_list if c.args)
+        self.assertIn("Bob", sent)
+        self.assertIn("not currently in a voice channel", sent)
+
     # roster_starting, not roster_team2_message_id, is the real
     # anti-double-click mutex: a fresh click still can't match a stale
     # message id once a new roster overwrites it, but roster_starting is
@@ -1069,8 +1094,9 @@ class RosterActionViewTests(HelperTestCase):
             await self.helperObj._handleRosterStartClick(self._click(), move=False)
 
         self.assertEqual(self.helperObj.get(GUILD_ID, "original_channel"), "")
-        moved = await self.helperObj.moveMembersToOriginalChannel(self.fakeGuild)
+        moved, not_moved = await self.helperObj.moveMembersToOriginalChannel(self.fakeGuild)
         self.assertFalse(moved)
+        self.assertEqual(not_moved, [])
 
     async def test_move_false_works_even_when_nobody_is_in_voice(self):
         self.member1.voice = None
@@ -1115,6 +1141,26 @@ class RosterActionViewTests(HelperTestCase):
         self.assertIsNotNone(default2)
         self.member1.move_to.assert_awaited_once_with(default1)
         self.member2.move_to.assert_awaited_once_with(default2)
+
+    # This runs before interaction.response.defer() - a missing Manage
+    # Channels permission used to propagate straight to Discord's own
+    # generic "This interaction failed," with no clue what actually went
+    # wrong or how to fix it, on a fresh server's very first Start click.
+    async def test_missing_manage_channels_permission_gives_a_specific_message(self):
+        self.helperObj.update(GUILD_ID, "channel1", "")
+        self.helperObj.update(GUILD_ID, "channel2", "")
+        self.fakeGuild.create_voice_channel = AsyncMock(
+            side_effect=discord.HTTPException(SimpleNamespace(status=403, reason="Forbidden"), "Missing Permissions")
+        )
+
+        click = self._click()
+        await self.helperObj._handleRosterStartClick(click, move=True)
+
+        click.response.send_message.assert_awaited_once()
+        self.assertIn("Manage Channels", click.response.send_message.call_args.args[0])
+        self.member1.move_to.assert_not_awaited()
+        # not left stuck - a retry after fixing permissions can still work
+        self.assertEqual(self.helperObj.get(GUILD_ID, "roster_starting"), 0)
 
     async def test_missing_team_channels_reuses_existing_defaults_without_recreating(self):
         self.helperObj.update(GUILD_ID, "channel1", "")
@@ -2400,14 +2446,12 @@ class CaptainsDraftPickTests(HelperTestCase):
         self.assertEqual(len(players.get_players()), 1)  # one spectator still unpicked
 
     async def test_random_click_reports_when_pool_empty(self):
-        self.helperObj.update(GUILD_ID, "players", Team().serializeTeam())
-        self.helperObj.update(GUILD_ID, "captain1", Player(401, "Cap1").serializePlayer())
-        self.helperObj.update(GUILD_ID, "captain2", Player(402, "Cap2").serializePlayer())
-        ctx = self._pick_ctx(FakeMember("Cap1", id=401))
+        captain1, captain2, pool, ctx = await self._draft_setup([])
+        pick_ctx = self._pick_ctx(captain1)
 
-        await self.helperObj._handleDraftPickRandomClick(ctx)
+        await self.helperObj._handleDraftPickRandomClick(pick_ctx)
 
-        ctx.response.send_message.assert_awaited_once_with(
+        pick_ctx.response.send_message.assert_awaited_once_with(
             "There are no players left to choose from!", ephemeral=True
         )
 
@@ -2441,6 +2485,140 @@ class CaptainsDraftPickTests(HelperTestCase):
 
         pick_ctx.response.defer.assert_awaited_once()
         pick_ctx.response.edit_message.assert_not_awaited()
+
+    def _undo_buttons(self, view):
+        return [c for c in view.children if isinstance(c, helper_module._DraftUndoButton)]
+
+    async def test_no_undo_button_before_any_pick(self):
+        await self._draft_setup([(501, "Pool1"), (502, "Pool2")])
+
+        _, view = self.helperObj._renderDraftPickView(GUILD_ID)
+
+        self.assertEqual(self._undo_buttons(view), [])
+
+    async def test_undo_button_appears_after_a_pick(self):
+        captain1, captain2, pool, ctx = await self._draft_setup([(501, "Pool1"), (502, "Pool2")])
+        await self.helperObj._applyDraftPick(self._pick_ctx(captain1), pool[0], 1)
+
+        _, view = self.helperObj._renderDraftPickView(GUILD_ID)
+
+        self.assertEqual(len(self._undo_buttons(view)), 1)
+
+    # Row 4 is already full (Random + First/Prev/Next/Last) once the pool
+    # needs paging - Undo has nowhere left to go, even with a pick to undo.
+    async def test_no_undo_button_once_paginated(self):
+        pool_entries = [(500 + i, f"Pool{i}") for i in range(helper_module.DRAFT_PICK_MAX_UNPAGINATED + 1)]
+        captain1, captain2, pool, ctx = await self._draft_setup(pool_entries)
+        await self.helperObj._applyDraftPick(self._pick_ctx(captain1), pool[0], 1)
+
+        _, view = self.helperObj._renderDraftPickView(GUILD_ID)
+
+        self.assertEqual(self._undo_buttons(view), [])
+
+    async def test_undo_reverts_the_last_pick(self):
+        captain1, captain2, pool, ctx = await self._draft_setup([(501, "Pool1"), (502, "Pool2")])
+        await self.helperObj._applyDraftPick(self._pick_ctx(captain1), pool[0], 1)
+        undo_ctx = self._pick_ctx(captain1)  # captain1 made the pick being undone
+
+        await self.helperObj._handleDraftUndoClick(undo_ctx)
+
+        team1 = self.deserialize_team("team1")
+        players = self.deserialize_team("players")
+        self.assertNotIn(501, {p.get_id() for p in team1.get_players()})
+        self.assertIn(501, {p.get_id() for p in players.get_players()})
+        self.assertEqual(self.helperObj.get(GUILD_ID, "turn"), 1)
+        self.assertIsNone(self.helperObj.get(GUILD_ID, "draft_last_pick_team"))
+        undo_ctx.response.edit_message.assert_awaited_once()
+        self.assertIn("undone", undo_ctx.response.edit_message.call_args.kwargs["content"])
+
+    async def test_undo_rejects_the_captain_whose_turn_it_now_is(self):
+        captain1, captain2, pool, ctx = await self._draft_setup([(501, "Pool1"), (502, "Pool2")])
+        await self.helperObj._applyDraftPick(self._pick_ctx(captain1), pool[0], 1)
+        # turn is now captain2's, but captain2 didn't make the last pick -
+        # captain1 did, so captain2 pressing Undo should still be rejected.
+        undo_ctx = self._pick_ctx(captain2)
+
+        await self.helperObj._handleDraftUndoClick(undo_ctx)
+
+        undo_ctx.response.send_message.assert_awaited_once_with(
+            "Only the captain who made the last pick can undo it.", ephemeral=True
+        )
+        team1 = self.deserialize_team("team1")
+        self.assertIn(501, {p.get_id() for p in team1.get_players()})  # untouched
+
+    async def test_undo_rejects_a_bystander(self):
+        captain1, captain2, pool, ctx = await self._draft_setup([(501, "Pool1"), (502, "Pool2")])
+        await self.helperObj._applyDraftPick(self._pick_ctx(captain1), pool[0], 1)
+        outsider = FakeMember("Outsider", id=999)
+        outsider_click = self._pick_ctx(outsider)
+
+        await self.helperObj._handleDraftUndoClick(outsider_click)
+
+        outsider_click.response.send_message.assert_awaited_once_with(
+            "Only the captain who made the last pick can undo it.", ephemeral=True
+        )
+
+    async def test_undo_with_nothing_to_undo_is_rejected(self):
+        captain1, captain2, pool, ctx = await self._draft_setup([(501, "Pool1")])
+        undo_ctx = self._pick_ctx(captain1)
+
+        await self.helperObj._handleDraftUndoClick(undo_ctx)
+
+        undo_ctx.response.send_message.assert_awaited_once_with("Nothing to undo yet.", ephemeral=True)
+
+    # Single-step undo, not a stack: once used, the same pick can't be
+    # undone a second time.
+    async def test_undo_cannot_be_used_twice_in_a_row(self):
+        captain1, captain2, pool, ctx = await self._draft_setup([(501, "Pool1"), (502, "Pool2")])
+        await self.helperObj._applyDraftPick(self._pick_ctx(captain1), pool[0], 1)
+        await self.helperObj._handleDraftUndoClick(self._pick_ctx(captain1))
+
+        second_undo = self._pick_ctx(captain1)
+        await self.helperObj._handleDraftUndoClick(second_undo)
+
+        second_undo.response.send_message.assert_awaited_once_with("Nothing to undo yet.", ephemeral=True)
+
+    async def test_undo_stale_message_is_rejected(self):
+        captain1, captain2, pool, ctx = await self._draft_setup([(501, "Pool1"), (502, "Pool2")])
+        await self.helperObj._applyDraftPick(self._pick_ctx(captain1), pool[0], 1)
+        stale_message = FakeMessage(id=999999)
+        stale_click = FakeInteraction(self.guild, captain1, channel=self.channel, message=stale_message)
+
+        await self.helperObj._handleDraftUndoClick(stale_click)
+
+        stale_click.response.send_message.assert_awaited_once_with(
+            "This draft is no longer active.", ephemeral=True
+        )
+
+    # Pattern (1,2,2,1,...): captain2's second, consecutive pick of their
+    # pair should undo back into THEIR OWN next turn, not hand it back to
+    # captain1 - draft_last_pick_team is the literal team that just
+    # picked, replayed directly rather than recomputed from scratch, so
+    # this holds regardless of straight/snake order.
+    async def test_undo_restores_turn_correctly_mid_snake_pair(self):
+        captain1, captain2, pool, ctx = await self._draft_setup(
+            [(501, "Pool1"), (502, "Pool2"), (503, "Pool3")], snake=True
+        )
+        await self.helperObj._applyDraftPick(self._pick_ctx(captain1), pool[0], 1)
+        await self.helperObj._applyDraftPick(self._pick_ctx(captain2), pool[1], 2)
+        self.assertEqual(self.helperObj.get(GUILD_ID, "turn"), 2)  # captain2's own pair, 2nd pick
+
+        await self.helperObj._handleDraftUndoClick(self._pick_ctx(captain2))
+
+        self.assertEqual(self.helperObj.get(GUILD_ID, "turn"), 2)
+        team2 = self.deserialize_team("team2")
+        players = self.deserialize_team("players")
+        self.assertNotIn(502, {p.get_id() for p in team2.get_players()})
+        self.assertIn(502, {p.get_id() for p in players.get_players()})
+
+    async def test_clear_teams_resets_the_last_pick_so_a_new_draft_cannot_inherit_it(self):
+        captain1, captain2, pool, ctx = await self._draft_setup([(501, "Pool1"), (502, "Pool2")])
+        await self.helperObj._applyDraftPick(self._pick_ctx(captain1), pool[0], 1)
+        self.assertIsNotNone(self.helperObj.get(GUILD_ID, "draft_last_pick_team"))
+
+        await self.helperObj.clearTeamsHelper(ctx)
+
+        self.assertIsNone(self.helperObj.get(GUILD_ID, "draft_last_pick_team"))
 
 
 class ClearTeamsHelperTests(HelperTestCase):
@@ -3997,6 +4175,41 @@ class TeamInviteHelperTests(HelperTestCase):
             "SELECT targetId FROM team_invites WHERE messageId=? ORDER BY targetId", (778,)
         )
         self.assertEqual([row[0] for row in self.cursor.fetchall()], [902, 903])
+
+    async def test_notes_when_accepting_every_invite_would_exceed_the_teams_target_size(self):
+        await self.helperObj.createTeamHelper(self._ctx(), "Red", 2)
+        ctx = self._ctx()
+        bob = FakeMember("Bob", id=902)
+        cleo = FakeMember("Cleo", id=903)
+        posted_message = FakeMessage(id=790)
+        ctx.original_response.return_value = posted_message
+
+        await self.helperObj.teamInviteHelper(ctx, "Red", [bob, cleo])
+
+        text = ctx.response.send_message.call_args.args[0]
+        self.assertIn("above its own target of 2", text)
+
+    async def test_no_heads_up_when_invite_would_not_exceed_target_size(self):
+        await self.helperObj.createTeamHelper(self._ctx(), "Red", 5)
+        ctx = self._ctx()
+        target = FakeMember("Bob", id=902)
+        posted_message = FakeMessage(id=791)
+        ctx.original_response.return_value = posted_message
+
+        await self.helperObj.teamInviteHelper(ctx, "Red", [target])
+
+        text = ctx.response.send_message.call_args.args[0]
+        self.assertNotIn("Heads up", text)
+
+    async def test_force_add_notes_when_roster_now_exceeds_target_size(self):
+        await self.helperObj.createTeamHelper(self._ctx(), "Red", 1)
+        ctx = self._ctx()
+        target = FakeMember("Bob", id=902)
+
+        await self.helperObj.teamInviteHelper(ctx, "Red", [target], force=True)
+
+        text = ctx.response.send_message.call_args.args[0]
+        self.assertIn("above its own target of 1", text)
 
     async def test_deduplicates_the_same_member_passed_twice(self):
         await self._make_team()
@@ -6120,6 +6333,40 @@ class UseTeamsHelperTests(HelperTestCase):
         self.assertEqual(self.helperObj.get(GUILD_ID, "mode"), "Ranked")
         self.assertIn("ranked", ctx.response.send_message.call_args.args[0].lower())
 
+    # Same elo-at-stake preview /make-teams random's own ranked path
+    # already shows - without it, a ranked /make-teams saved gave no clue
+    # whether this was a lopsided matchup or a coin flip until after the
+    # game.
+    async def test_ranked_load_shows_average_elo_for_each_side(self):
+        await self.helperObj.createTeamHelper(self._ctx(901, "Alice"), "Red", 5)
+        await self.helperObj.createTeamHelper(self._ctx(902, "Bob"), "Blue", 5)
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 901, "Alice", "League")
+        self.cursor.execute(
+            "UPDATE game_stats SET elo=1400 WHERE guildId=? AND userId=901 AND game='League'", (GUILD_ID,)
+        )
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 902, "Bob", "League")
+        self.cursor.execute(
+            "UPDATE game_stats SET elo=1000 WHERE guildId=? AND userId=902 AND game='League'", (GUILD_ID,)
+        )
+        self.db.commit()
+
+        ctx = self._ctx()
+        await self.helperObj.useTeamsHelper(ctx, "Red", "Blue", True)
+
+        text = ctx.response.send_message.call_args.args[0]
+        self.assertIn("Team 1 avg elo **1400**", text)
+        self.assertIn("Team 2 avg elo **1000**", text)
+
+    async def test_unranked_load_shows_no_elo_note(self):
+        await self.helperObj.createTeamHelper(self._ctx(901, "Alice"), "Red", 5)
+        await self.helperObj.createTeamHelper(self._ctx(902, "Bob"), "Blue", 5)
+
+        ctx = self._ctx()
+        await self.helperObj.useTeamsHelper(ctx, "Red", "Blue", False)
+
+        text = ctx.response.send_message.call_args.args[0]
+        self.assertNotIn("avg elo", text)
+
     async def test_loading_teams_does_not_mutate_the_stored_persistent_team(self):
         await self.helperObj.createTeamHelper(self._ctx(901, "Alice"), "Red", 5)
         await self.helperObj.createTeamHelper(self._ctx(902, "Bob"), "Blue", 5)
@@ -6353,7 +6600,20 @@ class RegisterTeamHelperTests(HelperTestCase):
         ctx = self._ctx()
         await self.helperObj.registerTeamHelper(ctx, "Red")
         ctx.response.send_message.assert_awaited_once_with(
-            "**Red** has 2 player(s), but this tournament needs teams of exactly 3.", ephemeral=True
+            "**Red** has 2 player(s), but this tournament needs teams of exactly 3. Use /team invite to "
+            "adjust the roster first.",
+            ephemeral=True,
+        )
+
+    async def test_rejects_wrong_team_size_pointing_at_remove_when_roster_is_too_big(self):
+        self.helperObj.saveTournament(GUILD_ID, Tournament("Cup", 2, 4))
+        await self._make_team("Red", 901, "Alice", 3)
+        ctx = self._ctx()
+        await self.helperObj.registerTeamHelper(ctx, "Red")
+        ctx.response.send_message.assert_awaited_once_with(
+            "**Red** has 3 player(s), but this tournament needs teams of exactly 2. Use /team remove to "
+            "adjust the roster first.",
+            ephemeral=True,
         )
 
     async def test_rejects_double_registration(self):
@@ -7631,6 +7891,25 @@ class ImageRenderThreadOffloadTests(HelperTestCase):
         await self.helperObj._sendMatchupImage(self.channel, team1, team2, "Normal")
         self.assertIsNone(self.helperObj.get(GUILD_ID, "matchup_message_id"))
 
+    # A missing Attach Files permission used to propagate straight to the
+    # un-overridden View.on_error from this being _handleRosterStartClick's
+    # own tail: no matchup image, no fallback text, and (in the real
+    # caller) roster_starting stuck forever with nothing shown to whoever
+    # clicked Start.
+    async def test_failed_image_post_falls_back_to_a_plain_notice_instead_of_raising(self):
+        team1, team2 = self._team("Red"), self._team("Blue")
+        self.channel.send = AsyncMock(side_effect=[
+            discord.HTTPException(SimpleNamespace(status=403, reason="Forbidden"), "Missing Permissions"),
+            FakeMessage(),
+        ])
+
+        await self.helperObj._sendMatchupImage(self.channel, team1, team2, "Normal", guild_id=GUILD_ID)
+
+        self.assertEqual(self.channel.send.await_count, 2)
+        fallback_text = self.channel.send.call_args_list[1].args[0]
+        self.assertIn("Attach Files", fallback_text)
+        self.assertIsNone(self.helperObj.get(GUILD_ID, "matchup_message_id"))
+
     async def test_redirects_to_the_configured_matchup_channel(self):
         matchup_channel = FakeChannel("results", kind="text", guild=self.guild)
         matchup_channel.send = AsyncMock(return_value=FakeMessage(id=5001))
@@ -7912,15 +8191,15 @@ class TournamentReadyAndReportViewTests(HelperTestCase):
         await view.confirm.callback(confirm_click)
         return view
 
-    def _click(self, message_id, user_id, name="Clicker"):
+    def _click(self, message_id, user_id, name="Clicker", manage_guild=True):
         return FakeInteraction(
-            self.guild, FakeMember(name, id=user_id),
+            self.guild, FakeMember(name, id=user_id, manage_guild=manage_guild),
             channel=self.channel, message=FakeMessage(id=message_id, channel=self.channel),
         )
 
-    async def _click_ready(self, message_id, user_id):
+    async def _click_ready(self, message_id, user_id, manage_guild=True):
         view = helper_module.TournamentReadyView(self.helperObj)
-        click = self._click(message_id, user_id)
+        click = self._click(message_id, user_id, manage_guild=manage_guild)
         await view.ready.callback(click)
         return click
 
@@ -7937,12 +8216,30 @@ class TournamentReadyAndReportViewTests(HelperTestCase):
         await self._start("sequential", red, blue)
         match_id, message_id = self._only_match()
 
-        click = await self._click_ready(message_id, 999)
+        click = await self._click_ready(message_id, 999, manage_guild=False)
 
         self.cursor.execute("SELECT state FROM tournament_matches WHERE id=?", (match_id,))
         self.assertEqual(self.cursor.fetchone()[0], "PENDING_READY")
         self.assertIsNone(self.helperObj.get(GUILD_ID, "active_tournament_match_id"))
         self.assertTrue(click.response.send_message.call_args.kwargs.get("ephemeral"))
+
+    # manage_guild is the same escape hatch _handleTournamentMatchReportClick
+    # already has: a ready check has no timeout (see the view's own
+    # comment) and, unlike a report, nothing else in the codebase can force
+    # a match past PENDING_READY if an AFK/unavailable captain never
+    # presses it - short of /clear tournament, which wipes the whole
+    # bracket just to unstick one match.
+    async def test_ready_click_from_manage_guild_non_captain_is_allowed(self):
+        red = _captained_team("Red", 901, "Alice")
+        blue = _captained_team("Blue", 902, "Bob")
+        await self._start("sequential", red, blue)
+        match_id, message_id = self._only_match()
+
+        await self._click_ready(message_id, 999, manage_guild=True)
+
+        self.cursor.execute("SELECT state FROM tournament_matches WHERE id=?", (match_id,))
+        self.assertEqual(self.cursor.fetchone()[0], "AWAITING_RESULT")
+        self.assertEqual(self.helperObj.get(GUILD_ID, "active_tournament_match_id"), match_id)
 
     async def test_ready_click_from_either_captain_starts_the_match(self):
         red = _captained_team("Red", 901, "Alice")
@@ -9979,6 +10276,27 @@ class NotifyHelperTests(HelperTestCase):
 
         self.assertFalse(result)
 
+    # None is distinct from False: a closed-DM failure is per-target and
+    # doesn't stop the rest of a role-wide batch, but a missing Create
+    # Instant Invite permission on the caller's own voice channel is
+    # channel-level - it'll fail identically for every remaining target
+    # too, so the caller (bot.py's /notify) stops right there instead of
+    # quietly failing the same way N more times.
+    async def test_returns_none_when_the_invite_cannot_be_created(self):
+        voice_channel = FakeChannel("Lobby")
+        voice_channel.create_invite.side_effect = discord.Forbidden(
+            SimpleNamespace(status=403, reason="Forbidden"), "Missing Permissions"
+        )
+        caller = FakeMember("Caller")
+        caller.voice = FakeVoiceState(voice_channel)
+        ctx = FakeInteraction(self.guild, caller)
+        target = FakeMember("Target")
+
+        result = await self.helperObj.notifyHelper(ctx, target)
+
+        self.assertIsNone(result)
+        target.create_dm.return_value.send.assert_not_awaited()
+
 
 class CancelGameHelperTests(HelperTestCase):
     async def test_moves_members_back_and_refunds_open_bets(self):
@@ -10021,6 +10339,28 @@ class CancelGameHelperTests(HelperTestCase):
         self.assertTrue(any("cancelled" in text for text in sent))
         self.assertTrue(any("refunded" in text for text in sent))
         self.assertTrue(any("Moved everyone back" in text for text in sent))
+
+    async def test_reports_who_could_not_be_moved_back_after_cancelling(self):
+        og = FakeChannel("Lobby")
+        channel1 = FakeChannel("Team 1")
+        member1 = FakeMember("Alice", id=801)
+        member2 = FakeMember("Bob", id=802)
+        member2.move_to.side_effect = discord.HTTPException(
+            SimpleNamespace(status=400, reason="Bad Request"), "Target user is not connected to voice"
+        )
+        channel1.members = [member1, member2]
+        guild = FakeGuild(channels=[og, channel1])
+        channel = FakeChannel("game-channel")
+
+        self.helperObj.update(GUILD_ID, "original_channel", "Lobby")
+        self.helperObj.update(GUILD_ID, "channel1", "Team 1")
+        self.helperObj.update(GUILD_ID, "channel2", "")
+
+        await self.helperObj.cancelGameHelper(GUILD_ID, channel, guild)
+
+        member1.move_to.assert_awaited_once_with(og)
+        sent = [call.args[0] for call in channel.send.call_args_list]
+        self.assertTrue(any("Couldn't move Bob" in text for text in sent))
 
     async def test_cancelled_message_replies_to_the_matchup_graphic(self):
         channel = FakeChannel("game-chat")
@@ -10111,16 +10451,44 @@ class MoveMembersToOriginalChannelTests(HelperTestCase):
         self.helperObj.update(GUILD_ID, "channel1", "Team 1")
         self.helperObj.update(GUILD_ID, "channel2", "Team 2")
 
-        moved = await self.helperObj.moveMembersToOriginalChannel(guild)
+        moved, not_moved = await self.helperObj.moveMembersToOriginalChannel(guild)
 
         self.assertTrue(moved)
+        self.assertEqual(not_moved, [])
         member1.move_to.assert_awaited_once_with(og)
         member2.move_to.assert_awaited_once_with(og)
 
     async def test_returns_false_when_never_started(self):
         guild = FakeGuild()
-        moved = await self.helperObj.moveMembersToOriginalChannel(guild)
+        moved, not_moved = await self.helperObj.moveMembersToOriginalChannel(guild)
         self.assertFalse(moved)
+        self.assertEqual(not_moved, [])
+
+    # A member who's left voice (or was never in it) entirely between the
+    # game starting and it ending makes move_to raise - this can't crash
+    # the rest of recordResult's own cleanup (tournament bracket
+    # advancement especially), the same "report and continue" shape
+    # _handleRosterStartClick's own move loop already uses.
+    async def test_continues_past_a_member_who_can_no_longer_be_moved(self):
+        og = FakeChannel("Lobby")
+        channel1 = FakeChannel("Team 1")
+        member1 = FakeMember("Alice", id=801)
+        member2 = FakeMember("Bob", id=802)
+        member2.move_to.side_effect = discord.HTTPException(
+            SimpleNamespace(status=400, reason="Bad Request"), "Target user is not connected to voice"
+        )
+        channel1.members = [member1, member2]
+        guild = FakeGuild(channels=[og, channel1])
+
+        self.helperObj.update(GUILD_ID, "original_channel", "Lobby")
+        self.helperObj.update(GUILD_ID, "channel1", "Team 1")
+        self.helperObj.update(GUILD_ID, "channel2", "")
+
+        moved, not_moved = await self.helperObj.moveMembersToOriginalChannel(guild)
+
+        self.assertTrue(moved)
+        self.assertEqual(not_moved, ["Bob"])
+        member1.move_to.assert_awaited_once_with(og)
 
 
 # ===========================================================================
@@ -10743,6 +11111,32 @@ class RecordResultTests(HelperTestCase):
 
         messages = [c.args[0] for c in channel.send.call_args_list]
         self.assertFalse(any("Moved everyone back" in m for m in messages))
+
+    # A player who's left voice entirely by the time the result comes in
+    # can't stop the rest of this function's own cleanup (tournament
+    # bracket advancement especially, further down) from running - see
+    # moveMembersToOriginalChannel's own comment.
+    async def test_reports_who_could_not_be_moved_back_but_still_continues(self):
+        og = FakeChannel("Lobby")
+        channel1 = FakeChannel("Team 1")
+        member1 = FakeMember("Alice", id=901)
+        member2 = FakeMember("Bob", id=902)
+        member2.move_to.side_effect = discord.HTTPException(
+            SimpleNamespace(status=400, reason="Bad Request"), "Target user is not connected to voice"
+        )
+        channel1.members = [member1, member2]
+        guild = FakeGuild(channels=[og, channel1])
+
+        self.helperObj.update(GUILD_ID, "original_channel", "Lobby")
+        self.helperObj.update(GUILD_ID, "channel1", "Team 1")
+        self.helperObj.update(GUILD_ID, "channel2", "")
+
+        channel = FakeChannel("game-chat")
+        await self.helperObj.recordResult(GUILD_ID, 1, channel, guild)
+
+        member1.move_to.assert_awaited_once_with(og)
+        messages = [c.args[0] for c in channel.send.call_args_list]
+        self.assertTrue(any("Couldn't move Bob" in m for m in messages))
 
     async def test_updates_game_record_and_elo_for_rostered_players(self):
         team1 = Team(); team1.name = "Team 1"
@@ -11981,6 +12375,46 @@ class StatsHelperTests(HelperTestCase):
         self.assertEqual(titles, {
             helper_module.CARD_TIER_REWARD_TITLES["Diamond"], helper_module.CARD_TIER_REWARD_TITLES["Master"],
         })
+
+    async def test_defaults_to_the_servers_current_game(self):
+        self.helperObj.update(GUILD_ID, "current_game", "Valorant")
+        ctx = self._ctx()
+
+        await self.helperObj.statsHelper(ctx)
+
+        embed = ctx.response.send_message.call_args.kwargs["embed"]
+        self.assertIn("Valorant", embed.title)
+
+    # The whole point of the game param: a switched-away-from game's
+    # stats are still reachable, not permanently stranded once /set game
+    # moves on to something else.
+    async def test_explicit_game_overrides_the_current_one(self):
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 901, "Alice", "League")
+        self.cursor.execute(
+            "UPDATE game_stats SET elo=1500 WHERE guildId=? AND userId=901 AND game='League'", (GUILD_ID,)
+        )
+        self.db.commit()
+        self.helperObj.update(GUILD_ID, "current_game", "Valorant")
+
+        ctx = self._ctx()
+        await self.helperObj.statsHelper(ctx, game="League")
+
+        embed = ctx.response.send_message.call_args.kwargs["embed"]
+        self.assertIn("Alice's Stats - League", embed.title)
+        values = {f.name: f.value for f in embed.fields}
+        self.assertIn("1500", values["Elo"])
+
+    async def test_rejects_a_game_this_server_has_never_tracked(self):
+        ctx = self._ctx()
+
+        await self.helperObj.statsHelper(ctx, game="Overwatch")
+
+        ctx.response.send_message.assert_awaited_once()
+        self.assertNotIn("embed", ctx.response.send_message.call_args.kwargs)
+        text = ctx.response.send_message.call_args.args[0]
+        self.assertIn("Overwatch", text)
+        self.assertIn("League", text)  # the one known game listed as an alternative
+        self.assertTrue(ctx.response.send_message.call_args.kwargs.get("ephemeral"))
 
 
 class StatsViewTests(HelperTestCase):
@@ -14681,6 +15115,35 @@ class WagerTeamNameResolutionTests(HelperTestCase):
     def test_get_wager_team_names_falls_back_for_an_unknown_match(self):
         self.assertEqual(self.helperObj.getWagerTeamNames(GUILD_ID, match_id=999), ("Team 1", "Team 2"))
 
+    def _insert_match(self, match_id, team1_name, team2_name, state="AWAITING_RESULT", betting_closed=0):
+        team1, team2 = Team(), Team()
+        team1.set_name(team1_name)
+        team2.set_name(team2_name)
+        self.cursor.execute(
+            "INSERT INTO tournament_matches(id, guildId, roundIndex, nodeIndex, team1, team2, state, "
+            "mode, bettingClosed) VALUES(?, ?, 0, 0, ?, ?, ?, 'simultaneous', ?)",
+            (match_id, GUILD_ID, team1.serializeTeam(), team2.serializeTeam(), state, betting_closed)
+        )
+        self.db.commit()
+
+    def test_get_open_tournament_matches_for_betting_returns_open_matches_only(self):
+        self._insert_match(1, "Ravens", "Falcons")
+        self._insert_match(2, "Eagles", "Hawks", state="RESOLVED")
+        self._insert_match(3, "Lions", "Tigers", betting_closed=1)
+
+        self.assertEqual(
+            self.helperObj.getOpenTournamentMatchesForBetting(GUILD_ID),
+            [(1, "Ravens", "Falcons")],
+        )
+
+    def test_get_open_tournament_matches_for_betting_falls_back_for_unnamed_teams(self):
+        self._insert_match(1, "", "")
+
+        self.assertEqual(
+            self.helperObj.getOpenTournamentMatchesForBetting(GUILD_ID),
+            [(1, "Team 1", "Team 2")],
+        )
+
     def test_resolve_accepts_numeric_strings(self):
         self.assertEqual(self.helperObj.resolveWagerTeamValue("1", "Ravens", "Falcons"), 1)
         self.assertEqual(self.helperObj.resolveWagerTeamValue("2", "Ravens", "Falcons"), 2)
@@ -14691,6 +15154,49 @@ class WagerTeamNameResolutionTests(HelperTestCase):
 
     def test_resolve_returns_none_for_anything_else(self):
         self.assertIsNone(self.helperObj.resolveWagerTeamValue("Seahawks", "Ravens", "Falcons"))
+
+
+class CorrectWinnerTeamNamesTests(HelperTestCase):
+    def test_falls_back_with_no_last_result(self):
+        self.assertEqual(self.helperObj.getCorrectWinnerTeamNames(GUILD_ID), ("Team 1", "Team 2"))
+
+    # Names the teams that were actually IN the game being corrected
+    # (last_result's own team1_name/team2_name), not whatever's currently
+    # sitting in the live team1/team2 columns - a new game may well have
+    # started since the one being corrected.
+    def test_reads_the_last_results_own_team_names_not_the_live_roster(self):
+        self.helperObj.saveLastResult(
+            GUILD_ID, winning_team=1, wagers=[], team1_roster=[], team2_roster=[], deltas={},
+            team1_name="Ravens", team2_name="Falcons",
+        )
+        team1, team2 = Team(), Team()
+        team1.set_name("Eagles")
+        team2.set_name("Hawks")
+        self.helperObj.update(GUILD_ID, "team1", team1.serializeTeam())
+        self.helperObj.update(GUILD_ID, "team2", team2.serializeTeam())
+
+        self.assertEqual(self.helperObj.getCorrectWinnerTeamNames(GUILD_ID), ("Ravens", "Falcons"))
+
+    def test_reads_a_specific_matchs_own_team_names(self):
+        team1, team2 = Team(), Team()
+        team1.set_name("Ravens")
+        team2.set_name("Falcons")
+        self.cursor.execute(
+            "INSERT INTO tournament_matches(id, guildId, roundIndex, nodeIndex, team1, team2, state, "
+            "mode, messageId, channelId, winner, bracketType) "
+            "VALUES(5, ?, 0, 0, ?, ?, 'RESOLVED', 'simultaneous', NULL, NULL, 1, 'winners')",
+            (GUILD_ID, team1.serializeTeam(), team2.serializeTeam())
+        )
+        self.db.commit()
+
+        self.assertEqual(
+            self.helperObj.getCorrectWinnerTeamNames(GUILD_ID, match_id=5), ("Ravens", "Falcons")
+        )
+
+    def test_falls_back_for_an_unknown_match(self):
+        self.assertEqual(
+            self.helperObj.getCorrectWinnerTeamNames(GUILD_ID, match_id=999), ("Team 1", "Team 2")
+        )
 
 
 class PlaceTournamentWagerTests(HelperTestCase):
@@ -15994,6 +16500,19 @@ class LeaderboardHelperTests(HelperTestCase):
         self.cursor.execute("SELECT COUNT(*) FROM leaderboards")
         self.assertEqual(self.cursor.fetchone()[0], 0)
 
+    # A server that's never played ranked games still has plenty of
+    # overall stats - filtering to one specific, empty category shouldn't
+    # read as "the bot is broken" or "nobody's played anything," the same
+    # generic wording an actually-empty server gets.
+    async def test_empty_result_for_a_specific_stat_names_that_stat(self):
+        self._seed_players()
+        ctx = self._ctx()
+        await self.helperObj.leaderboardHelper(ctx, "ranked_wins", "desc")
+
+        ctx.response.send_message.assert_awaited_once_with(
+            "Nobody has any Ranked Wins stats to show yet in this server!", ephemeral=True
+        )
+
     def test_get_leaderboard_entries_computes_rates_and_none_for_no_games(self):
         self._seed_players()
         entries = self.helperObj.getLeaderboardEntries(GUILD_ID)
@@ -17048,6 +17567,20 @@ class CommandRegistrationTests(BotModuleTestCase):
                     f"{len(param.description)} chars",
                 )
 
+    # A team/tournament name is otherwise unbounded user text that can
+    # end up as a Discord voice channel name (100-char API limit) via
+    # /team set's own conflict-resolution path, or an embed title
+    # (256-char limit) via /team stats - capped here at the command
+    # boundary instead of patching every downstream site individually.
+    def test_team_and_tournament_names_are_length_capped(self):
+        for command_path, param_name in [
+            ("team create", "name"), ("team save", "name"), ("team rename", "new_name"),
+            ("tournament create", "name"),
+        ]:
+            cmd = self._command(command_path)
+            constraint = cmd._params[param_name].to_dict()
+            self.assertEqual(constraint.get("max_length"), 90, command_path)
+
     def test_all_expected_commands_registered(self):
         names = {c.name for c in self.bot.tree.get_commands()}
         expected = {
@@ -17072,6 +17605,16 @@ class CommandRegistrationTests(BotModuleTestCase):
     def test_make_teams_group_has_the_expected_subcommands(self):
         names = {c.name for c in self._command("make-teams").commands}
         self.assertEqual(names, {"random", "draft", "saved", "repeat"})
+
+    # /make-teams saved's whole point is loading a game against someone
+    # ELSE's team, so team1/team2 both need the widen-on-search
+    # autocomplete (every team in the guild once you type), not
+    # myTeamAutocomplete's own "just the caller's teams" scoping - that
+    # would hide the opponent from the picker entirely.
+    def test_make_teams_saved_autocompletes_from_every_team_not_just_the_callers_own(self):
+        cmd = self._command("make-teams saved")
+        self.assertIs(cmd._params["team1"].autocomplete, self.bot.teamStatsAutocomplete)
+        self.assertIs(cmd._params["team2"].autocomplete, self.bot.teamStatsAutocomplete)
 
     def test_team_group_has_the_expected_subcommands(self):
         names = {c.name for c in self._command("team").commands}
@@ -17336,6 +17879,94 @@ class WagerTeamAutocompleteTests(BotModuleTestCase):
         ctx = self._ctx(guild_id=guild_id)
 
         choices = await self.bot.wagerTeamAutocomplete(ctx, "")
+
+        self.assertEqual([c.name for c in choices], ["Team 1", "Team 2"])
+
+
+class WagerMatchIdAutocompleteTests(BotModuleTestCase):
+    def _insert_match(self, guild_id, match_id, team1_name, team2_name, state="AWAITING_RESULT",
+                       betting_closed=0):
+        team1, team2 = Team(), Team()
+        team1.set_name(team1_name)
+        team2.set_name(team2_name)
+        self.bot.cursor.execute(
+            "INSERT INTO tournament_matches(id, guildId, roundIndex, nodeIndex, team1, team2, state, "
+            "mode, bettingClosed) VALUES(?, ?, 0, 0, ?, ?, ?, 'simultaneous', ?)",
+            (match_id, guild_id, team1.serializeTeam(), team2.serializeTeam(), state, betting_closed)
+        )
+        self.bot.mainDB.commit()
+
+    async def test_suggests_every_currently_open_match(self):
+        guild_id = 9330
+        await self._insert_guild_row(guild_id)
+        self._insert_match(guild_id, 101, "Ravens", "Falcons")
+        self._insert_match(guild_id, 102, "Eagles", "Hawks")
+        ctx = self._ctx(guild_id=guild_id)
+
+        choices = await self.bot.wagerMatchIdAutocomplete(ctx, "")
+
+        self.assertEqual(
+            [(c.name, c.value) for c in choices],
+            [("Match #101: Ravens vs Falcons", 101), ("Match #102: Eagles vs Hawks", 102)],
+        )
+
+    async def test_excludes_resolved_and_betting_closed_matches(self):
+        guild_id = 9331
+        await self._insert_guild_row(guild_id)
+        self._insert_match(guild_id, 201, "Ravens", "Falcons", state="RESOLVED")
+        self._insert_match(guild_id, 202, "Eagles", "Hawks", betting_closed=1)
+        self._insert_match(guild_id, 203, "Lions", "Tigers")
+        ctx = self._ctx(guild_id=guild_id)
+
+        choices = await self.bot.wagerMatchIdAutocomplete(ctx, "")
+
+        self.assertEqual([c.value for c in choices], [203])
+
+    async def test_filters_by_current_input_against_team_names_too(self):
+        guild_id = 9332
+        await self._insert_guild_row(guild_id)
+        self._insert_match(guild_id, 301, "Ravens", "Falcons")
+        self._insert_match(guild_id, 302, "Eagles", "Hawks")
+        ctx = self._ctx(guild_id=guild_id)
+
+        choices = await self.bot.wagerMatchIdAutocomplete(ctx, "eagle")
+
+        self.assertEqual([c.value for c in choices], [302])
+
+
+class CorrectWinnerTeamAutocompleteTests(BotModuleTestCase):
+    async def test_suggests_the_last_games_real_team_names(self):
+        guild_id = 9340
+        await self._insert_guild_row(guild_id)
+        self.bot.helperObj.saveLastResult(
+            guild_id, winning_team=1, wagers=[], team1_roster=[], team2_roster=[], deltas={},
+            team1_name="Ravens", team2_name="Falcons",
+        )
+        ctx = self._ctx(guild_id=guild_id)
+
+        choices = await self.bot.correctWinnerTeamAutocomplete(ctx, "")
+
+        self.assertEqual([(c.name, c.value) for c in choices], [("Ravens", "1"), ("Falcons", "2")])
+
+    async def test_filters_by_current_input(self):
+        guild_id = 9341
+        await self._insert_guild_row(guild_id)
+        self.bot.helperObj.saveLastResult(
+            guild_id, winning_team=1, wagers=[], team1_roster=[], team2_roster=[], deltas={},
+            team1_name="Ravens", team2_name="Falcons",
+        )
+        ctx = self._ctx(guild_id=guild_id)
+
+        choices = await self.bot.correctWinnerTeamAutocomplete(ctx, "fal")
+
+        self.assertEqual([c.name for c in choices], ["Falcons"])
+
+    async def test_falls_back_to_generic_labels_with_no_last_result(self):
+        guild_id = 9342
+        await self._insert_guild_row(guild_id)
+        ctx = self._ctx(guild_id=guild_id)
+
+        choices = await self.bot.correctWinnerTeamAutocomplete(ctx, "")
 
         self.assertEqual([c.name for c in choices], ["Team 1", "Team 2"])
 
@@ -19370,6 +20001,27 @@ class NotifyCommandTests(BotModuleTestCase):
         mock.assert_awaited_with(ctx, role.members[-1], None)
         ctx.response.send_message.assert_awaited_once_with("Sent an invite to 2 members in Squad!")
 
+    # None (distinct from False) signals a channel-level failure - the
+    # invite link itself couldn't be created - that'll happen identically
+    # for every remaining target too, so this stops immediately with a
+    # specific message instead of quietly failing the same way through
+    # the whole role.
+    async def test_notify_stops_immediately_when_the_invite_cannot_be_created(self):
+        guild_id = 908
+        await self._insert_guild_row(guild_id)
+        ctx = self._ctx_in_voice(guild_id=guild_id)
+        role = SimpleNamespace(name="Squad", members=[FakeMember("A"), FakeMember("B")])
+
+        mock = AsyncMock(return_value=None)
+        with patch.object(self.bot.helperObj, "notifyHelper", mock):
+            await self._command("notify").callback(ctx, role=role)
+
+        mock.assert_awaited_once()  # never even tried the second member
+        ctx.response.send_message.assert_awaited_once()
+        text = ctx.response.send_message.call_args.args[0]
+        self.assertIn("permission", text)
+        self.assertTrue(ctx.response.send_message.call_args.kwargs.get("ephemeral"))
+
     async def test_notify_role_with_a_single_member_uses_singular_wording(self):
         guild_id = 906
         await self._insert_guild_row(guild_id)
@@ -19889,7 +20541,7 @@ class StatsCommandTests(BotModuleTestCase):
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "statsHelper", mock):
             await self._command("stats").callback(ctx, member=None)
-        mock.assert_awaited_once_with(ctx, None)
+        mock.assert_awaited_once_with(ctx, None, None)
 
     async def test_looks_up_another_member(self):
         ctx = self._ctx()
@@ -19897,7 +20549,14 @@ class StatsCommandTests(BotModuleTestCase):
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "statsHelper", mock):
             await self._command("stats").callback(ctx, member=target)
-        mock.assert_awaited_once_with(ctx, target)
+        mock.assert_awaited_once_with(ctx, target, None)
+
+    async def test_passes_through_a_given_game(self):
+        ctx = self._ctx()
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "statsHelper", mock):
+            await self._command("stats").callback(ctx, game="Valorant")
+        mock.assert_awaited_once_with(ctx, None, "Valorant")
 
 
 class TeamListCommandTests(BotModuleTestCase):
@@ -19937,16 +20596,36 @@ class SetCorrectWinnerCommandTests(BotModuleTestCase):
         ctx = self._ctx()
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "reportCorrectWinnerHelper", mock):
-            choice = app_commands.Choice(name="Team 2", value=2)
-            await self._command("set correct-winner").callback(ctx, choice)
+            await self._command("set correct-winner").callback(ctx, team="2")
         mock.assert_awaited_once_with(ctx, 2, None, False)
+
+    # Autocomplete only offers "1"/"2" (mirroring /wager team's own
+    # value shape), but the real team name typed out by hand still
+    # resolves too - resolveWagerTeamValue is fully generic, reused as-is
+    # here.
+    async def test_delegates_with_a_typed_out_team_name(self):
+        ctx = self._ctx()
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "reportCorrectWinnerHelper", mock):
+            await self._command("set correct-winner").callback(ctx, team="team 2")
+        mock.assert_awaited_once_with(ctx, 2, None, False)
+
+    async def test_rejects_a_team_that_matches_neither_name(self):
+        ctx = self._ctx()
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "reportCorrectWinnerHelper", mock):
+            await self._command("set correct-winner").callback(ctx, team="Purple Team")
+        mock.assert_not_awaited()
+        ctx.response.send_message.assert_awaited_once()
+        text = ctx.response.send_message.call_args.args[0]
+        self.assertIn("Couldn't tell which team", text)
+        self.assertTrue(ctx.response.send_message.call_args.kwargs.get("ephemeral"))
 
     async def test_delegates_with_match_id(self):
         ctx = self._ctx()
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "reportCorrectWinnerHelper", mock):
-            choice = app_commands.Choice(name="Team 2", value=2)
-            await self._command("set correct-winner").callback(ctx, choice, match_id=42)
+            await self._command("set correct-winner").callback(ctx, team="2", match_id=42)
         mock.assert_awaited_once_with(ctx, 2, 42, False)
 
     async def test_delegates_with_invalidate_and_no_team(self):

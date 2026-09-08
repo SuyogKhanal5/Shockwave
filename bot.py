@@ -213,7 +213,8 @@ if not db_already_existed:
         "default_elo, betting_opened_at, disliked_role_user_ids, draft_pick_page, "
         "draft_players_message_id, draft_snake, betting_closed_message_id, make_teams_message_ids, "
         "matchup_message_id, roster_starting, roster_permissions_strict, max_wager, betting_enabled, "
-        "matchup_channel, current_game, game, draft_picker_message_id, welcome_message_enabled)"
+        "matchup_channel, current_game, game, draft_picker_message_id, welcome_message_enabled, "
+        "draft_last_pick_team, draft_last_pick_player)"
     )
     mainDB.commit()
 else:
@@ -369,6 +370,17 @@ else:
     # before this setting existed. An admin who doesn't want it can turn
     # it off, same shape as /set betting.
     ensure_column("servers", "welcome_message_enabled", "INTEGER", "1")
+    # Which team (1 or 2) and player (a serializePlayer()'d "(id,name)",
+    # same format captain1/captain2 already use) made the most recent
+    # draft pick, backing CaptainsDraftPickView's Undo button
+    # (_handleDraftUndoClick). NULL/empty until a pick's actually been
+    # made. Overwritten by every pick (slot click or Random), so only the
+    # single most recent one is ever undo-able - not a multi-level undo
+    # stack. Cleared by clearTeamsHelper alongside team1/team2/players, so
+    # a stale value from an abandoned draft can never be undone into a
+    # brand new one.
+    ensure_column("servers", "draft_last_pick_team", "INTEGER")
+    ensure_column("servers", "draft_last_pick_player", "TEXT")
 
 # Per-member currency: gold balance plus win/loss and wagering stats, one
 # row per (guild, user). Shared across every game a server plays. Elo and
@@ -1000,7 +1012,7 @@ def ensure_guild_row(guild_id, guild_name):
         "INSERT INTO servers VALUES(?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, "
         "NULL, NULL, NULL, 'NONE', NULL, NULL, 0, NULL, NULL, ?, "
         "NULL, NULL, NULL, 0, NULL, NULL, NULL, 0, NULL, 0, NULL, NULL, NULL, 0, 0, NULL, 1, NULL, "
-        "'League', NULL, NULL, 1)",
+        "'League', NULL, NULL, 1, NULL, NULL)",
         (guild_id, guild_name, helper.BETTING_DURATION_SECONDS)
     )
     cursor.execute("INSERT OR IGNORE INTO guild_games(guildId, game) VALUES(?, 'League')", (guild_id,))
@@ -1228,6 +1240,24 @@ async def setDefaultElo(ctx, elo: int):
 setDefaultElo.error(_setAdminPermissionError)
 
 
+# Always suggests the last game's own real team names (getCorrectWinnerTeamNames
+# with no match_id), the same limitation /wager team's own wagerTeamAutocomplete
+# documents: discord.py's real option-resolution for interaction.namespace
+# can't be faithfully exercised by this file's own FakeInteraction-based
+# tests, and match_id comes after team in the command's own parameter
+# order anyway, so it's rarely even set yet at this point. setCorrectWinner's
+# own server-side resolution still matches against the real match_id's team
+# names when one is given. This autocomplete only builds the suggestion list.
+async def correctWinnerTeamAutocomplete(ctx, current: str):
+    name1, name2 = helperObj.getCorrectWinnerTeamNames(ctx.guild.id)
+    current = current.lower()
+    choices = [
+        app_commands.Choice(name=name1, value="1"),
+        app_commands.Choice(name=name2, value="2"),
+    ]
+    return [c for c in choices if current in c.name.lower()]
+
+
 @setGroup.command(
     name="correct-winner",
     description="Admin: fix a misreported winner, or invalidate the last game entirely"
@@ -1237,15 +1267,18 @@ setDefaultElo.error(_setAdminPermissionError)
     match_id="Optional: correct a specific tournament match instead of the last game",
     invalidate="Undo the last game entirely instead of picking a winner: refunds bets, undoes elo/records/gold",
 )
-@app_commands.choices(team=[
-    app_commands.Choice(name="Team 1", value=1),
-    app_commands.Choice(name="Team 2", value=2),
-])
+@app_commands.autocomplete(team=correctWinnerTeamAutocomplete)
 @app_commands.checks.has_permissions(manage_guild=True)
-async def setCorrectWinner(
-    ctx, team: app_commands.Choice[int] = None, match_id: int = None, invalidate: bool = False
-):
-    team_value = team.value if team is not None else None
+async def setCorrectWinner(ctx, team: str = None, match_id: int = None, invalidate: bool = False):
+    team_value = None
+    if team is not None:
+        name1, name2 = helperObj.getCorrectWinnerTeamNames(ctx.guild.id, match_id)
+        team_value = helperObj.resolveWagerTeamValue(team, name1, name2)
+        if team_value is None:
+            await ctx.response.send_message(
+                f"Couldn't tell which team **{team}** is. Pick **{name1}** or **{name2}**.", ephemeral=True
+            )
+            return
     await helperObj.reportCorrectWinnerHelper(ctx, team_value, match_id, invalidate)
 
 setCorrectWinner.error(_setAdminPermissionError)
@@ -1388,6 +1421,25 @@ async def wagerTeamAutocomplete(ctx, current: str):
     return [c for c in choices if current in c.name.lower()]
 
 
+# match_id used to be pure manual lookup: betting on a specific tournament
+# match meant separately running /tournament print-bracket, scanning the
+# image for a match number, then typing a bare integer with nothing else
+# to go on. This suggests every match currently open for betting
+# (getOpenTournamentMatchesForBetting, the same "open" condition
+# _placeTournamentWager itself enforces) as "Match #N: TeamA vs TeamB", so
+# the id and the matchup are visible together right in the picker.
+# Filtering matches team names too, not just the id, since `current` is
+# whatever's actually been typed into the field so far, digits or not.
+async def wagerMatchIdAutocomplete(ctx, current: str):
+    current = current.lower()
+    matches = helperObj.getOpenTournamentMatchesForBetting(ctx.guild.id)
+    choices = [
+        app_commands.Choice(name=f"Match #{match_id}: {name1} vs {name2}", value=match_id)
+        for match_id, name1, name2 in matches
+    ]
+    return [c for c in choices if current in c.name.lower()][:25]
+
+
 @wagerGroup.command(
     name="team",
     description="Wager gold on the current game, or on one tournament match if you give a match id"
@@ -1396,7 +1448,7 @@ async def wagerTeamAutocomplete(ctx, current: str):
     amount="Amount of gold to wager", team="Which team you think will win",
     match_id="A match's id, shown as \"Match #N\" in the bracket; omit to bet on the current game instead"
 )
-@app_commands.autocomplete(team=wagerTeamAutocomplete)
+@app_commands.autocomplete(team=wagerTeamAutocomplete, match_id=wagerMatchIdAutocomplete)
 async def wagerTeam(ctx, amount: int, team: str, match_id: int = None):
     name1, name2 = helperObj.getWagerTeamNames(ctx.guild.id, match_id)
     team_value = helperObj.resolveWagerTeamValue(team, name1, name2)
@@ -1441,9 +1493,13 @@ async def give(ctx, member: discord.Member, amount: int):
     name="stats",
     description="View your (or another player's) game record, elo, and economy stats"
 )
-@app_commands.describe(member="Whose stats to look up; defaults to you")
-async def stats(ctx, member: discord.Member = None):
-    await helperObj.statsHelper(ctx, member)
+@app_commands.describe(
+    member="Whose stats to look up; defaults to you",
+    game="Which game's elo/record to show; defaults to this server's current game",
+)
+@app_commands.autocomplete(game=gameAutocomplete)
+async def stats(ctx, member: discord.Member = None, game: str = None):
+    await helperObj.statsHelper(ctx, member, game)
 
 
 # Only the caller's own available titles (CARD_DEFAULT_TITLE plus
@@ -1621,7 +1677,7 @@ COMMAND_HELP = {
     "clear achievements": "Wipes the current teams/draft, and resets earned achievements for every player, or just one player if user is set. Confirmation required. Requires the Manage Server permission.",
     "clear card-unlocks": "Wipes the current teams/draft, and resets trading-card unlocks for every player, or just one player if user is set. Confirmation required. Requires the Manage Server permission.",
     "make-teams random": "Randomly splits everyone in your voice channel into two even teams and posts the roster, with a Start button on it to move everyone and open betting when you're ready (Start (no move) to open betting without moving anyone). If both teams land at exactly 5 players, Random Roles and Balanced Roles buttons also appear: Random Roles shuffles who's shown in which of Top/Jungle/Mid/Bottom/Support, while Balanced Roles assigns them by elo + each player's liked roles from /setup, the same logic ranked roles uses, without moving anyone between teams. ranked:true forms roughly elo-balanced teams instead, and tracks elo once a winner is reported. Combine ranked:true with use_roles:true (10 players only) to have the roster already show Top/Jungle/Mid/Bottom/Support the moment it posts, nudging the split toward whichever side is more balanced once roles are considered.",
-    "make-teams draft": "Starts a live captain draft. Name two captains, or use_random to pick two automatically; everyone else lands in a pool the captains draft from using the buttons on the posted picker (blue for Team 1's turn, red for Team 2's, plus a Random pick and paging once the pool is too big for one page). Once both teams are set, press Start on the roster to move everyone and open betting, or Start (no move) to open betting without moving anyone. ranked:true tracks elo for the resulting game. snake:true reverses pick order every 2 picks (1,2,2,1,1,2,...) instead of alternating every single pick, so neither captain always drafts right after seeing the other's pick.",
+    "make-teams draft": "Starts a live captain draft. Name two captains, or use_random to pick two automatically; everyone else lands in a pool the captains draft from using the buttons on the posted picker (blue for Team 1's turn, red for Team 2's, plus a Random pick and paging once the pool is too big for one page). Misclicked a pick? An Undo last pick button appears right after, but only for whoever just made it, and only while the pool's small enough that pagination hasn't kicked in. Once both teams are set, press Start on the roster to move everyone and open betting, or Start (no move) to open betting without moving anyone. ranked:true tracks elo for the resulting game. snake:true reverses pick order every 2 picks (1,2,2,1,1,2,...) instead of alternating every single pick, so neither captain always drafts right after seeing the other's pick.",
     "make-teams saved": "Loads two persistent teams straight into a casual or ranked game, skipping the random-split-or-draft step. Posts a roster with the same Start/Start (no move) buttons as /make-teams random to start it.",
     "make-teams repeat": "Re-posts the exact same two teams from whichever of /make-teams random, /make-teams draft, or /make-teams saved ran last, instead of drawing a fresh random split or captains draft. Stays ranked if the last game was ranked, casual if it was casual. Cancels an actively in-progress game from those same teams first (refund + move back) if there is one.",
     "notify": "DMs a one-time invite link to your voice channel, to one member, or to everyone holding a given role. message optionally replaces the default invite text; either way it's signed \"Sent by\" you. You must be sitting in a voice channel yourself to run this.",
@@ -1630,7 +1686,7 @@ COMMAND_HELP = {
     "daily": "Claims 1000 free gold. Once per calendar day, per player.",
     "give": "Gives some of your gold to another player. Immediate, no confirmation from either side needed.",
     "current-game": "Shows which game this server is currently tracking (see /set game).",
-    "stats": "Shows a player's elo, ranked/casual/game record, betting record, balance, and net gold; defaults to you. Press Avatar to toggle between this server's own identity (nickname and profile picture) and their regular Discord one (display name and account-wide avatar) - the two always switch together, or Card to replace the whole embed with a customizable trading card; Back swaps back.",
+    "stats": "Shows a player's elo, ranked/casual/game record, betting record, balance, and net gold; defaults to you. game looks up a different game's elo/record than whichever one /set game currently has this server tracking - defaults to the current game, autocompletes from games this server has actually tracked before, and rejects one it's never seen. Press Avatar to toggle between this server's own identity (nickname and profile picture) and their regular Discord one (display name and account-wide avatar) - the two always switch together, or Card to replace the whole embed with a customizable trading card; Back swaps back.",
     "card-set": "Equips your unlocked trading-card title, color scheme, and/or font in one go (see /stats' Card button); set any combination of the three at once. Reaching Diamond, Master, Grandmaster, or Challenger permanently unlocks that tier's own title and scheme, even if you derank afterward; \"Default\" is always available for both. Fonts are purchased from /shop buy.",
     "shop preview": "Shows every option for one customization type (Logos, Card Titles, Color Schemes, or Fonts) in a single gallery image (a few images only if there are too many to fit), regardless of what you've personally unlocked yet.",
     "shop browse": "Browse every trading-card title, color scheme, and font purchasable with gold, with a ✅ next to anything you already own. Sort: Price / Sort: Owned buttons under the listing re-sort each category (Ascending/Descending toggle which way) without needing to re-run the command.",
@@ -2089,14 +2145,18 @@ async def myTeamAutocomplete(ctx, current: str):
     return [app_commands.Choice(name=n, value=n) for n in names[:25]]
 
 
-# /team stats works on any team in the guild by exact name. It's a lookup,
-# not an action you need to be rostered for. But suggesting literally
-# every team in a large server the instant the param is focused would bury
-# the ones you actually belong to under everyone else's. So an empty box
-# still suggests just your own teams (myTeamAutocomplete's own behavior,
-# admin carve-out included). The moment you actually type something,
-# that's a deliberate search, so this widens to every team in the guild
-# that matches it, the same as /team list's own search would.
+# /team stats, and /make-teams saved's team1/team2, all work on any team in
+# the guild by exact name - a lookup, not an action you need to be rostered
+# for. /make-teams saved especially needs this: the whole point of the
+# command is loading up a game against someone else's team, so restricting
+# suggestions to teams the caller's own would hide the opponent entirely.
+# But suggesting literally every team in a large server the instant the
+# param is focused would bury the ones you actually belong to under
+# everyone else's. So an empty box still suggests just your own teams
+# (myTeamAutocomplete's own behavior, admin carve-out included). The moment
+# you actually type something, that's a deliberate search, so this widens
+# to every team in the guild that matches it, the same as /team list's own
+# search would.
 async def teamStatsAutocomplete(ctx, current: str):
     if not current:
         return await myTeamAutocomplete(ctx, current)
@@ -2126,7 +2186,9 @@ tournamentGroup = app_commands.Group(
     numteams="Number of teams the bracket holds",
     double_elim="Double elimination instead of single; defaults to single"
 )
-async def tournamentCreate(ctx, name: str, teamsize: int, numteams: int, double_elim: bool = False):
+async def tournamentCreate(
+    ctx, name: app_commands.Range[str, 1, 90], teamsize: int, numteams: int, double_elim: bool = False
+):
     await helperObj.createTournamentHelper(ctx, name, teamsize, numteams, double_elim)
 
 
@@ -2221,7 +2283,7 @@ teamGroup = app_commands.Group(
     name="Team name", team_size="How many players the team is looking for",
     captain="Optional: make this member the captain instead of you",
 )
-async def teamCreate(ctx, name: str, team_size: int, captain: discord.Member = None):
+async def teamCreate(ctx, name: app_commands.Range[str, 1, 90], team_size: int, captain: discord.Member = None):
     await helperObj.createTeamHelper(ctx, name, team_size, captain)
 
 
@@ -2236,7 +2298,7 @@ async def teamCreate(ctx, name: str, team_size: int, captain: discord.Member = N
     app_commands.Choice(name="Team 1", value=1),
     app_commands.Choice(name="Team 2", value=2),
 ])
-async def teamSave(ctx, team: app_commands.Choice[int], name: str):
+async def teamSave(ctx, team: app_commands.Choice[int], name: app_commands.Range[str, 1, 90]):
     await helperObj.saveTeamHelper(ctx, team.value, name)
 
 
@@ -2318,7 +2380,7 @@ async def teamSet(
 )
 @app_commands.describe(team="Current name of the team", new_name="New name for the team")
 @app_commands.autocomplete(team=myCaptainedTeamAutocomplete)
-async def teamRename(ctx, team: str, new_name: str):
+async def teamRename(ctx, team: str, new_name: app_commands.Range[str, 1, 90]):
     await helperObj.teamRenameHelper(ctx, team, new_name)
 
 
@@ -2409,7 +2471,7 @@ tree.add_command(teamGroup)
     team2="Name of the second persistent team",
     ranked="Track elo for this game; defaults to casual"
 )
-@app_commands.autocomplete(team1=myTeamAutocomplete, team2=myTeamAutocomplete)
+@app_commands.autocomplete(team1=teamStatsAutocomplete, team2=teamStatsAutocomplete)
 async def makeTeamsSaved(ctx, team1: str, team2: str, ranked: bool = False):
     await helperObj.useTeamsHelper(ctx, team1, team2, ranked)
 
@@ -2454,11 +2516,22 @@ async def notify(ctx, member: discord.Member = None, role: discord.Role = None, 
     # interaction, so calling it once per role member in a loop is safe.
     # ctx.response.send_message below still only ever fires once either
     # way. A member with closed DMs (notifyHelper returns False) doesn't
-    # stop the rest of the batch from being invited.
+    # stop the rest of the batch from being invited. None is different:
+    # the invite link itself couldn't be created, a channel-level
+    # permission problem that'll fail identically for every remaining
+    # target too, so this stops right there with a specific message
+    # instead of quietly failing the same way N more times.
     targets = role.members if role is not None else [member]
     failures = 0
     for target in targets:
-        if not await helperObj.notifyHelper(ctx, target, message):
+        sent = await helperObj.notifyHelper(ctx, target, message)
+        if sent is None:
+            await ctx.response.send_message(
+                "I don't have permission to create an invite link in your voice channel.",
+                ephemeral=True,
+            )
+            return
+        if not sent:
             failures += 1
 
     if member is not None:

@@ -2608,24 +2608,61 @@ class _DraftPickSlotButton(discord.ui.DynamicItem[discord.ui.Button], template=r
         await interaction.client.helperObj._handleDraftPickSlotClick(interaction, self.index)
 
 
+# A plain (non-DynamicItem) Button, unlike _DraftPickSlotButton above:
+# Undo's custom_id never varies (there's only ever one), so it doesn't
+# need per-instance reconstruction from a bare custom_id the way a slot
+# button's index does. Added manually via add_item rather than the
+# @discord.ui.button decorator CaptainsDraftPickView's other fixed
+# buttons use, since decorator-registered buttons all get added
+# unconditionally the moment super().__init__() runs, before there's any
+# chance to compute whether row 4 actually has room left - a 6th
+# decorator-declared row=4 button alongside Random/First/Prev/Next/Last
+# overflows immediately at construction time regardless of what gets
+# removed afterward. Building this one by hand, on a row CaptainsDraftPickView
+# has already worked out has space, sidesteps that entirely.
+class _DraftUndoButton(discord.ui.Button):
+    def __init__(self, helperObj, row):
+        super().__init__(
+            label="Undo last pick ↩️", style=discord.ButtonStyle.secondary, row=row,
+            custom_id="shockwave:draft_pick:undo",
+        )
+        self.helperObj = helperObj
+
+    async def callback(self, interaction):
+        await self.helperObj._handleDraftUndoClick(interaction)
+
+
 # The draft picker's own posted message: one _DraftPickSlotButton per
 # player on the current page (blue while Team 1 is picking, red for Team
 # 2, recomputed fresh every render, never toggled in place), a Random
-# button that's always present, and First/Prev/Next/Last only once the
-# pool no longer fits on one page (see DRAFT_PICK_MAX_UNPAGINATED). No
-# on_timeout at all: timeout=None like WinnerReportView, since a draft
-# waiting on a captain shouldn't quietly lock up mid-pick the way a
+# button that's always present, First/Prev/Next/Last only once the pool
+# no longer fits on one page (see DRAFT_PICK_MAX_UNPAGINATED), and Undo
+# only once there's actually a pick to undo AND row 4 has a free slot for
+# it. No on_timeout at all: timeout=None like WinnerReportView, since a
+# draft waiting on a captain shouldn't quietly lock up mid-pick the way a
 # confirm dialog reasonably can.
+#
+# No view-level interaction_check: unlike most persistent views in this
+# file, this one's buttons don't share a single permission rule.
+# _DraftPickSlotButton checks its own turn independently (it has to - see
+# its own comment), _handleDraftPickRandomClick/_handleDraftPickPageClick
+# check theirs inline, and _handleDraftUndoClick checks against whoever
+# made the LAST pick instead - the opposite of "whose turn is it now,"
+# since turn has already flipped away from them by the time Undo would
+# ever be pressed. A single view-wide check couldn't express both rules
+# at once, so each handler owns its own, the same way
+# _handleReadyClick/_handleTournamentMatchReportClick already do for
+# their own views.
 class CaptainsDraftPickView(discord.ui.View):
-    def __init__(self, helperObj, pool_page=(), turn=1, paginated=False):
+    def __init__(self, helperObj, pool_page=(), turn=1, paginated=False, can_undo=False):
         super().__init__(timeout=None)
         self.helperObj = helperObj
-        # Random/First/Prev/Next/Last already exist as children the moment
-        # super().__init__() runs, since decorator-registered buttons are
-        # added by the base View before this body even starts. So the
-        # unwanted nav buttons have to come out BEFORE the slot buttons go
-        # in, or a full 24-slot non-paginated page plus all 5 fixed
-        # buttons would overflow the 25-child cap.
+        # Random/First/Prev/Next/Last already exist as children the
+        # moment super().__init__() runs, since decorator-registered
+        # buttons are added by the base View before this body even
+        # starts. So the unwanted nav buttons have to come out BEFORE the
+        # slot buttons go in, or a full 24-slot non-paginated page plus
+        # every fixed button would overflow the 25-child cap.
         if not paginated:
             self.remove_item(self.first)
             self.remove_item(self.prev)
@@ -2635,8 +2672,16 @@ class CaptainsDraftPickView(discord.ui.View):
         for i, player in enumerate(pool_page):
             self.add_item(_DraftPickSlotButton(i, player.get_name(), style, i // 5))
 
-    async def interaction_check(self, interaction):
-        return await self.helperObj._isDraftPickTurn(interaction)
+        # Row 4 holds Random (always), First/Prev/Next/Last (only once
+        # paginated), and any slot buttons that spilled onto it (an
+        # unpaginated pool between DRAFT_PICK_PAGE_SIZE+1 and
+        # DRAFT_PICK_MAX_UNPAGINATED players puts i//5==4 slots there
+        # too). Undo only gets added if a genuine slot remains - it's
+        # fine for it to simply not show up for a pool sized right at
+        # that edge; there's no reasonable extra row left to put it on.
+        row4_count = sum(1 for item in self.children if item.row == 4)
+        if can_undo and row4_count < 5:
+            self.add_item(_DraftUndoButton(helperObj, 4))
 
     @discord.ui.button(
         label=f"Random {DRAFT_PICK_RANDOM_EMOJI}", style=discord.ButtonStyle.success, row=4,
@@ -3854,8 +3899,21 @@ class helpers():
                 # the game, fall back to DEFAULT_TEAM_CHANNEL_NAMES,
                 # creating them if they don't already exist, and remember
                 # them as this guild's own from here on so this only
-                # happens once.
-                channel1, channel2 = await self._ensureDefaultTeamChannels(guild)
+                # happens once. This is a fresh server's very first Start
+                # click, before interaction.response.defer() below - a
+                # missing Manage Channels permission would otherwise
+                # propagate uncaught straight to Discord's own generic
+                # "This interaction failed," with no clue what actually
+                # went wrong or how to fix it.
+                try:
+                    channel1, channel2 = await self._ensureDefaultTeamChannels(guild)
+                except discord.HTTPException:
+                    await interaction.response.send_message(
+                        "I need the Manage Channels permission to create the team voice channels "
+                        f"({', '.join(DEFAULT_TEAM_CHANNEL_NAMES)}). Ask an admin to grant it, or "
+                        "set up the channels yourself with /set channels."
+                    )
+                    return
 
         # BUG-PRONE PATTERN AVOIDED: flip this synchronously, with no
         # `await` between it and the checks above, so a second
@@ -3881,16 +3939,46 @@ class helpers():
         if move:
             self.update(guild_id, "original_channel", str(original_channel))
 
+            # _findRosterVoiceChannel above only guarantees SOMEONE from
+            # the roster is in voice, not everyone - a drafted/random-
+            # teamed player can leave voice (or never join it in the
+            # first place; captains aren't checked at all) between the
+            # roster posting and Start being clicked. move_to raises
+            # discord.HTTPException for anyone not currently connected to
+            # a voice channel, so this can't be a bare loop: an uncaught
+            # exception here would die mid-move with nothing shown to the
+            # user (the interaction's already been deferred, and no View
+            # in this file overrides on_error), leaving some players moved
+            # and others not, and no matchup image or betting ever
+            # opened. Collecting failures and continuing regardless keeps
+            # this in line with the "nobody in voice at all" case above,
+            # which already degrades gracefully instead of refusing to
+            # start.
+            not_moved = []
             for player in team1.get_players():
                 member = discord.utils.get(guild.members, id=player.get_id())
-                if member is not None:
+                if member is None:
+                    continue
+                try:
                     await member.move_to(channel1)
+                except discord.HTTPException:
+                    not_moved.append(member.display_name)
             for player in team2.get_players():
                 member = discord.utils.get(guild.members, id=player.get_id())
-                if member is not None:
+                if member is None:
+                    continue
+                try:
                     await member.move_to(channel2)
+                except discord.HTTPException:
+                    not_moved.append(member.display_name)
 
-            await channel.send("Moved!")
+            if not_moved:
+                await channel.send(
+                    f"Moved everyone else! Couldn't move {', '.join(not_moved)} (not currently in a "
+                    "voice channel)."
+                )
+            else:
+                await channel.send("Moved!")
         else:
             # Overwrite whatever original_channel might already be on
             # record. (captainsHelper captures the drafting caller's voice
@@ -4032,7 +4120,8 @@ class helpers():
         else:
             pool_page = pool[:DRAFT_PICK_MAX_UNPAGINATED]
 
-        view = CaptainsDraftPickView(self, pool_page, turn, paginated)
+        can_undo = self.get(guild_id, "draft_last_pick_team") is not None
+        view = CaptainsDraftPickView(self, pool_page, turn, paginated, can_undo)
 
         captain = Player()
         captain.deserializePlayer(self.get(guild_id, f"captain{turn}"))
@@ -4048,11 +4137,12 @@ class helpers():
             content += f" ({label})"
         return content, view
 
-    # Shared by CaptainsDraftPickView's interaction_check and
-    # _DraftPickSlotButton's own. (A DynamicItem reconstructed after a
-    # restart isn't necessarily attached to a live View instance, so it
-    # needs this check itself rather than relying on the containing
-    # View's.) Re-derives whose turn it is from `servers` fresh every
+    # Shared by _DraftPickSlotButton's own interaction_check and, called
+    # inline, by _handleDraftPickRandomClick/_handleDraftPickPageClick -
+    # CaptainsDraftPickView has no view-level interaction_check of its own
+    # (see its own comment: Undo needs a different rule than everything
+    # else on the same view, so each button owns its own check instead of
+    # sharing one). Re-derives whose turn it is from `servers` fresh every
     # time, since there's no per-instance state to trust on a persistent
     # view. Checked against draft_picker_message_id first, the same
     # "an older message's buttons stop working once a newer one takes
@@ -4107,6 +4197,8 @@ class helpers():
         await self._applyDraftPick(interaction, member, turn)
 
     async def _handleDraftPickRandomClick(self, interaction):
+        if not await self._isDraftPickTurn(interaction):
+            return
         member = await self.getRandomMember(interaction)
         if member is None:
             await interaction.response.send_message("There are no players left to choose from!", ephemeral=True)
@@ -4115,6 +4207,8 @@ class helpers():
         await self._applyDraftPick(interaction, member, turn)
 
     async def _handleDraftPickPageClick(self, interaction, direction):
+        if not await self._isDraftPickTurn(interaction):
+            return
         guild_id = interaction.guild_id
         players = Team()
         players.deserializeTeam(self.get(guild_id, "players") or "")
@@ -4215,6 +4309,13 @@ class helpers():
             players.remove_player(toRemove)
         self.update(guild_id, "players", players.serializeTeam())
         self.update(guild_id, "draft_pick_page", 0)
+        # Backs CaptainsDraftPickView's Undo button (_handleDraftUndoClick):
+        # overwritten by every pick, so only this single most recent one is
+        # ever undo-able. Harmless to set even on the pick that completes
+        # the draft below - the picker view (and its Undo button) is gone
+        # by then regardless, so it just never gets read back.
+        self.update(guild_id, "draft_last_pick_team", turn)
+        self.update(guild_id, "draft_last_pick_player", player.serializePlayer())
 
         # Also wrap up once both teams reach team_size, even if the pool
         # still has people left in it. A voice channel with more people
@@ -4261,6 +4362,80 @@ class helpers():
         )
         await self._updateDraftEmbeds(guild_id, interaction.channel, team1, team2, players)
 
+    # CaptainsDraftPickView's Undo button: the deliberate opposite of
+    # _isDraftPickTurn. By the time Undo would ever be pressed, `turn` has
+    # already flipped away from whoever just picked - so this checks
+    # against draft_last_pick_team's own captain instead of the current
+    # turn's. Same staleness guard as _isDraftPickTurn (an abandoned
+    # draft's old picker message shouldn't be clickable), plus a "was
+    # there actually a pick to undo" check, since draft_last_pick_team is
+    # cleared by clearTeamsHelper and never set until a first pick lands.
+    async def _isDraftUndoAllowed(self, interaction):
+        guild_id = interaction.guild_id
+        if guild_id is None:
+            return False
+        stored_message_id = self.get(guild_id, "draft_picker_message_id")
+        if stored_message_id is None or int(stored_message_id) != interaction.message.id:
+            await interaction.response.send_message("This draft is no longer active.", ephemeral=True)
+            return False
+        last_team = self.get(guild_id, "draft_last_pick_team")
+        if last_team is None:
+            await interaction.response.send_message("Nothing to undo yet.", ephemeral=True)
+            return False
+        captain = Player()
+        captain.deserializePlayer(self.get(guild_id, f"captain{last_team}"))
+        if interaction.user.id != captain.get_id():
+            await interaction.response.send_message(
+                "Only the captain who made the last pick can undo it.", ephemeral=True
+            )
+            return False
+        return True
+
+    # Reverses the single most recent pick: moves the player back from
+    # whichever team drafted them into the pool, restores `turn` to that
+    # same team (correct regardless of straight/snake order, since this
+    # replays the exact team draft_last_pick_team recorded rather than
+    # recomputing "whose turn comes next" from scratch), and clears
+    # draft_last_pick_team/_player so Undo can't be pressed again for a
+    # pick it's already reverted - single-step, not a multi-level undo
+    # stack. _isDraftUndoAllowed has already confirmed there's something
+    # to undo and that the caller is the captain who made it.
+    async def _handleDraftUndoClick(self, interaction):
+        if not await self._isDraftUndoAllowed(interaction):
+            return
+        guild_id = interaction.guild_id
+
+        last_team = self.get(guild_id, "draft_last_pick_team")
+        last_player = Player()
+        last_player.deserializePlayer(self.get(guild_id, "draft_last_pick_player"))
+
+        players = Team()
+        players.deserializeTeam(self.get(guild_id, "players") or "")
+        team1 = Team()
+        team1.deserializeTeam(self.get(guild_id, "team1") or "")
+        team2 = Team()
+        team2.deserializeTeam(self.get(guild_id, "team2") or "")
+
+        team = team1 if last_team == 1 else team2
+        picked = next((p for p in team.get_players() if p.get_id() == last_player.get_id()), None)
+        if picked is not None:
+            team.remove_player(picked)
+        players.add_player(last_player)
+
+        self.update(guild_id, "team1", team1.serializeTeam())
+        self.update(guild_id, "team2", team2.serializeTeam())
+        self.update(guild_id, "players", players.serializeTeam())
+        self.update(guild_id, "turn", last_team)
+        self.update(guild_id, "draft_pick_page", 0)
+        self.update(guild_id, "draft_last_pick_team", None)
+        self.update(guild_id, "draft_last_pick_player", "")
+
+        content, view = self._renderDraftPickView(guild_id)
+        await interaction.response.edit_message(
+            content=f"{last_player.get_name()}'s pick undone.\n\n{content}", view=view
+        )
+        await self._updateDraftEmbeds(guild_id, interaction.channel, team1, team2, players)
+
     # Clears all current teams.
     #
     # Every team-formation command (/make-teams random, /make-teams draft,
@@ -4302,18 +4477,34 @@ class helpers():
         # above. Whichever team-formation helper runs next re-stamps it
         # from current_game.
         self.update(guild_id, "game", None)
+        # A stale value from an abandoned/superseded draft could otherwise
+        # be undone straight into a brand new one's team1/team2.
+        self.update(guild_id, "draft_last_pick_team", None)
+        self.update(guild_id, "draft_last_pick_player", "")
 
     # `message`, when given, replaces the default "You've been invited..."
     # line entirely rather than being appended alongside it. The invite
     # link and a "Sent by" attribution line (since a custom message might
     # not mention the sender at all) still always follow it. Returns
-    # whether the DM actually went through, so /notify can tally
+    # whether the DM actually went through (so /notify can tally
     # successes/failures across a whole role instead of one member's
-    # closed DMs silently aborting the rest of the batch.
+    # closed DMs silently aborting the rest of the batch), or None if the
+    # invite itself couldn't even be created - a channel-level permission
+    # problem (missing Create Instant Invite), not a per-target one, so
+    # unlike a closed-DMs failure it'll happen identically for every
+    # remaining target too. Each target needs their own invite rather
+    # than sharing one (max_uses=1 - a single invite only ever admits the
+    # first person who clicks it), so this can't be hoisted out of
+    # /notify's own per-target loop, but the caller can and does stop
+    # calling in there the first time this happens instead of failing the
+    # same way N more times.
     async def notifyHelper(self, ctx, member: discord.Member, message: str = None):
         channel = await member.create_dm()
         invite_channel = ctx.user.voice.channel
-        invite_link = await invite_channel.create_invite(max_uses=1, unique=True)
+        try:
+            invite_link = await invite_channel.create_invite(max_uses=1, unique=True)
+        except discord.HTTPException:
+            return None
 
         body = message if message is not None else "You've been invited to play in a game!"
         content = (
@@ -4331,9 +4522,17 @@ class helpers():
     # an Interaction so it can run both from cancelGameHelper
     # (CANCEL_GAME_EMOJI) and automatically once a winner is reported
     # (recordResult), neither of which always has a command Interaction
-    # to work with. Returns False (and moves nobody) if the server was
-    # never started, since there's no "original channel" on record to
-    # send anyone back to.
+    # to work with. Returns (False, []) if the server was never started,
+    # since there's no "original channel" on record to send anyone back
+    # to; otherwise (True, not_moved), where not_moved names whoever
+    # couldn't actually be moved. move_to raises discord.HTTPException for
+    # anyone no longer connected to a voice channel at all (same hazard
+    # _handleRosterStartClick's own move loop guards against - see its
+    # comment), and this runs from deep inside recordResult, well before
+    # tournament bracket advancement and the rest of that function's own
+    # cleanup: a bare loop here could leave a tournament match stuck
+    # exactly the way the Start-button crash used to leave a roster stuck,
+    # just one step later in the game's lifecycle.
     async def moveMembersToOriginalChannel(self, guild):
         guild_id = guild.id
         og = self.get(guild_id, "original_channel")
@@ -4345,7 +4544,7 @@ class helpers():
         channel2 = discord.utils.get(guild.channels, name=chan2)
 
         if original_channel is None:
-            return False
+            return False, []
 
         aggregate = []
         if channel1 is not None:
@@ -4353,10 +4552,14 @@ class helpers():
         if channel2 is not None:
             aggregate.extend(channel2.members)
 
+        not_moved = []
         for member in aggregate:
-            await member.move_to(original_channel)
+            try:
+                await member.move_to(original_channel)
+            except discord.HTTPException:
+                not_moved.append(member.display_name)
 
-        return True
+        return True, not_moved
 
     # ---------------- Economy ----------------
 
@@ -4819,9 +5022,10 @@ class helpers():
             return
 
         if team.get_size() != tournament.get_team_size():
+            fix = "/team remove" if team.get_size() > tournament.get_team_size() else "/team invite"
             await ctx.response.send_message(
                 f"**{team_name}** has {team.get_size()} player(s), but this tournament needs teams of "
-                f"exactly {tournament.get_team_size()}.",
+                f"exactly {tournament.get_team_size()}. Use {fix} to adjust the roster first.",
                 ephemeral=True,
             )
             return
@@ -6424,7 +6628,30 @@ class helpers():
         image = await asyncio.to_thread(
             self._renderMatchupImage, None, team1, team2, label, None, guild_name, use_roles
         )
-        msg = await channel.send(file=self._imageToFile(image, "matchup.png"))
+        # This is _handleRosterStartClick's own tail: by the time this
+        # runs, players are already moved and roster_starting is already
+        # set. An uncaught HTTPException here (missing Attach Files, most
+        # likely) used to propagate straight to the un-overridden
+        # View.on_error, skipping _deleteMakeTeamsIntroMessages/
+        # _openBetting entirely and leaving roster_starting stuck at 1
+        # forever - a started game with nowhere to go, and nothing shown
+        # to whoever clicked Start. Falling back to a plain text notice
+        # (itself best-effort - a channel missing Attach Files might still
+        # allow Send Messages, but not always) keeps the rest of the flow
+        # running regardless, the same "report and continue" shape the
+        # Start-button move loop above already uses.
+        try:
+            msg = await channel.send(file=self._imageToFile(image, "matchup.png"))
+        except discord.HTTPException:
+            logger.exception("_sendMatchupImage: failed to post the matchup image (guild %s)", guild_id)
+            try:
+                await channel.send(
+                    "(Couldn't post the matchup image here - I might be missing the Attach Files "
+                    "permission in this channel.)"
+                )
+            except discord.HTTPException:
+                pass
+            return
         # Read back by recordResult once this game's result is scored,
         # so it can reply to this same message instead of just posting
         # the result on its own further down the channel.
@@ -7267,7 +7494,13 @@ class helpers():
     # TournamentReadyView's Ready button callback, re-derives which match
     # (and whether the clicker is actually one of its captains) from the
     # interaction itself, since the view is a single shared persistent
-    # instance with nothing match-specific stored on it.
+    # instance with nothing match-specific stored on it. manage_guild can
+    # also press it, same override _handleTournamentMatchReportClick
+    # already has below: this view is timeout=None (deliberately, a ready
+    # check can sit open indefinitely), and nothing else in the codebase
+    # can advance a match past PENDING_READY if the captain who'd press
+    # this goes AFK or leaves - short of /clear tournament, which wipes
+    # the entire bracket and match history just to unstick one match.
     async def _handleReadyClick(self, interaction):
         guild_id = interaction.guild_id
         if guild_id is None:
@@ -7289,9 +7522,12 @@ class helpers():
         team1.deserializeTeam(team1_ser)
         team2.deserializeTeam(team2_ser)
 
-        if not (self.isTeamCaptain(team1, interaction.user.id) or self.isTeamCaptain(team2, interaction.user.id)):
+        is_captain = self.isTeamCaptain(team1, interaction.user.id) or self.isTeamCaptain(team2, interaction.user.id)
+        if not (is_captain or interaction.user.guild_permissions.manage_guild):
             await interaction.response.send_message(
-                "Only one of this match's captains can mark it ready.", ephemeral=True
+                "Only one of this match's captains, or a member with the Manage Server permission, can "
+                "mark it ready.",
+                ephemeral=True,
             )
             return
 
@@ -8590,6 +8826,12 @@ class helpers():
             if skipped:
                 reasons = "; ".join(f"{member.display_name} ({reason})" for member, reason in skipped)
                 message += f"\n(Not added: {reasons}.)"
+            if team.get_size() > team.get_team_size():
+                message += (
+                    f"\n(Heads up: **{team_name}** is now at {team.get_size()} players, above its own "
+                    f"target of {team.get_team_size()}. This won't block using the team, but a "
+                    "tournament requires the roster to match its team size exactly.)"
+                )
             await ctx.response.send_message(message)
             return
 
@@ -8601,6 +8843,13 @@ class helpers():
         if skipped:
             reasons = "; ".join(f"{member.display_name} ({reason})" for member, reason in skipped)
             message += f"\n(Not invited: {reasons}.)"
+        if len(rostered_ids) + len(valid) > team.get_team_size():
+            message += (
+                f"\n(Heads up: if everyone accepts, **{team_name}** will be at "
+                f"{len(rostered_ids) + len(valid)} players, above its own target of "
+                f"{team.get_team_size()}. This won't block using the team, but a tournament requires "
+                "the roster to match its team size exactly.)"
+            )
 
         await ctx.response.send_message(message, view=TeamInviteAcceptView(self))
         msg = await ctx.original_response()
@@ -9945,7 +10194,23 @@ class helpers():
             self.update(guild_id, "is_ranked", 1)
         self.update(guild_id, "game", self._currentGame(guild_id))
 
-        ranked_note = " (ranked, elo will update when the winner is reported)" if ranked else ""
+        if ranked:
+            # Same elo-at-stake preview /make-teams random's own ranked
+            # path already shows (rankedTeamHelper) - without it, these
+            # two rosters were already fully loaded here, elo and all,
+            # but nobody found out whether this was a lopsided matchup or
+            # a coin flip until after the game, from the post-result
+            # "Elo: TeamA +12, TeamB -12" line.
+            roster = [(p.get_id(), p.get_name()) for p in team1.get_players() + team2.get_players()]
+            elo_lookup = self.getEloLookup(guild_id, roster, self._currentGame(guild_id))
+            team1_avg = self.averageElo(team1.get_players(), elo_lookup)
+            team2_avg = self.averageElo(team2.get_players(), elo_lookup)
+            ranked_note = (
+                f" (ranked: Team 1 avg elo **{team1_avg}**, Team 2 avg elo **{team2_avg}**; elo "
+                "updates when the winner is reported)"
+            )
+        else:
+            ranked_note = ""
         # escape_markdown on the actual resolved names (not the raw
         # args), so this reflects what /team create stored even if the
         # caller typed different casing, and so a stray
@@ -10243,6 +10508,31 @@ class helpers():
             lookup[user_id] = elo if elo is not None else default_elo
         return lookup
 
+    # /wager team's match_id autocomplete: every tournament match this
+    # guild could actually place a bet on right now, using the exact same
+    # "open" condition _placeTournamentWager itself checks (state not yet
+    # RESOLVED, bettingClosed not set) so the list can never suggest an id
+    # that would just bounce back with "Betting is closed for match #N."
+    # Without this, betting on a specific match meant separately running
+    # /tournament print-bracket, scanning the image for a match number, and
+    # typing a bare integer with nothing else to go on - especially awkward
+    # in simultaneous mode, where several matches can be open for betting
+    # at once. team1/team2 are serialized Team blobs here, not names, so
+    # each gets deserialized the same way getWagerTeamNames does below.
+    def getOpenTournamentMatchesForBetting(self, guild_id):
+        self.cursor.execute(
+            "SELECT id, team1, team2 FROM tournament_matches WHERE guildId=? AND state != 'RESOLVED' "
+            "AND bettingClosed=0 ORDER BY id",
+            (guild_id,)
+        )
+        matches = []
+        for match_id, team1_ser, team2_ser in self.cursor.fetchall():
+            team1, team2 = Team(), Team()
+            team1.deserializeTeam(team1_ser)
+            team2.deserializeTeam(team2_ser)
+            matches.append((match_id, team1.get_name() or "Team 1", team2.get_name() or "Team 2"))
+        return matches
+
     # The two real team names a `team` param resolves against for
     # `match_id` (a specific tournament match) or the current guild-wide
     # game (no match_id). /wager team's own autocomplete, plus
@@ -10268,14 +10558,32 @@ class helpers():
             self.getRosterName(guild_id, "team2", "Team 2", escape=False),
         )
 
+    # /set correct-winner's own `team` param: the two real team names to
+    # resolve free text against, same shape getWagerTeamNames provides for
+    # /wager team. Reuses getWagerTeamNames outright for the match_id case
+    # (a specific tournament match's teams never change once played), but
+    # NOT for the no-match_id case - that one has to name whichever two
+    # teams were actually in the game being corrected, which is
+    # last_result's own team1_name/team2_name, not whatever's currently
+    # sitting in the live team1/team2 columns (a new game may well have
+    # started since). resolveWagerTeamValue below is generic enough to
+    # reuse as-is for resolving the caller's answer either way.
+    def getCorrectWinnerTeamNames(self, guild_id, match_id=None):
+        if match_id is not None:
+            return self.getWagerTeamNames(guild_id, match_id)
+        last = self.getLastResult(guild_id)
+        if last is None:
+            return "Team 1", "Team 2"
+        return last.get("team1_name", "Team 1"), last.get("team2_name", "Team 2")
+
     # Accepts "1"/"2" (autocomplete's own Choice values) or either
     # team's real name typed out directly (case-insensitive), so
     # someone who ignores the suggestion list and just types the team
     # they mean still works. None if it matches neither, letting the
     # caller reject it. Resolves the caller's free-text `team` input at
-    # the command boundary (bot.py's own wagerTeam), not inside
-    # wagerHelper itself, so wagerHelper's own signature/tests keep
-    # taking the already-resolved 1/2 int exactly as before.
+    # the command boundary (bot.py's own wagerTeam/setCorrectWinner), not
+    # inside wagerHelper/reportCorrectWinnerHelper themselves, so those
+    # keep taking the already-resolved 1/2 int exactly as before.
     def resolveWagerTeamValue(self, team_input, name1, name2):
         normalized = team_input.strip()
         if normalized in ("1", "2"):
@@ -11094,8 +11402,16 @@ class helpers():
         await channel.send(f"{CANCEL_GAME_EMOJI} Game cancelled.", reference=matchup_message)
         await self.cancelBettingHelper(guild_id, channel)
 
-        if guild is not None and await self.moveMembersToOriginalChannel(guild):
-            await channel.send("Moved everyone back to the original channel!")
+        if guild is not None:
+            moved, not_moved = await self.moveMembersToOriginalChannel(guild)
+            if moved:
+                if not_moved:
+                    await channel.send(
+                        f"Moved everyone else back to the original channel! Couldn't move "
+                        f"{', '.join(not_moved)} (not currently in a voice channel)."
+                    )
+                else:
+                    await channel.send("Moved everyone back to the original channel!")
 
     # Pari-mutuel payout: winners split the losing side's pool
     # proportional to their own wager, on top of getting their own
@@ -11160,8 +11476,16 @@ class helpers():
         await channel.send(self.formatResultMessage(winning_team, summary), reference=matchup_message)
         await self._announceAchievements(channel, newly_unlocked)
 
-        if guild is not None and await self.moveMembersToOriginalChannel(guild):
-            await channel.send("Moved everyone back to the original channel!")
+        if guild is not None:
+            moved, not_moved = await self.moveMembersToOriginalChannel(guild)
+            if moved:
+                if not_moved:
+                    await channel.send(
+                        f"Moved everyone else back to the original channel! Couldn't move "
+                        f"{', '.join(not_moved)} (not currently in a voice channel)."
+                    )
+                else:
+                    await channel.send("Moved everyone back to the original channel!")
 
         # The winner-report message itself is deleted by whichever
         # Confirm view called into this (it's the one holding that
@@ -12132,9 +12456,10 @@ class helpers():
     # out of statsHelper so _handleStatsReturnClick can rebuild the
     # exact same embed when the Back button swaps a trading card back
     # to it, without duplicating the field layout.
-    def _buildStatsEmbed(self, guild_id, target):
+    def _buildStatsEmbed(self, guild_id, target, game=None):
         user_id = target.id
-        game = self._currentGame(guild_id)
+        if game is None:
+            game = self._currentGame(guild_id)
 
         self.ensureEconomyRow(guild_id, user_id, target.name)
         self.ensureGameStatsRow(guild_id, user_id, target.name, game)
@@ -12245,12 +12570,32 @@ class helpers():
 
         return embed
 
-    async def statsHelper(self, ctx, member=None):
+    # `game`, when given, lets a lookup reach a game other than whichever
+    # one /set game currently has this server tracking - without it,
+    # /stats and getLeaderboardEntries were both hard-locked to
+    # _currentGame, so switching games (a new season, a different title
+    # entirely) made every earlier game's elo/record permanently
+    # unreachable from any player-facing command, not just deprioritized.
+    # The data was never lost (game_stats keys on game already), just
+    # stranded. Validated against listKnownGames here specifically -
+    # unlike /set game, which deliberately accepts any new name to start
+    # tracking it, a typo'd game here would otherwise silently create a
+    # brand new, all-zero game_stats row via ensureGameStatsRow and just
+    # look like "you have no stats," rather than "you mistyped the name."
+    async def statsHelper(self, ctx, member=None, game=None):
         target = member if member is not None else ctx.user
         guild_id = ctx.guild.id
         user_id = target.id
 
-        embed = self._buildStatsEmbed(guild_id, target)
+        if game is not None and game not in self.listKnownGames(guild_id):
+            known = ", ".join(f"**{g}**" for g in self.listKnownGames(guild_id))
+            await ctx.response.send_message(
+                f"This server hasn't tracked a game called **{game}**. Known games: {known}.",
+                ephemeral=True,
+            )
+            return
+
+        embed = self._buildStatsEmbed(guild_id, target, game)
 
         await ctx.response.send_message(embed=embed, view=StatsView(self, card_shown=False))
         msg = await ctx.original_response()
@@ -14170,9 +14515,12 @@ class helpers():
 
         entries = self._filterLeaderboardEntries(self.getLeaderboardEntries(guild_id), stat)
         if not entries:
-            await ctx.response.send_message(
-                "Nobody has any stats to show yet in this server!", ephemeral=True
+            message = (
+                f"Nobody has any {LEADERBOARD_STAT_LABELS[stat]} stats to show yet in this server!"
+                if stat is not None
+                else "Nobody has any stats to show yet in this server!"
             )
+            await ctx.response.send_message(message, ephemeral=True)
             return
 
         entries_sorted = self._sortLeaderboardEntries(entries, stat if stat is not None else "elo", order)
