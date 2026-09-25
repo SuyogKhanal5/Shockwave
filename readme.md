@@ -443,14 +443,26 @@ every guild at once, so its callbacks re-derive everything (which roster,
 whether it's still live) from the interaction itself rather than from
 anything stored on the view.
 
-`printEmbed` returns both posted messages so its callers can hand them to
-`_finalizeRoster`, which records
+`printEmbed` returns all three posted messages (team1, team2, and the
+player-pool embed, `None` when there's no pool) so its callers can hand
+team1/team2 to `_finalizeRoster`, which records
 `roster_team1_message_id`/`roster_team2_message_id`/`roster_channel_id` on the
 guild's `servers` row, the same "remember which message is still live" shape
 `betting_message_id` uses for the winner-report message. That's what lets
 `_handleRosterStartClick`/`_handleRosterRerollClick`/
 `_handleRosterBalanceRolesClick` tell a stale roster apart from the current
 one, since forming a new roster just overwrites those columns.
+
+Every `ctx.channel.send` in `printEmbed` is wrapped in one try/except: every
+caller has already used `ctx.response` by this point (their own "Teams
+created!"-style intro message), so `ctx.followup` is the only channel still
+guaranteed to work if the bot's actual Send Messages/View Channel access to
+this specific text channel turns out to be missing (a channel-level
+permission override, not a server-wide one, is the realistic cause). A
+failure posts a plain explanation there instead of leaving the caller with
+nothing to hand `_finalizeRoster`, then re-raises rather than returning
+partial results, since every caller immediately uses these messages to
+attach a view.
 
 Start (no move) is the same button, `move=False`, for a group that's already
 elsewhere (a stage channel, another platform, in person) and doesn't want

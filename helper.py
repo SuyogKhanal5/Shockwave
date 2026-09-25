@@ -3237,11 +3237,37 @@ class helpers():
         # (captainsHelper) where the interaction was already responded to
         # earlier in the flow. channel.send for both embeds here lets the
         # caller decide if/when to do the initial interaction response.
-        team1_message = await ctx.channel.send(embed=team1_embed)
-        team2_message = await ctx.channel.send(embed=team2_embed)
+        try:
+            team1_message = await ctx.channel.send(embed=team1_embed)
+            team2_message = await ctx.channel.send(embed=team2_embed)
 
-        players_embed = self._buildPlayersEmbed(playersTeam)
-        players_message = await ctx.channel.send(embed=players_embed) if players_embed is not None else None
+            players_embed = self._buildPlayersEmbed(playersTeam)
+            players_message = await ctx.channel.send(embed=players_embed) if players_embed is not None else None
+        except discord.HTTPException:
+            # Every caller has already used ctx.response by this point
+            # (their own "Teams created!"-style intro message), so
+            # ctx.followup is the only channel still guaranteed to work -
+            # a plain ctx.channel.send retry here would just fail the
+            # exact same way. Interaction responses/followups go through
+            # Discord's webhook rather than an ordinary bot message, so
+            # they can still land even when the bot's actual Send
+            # Messages/View Channel access to THIS channel is what's
+            # missing (a channel-level permission override is the
+            # realistic cause - seen in production, see shockwave.log).
+            # Re-raised rather than swallowed: every caller immediately
+            # hands these messages to _finalizeRoster (or the draft
+            # picker) to attach a view to, which would itself crash on a
+            # None message if this just returned quietly instead.
+            try:
+                await ctx.followup.send(
+                    "I couldn't post the team roster in this channel - I might be missing the View "
+                    "Channel or Send Messages permission here. Ask an admin to check my permissions "
+                    "and try again.",
+                    ephemeral=True,
+                )
+            except discord.HTTPException:
+                pass
+            raise
 
         return team1_message, team2_message, players_message
 

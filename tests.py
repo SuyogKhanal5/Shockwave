@@ -9762,6 +9762,43 @@ class PrintEmbedTests(HelperTestCase):
         self.assertIsNotNone(players_message)
         self.assertNotIn(players_message, (team1_message, team2_message))
 
+    # Production incident: a channel-level permission override left the
+    # bot able to receive/respond to the slash command (ctx.response
+    # already succeeded, by every caller's own convention) but unable to
+    # post an ordinary message there. The old bare channel.send() call
+    # crashed with nothing shown to the user at all, since
+    # on_app_command_error skips sending anything once ctx.response is
+    # already done.
+    async def test_channel_send_failure_notifies_via_followup_and_reraises(self):
+        team1 = self._five_player_team("Team 1", 700)
+        team2 = self._five_player_team("Team 2", 800)
+        ctx = FakeInteraction(self.guild, FakeMember("Caller"))
+        ctx.channel.send.side_effect = discord.HTTPException(
+            SimpleNamespace(status=403, reason="Forbidden"), "Missing Access"
+        )
+
+        with self.assertRaises(discord.HTTPException):
+            await self.helperObj.printEmbed(ctx, team1, team2)
+
+        ctx.followup.send.assert_awaited_once()
+        text = ctx.followup.send.call_args.args[0]
+        self.assertIn("View Channel", text)
+        self.assertTrue(ctx.followup.send.call_args.kwargs.get("ephemeral"))
+
+    async def test_followup_failure_does_not_mask_the_original_error(self):
+        team1 = self._five_player_team("Team 1", 700)
+        team2 = self._five_player_team("Team 2", 800)
+        ctx = FakeInteraction(self.guild, FakeMember("Caller"))
+        ctx.channel.send.side_effect = discord.HTTPException(
+            SimpleNamespace(status=403, reason="Forbidden"), "Missing Access"
+        )
+        ctx.followup.send.side_effect = discord.HTTPException(
+            SimpleNamespace(status=403, reason="Forbidden"), "Missing Access"
+        )
+
+        with self.assertRaises(discord.HTTPException):
+            await self.helperObj.printEmbed(ctx, team1, team2)
+
 
 class AdminSetHelperTests(HelperTestCase):
     def _ctx(self):
@@ -20144,7 +20181,7 @@ class MakeTeamsCommandTests(BotModuleTestCase):
 
         with patch.object(self.bot.helperObj, "randomizeTeamHelper", AsyncMock()) as randomize_mock, \
              patch.object(
-                 self.bot.helperObj, "printEmbed", AsyncMock(return_value=(FakeMessage(), FakeMessage()))
+                 self.bot.helperObj, "printEmbed", AsyncMock(return_value=(FakeMessage(), FakeMessage(), None))
              ) as embed_mock, \
              patch.object(self.bot.helperObj, "_finalizeRoster", AsyncMock()) as finalize_mock:
             await self._command("make-teams random").callback(ctx, use_roles=False)
@@ -20170,7 +20207,7 @@ class MakeTeamsCommandTests(BotModuleTestCase):
         ctx = self._ctx_in_voice(guild_id=guild_id)
 
         with patch.object(
-            self.bot.helperObj, "printEmbed", AsyncMock(return_value=(FakeMessage(), FakeMessage()))
+            self.bot.helperObj, "printEmbed", AsyncMock(return_value=(FakeMessage(), FakeMessage(), None))
         ), patch.object(self.bot.helperObj, "_finalizeRoster", AsyncMock()):
             await self._command("make-teams random").callback(ctx, use_roles=False)
 
@@ -20217,7 +20254,7 @@ class MakeTeamsCommandTests(BotModuleTestCase):
 
         with patch.object(self.bot.helperObj, "randomizeTeamHelper", AsyncMock()) as randomize_mock, \
              patch.object(
-                 self.bot.helperObj, "printEmbed", AsyncMock(return_value=(FakeMessage(), FakeMessage()))
+                 self.bot.helperObj, "printEmbed", AsyncMock(return_value=(FakeMessage(), FakeMessage(), None))
              ) as embed_mock, \
              patch.object(self.bot.helperObj, "_finalizeRoster", AsyncMock()) as finalize_mock:
             await self._command("make-teams random").callback(ctx, use_roles=True)
@@ -20241,7 +20278,7 @@ class MakeTeamsCommandTests(BotModuleTestCase):
 
         with patch.object(self.bot.helperObj, "randomizeTeamHelper", AsyncMock()), \
              patch.object(
-                 self.bot.helperObj, "printEmbed", AsyncMock(return_value=(FakeMessage(), FakeMessage()))
+                 self.bot.helperObj, "printEmbed", AsyncMock(return_value=(FakeMessage(), FakeMessage(), None))
              ) as embed_mock, \
              patch.object(self.bot.helperObj, "_finalizeRoster", AsyncMock()):
             await self._command("make-teams random").callback(ctx, use_roles=True)
@@ -20269,7 +20306,7 @@ class MakeTeamsCommandTests(BotModuleTestCase):
         with patch.object(self.bot.helperObj, "hasCompletedSetup", return_value=True), \
              patch.object(self.bot.helperObj, "randomizeTeamHelper", AsyncMock()), \
              patch.object(
-                 self.bot.helperObj, "printEmbed", AsyncMock(return_value=(FakeMessage(), FakeMessage()))
+                 self.bot.helperObj, "printEmbed", AsyncMock(return_value=(FakeMessage(), FakeMessage(), None))
              ), \
              patch.object(self.bot.helperObj, "_finalizeRoster", AsyncMock()):
             await self._command("make-teams random").callback(ctx, use_roles=True)
@@ -20305,7 +20342,7 @@ class MakeTeamsCommandTests(BotModuleTestCase):
             self.bot.helperObj, "hasCompletedSetup", side_effect=lambda gid, uid: uid == 950
         ), patch.object(self.bot.helperObj, "randomizeTeamHelper", AsyncMock()) as randomize_mock, \
              patch.object(
-                 self.bot.helperObj, "printEmbed", AsyncMock(return_value=(FakeMessage(), FakeMessage()))
+                 self.bot.helperObj, "printEmbed", AsyncMock(return_value=(FakeMessage(), FakeMessage(), None))
              ), \
              patch.object(self.bot.helperObj, "_finalizeRoster", AsyncMock()):
             await self._command("make-teams random").callback(ctx, use_roles=True)
@@ -20326,7 +20363,7 @@ class MakeTeamsCommandTests(BotModuleTestCase):
         with patch.object(self.bot.helperObj, "hasCompletedSetup", return_value=True), \
              patch.object(self.bot.helperObj, "randomizeTeamHelper", AsyncMock()) as randomize_mock, \
              patch.object(
-                 self.bot.helperObj, "printEmbed", AsyncMock(return_value=(FakeMessage(), FakeMessage()))
+                 self.bot.helperObj, "printEmbed", AsyncMock(return_value=(FakeMessage(), FakeMessage(), None))
              ), \
              patch.object(self.bot.helperObj, "_finalizeRoster", AsyncMock()):
             await self._command("make-teams random").callback(ctx, use_roles=True)
@@ -20342,7 +20379,7 @@ class MakeTeamsCommandTests(BotModuleTestCase):
         with patch.object(self.bot.helperObj, "hasCompletedSetup", return_value=False), \
              patch.object(self.bot.helperObj, "randomizeTeamHelper", AsyncMock()) as randomize_mock, \
              patch.object(
-                 self.bot.helperObj, "printEmbed", AsyncMock(return_value=(FakeMessage(), FakeMessage()))
+                 self.bot.helperObj, "printEmbed", AsyncMock(return_value=(FakeMessage(), FakeMessage(), None))
              ), \
              patch.object(self.bot.helperObj, "_finalizeRoster", AsyncMock()):
             await self._command("make-teams random").callback(ctx, use_roles=True)
@@ -20358,7 +20395,7 @@ class MakeTeamsCommandTests(BotModuleTestCase):
         with patch.object(self.bot.helperObj, "hasCompletedSetup", return_value=False) as setup_mock, \
              patch.object(self.bot.helperObj, "randomizeTeamHelper", AsyncMock()), \
              patch.object(
-                 self.bot.helperObj, "printEmbed", AsyncMock(return_value=(FakeMessage(), FakeMessage()))
+                 self.bot.helperObj, "printEmbed", AsyncMock(return_value=(FakeMessage(), FakeMessage(), None))
              ), \
              patch.object(self.bot.helperObj, "_finalizeRoster", AsyncMock()):
             await self._command("make-teams random").callback(ctx, use_roles=False)

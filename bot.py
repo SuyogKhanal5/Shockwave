@@ -1902,7 +1902,7 @@ async def makeTeamsRandom(ctx, use_roles: bool = False, ranked: bool = False):
             # nobody's preferences mattered this time.
             intro_messages.append(await ctx.channel.send(not_setup_note))
 
-    team1_message, team2_message = await helperObj.printEmbed(ctx, team1Obj, team2Obj, useRoles=use_roles)
+    team1_message, team2_message, _ = await helperObj.printEmbed(ctx, team1Obj, team2Obj, useRoles=use_roles)
 
     # Posted last, after the rosters, in bold, instead of folded into the
     # very first response message. That first message is easy to scroll
