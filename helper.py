@@ -11425,19 +11425,37 @@ class helpers():
         # _matchupMessageLocation). Best-effort, so a game that never
         # actually got a matchup graphic just falls back to a plain send.
         matchup_message = await self._fetchMatchupMessage(guild_id, channel)
-        await channel.send(f"{CANCEL_GAME_EMOJI} Game cancelled.", reference=matchup_message)
+        # Every send below is a pure notification, not something anything
+        # downstream reads back - the actual cancel (betting_state, wager
+        # refunds, the move back) already happened or happens regardless
+        # of whether any of these land. clearTeamsHelper calls this before
+        # every fresh /make-teams attempt when an old game's still open,
+        # so an uncaught HTTPException here (a channel missing Send
+        # Messages, seen in production) used to abort the NEW roster
+        # before it ever got a chance to form, instead of just skipping a
+        # notice nobody could see anyway.
+        try:
+            await channel.send(f"{CANCEL_GAME_EMOJI} Game cancelled.", reference=matchup_message)
+        except discord.HTTPException:
+            logger.exception("cancelGameHelper: failed to post the cancellation notice (guild %s)", guild_id)
+
         await self.cancelBettingHelper(guild_id, channel)
 
         if guild is not None:
             moved, not_moved = await self.moveMembersToOriginalChannel(guild)
             if moved:
-                if not_moved:
-                    await channel.send(
-                        f"Moved everyone else back to the original channel! Couldn't move "
-                        f"{', '.join(not_moved)} (not currently in a voice channel)."
+                try:
+                    if not_moved:
+                        await channel.send(
+                            f"Moved everyone else back to the original channel! Couldn't move "
+                            f"{', '.join(not_moved)} (not currently in a voice channel)."
+                        )
+                    else:
+                        await channel.send("Moved everyone back to the original channel!")
+                except discord.HTTPException:
+                    logger.exception(
+                        "cancelGameHelper: failed to post the moved-back notice (guild %s)", guild_id
                     )
-                else:
-                    await channel.send("Moved everyone back to the original channel!")
 
     # Pari-mutuel payout: winners split the losing side's pool
     # proportional to their own wager, on top of getting their own
@@ -14942,4 +14960,14 @@ class helpers():
         self.db.commit()
 
         if refunds:
-            await channel.send("Bets have been refunded since the game ended before a winner was recorded.")
+            # The refund itself already happened above (the balance
+            # UPDATEs and wager DELETE are already committed) - this is
+            # just the notice. A channel missing Send Messages shouldn't
+            # stop cancelGameHelper's own caller from continuing on to a
+            # fresh roster.
+            try:
+                await channel.send("Bets have been refunded since the game ended before a winner was recorded.")
+            except discord.HTTPException:
+                logger.exception(
+                    "cancelBettingHelper: failed to post the refund notice (guild %s)", guild_id
+                )

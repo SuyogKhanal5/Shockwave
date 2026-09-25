@@ -10399,6 +10399,49 @@ class CancelGameHelperTests(HelperTestCase):
         sent = [call.args[0] for call in channel.send.call_args_list]
         self.assertTrue(any("Couldn't move Bob" in text for text in sent))
 
+    # Production incident: a channel missing Send Messages made every
+    # notice here raise uncaught, aborting clearTeamsHelper (and the
+    # fresh /make-teams attempt that called it) before a new roster ever
+    # got a chance to form - even though the actual cancel (refund,
+    # betting_state reset, move back) had nothing to do with whether a
+    # notice about it could be posted.
+    async def test_a_channel_that_cannot_be_posted_to_still_completes_the_cancel(self):
+        og = FakeChannel("Lobby")
+        channel1 = FakeChannel("Team 1")
+        channel2 = FakeChannel("Team 2")
+        member1 = FakeMember("Alice", id=801)
+        member2 = FakeMember("Bob", id=802)
+        channel1.members = [member1]
+        channel2.members = [member2]
+        guild = FakeGuild(channels=[og, channel1, channel2])
+        channel = FakeChannel("game-channel")
+        channel.send.side_effect = discord.HTTPException(
+            SimpleNamespace(status=403, reason="Forbidden"), "Missing Permissions"
+        )
+
+        self.helperObj.update(GUILD_ID, "original_channel", "Lobby")
+        self.helperObj.update(GUILD_ID, "channel1", "Team 1")
+        self.helperObj.update(GUILD_ID, "channel2", "Team 2")
+        self.helperObj.update(GUILD_ID, "betting_state", "OPEN")
+        self.helperObj.ensureEconomyRow(GUILD_ID, 801, "Alice")
+        self.cursor.execute(
+            "UPDATE economy SET balance=500 WHERE guildId=? AND userId=?", (GUILD_ID, 801)
+        )
+        self.cursor.execute(
+            "INSERT INTO wagers(guildId, userId, username, team, amount) VALUES(?, ?, ?, ?, ?)",
+            (GUILD_ID, 801, "Alice", 1, 200),
+        )
+        self.db.commit()
+
+        await self.helperObj.cancelGameHelper(GUILD_ID, channel, guild)  # must not raise
+
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 801, "balance"), 700)
+        self.assertEqual(self.helperObj.get(GUILD_ID, "betting_state"), "NONE")
+        self.cursor.execute("SELECT COUNT(*) FROM wagers WHERE guildId=?", (GUILD_ID,))
+        self.assertEqual(self.cursor.fetchone()[0], 0)
+        member1.move_to.assert_awaited_once_with(og)
+        member2.move_to.assert_awaited_once_with(og)
+
     async def test_cancelled_message_replies_to_the_matchup_graphic(self):
         channel = FakeChannel("game-chat")
         matchup_message = FakeMessage(id=3001, channel=channel)
@@ -14503,6 +14546,31 @@ class CancelBettingHelperTests(HelperTestCase):
 
         self.assertTrue(task.cancelled())
         self.assertNotIn(GUILD_ID, self.helperObj.bettingTasks)
+
+    # The refund itself (balance UPDATEs, wager DELETE) is already
+    # committed by the time this notice tries to post - a channel missing
+    # Send Messages shouldn't undo that or stop cancelGameHelper's own
+    # caller from continuing on.
+    async def test_a_channel_that_cannot_be_posted_to_still_refunds(self):
+        self.helperObj.update(GUILD_ID, "betting_state", "OPEN")
+        self.helperObj.ensureEconomyRow(GUILD_ID, 901, "Alice")
+        self.cursor.execute(
+            "UPDATE economy SET balance=700 WHERE guildId=? AND userId=?", (GUILD_ID, 901)
+        )
+        self.cursor.execute(
+            "INSERT INTO wagers(guildId, userId, username, team, amount) VALUES(?, ?, ?, ?, ?)",
+            (GUILD_ID, 901, "Alice", 1, 300),
+        )
+        self.db.commit()
+        channel = FakeChannel("game-chat")
+        channel.send.side_effect = discord.HTTPException(
+            SimpleNamespace(status=403, reason="Forbidden"), "Missing Permissions"
+        )
+
+        await self.helperObj.cancelBettingHelper(GUILD_ID, channel)  # must not raise
+
+        self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "balance"), 1000)
+        self.assertEqual(self.helperObj.get(GUILD_ID, "betting_state"), "NONE")
 
 
 class OpenBettingTests(HelperTestCase):

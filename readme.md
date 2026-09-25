@@ -810,6 +810,19 @@ returns `(moved, not_moved)` instead of a plain bool; both callers report
 who couldn't be moved ("Moved everyone else back... Couldn't move X, Y")
 when that happens, and either way the rest of the function always runs.
 
+`cancelGameHelper`'s own three `channel.send` calls (the "Game cancelled."
+notice, and the two move-back notices covered just above) are each wrapped
+in try/except too, same for `cancelBettingHelper`'s refund notice. None of
+these are anything downstream reads back - the actual cancel (`betting_state`
+reset, wager refunds, the move back itself) already happened or happens
+regardless of whether any of these land. That matters because
+`clearTeamsHelper` calls `cancelGameHelper` first whenever an old game's
+still open, and every fresh `/make-teams` command routes through
+`clearTeamsHelper` before it ever gets to forming the new roster - a channel
+missing Send Messages used to raise uncaught here and abort the whole
+attempt before a new roster had any chance to post, rather than just
+skipping a notice nobody could have seen anyway.
+
 Cancel and a timeout on either confirmation view instead call
 `_restoreWinnerReportMessage`, which puts the original report message's id
 back into `betting_message_id` so its buttons work again. It only does this
