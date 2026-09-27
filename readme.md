@@ -458,11 +458,18 @@ caller has already used `ctx.response` by this point (their own "Teams
 created!"-style intro message), so `ctx.followup` is the only channel still
 guaranteed to work if the bot's actual Send Messages/View Channel access to
 this specific text channel turns out to be missing (a channel-level
-permission override, not a server-wide one, is the realistic cause). A
-failure posts a plain explanation there instead of leaving the caller with
-nothing to hand `_finalizeRoster`, then re-raises rather than returning
-partial results, since every caller immediately uses these messages to
-attach a view.
+permission override, not a server-wide one, is the realistic cause -
+confirmed in production). A failure posts a plain explanation there, logs
+the full traceback (`logger.exception`, in case it's ever something other
+than the known permission issue), and returns `(None, None, None)` rather
+than re-raising. Every one of `printEmbed`'s five callers (`rankedTeamHelper`,
+`captainsHelper`, `useTeamsHelper`, `reuseTeamsHelper`, and `makeTeamsRandom`
+in bot.py) checks for that and returns early instead of handing
+`_finalizeRoster` a message that doesn't exist. Re-raising was the original
+design, but a server stuck on a genuinely broken channel permission would
+then re-log this as a fresh "Unhandled application command error" on every
+single retry - indistinguishable in shockwave.log from a real new bug, even
+though the user had already been told exactly what was wrong.
 
 Start (no move) is the same button, `move=False`, for a group that's already
 elsewhere (a stage channel, another platform, in person) and doesn't want

@@ -3175,6 +3175,11 @@ class helpers():
         await ctx.response.send_message(message)
         intro_message = await ctx.original_response()
         team1_message, team2_message, _ = await self.printEmbed(ctx, team1, team2, useRoles=role_split is not None)
+        if team1_message is None:
+            # printEmbed already logged and told the user why (a channel
+            # permission problem, most likely) - nothing left to finalize
+            # against a roster that never actually posted.
+            return
         await self._finalizeRoster(
             ctx.guild.id, team1_message, team2_message, team1, team2, use_roles=role_split is not None,
             intro_messages=[intro_message],
@@ -3253,11 +3258,17 @@ class helpers():
             # they can still land even when the bot's actual Send
             # Messages/View Channel access to THIS channel is what's
             # missing (a channel-level permission override is the
-            # realistic cause - seen in production, see shockwave.log).
-            # Re-raised rather than swallowed: every caller immediately
-            # hands these messages to _finalizeRoster (or the draft
-            # picker) to attach a view to, which would itself crash on a
-            # None message if this just returned quietly instead.
+            # realistic cause - confirmed in production, see
+            # shockwave.log). Logged here (full traceback, in case this
+            # is ever something other than the known permission issue),
+            # but NOT re-raised: a server stuck on a broken channel
+            # permission would otherwise re-log this as a fresh
+            # "Unhandled application command error" every single time
+            # someone tries again, indistinguishable in shockwave.log
+            # from a genuine new bug even though the user's already been
+            # told exactly what's wrong. Callers check for the (None,
+            # None, None) this returns instead and bail out quietly.
+            logger.exception("printEmbed: failed to post the team roster (guild %s)", ctx.guild.id)
             try:
                 await ctx.followup.send(
                     "I couldn't post the team roster in this channel - I might be missing the View "
@@ -3267,7 +3278,7 @@ class helpers():
                 )
             except discord.HTTPException:
                 pass
-            raise
+            return None, None, None
 
         return team1_message, team2_message, players_message
 
@@ -4097,6 +4108,12 @@ class helpers():
         # intro reply isn't lost track of in the meantime.
         self.update(ctx.guild.id, "make_teams_message_ids", str(intro_message.id))
         team1_message, team2_message, players_message = await self.printEmbed(ctx, team1, team2, players)
+        if team1_message is None:
+            # printEmbed already logged and told the user why. The draft's
+            # own state (captains, pool) is already written, but there's
+            # no picker to post either without a channel that'll accept
+            # messages, so this can't proceed any further than that.
+            return
         self.update(ctx.guild.id, "roster_team1_message_id", team1_message.id)
         self.update(ctx.guild.id, "roster_team2_message_id", team2_message.id)
         self.update(ctx.guild.id, "roster_channel_id", team2_message.channel.id)
@@ -10251,6 +10268,8 @@ class helpers():
         )
         intro_message = await ctx.original_response()
         team1_message, team2_message, _ = await self.printEmbed(ctx, team1, team2)
+        if team1_message is None:
+            return
         await self._finalizeRoster(
             guild_id, team1_message, team2_message, team1, team2, use_roles=False,
             intro_messages=[intro_message],
@@ -10310,6 +10329,8 @@ class helpers():
         )
         intro_message = await ctx.original_response()
         team1_message, team2_message, _ = await self.printEmbed(ctx, team1, team2, useRoles=use_roles)
+        if team1_message is None:
+            return
         await self._finalizeRoster(
             guild_id, team1_message, team2_message, team1, team2, use_roles=use_roles,
             intro_messages=[intro_message],

@@ -1568,6 +1568,23 @@ class RankedTeamHelperTests(HelperTestCase):
 
         self.assertEqual(self.helperObj._dislikedRoleUserIds(GUILD_ID), frozenset())
 
+    # printEmbed already logged the failure and told the user why (a
+    # channel permission problem, most likely) before returning
+    # (None, None, None) - nothing left here to hand _finalizeRoster.
+    async def test_bails_out_quietly_when_print_embed_cannot_post(self):
+        members = [FakeMember(f"P{i}", id=300 + i) for i in range(6)]
+        voice_channel = FakeChannel("Lobby", members=members)
+        user = FakeMember("Caller")
+        user.voice = FakeVoiceState(voice_channel)
+        ctx = FakeInteraction(self.guild, user)
+
+        with patch.object(
+            self.helperObj, "printEmbed", AsyncMock(return_value=(None, None, None))
+        ), patch.object(self.helperObj, "_finalizeRoster", AsyncMock()) as finalize_mock:
+            await self.helperObj.rankedTeamHelper(ctx)
+
+        finalize_mock.assert_not_awaited()
+
 
 class RoleBalancedTeamAssignmentTests(HelperTestCase):
     def _members(self, n=10, start_id=800):
@@ -2000,6 +2017,22 @@ class CaptainsHelperTests(HelperTestCase):
         self.assertEqual(self.helperObj.get(GUILD_ID, "draft_snake"), 1)
         message = ctx.response.send_message.call_args.args[0]
         self.assertIn("Snake draft", message)
+
+    # printEmbed already logged and told the user why. The draft's own
+    # state (captains, pool) is already written by this point, but
+    # there's no picker to post either without a channel that'll accept
+    # messages, so this can't set up roster_team1_message_id etc. against
+    # messages that were never posted.
+    async def test_bails_out_quietly_when_print_embed_cannot_post(self):
+        captain1 = FakeMember("Cap1", id=301)
+        captain2 = FakeMember("Cap2", id=302)
+        ctx = self._ctx(captain1, captain2, [])
+
+        with patch.object(self.helperObj, "printEmbed", AsyncMock(return_value=(None, None, None))):
+            await self.helperObj.captainsHelper(ctx, captain1, captain2)
+
+        self.assertIsNone(self.helperObj.get(GUILD_ID, "roster_team1_message_id"))
+        self.assertIsNone(self.helperObj.get(GUILD_ID, "roster_team2_message_id"))
 
 
 class NextDraftTurnTests(HelperTestCase):
@@ -6382,6 +6415,18 @@ class UseTeamsHelperTests(HelperTestCase):
         self.assertEqual(after_id, before_id)
         self.assertEqual(stored_red.get_id(), before_id)
 
+    async def test_bails_out_quietly_when_print_embed_cannot_post(self):
+        await self.helperObj.createTeamHelper(self._ctx(901, "Alice"), "Red", 5)
+        await self.helperObj.createTeamHelper(self._ctx(902, "Bob"), "Blue", 5)
+        ctx = self._ctx()
+
+        with patch.object(
+            self.helperObj, "printEmbed", AsyncMock(return_value=(None, None, None))
+        ), patch.object(self.helperObj, "_finalizeRoster", AsyncMock()) as finalize_mock:
+            await self.helperObj.useTeamsHelper(ctx, "Red", "Blue", False)
+
+        finalize_mock.assert_not_awaited()
+
 
 class ReuseTeamsHelperTests(HelperTestCase):
     def _ctx(self, user_id=901, name="Alice", guild=None, channel=None):
@@ -6423,6 +6468,19 @@ class ReuseTeamsHelperTests(HelperTestCase):
         team1.deserializeTeam(self.helperObj.get(GUILD_ID, "team1"))
         self.assertEqual(team1.get_name(), "Red")
         self.assertEqual([p.get_id() for p in team1.get_players()], [901])
+
+    async def test_bails_out_quietly_when_print_embed_cannot_post(self):
+        await self.helperObj.createTeamHelper(self._ctx(901, "Alice"), "Red", 2)
+        await self.helperObj.createTeamHelper(self._ctx(902, "Bob"), "Blue", 2)
+        await self.helperObj.useTeamsHelper(self._ctx(), "Red", "Blue", False)
+
+        ctx = self._ctx()
+        with patch.object(
+            self.helperObj, "printEmbed", AsyncMock(return_value=(None, None, None))
+        ), patch.object(self.helperObj, "_finalizeRoster", AsyncMock()) as finalize_mock:
+            await self.helperObj.reuseTeamsHelper(ctx)
+
+        finalize_mock.assert_not_awaited()
 
     async def test_keeps_announcing_the_original_game_even_after_current_game_changes(self):
         await self.helperObj.createTeamHelper(self._ctx(901, "Alice"), "Red", 2)
@@ -9769,7 +9827,7 @@ class PrintEmbedTests(HelperTestCase):
     # crashed with nothing shown to the user at all, since
     # on_app_command_error skips sending anything once ctx.response is
     # already done.
-    async def test_channel_send_failure_notifies_via_followup_and_reraises(self):
+    async def test_channel_send_failure_notifies_via_followup_and_returns_none(self):
         team1 = self._five_player_team("Team 1", 700)
         team2 = self._five_player_team("Team 2", 800)
         ctx = FakeInteraction(self.guild, FakeMember("Caller"))
@@ -9777,15 +9835,21 @@ class PrintEmbedTests(HelperTestCase):
             SimpleNamespace(status=403, reason="Forbidden"), "Missing Access"
         )
 
-        with self.assertRaises(discord.HTTPException):
-            await self.helperObj.printEmbed(ctx, team1, team2)
+        result = await self.helperObj.printEmbed(ctx, team1, team2)
 
+        # Not re-raised: a server stuck on a broken channel permission
+        # would otherwise re-log this as a fresh "Unhandled application
+        # command error" every single retry, indistinguishable from a
+        # genuine new bug in shockwave.log even though the user's already
+        # been told exactly what's wrong via the followup below. Callers
+        # check for this instead and bail out quietly.
+        self.assertEqual(result, (None, None, None))
         ctx.followup.send.assert_awaited_once()
         text = ctx.followup.send.call_args.args[0]
         self.assertIn("View Channel", text)
         self.assertTrue(ctx.followup.send.call_args.kwargs.get("ephemeral"))
 
-    async def test_followup_failure_does_not_mask_the_original_error(self):
+    async def test_followup_failure_does_not_raise_either(self):
         team1 = self._five_player_team("Team 1", 700)
         team2 = self._five_player_team("Team 2", 800)
         ctx = FakeInteraction(self.guild, FakeMember("Caller"))
@@ -9796,8 +9860,9 @@ class PrintEmbedTests(HelperTestCase):
             SimpleNamespace(status=403, reason="Forbidden"), "Missing Access"
         )
 
-        with self.assertRaises(discord.HTTPException):
-            await self.helperObj.printEmbed(ctx, team1, team2)
+        result = await self.helperObj.printEmbed(ctx, team1, team2)
+
+        self.assertEqual(result, (None, None, None))
 
 
 class AdminSetHelperTests(HelperTestCase):
@@ -20267,6 +20332,26 @@ class MakeTeamsCommandTests(BotModuleTestCase):
         # easy to miss. It's the last message sent now, after the rosters.
         ctx.channel.send.assert_awaited_once()
         self.assertIn("Press Start", ctx.channel.send.call_args.args[0])
+
+    # printEmbed already told the user why (a channel permission problem,
+    # most likely) and logged it, then returned (None, None, None) -
+    # nothing left here to announce or finalize against a roster that
+    # never actually posted. Also confirms the "Press Start" reminder
+    # doesn't attempt yet another send on the same broken channel.
+    async def test_bails_out_quietly_when_print_embed_cannot_post(self):
+        guild_id = 909
+        await self._setup_teams(guild_id)
+        ctx = self._ctx_in_voice(guild_id=guild_id)
+
+        with patch.object(self.bot.helperObj, "randomizeTeamHelper", AsyncMock()), \
+             patch.object(
+                 self.bot.helperObj, "printEmbed", AsyncMock(return_value=(None, None, None))
+             ), \
+             patch.object(self.bot.helperObj, "_finalizeRoster", AsyncMock()) as finalize_mock:
+            await self._command("make-teams random").callback(ctx, use_roles=False)
+
+        finalize_mock.assert_not_awaited()
+        ctx.channel.send.assert_not_awaited()
 
     async def test_random_split_announces_the_active_game(self):
         guild_id = 908
