@@ -855,8 +855,20 @@ _DISCORD_MESSAGE_MAX_LENGTH = 2000
 # already logs through (see logger.addHandler below), filtered to
 # WARNING+ via setLevel so this file's routine logger.info calls (command
 # invocations, DB writes) never trigger it.
+#
+# skip_developer_dm (set via logger.exception(..., extra={"skip_developer_dm": True}))
+# opts a specific record out of this, still fully written to shockwave.log
+# by the other handlers, just not DMed. For a known, already-communicated
+# failure - a Discord permission problem the end user was already told
+# about directly (see printEmbed/_sendMatchupImage's own follow-up
+# notices) or that a command's own later messaging will surface anyway
+# (cancelGameHelper/cancelBettingHelper's secondary notices) - repeating
+# it as a developer DM on every retry is just noise: the fix is on that
+# server's own admin, not anything code-side to act on.
 class DeveloperDMHandler(logging.Handler):
     def emit(self, record):
+        if getattr(record, "skip_developer_dm", False):
+            return
         if not _developerAlertsEnabled or helper.SHOCKWAVE_DEVELOPER_ID is None:
             return
         try:

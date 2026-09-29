@@ -284,6 +284,24 @@ doesn't route its own failures back through `logger`, since this handler is
 itself attached to that logger, so logging a failure here would just
 re-trigger itself and recurse. It `print()`s to stderr instead.
 
+A `logger.exception` call can opt itself out of the DM specifically -
+`extra={"skip_developer_dm": True}` sets that attribute on the `LogRecord`,
+and `emit()` returns immediately if it's set, before it does anything else.
+The record still reaches `shockwave.log` and the console as normal; only the
+DM is skipped. This is for a failure that's a known Discord-side permission
+problem one server's admin hasn't granted yet (missing Send Messages, View
+Channel, Attach Files) where the bot has already told the affected party
+directly what's wrong and how to fix it - `printEmbed`, `_sendMatchupImage`,
+`cancelGameHelper`, and `cancelBettingHelper` all set it on their own
+`channel.send` failures for exactly this reason (see "Team formation" and
+"Betting" below). Repeating that as a developer DM on every retry until that
+server's admin gets around to fixing it is just noise: there's nothing
+code-side to act on. Where a caller also attempts a fallback notice
+(`printEmbed`'s `ctx.followup.send`, `_sendMatchupImage`'s plain-text retry),
+only the first failure sets the flag - if the fallback itself also fails,
+that second `logger.exception` call does NOT set it, since at that point
+nobody was actually told anything, which is worth knowing about.
+
 Turning alerts on/off isn't a slash command: every application command is
 visible to every user who types "/" in any server the bot is in, whether or
 not they can actually run it (there's no way to hide one from Discord's own
@@ -469,7 +487,13 @@ in bot.py) checks for that and returns early instead of handing
 design, but a server stuck on a genuinely broken channel permission would
 then re-log this as a fresh "Unhandled application command error" on every
 single retry - indistinguishable in shockwave.log from a real new bug, even
-though the user had already been told exactly what was wrong.
+though the user had already been told exactly what was wrong. That primary
+`logger.exception` call also sets `extra={"skip_developer_dm": True}` (see
+`DeveloperDMHandler` above) so a known, already-communicated permission
+issue on one server doesn't keep paging the developer on every retry either
+- unless the `ctx.followup.send` above also fails, in which case a second,
+un-suppressed `logger.exception` call fires, since at that point the caller
+genuinely wasn't told anything.
 
 Start (no move) is the same button, `move=False`, for a group that's already
 elsewhere (a stage channel, another platform, in person) and doesn't want
@@ -639,7 +663,10 @@ it's set. A failed send now falls back to a plain "(Couldn't post the
 matchup image here...)" notice (itself best-effort - a channel without
 Attach Files might still allow Send Messages, but not always) and lets the
 rest of the flow run regardless, the same "report and continue" shape the
-move loop above already uses.
+move loop above already uses. Same `skip_developer_dm`/escalation split as
+`printEmbed` above: the primary failure's `logger.exception` is suppressed
+since the fallback notice is about to explain it, but a second,
+un-suppressed call fires if that fallback also fails.
 
 It then calls `_openBetting`. Betting stays open for a configurable window
 while the bot keeps responding to other commands, so the countdown runs as
@@ -822,7 +849,12 @@ notice, and the two move-back notices covered just above) are each wrapped
 in try/except too, same for `cancelBettingHelper`'s refund notice. None of
 these are anything downstream reads back - the actual cancel (`betting_state`
 reset, wager refunds, the move back itself) already happened or happens
-regardless of whether any of these land. That matters because
+regardless of whether any of these land. Each of these four failures logs
+with `skip_developer_dm` set - unlike `printEmbed`/`_sendMatchupImage`
+above, there's no fallback notice attempt to nest an escalation around, so
+these just stay quiet uniformly; the caller already sees whatever the
+command's own later messaging (or the next attempt) surfaces regardless.
+That matters because
 `clearTeamsHelper` calls `cancelGameHelper` first whenever an old game's
 still open, and every fresh `/make-teams` command routes through
 `clearTeamsHelper` before it ever gets to forming the new roster - a channel

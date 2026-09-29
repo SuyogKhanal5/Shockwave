@@ -3268,7 +3268,16 @@ class helpers():
             # from a genuine new bug even though the user's already been
             # told exactly what's wrong. Callers check for the (None,
             # None, None) this returns instead and bail out quietly.
-            logger.exception("printEmbed: failed to post the team roster (guild %s)", ctx.guild.id)
+            # skip_developer_dm: the followup below is about to tell the
+            # caller directly what's wrong - that's the whole point of
+            # this handler, so there's nothing here a developer needs
+            # DMed about too. A known, already-communicated permission
+            # problem on one server isn't a code issue to keep getting
+            # paged for.
+            logger.exception(
+                "printEmbed: failed to post the team roster (guild %s)", ctx.guild.id,
+                extra={"skip_developer_dm": True},
+            )
             try:
                 await ctx.followup.send(
                     "I couldn't post the team roster in this channel - I might be missing the View "
@@ -3277,7 +3286,13 @@ class helpers():
                     ephemeral=True,
                 )
             except discord.HTTPException:
-                pass
+                # Unlike the primary failure above, this one IS worth
+                # knowing about: the caller was never actually told
+                # anything at all, so there's no guarantee anyone
+                # involved even knows this command failed.
+                logger.exception(
+                    "printEmbed: also failed to notify the caller via followup (guild %s)", ctx.guild.id
+                )
             return None, None, None
 
         return team1_message, team2_message, players_message
@@ -6686,14 +6701,25 @@ class helpers():
         try:
             msg = await channel.send(file=self._imageToFile(image, "matchup.png"))
         except discord.HTTPException:
-            logger.exception("_sendMatchupImage: failed to post the matchup image (guild %s)", guild_id)
+            # skip_developer_dm: the fallback text notice right below is
+            # about to tell whoever's watching the channel what's wrong -
+            # a known, already-communicated permission problem on one
+            # server isn't a code issue to keep getting paged for.
+            logger.exception(
+                "_sendMatchupImage: failed to post the matchup image (guild %s)", guild_id,
+                extra={"skip_developer_dm": True},
+            )
             try:
                 await channel.send(
                     "(Couldn't post the matchup image here - I might be missing the Attach Files "
                     "permission in this channel.)"
                 )
             except discord.HTTPException:
-                pass
+                # Unlike the primary failure above, this one IS worth
+                # knowing about: nobody was actually told anything at all.
+                logger.exception(
+                    "_sendMatchupImage: also failed to post the fallback notice (guild %s)", guild_id
+                )
             return
         # Read back by recordResult once this game's result is scored,
         # so it can reply to this same message instead of just posting
@@ -11458,7 +11484,10 @@ class helpers():
         try:
             await channel.send(f"{CANCEL_GAME_EMOJI} Game cancelled.", reference=matchup_message)
         except discord.HTTPException:
-            logger.exception("cancelGameHelper: failed to post the cancellation notice (guild %s)", guild_id)
+            logger.exception(
+                "cancelGameHelper: failed to post the cancellation notice (guild %s)", guild_id,
+                extra={"skip_developer_dm": True},
+            )
 
         await self.cancelBettingHelper(guild_id, channel)
 
@@ -11475,7 +11504,8 @@ class helpers():
                         await channel.send("Moved everyone back to the original channel!")
                 except discord.HTTPException:
                     logger.exception(
-                        "cancelGameHelper: failed to post the moved-back notice (guild %s)", guild_id
+                        "cancelGameHelper: failed to post the moved-back notice (guild %s)", guild_id,
+                        extra={"skip_developer_dm": True},
                     )
 
     # Pari-mutuel payout: winners split the losing side's pool
@@ -14990,5 +15020,6 @@ class helpers():
                 await channel.send("Bets have been refunded since the game ended before a winner was recorded.")
             except discord.HTTPException:
                 logger.exception(
-                    "cancelBettingHelper: failed to post the refund notice (guild %s)", guild_id
+                    "cancelBettingHelper: failed to post the refund notice (guild %s)", guild_id,
+                    extra={"skip_developer_dm": True},
                 )

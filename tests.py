@@ -7961,12 +7961,36 @@ class ImageRenderThreadOffloadTests(HelperTestCase):
             FakeMessage(),
         ])
 
-        await self.helperObj._sendMatchupImage(self.channel, team1, team2, "Normal", guild_id=GUILD_ID)
+        with self.assertLogs("shockwave", level="ERROR") as cm:
+            await self.helperObj._sendMatchupImage(self.channel, team1, team2, "Normal", guild_id=GUILD_ID)
 
         self.assertEqual(self.channel.send.await_count, 2)
         fallback_text = self.channel.send.call_args_list[1].args[0]
         self.assertIn("Attach Files", fallback_text)
         self.assertIsNone(self.helperObj.get(GUILD_ID, "matchup_message_id"))
+
+        # The fallback notice above is what actually tells the channel
+        # what's wrong, so this record shouldn't also page the developer.
+        self.assertEqual(len(cm.records), 1)
+        self.assertTrue(getattr(cm.records[0], "skip_developer_dm", False))
+
+    async def test_failed_fallback_notice_also_does_not_raise_but_does_escalate(self):
+        team1, team2 = self._team("Red"), self._team("Blue")
+        forbidden = discord.HTTPException(SimpleNamespace(status=403, reason="Forbidden"), "Missing Permissions")
+        self.channel.send = AsyncMock(side_effect=[forbidden, forbidden])
+
+        with self.assertLogs("shockwave", level="ERROR") as cm:
+            await self.helperObj._sendMatchupImage(self.channel, team1, team2, "Normal", guild_id=GUILD_ID)
+
+        self.assertEqual(self.channel.send.await_count, 2)
+        self.assertIsNone(self.helperObj.get(GUILD_ID, "matchup_message_id"))
+
+        # Nobody was actually told anything this time (both the image post
+        # AND the fallback notice failed), so unlike the single-failure
+        # case above, this DOES need to reach the developer.
+        self.assertEqual(len(cm.records), 2)
+        self.assertTrue(getattr(cm.records[0], "skip_developer_dm", False))
+        self.assertFalse(getattr(cm.records[1], "skip_developer_dm", False))
 
     async def test_redirects_to_the_configured_matchup_channel(self):
         matchup_channel = FakeChannel("results", kind="text", guild=self.guild)
@@ -9835,7 +9859,8 @@ class PrintEmbedTests(HelperTestCase):
             SimpleNamespace(status=403, reason="Forbidden"), "Missing Access"
         )
 
-        result = await self.helperObj.printEmbed(ctx, team1, team2)
+        with self.assertLogs("shockwave", level="ERROR") as cm:
+            result = await self.helperObj.printEmbed(ctx, team1, team2)
 
         # Not re-raised: a server stuck on a broken channel permission
         # would otherwise re-log this as a fresh "Unhandled application
@@ -9849,6 +9874,11 @@ class PrintEmbedTests(HelperTestCase):
         self.assertIn("View Channel", text)
         self.assertTrue(ctx.followup.send.call_args.kwargs.get("ephemeral"))
 
+        # The followup above is what actually tells the caller what's
+        # wrong, so this record shouldn't also page the developer.
+        self.assertEqual(len(cm.records), 1)
+        self.assertTrue(getattr(cm.records[0], "skip_developer_dm", False))
+
     async def test_followup_failure_does_not_raise_either(self):
         team1 = self._five_player_team("Team 1", 700)
         team2 = self._five_player_team("Team 2", 800)
@@ -9860,9 +9890,17 @@ class PrintEmbedTests(HelperTestCase):
             SimpleNamespace(status=403, reason="Forbidden"), "Missing Access"
         )
 
-        result = await self.helperObj.printEmbed(ctx, team1, team2)
+        with self.assertLogs("shockwave", level="ERROR") as cm:
+            result = await self.helperObj.printEmbed(ctx, team1, team2)
 
         self.assertEqual(result, (None, None, None))
+
+        # The caller genuinely wasn't told anything this time (both the
+        # channel send AND the followup failed), so unlike the single-
+        # failure case above, this DOES need to reach the developer.
+        self.assertEqual(len(cm.records), 2)
+        self.assertTrue(getattr(cm.records[0], "skip_developer_dm", False))
+        self.assertFalse(getattr(cm.records[1], "skip_developer_dm", False))
 
 
 class AdminSetHelperTests(HelperTestCase):
@@ -10498,7 +10536,8 @@ class CancelGameHelperTests(HelperTestCase):
         )
         self.db.commit()
 
-        await self.helperObj.cancelGameHelper(GUILD_ID, channel, guild)  # must not raise
+        with self.assertLogs("shockwave", level="ERROR") as cm:
+            await self.helperObj.cancelGameHelper(GUILD_ID, channel, guild)  # must not raise
 
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 801, "balance"), 700)
         self.assertEqual(self.helperObj.get(GUILD_ID, "betting_state"), "NONE")
@@ -10506,6 +10545,12 @@ class CancelGameHelperTests(HelperTestCase):
         self.assertEqual(self.cursor.fetchone()[0], 0)
         member1.move_to.assert_awaited_once_with(og)
         member2.move_to.assert_awaited_once_with(og)
+
+        # Every notice here failed the same known way (channel missing
+        # Send Messages) - none of them are a genuine code issue to page
+        # the developer about.
+        self.assertTrue(cm.records)
+        self.assertTrue(all(getattr(r, "skip_developer_dm", False) for r in cm.records))
 
     async def test_cancelled_message_replies_to_the_matchup_graphic(self):
         channel = FakeChannel("game-chat")
@@ -14632,10 +14677,16 @@ class CancelBettingHelperTests(HelperTestCase):
             SimpleNamespace(status=403, reason="Forbidden"), "Missing Permissions"
         )
 
-        await self.helperObj.cancelBettingHelper(GUILD_ID, channel)  # must not raise
+        with self.assertLogs("shockwave", level="ERROR") as cm:
+            await self.helperObj.cancelBettingHelper(GUILD_ID, channel)  # must not raise
 
         self.assertEqual(self.helperObj.getEconomy(GUILD_ID, 901, "balance"), 1000)
         self.assertEqual(self.helperObj.get(GUILD_ID, "betting_state"), "NONE")
+
+        # A known, already-understood permission issue on one server isn't
+        # a code issue to keep getting paged for.
+        self.assertEqual(len(cm.records), 1)
+        self.assertTrue(getattr(cm.records[0], "skip_developer_dm", False))
 
 
 class OpenBettingTests(HelperTestCase):
@@ -18583,6 +18634,29 @@ class DeveloperDMHandlerTests(BotModuleTestCase):
             self.bot._developer_dm_handler.emit(self._record())
         mock_schedule.assert_not_called()
         self.assertEqual(self.bot._pendingDeveloperDMs, [])
+
+    def test_emit_does_nothing_when_the_record_opts_out(self):
+        # extra={"skip_developer_dm": True} on a logger.exception call - used
+        # for a known, already-end-user-communicated permission failure -
+        # sets this attribute on the record. It should never reach a DM,
+        # even though it's still WARNING+ and would otherwise qualify.
+        record = self._record(level=logging.ERROR, msg="known permission issue")
+        record.skip_developer_dm = True
+        with patch.object(self.bot.client, "is_ready", return_value=True), \
+             patch.object(self.bot.asyncio, "run_coroutine_threadsafe") as mock_schedule:
+            self.bot._developer_dm_handler.emit(record)
+        mock_schedule.assert_not_called()
+        self.assertEqual(self.bot._pendingDeveloperDMs, [])
+
+    def test_emit_still_dms_when_skip_developer_dm_is_false(self):
+        record = self._record(level=logging.ERROR, msg="genuine issue")
+        record.skip_developer_dm = False
+        with patch.object(self.bot.client, "is_ready", return_value=True), \
+             patch.object(self.bot.asyncio, "run_coroutine_threadsafe") as mock_schedule:
+            self.bot._developer_dm_handler.emit(record)
+        mock_schedule.assert_called_once()
+        coro, _ = mock_schedule.call_args.args
+        coro.close()
 
     def test_emit_ignores_info_level_records(self):
         # setLevel(WARNING) on the handler itself is what filters these
