@@ -98,7 +98,7 @@ DUELS_SCHEMA = (
 )
 LEADERBOARDS_SCHEMA = (
     "CREATE TABLE leaderboards(messageId INTEGER PRIMARY KEY, guildId, channelId, "
-    "filter, sort_order, page, cards INTEGER DEFAULT 0, cardShown INTEGER DEFAULT 0)"
+    "filter, sort_order, page, cards INTEGER DEFAULT 0, cardShown INTEGER DEFAULT 0, game TEXT)"
 )
 TEAM_LIST_VIEWS_SCHEMA = (
     "CREATE TABLE team_list_views(messageId INTEGER PRIMARY KEY, guildId, channelId, "
@@ -16858,10 +16858,49 @@ class LeaderboardHelperTests(HelperTestCase):
         self.assertIsInstance(view, helper_module.LeaderboardPagingView)
 
         self.cursor.execute(
-            "SELECT guildId, channelId, filter, sort_order, page FROM leaderboards WHERE messageId=?",
+            "SELECT guildId, channelId, filter, sort_order, page, game FROM leaderboards WHERE messageId=?",
             (8888,)
         )
-        self.assertEqual(self.cursor.fetchone(), (GUILD_ID, channel.id, "balance", "asc", 0))
+        # No game given, so the view is pinned to this server's current
+        # game (League, the default) rather than left NULL.
+        self.assertEqual(self.cursor.fetchone(), (GUILD_ID, channel.id, "balance", "asc", 0, "League"))
+
+    async def test_unknown_game_is_rejected_with_the_known_games_listed(self):
+        self._seed_players()
+        ctx = self._ctx()
+
+        await self.helperObj.leaderboardHelper(ctx, None, "desc", "Valorant")
+
+        ctx.response.send_message.assert_awaited_once()
+        message = ctx.response.send_message.call_args.args[0]
+        self.assertIn("Valorant", message)
+        self.assertIn("League", message)
+        self.cursor.execute("SELECT COUNT(*) FROM leaderboards")
+        self.assertEqual(self.cursor.fetchone()[0], 0)
+
+    async def test_explicit_game_ranks_that_games_stats_and_is_stored(self):
+        self._seed_players()
+        await self.helperObj.setGameHelper(self._ctx(), "Valorant")  # registers it as known
+        self.helperObj.update(GUILD_ID, "current_game", "League")  # current game stays League
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 901, "Alice", "Valorant")
+        self.cursor.execute(
+            "UPDATE game_stats SET elo=1600, game_wins=2, game_losses=0 "
+            "WHERE guildId=? AND userId=901 AND game='Valorant'", (GUILD_ID,)
+        )
+        self.db.commit()
+        channel = FakeChannel("leaderboard-chat")
+        ctx = self._ctx(channel=channel)
+        posted_message = FakeMessage(id=8889)
+        ctx.original_response.return_value = posted_message
+
+        await self.helperObj.leaderboardHelper(ctx, None, "desc", "Valorant")
+
+        embed = ctx.response.send_message.call_args.kwargs["embed"]
+        self.assertIn("Valorant", embed.title)
+        self.assertIn("1600", embed.description)
+
+        self.cursor.execute("SELECT game FROM leaderboards WHERE messageId=?", (8889,))
+        self.assertEqual(self.cursor.fetchone(), ("Valorant",))
 
     async def test_overview_mode_defaults_sort_to_elo_and_shows_elo_and_ranked_record(self):
         self._seed_players()
@@ -16977,6 +17016,32 @@ class LeaderboardCardsModeTests(HelperTestCase):
         embed = posted.edit.call_args.kwargs["embed"]
         # falls back to discord.User (fetch_user), which still has a name
         self.assertIn("Stats", embed.title)
+
+    # If /leaderboard was explicitly run for a game other than this
+    # server's current one, flipping into cards mode should show that
+    # same game's stats, not silently fall back to whatever /set game
+    # currently has configured - see the leaderboards.game column and
+    # _renderLeaderboardEntryStatsEmbed's own comment.
+    async def test_cards_mode_shows_the_leaderboards_own_pinned_game_not_the_current_one(self):
+        self._seed_players()
+        await self.helperObj.setGameHelper(self._ctx(), "Valorant")  # registers it as known
+        self.helperObj.update(GUILD_ID, "current_game", "League")  # current game stays League
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 901, "Alice", "Valorant")
+        self.cursor.execute(
+            "UPDATE game_stats SET elo=2000, game_wins=1, game_losses=0 "
+            "WHERE guildId=? AND userId=901 AND game='Valorant'", (GUILD_ID,)
+        )
+        self.db.commit()
+        ctx = self._ctx()
+        posted = FakeMessage(id=7104)
+        ctx.original_response.return_value = posted
+        await self.helperObj.leaderboardHelper(ctx, None, "desc", "Valorant")
+        click = FakeInteraction(self.guild, ctx.user, channel=self.channel, message=posted)
+
+        await self.helperObj._handleLeaderboardViewCardsClick(click)
+
+        embed = posted.edit.call_args.kwargs["embed"]
+        self.assertEqual(embed.title, "Alice's Stats - Valorant")
 
     async def test_cards_button_rejects_a_stale_or_gone_leaderboard(self):
         click = FakeInteraction(
@@ -17370,6 +17435,44 @@ class LeaderboardPagingViewTests(HelperTestCase):
         click.response.edit_message.assert_awaited_once()
         embed = click.response.edit_message.call_args.kwargs["embed"]
         self.assertIn("Page 3/3", embed.footer.text)
+
+    # The row this view was posted for has no `game` column value (it
+    # predates this column, same as every other row this setUp inserts),
+    # so a page click should fall back to reading the server's current
+    # game live, same as /leaderboard itself defaults to when no game is
+    # given.
+    async def test_page_click_falls_back_to_current_game_when_the_row_predates_the_column(self):
+        click = self._click()
+        await helper_module.LeaderboardPagingView(self.helperObj).next.callback(click)
+        embed = click.response.edit_message.call_args.kwargs["embed"]
+        self.assertIn("League", embed.title)
+
+    # Once a leaderboard view is pinned to a specific game (see
+    # leaderboardHelper), its buttons should keep ranking that game even
+    # if /set game has since moved the server's current game elsewhere -
+    # same reasoning the stored filter/sort_order are pinned instead of
+    # re-read fresh each click.
+    async def test_button_click_stays_pinned_to_the_game_it_was_posted_for(self):
+        await self.helperObj.setGameHelper(FakeInteraction(self.guild, FakeMember("Admin")), "Valorant")
+        self.helperObj.ensureEconomyRow(GUILD_ID, 2000, "Riot")
+        self.helperObj.ensureGameStatsRow(GUILD_ID, 2000, "Riot", "Valorant")
+        self.cursor.execute(
+            "UPDATE game_stats SET elo=9999, game_wins=1, game_losses=0 "
+            "WHERE guildId=? AND userId=2000 AND game='Valorant'", (GUILD_ID,)
+        )
+        self.cursor.execute("UPDATE leaderboards SET game='Valorant', page=0 WHERE messageId=9999")
+        self.helperObj.update(GUILD_ID, "current_game", "League")  # moved on since this view was posted
+        self.db.commit()
+
+        # The only Valorant player there is, so there's nothing to page
+        # to - ascending/descending still re-renders regardless of page
+        # count, which is enough to prove which game actually got used.
+        click = self._click()
+        await helper_module.LeaderboardPagingView(self.helperObj).ascending.callback(click)
+
+        embed = click.response.edit_message.call_args.kwargs["embed"]
+        self.assertIn("Valorant", embed.title)
+        self.assertIn("Riot", embed.description)
 
     async def test_ascending_button_flips_order_and_resets_to_page_zero(self):
         click = self._click()
@@ -19218,7 +19321,7 @@ class CommandDelegationTests(BotModuleTestCase):
         mock = AsyncMock()
         with patch.object(self.bot.helperObj, "leaderboardHelper", mock):
             await self._command("leaderboard").callback(ctx)
-        mock.assert_awaited_once_with(ctx, None, "desc")
+        mock.assert_awaited_once_with(ctx, None, "desc", None)
 
     async def test_leaderboard_passes_resolved_filter_and_order(self):
         ctx = self._ctx()
@@ -19227,7 +19330,14 @@ class CommandDelegationTests(BotModuleTestCase):
             filter_choice = app_commands.Choice(name="Balance", value="balance")
             order_choice = app_commands.Choice(name="Ascending (lowest first)", value="asc")
             await self._command("leaderboard").callback(ctx, filter=filter_choice, order=order_choice)
-        mock.assert_awaited_once_with(ctx, "balance", "asc")
+        mock.assert_awaited_once_with(ctx, "balance", "asc", None)
+
+    async def test_leaderboard_passes_the_requested_game(self):
+        ctx = self._ctx()
+        mock = AsyncMock()
+        with patch.object(self.bot.helperObj, "leaderboardHelper", mock):
+            await self._command("leaderboard").callback(ctx, game="Valorant")
+        mock.assert_awaited_once_with(ctx, None, "desc", "Valorant")
 
     async def test_create_tournament_delegates(self):
         ctx = self._ctx()

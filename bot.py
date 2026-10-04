@@ -447,14 +447,20 @@ ensure_column("duels", "createdAt", "INTEGER")
 # and cardShown carry over /team list's own cards:true toggle. See the
 # identically-named columns on team_list_views for what each one means.
 # LeaderboardPagingView reads both back the same way TeamListPagingView
-# does.
+# does. game pins the view to whichever game /leaderboard was actually
+# run for, so paging/sorting/card-flipping stays on that game even if
+# /set game changes the server's current game while this view is still
+# live, same reasoning filter/sort_order are pinned instead of re-read
+# from the command each time. NULL on a row from before this column
+# existed reads back as this server's current game (see _currentGame).
 cursor.execute(
     "CREATE TABLE IF NOT EXISTS leaderboards("
     "messageId INTEGER PRIMARY KEY, guildId, channelId, filter, sort_order, page, "
-    "cards INTEGER DEFAULT 0, cardShown INTEGER DEFAULT 0)"
+    "cards INTEGER DEFAULT 0, cardShown INTEGER DEFAULT 0, game TEXT)"
 )
 ensure_column("leaderboards", "cards", "INTEGER", "0")
 ensure_column("leaderboards", "cardShown", "INTEGER", "0")
+ensure_column("leaderboards", "game", "TEXT")
 # One row per posted /stats message, so we can recognize that a click
 # landed on a real /stats embed (see StatsView).
 cursor.execute(
@@ -1631,6 +1637,7 @@ tree.add_command(shopGroup)
 @app_commands.describe(
     filter="Which stat to rank by; omit for an overview of elo, balance, and record",
     order="Highest-first or lowest-first; defaults to highest-first",
+    game="Which game's elo/record to rank by; defaults to this server's current game",
 )
 @app_commands.choices(filter=[
     app_commands.Choice(name="Elo", value="elo"),
@@ -1654,10 +1661,13 @@ tree.add_command(shopGroup)
     app_commands.Choice(name="Descending (highest first)", value="desc"),
     app_commands.Choice(name="Ascending (lowest first)", value="asc"),
 ])
-async def leaderboard(ctx, filter: app_commands.Choice[str] = None, order: app_commands.Choice[str] = None):
+@app_commands.autocomplete(game=gameAutocomplete)
+async def leaderboard(
+    ctx, filter: app_commands.Choice[str] = None, order: app_commands.Choice[str] = None, game: str = None
+):
     stat = filter.value if filter is not None else None
     sort_order = order.value if order is not None else "desc"
-    await helperObj.leaderboardHelper(ctx, stat, sort_order)
+    await helperObj.leaderboardHelper(ctx, stat, sort_order, game)
 
 
 SITE_COMMANDS_URL = "https://addshockwave.com/commands.html"
@@ -1704,7 +1714,7 @@ COMMAND_HELP = {
     "shop browse": "Browse every trading-card title, color scheme, and font purchasable with gold, with a ✅ next to anything you already own. Sort: Price / Sort: Owned buttons under the listing re-sort each category (Ascending/Descending toggle which way) without needing to re-run the command.",
     "achievements": "Browse every gameplay achievement, what it takes to earn it, whether you already have, and your current progress toward the ones you don't. Earning one unlocks its title for /card-set and posts a one-time announcement in the channel.",
     "shop buy": "Purchases a trading-card cosmetic with gold, permanently unlocking it for /card-set. Refuses if you already own it or can't afford it.",
-    "leaderboard": "Ranks the server by a stat, including ranked-only and casual-only wins/losses/win rate. Omit filter for an elo-sorted overview. Players with a 0W-0L record in the selected stat's category (or who've never played a game at all, for the overview and elo views) are left off, so a currency-based stat like balance still shows everyone. Buttons page through the results, and Ascending/Descending buttons flip the sort direction without re-running the command. Press Cards to flip through each player's full stats card one at a time instead; a Card button on that view swaps the current player's stats card for their actual trading card, and List brings you back to the ranked list.",
+    "leaderboard": "Ranks the server by a stat, including ranked-only and casual-only wins/losses/win rate. Omit filter for an elo-sorted overview. game ranks a different game's elo/record than whichever one /set game currently has this server tracking - defaults to the current game, autocompletes from games this server has actually tracked before, and rejects one it's never seen, same as /stats' own game parameter. Players with a 0W-0L record in the selected stat's category (or who've never played a game at all, for the overview and elo views) are left off, so a currency-based stat like balance still shows everyone. Buttons page through the results, and Ascending/Descending buttons flip the sort direction without re-running the command. Press Cards to flip through each player's full stats card one at a time instead; a Card button on that view swaps the current player's stats card for their actual trading card, and List brings you back to the ranked list.",
     "team create": "Creates a persistent team with you as its captain, or captain as its captain if given.",
     "team save": "Saves Team 1 or Team 2 from the last game in this server as a new persistent team, with you as its captain. You must have actually been rostered on that side to save it, and the new name can't already belong to another team here.",
     "team set": "Sets a persistent team's voice channel and/or logo, any combination in one call. new_voice_channel creates a fresh one named after the team. The team's captain, or anyone with Manage Server, can do this.",

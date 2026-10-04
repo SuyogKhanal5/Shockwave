@@ -14440,15 +14440,17 @@ class helpers():
     # None (not 0) when a player has no games/bets yet, so they can
     # sort to the bottom instead of looking like the worst possible
     # rate.
-    # Scoped to the server's CURRENT game (see /set game): a player who's
-    # never played it (only ever bet, or only played a different game)
-    # still has an economy row, so a LEFT JOIN (rather than requiring a
-    # game_stats row to exist) is what lets them show up at all, with
-    # elo/game_wins/etc. all reading as 0/default, the same "hasn't
-    # played this game" shape _filterLeaderboardEntries already treats as
-    # not belonging on a game-record-based leaderboard.
-    def getLeaderboardEntries(self, guild_id):
-        game = self._currentGame(guild_id)
+    # Scoped to `game` (see /set game), defaulting to the server's
+    # current game when omitted: a player who's never played it (only
+    # ever bet, or only played a different game) still has an economy
+    # row, so a LEFT JOIN (rather than requiring a game_stats row to
+    # exist) is what lets them show up at all, with elo/game_wins/etc.
+    # all reading as 0/default, the same "hasn't played this game" shape
+    # _filterLeaderboardEntries already treats as not belonging on a
+    # game-record-based leaderboard.
+    def getLeaderboardEntries(self, guild_id, game=None):
+        if game is None:
+            game = self._currentGame(guild_id)
         self.cursor.execute(
             "SELECT e.userId, e.username, e.balance, e.wins, e.losses, e.gold_wagered, e.gold_won, "
             "e.gold_lost, COALESCE(g.game_wins, 0), COALESCE(g.game_losses, 0), "
@@ -14584,12 +14586,17 @@ class helpers():
     # discord.User (global account, no per-server data) still works,
     # and only the astronomically rare "account doesn't resolve at all
     # anymore" case falls back to a bare embed built straight from the
-    # entry dict's own username.
-    async def _renderLeaderboardEntryStatsEmbed(self, guild_id, entries_sorted, page):
+    # entry dict's own username. `game` is whichever game this
+    # leaderboard view is actually pinned to (see leaderboardHelper),
+    # passed straight through to _buildStatsEmbed so flipping into cards
+    # mode shows the same game's stats the ranked list itself was
+    # showing, not whatever _buildStatsEmbed's own _currentGame default
+    # would otherwise fall back to.
+    async def _renderLeaderboardEntryStatsEmbed(self, guild_id, entries_sorted, page, game=None):
         entry = entries_sorted[page]
         target = await self._resolveGuildMemberOrUser(guild_id, entry["user_id"])
         if target is not None:
-            embed = self._buildStatsEmbed(guild_id, target)
+            embed = self._buildStatsEmbed(guild_id, target, game)
         else:
             embed = discord.Embed(title=f"{entry['username']}'s Stats", color=discord.Color.gold())
         embed.set_footer(text=f"Player {page + 1}/{len(entries_sorted)}")
@@ -14605,10 +14612,26 @@ class helpers():
     # uses, with its own Card/Back toggle over to that player's actual
     # trading card. No longer something you have to pre-select before
     # the command even runs.
-    async def leaderboardHelper(self, ctx, stat, order):
+    #
+    # `game` is None for "whatever this server's current game is" (same
+    # default /stats uses), or an explicit game to look at instead -
+    # validated against listKnownGames the same way /stats does, so a
+    # typo doesn't silently render an all-zero leaderboard. The resolved
+    # game is pinned into the leaderboards row (see its own comment) so
+    # every button on this view keeps ranking that same game.
+    async def leaderboardHelper(self, ctx, stat, order, game=None):
         guild_id = ctx.guild.id
 
-        entries = self._filterLeaderboardEntries(self.getLeaderboardEntries(guild_id), stat)
+        if game is not None and game not in self.listKnownGames(guild_id):
+            known = ", ".join(f"**{g}**" for g in self.listKnownGames(guild_id))
+            await ctx.response.send_message(
+                f"This server hasn't tracked a game called **{game}**. Known games: {known}.",
+                ephemeral=True,
+            )
+            return
+        resolved_game = game if game is not None else self._currentGame(guild_id)
+
+        entries = self._filterLeaderboardEntries(self.getLeaderboardEntries(guild_id, resolved_game), stat)
         if not entries:
             message = (
                 f"Nobody has any {LEADERBOARD_STAT_LABELS[stat]} stats to show yet in this server!"
@@ -14621,16 +14644,16 @@ class helpers():
         entries_sorted = self._sortLeaderboardEntries(entries, stat if stat is not None else "elo", order)
         view = LeaderboardPagingView(self)
         embed = self._renderLeaderboardEmbed(
-            ctx.guild.name, entries_sorted, stat, order, page=0, game=self._currentGame(guild_id)
+            ctx.guild.name, entries_sorted, stat, order, page=0, game=resolved_game
         )
         await ctx.response.send_message(embed=embed, view=view)
         msg = await ctx.original_response()
 
         self.cursor.execute(
             "INSERT OR REPLACE INTO leaderboards"
-            "(messageId, guildId, channelId, filter, sort_order, page, cards, cardShown) "
-            "VALUES(?, ?, ?, ?, ?, 0, 0, 0)",
-            (msg.id, guild_id, ctx.channel.id, stat, order)
+            "(messageId, guildId, channelId, filter, sort_order, page, cards, cardShown, game) "
+            "VALUES(?, ?, ?, ?, ?, 0, 0, 0, ?)",
+            (msg.id, guild_id, ctx.channel.id, stat, order, resolved_game)
         )
         self.db.commit()
 
@@ -14645,7 +14668,7 @@ class helpers():
             return
 
         self.cursor.execute(
-            "SELECT filter, sort_order, page, cards, cardShown FROM leaderboards "
+            "SELECT filter, sort_order, page, cards, cardShown, game FROM leaderboards "
             "WHERE guildId=? AND messageId=?",
             (guild_id, interaction.message.id)
         )
@@ -14653,11 +14676,13 @@ class helpers():
         if row is None:
             await interaction.response.send_message("This leaderboard is no longer live.", ephemeral=True)
             return
-        stat, order, page, cards, card_shown = row
+        stat, order, page, cards, card_shown, game = row
         cards = bool(cards)
         card_shown = bool(card_shown)
+        if game is None:
+            game = self._currentGame(guild_id)
 
-        entries = self._filterLeaderboardEntries(self.getLeaderboardEntries(guild_id), stat)
+        entries = self._filterLeaderboardEntries(self.getLeaderboardEntries(guild_id, game), stat)
         entries_sorted = self._sortLeaderboardEntries(entries, stat if stat is not None else "elo", order)
         if cards and not entries_sorted:
             # Everyone who ever had an economy row got cleared out from
@@ -14684,11 +14709,11 @@ class helpers():
                 embed, file = await self._renderLeaderboardCardEmbed(guild_id, guild_name, entries_sorted, new_page, target)
                 await interaction.response.edit_message(embed=embed, attachments=[file])
             else:
-                embed = await self._renderLeaderboardEntryStatsEmbed(guild_id, entries_sorted, new_page)
+                embed = await self._renderLeaderboardEntryStatsEmbed(guild_id, entries_sorted, new_page, game)
                 await interaction.response.edit_message(embed=embed, attachments=[])
         else:
             embed = self._renderLeaderboardEmbed(
-                guild_name, entries_sorted, stat, order, new_page, game=self._currentGame(guild_id)
+                guild_name, entries_sorted, stat, order, new_page, game=game
             )
             await interaction.response.edit_message(embed=embed)
 
@@ -14710,17 +14735,19 @@ class helpers():
             return
 
         self.cursor.execute(
-            "SELECT filter, sort_order, cards FROM leaderboards WHERE guildId=? AND messageId=?",
+            "SELECT filter, sort_order, cards, game FROM leaderboards WHERE guildId=? AND messageId=?",
             (guild_id, interaction.message.id)
         )
         row = self.cursor.fetchone()
         if row is None:
             await interaction.response.send_message("This leaderboard is no longer live.", ephemeral=True)
             return
-        stat, order, cards = row
+        stat, order, cards, game = row
         cards = bool(cards)
+        if game is None:
+            game = self._currentGame(guild_id)
 
-        entries = self._filterLeaderboardEntries(self.getLeaderboardEntries(guild_id), stat)
+        entries = self._filterLeaderboardEntries(self.getLeaderboardEntries(guild_id, game), stat)
         entries_sorted = self._sortLeaderboardEntries(entries, stat if stat is not None else "elo", order)
         if cards and not entries_sorted:
             await interaction.response.defer()
@@ -14743,22 +14770,24 @@ class helpers():
             return
 
         self.cursor.execute(
-            "SELECT filter, sort_order, cards, cardShown FROM leaderboards WHERE guildId=? AND messageId=?",
+            "SELECT filter, sort_order, cards, cardShown, game FROM leaderboards WHERE guildId=? AND messageId=?",
             (guild_id, interaction.message.id)
         )
         row = self.cursor.fetchone()
         if row is None:
             await interaction.response.send_message("This leaderboard is no longer live.", ephemeral=True)
             return
-        stat, current_order, cards, card_shown = row
+        stat, current_order, cards, card_shown, game = row
         cards = bool(cards)
         card_shown = bool(card_shown)
+        if game is None:
+            game = self._currentGame(guild_id)
 
         if order == current_order:
             await interaction.response.defer()
             return
 
-        entries = self._filterLeaderboardEntries(self.getLeaderboardEntries(guild_id), stat)
+        entries = self._filterLeaderboardEntries(self.getLeaderboardEntries(guild_id, game), stat)
         entries_sorted = self._sortLeaderboardEntries(entries, stat if stat is not None else "elo", order)
         guild_name = interaction.guild.name if interaction.guild is not None else ""
 
@@ -14773,11 +14802,11 @@ class helpers():
                 embed, file = await self._renderLeaderboardCardEmbed(guild_id, guild_name, entries_sorted, 0, target)
                 await interaction.response.edit_message(embed=embed, attachments=[file])
             else:
-                embed = await self._renderLeaderboardEntryStatsEmbed(guild_id, entries_sorted, 0)
+                embed = await self._renderLeaderboardEntryStatsEmbed(guild_id, entries_sorted, 0, game)
                 await interaction.response.edit_message(embed=embed, attachments=[])
         else:
             embed = self._renderLeaderboardEmbed(
-                guild_name, entries_sorted, stat, order, 0, game=self._currentGame(guild_id)
+                guild_name, entries_sorted, stat, order, 0, game=game
             )
             await interaction.response.edit_message(embed=embed)
 
@@ -14844,7 +14873,7 @@ class helpers():
         message = interaction.message
 
         self.cursor.execute(
-            "SELECT filter, sort_order, page FROM leaderboards "
+            "SELECT filter, sort_order, page, game FROM leaderboards "
             "WHERE guildId=? AND messageId=? AND cards=1 AND cardShown=0",
             (guild_id, message.id)
         )
@@ -14852,9 +14881,11 @@ class helpers():
         if row is None:
             await interaction.response.send_message("This leaderboard is no longer live.", ephemeral=True)
             return
-        stat, order, page = row
+        stat, order, page, game = row
+        if game is None:
+            game = self._currentGame(guild_id)
 
-        entries = self._filterLeaderboardEntries(self.getLeaderboardEntries(guild_id), stat)
+        entries = self._filterLeaderboardEntries(self.getLeaderboardEntries(guild_id, game), stat)
         entries_sorted = self._sortLeaderboardEntries(entries, stat if stat is not None else "elo", order)
         if not entries_sorted:
             await interaction.response.send_message("This leaderboard is no longer live.", ephemeral=True)
@@ -14881,7 +14912,7 @@ class helpers():
         message = interaction.message
 
         self.cursor.execute(
-            "SELECT filter, sort_order, page FROM leaderboards "
+            "SELECT filter, sort_order, page, game FROM leaderboards "
             "WHERE guildId=? AND messageId=? AND cards=1 AND cardShown=1",
             (guild_id, message.id)
         )
@@ -14889,9 +14920,11 @@ class helpers():
         if row is None:
             await interaction.response.send_message("This leaderboard is no longer live.", ephemeral=True)
             return
-        stat, order, page = row
+        stat, order, page, game = row
+        if game is None:
+            game = self._currentGame(guild_id)
 
-        entries = self._filterLeaderboardEntries(self.getLeaderboardEntries(guild_id), stat)
+        entries = self._filterLeaderboardEntries(self.getLeaderboardEntries(guild_id, game), stat)
         entries_sorted = self._sortLeaderboardEntries(entries, stat if stat is not None else "elo", order)
         if not entries_sorted:
             await interaction.response.send_message("This leaderboard is no longer live.", ephemeral=True)
@@ -14899,7 +14932,7 @@ class helpers():
         page = min(page, len(entries_sorted) - 1)
 
         await interaction.response.defer()
-        embed = await self._renderLeaderboardEntryStatsEmbed(guild_id, entries_sorted, page)
+        embed = await self._renderLeaderboardEntryStatsEmbed(guild_id, entries_sorted, page, game)
         await message.edit(
             embed=embed, attachments=[], view=LeaderboardPagingView(self, cards=True, card_shown=False)
         )
@@ -14918,23 +14951,25 @@ class helpers():
         message = interaction.message
 
         self.cursor.execute(
-            "SELECT filter, sort_order FROM leaderboards WHERE guildId=? AND messageId=? AND cards=0",
+            "SELECT filter, sort_order, game FROM leaderboards WHERE guildId=? AND messageId=? AND cards=0",
             (guild_id, message.id)
         )
         row = self.cursor.fetchone()
         if row is None:
             await interaction.response.send_message("This leaderboard is no longer live.", ephemeral=True)
             return
-        stat, order = row
+        stat, order, game = row
+        if game is None:
+            game = self._currentGame(guild_id)
 
-        entries = self._filterLeaderboardEntries(self.getLeaderboardEntries(guild_id), stat)
+        entries = self._filterLeaderboardEntries(self.getLeaderboardEntries(guild_id, game), stat)
         entries_sorted = self._sortLeaderboardEntries(entries, stat if stat is not None else "elo", order)
         if not entries_sorted:
             await interaction.response.send_message("This leaderboard is no longer live.", ephemeral=True)
             return
 
         await interaction.response.defer()
-        embed = await self._renderLeaderboardEntryStatsEmbed(guild_id, entries_sorted, 0)
+        embed = await self._renderLeaderboardEntryStatsEmbed(guild_id, entries_sorted, 0, game)
         await message.edit(embed=embed, attachments=[], view=LeaderboardPagingView(self, cards=True, card_shown=False))
         self.cursor.execute(
             "UPDATE leaderboards SET cards=1, cardShown=0, page=0 WHERE guildId=? AND messageId=?",
@@ -14950,22 +14985,24 @@ class helpers():
         message = interaction.message
 
         self.cursor.execute(
-            "SELECT filter, sort_order FROM leaderboards WHERE guildId=? AND messageId=? AND cards=1",
+            "SELECT filter, sort_order, game FROM leaderboards WHERE guildId=? AND messageId=? AND cards=1",
             (guild_id, message.id)
         )
         row = self.cursor.fetchone()
         if row is None:
             await interaction.response.send_message("This leaderboard is no longer live.", ephemeral=True)
             return
-        stat, order = row
+        stat, order, game = row
+        if game is None:
+            game = self._currentGame(guild_id)
 
-        entries = self._filterLeaderboardEntries(self.getLeaderboardEntries(guild_id), stat)
+        entries = self._filterLeaderboardEntries(self.getLeaderboardEntries(guild_id, game), stat)
         entries_sorted = self._sortLeaderboardEntries(entries, stat if stat is not None else "elo", order)
 
         await interaction.response.defer()
         guild_name = interaction.guild.name if interaction.guild is not None else ""
         embed = self._renderLeaderboardEmbed(
-            guild_name, entries_sorted, stat, order, 0, game=self._currentGame(guild_id)
+            guild_name, entries_sorted, stat, order, 0, game=game
         )
         await message.edit(embed=embed, attachments=[], view=LeaderboardPagingView(self))
         self.cursor.execute(

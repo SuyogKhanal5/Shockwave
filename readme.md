@@ -1080,37 +1080,59 @@ on the current game only, not every game a player's ever touched;
 `/clear economy` still wipes every game's `game_stats` rows outright
 (`resetEconomyHelper`), matching its own "wipe everything" scope.
 
-`getLeaderboardEntries` scopes to `_currentGame`, LEFT JOINing `game_stats`
-onto `economy` (so a player who's only ever bet, or only played a different
-game, still shows up with 0s/defaults rather than being excluded outright)
-rather than requiring a `game_stats` row to already exist. `/leaderboard`'s
-own title says which game it's for.
+`getLeaderboardEntries(guild_id, game=None)` defaults to `_currentGame` when
+no game is given, LEFT JOINing `game_stats` onto `economy` (so a player
+who's only ever bet, or only played a different game, still shows up with
+0s/defaults rather than being excluded outright) rather than requiring a
+`game_stats` row to already exist. `/leaderboard`'s own title says which
+game it's for.
 
 `_buildStatsEmbed(guild_id, target, game=None)` defaults to `_currentGame`
-the same way, but `/stats` (`statsHelper`) can override it with its own
-optional `game` param, autocompleted from `listKnownGames` (the same list
-`/set game`'s own autocomplete offers). Without this, switching
-`current_game` didn't just deprioritize an earlier game's stats, it made
-them permanently unreachable from any player-facing command - the data was
-never actually lost (`game_stats` keys on `game` already), just stranded
-behind whatever `/set game` happened to be pointed at. `statsHelper`
-validates the given `game` against `listKnownGames` before ever calling
-`_buildStatsEmbed` with it, rejecting one this server's never tracked with
-the list of ones it has - unlike `/set game` itself, which deliberately
-accepts any new name to start tracking it, a typo'd game name here would
-otherwise silently create a brand new, all-zero `game_stats` row via
-`ensureGameStatsRow`'s own self-heal and just look like "you have no
-stats," not "you mistyped the name." The other three `_buildStatsEmbed`
-call sites (`_handleStatsAvatarToggleClick`, `_swapTradingCardForStats` -
-the card-to-embed/Back-button return path - and
-`_renderLeaderboardEntryStatsEmbed`'s own leaderboard card view) all still
-pass no `game` at all, so re-rendering
-an existing `/stats` post always tracks whatever the CURRENT game is, even
-if the post itself was opened with an explicit `game` override - a
-deliberate simplification, not an oversight: persisting an arbitrary
-game selection across every button click on that message would need its
-own `stats_views` column for a case that's genuinely rare (looking up a
-non-current game's stats AND then also toggling the same view's avatar).
+the same way, but `/stats` (`statsHelper`) and `/leaderboard`
+(`leaderboardHelper`) can both override it with their own optional `game`
+param, autocompleted from `listKnownGames` (the same list `/set game`'s own
+autocomplete offers). Without this, switching `current_game` didn't just
+deprioritize an earlier game's stats, it made them permanently unreachable
+from any player-facing command - the data was never actually lost
+(`game_stats` keys on `game` already), just stranded behind whatever
+`/set game` happened to be pointed at. Both helpers validate the given
+`game` against `listKnownGames` before ever querying with it, rejecting one
+this server's never tracked with the list of ones it has - unlike
+`/set game` itself, which deliberately accepts any new name to start
+tracking it, a typo'd game name here would otherwise silently create a
+brand new, all-zero `game_stats` row via `ensureGameStatsRow`'s own
+self-heal (or, for `/leaderboard`, just a leaderboard showing nobody) and
+just look like "you have no stats," not "you mistyped the name."
+
+Unlike `/stats`, `/leaderboard`'s result is a paged, buttoned view that can
+stay open and get clicked on well after the command itself ran, so the
+resolved game (whatever was actually passed, or `_currentGame` at the time
+if nothing was) is written into the `leaderboards` table's own `game`
+column (see "Leaderboard paging" below) rather than re-read fresh on every
+click - otherwise paging or re-sorting an already-posted leaderboard would
+silently jump to whatever game `/set game` has since moved on to, out from
+under a view that was clearly opened for a different one. A row from
+before this column existed reads back as `NULL`, which every button
+handler falls back to `_currentGame` for, the same default a brand new
+`/leaderboard` call with no `game` uses.
+
+The other two `/stats`-side `_buildStatsEmbed` call sites
+(`_handleStatsAvatarToggleClick` and `_swapTradingCardForStats` - the
+card-to-embed/Back-button return path) still pass no `game` at all, so
+re-rendering an existing `/stats` post always tracks whatever the CURRENT
+game is, even if the post itself was opened with an explicit `game`
+override - a deliberate simplification, not an oversight: persisting an
+arbitrary game selection across every button click on that message would
+need its own `stats_views` column for a case that's genuinely rare (looking
+up a non-current game's stats AND then also toggling the same view's
+avatar). `_renderLeaderboardEntryStatsEmbed`'s own leaderboard card view
+(cards:true's one-player-per-page stats embed) is the one exception: it
+takes `game` straight from whichever game that `/leaderboard` view is
+already pinned to, so flipping into cards mode shows the same game's stats
+the ranked list itself was just showing - that one already has a durable
+place to carry the selection (the `leaderboards` row), so there's no reason
+to let it drift back to `_currentGame` the way `/stats`' own button
+callbacks do.
 
 Role-based team balancing (Random Roles/Balanced Roles, role icons on the
 matchup graphic, `use_roles`) is League-only. It's simpler to link it to the
@@ -1316,7 +1338,9 @@ channel's history by then.
 
 `/leaderboard` builds the full sorted/filtered player list once, up front,
 then only ever sends one message. `getLeaderboardEntries` returns every
-player with an economy row. `_filterLeaderboardEntries` then drops anyone
+player with an economy row, scoped to whichever game was resolved for this
+call (the `game` param if given, `_currentGame` otherwise - see the `game`
+param section above). `_filterLeaderboardEntries` then drops anyone
 with a 0W-0L record in whichever category the selected stat is about.
 (`LEADERBOARD_RECORD_KEYS` maps each stat to its relevant wins/losses pair,
 e.g. bet wins/losses for a bet stat, or the combined game record for the
@@ -1333,7 +1357,7 @@ as "the bot is broken" for a server that actually has a full, populated
 overview leaderboard one filter away.
 
 `LeaderboardPagingView`'s First/Prev/Next/Last buttons don't post anything
-new. `_handleLeaderboardPageClick` looks up the stored filter/order/page
+new. `_handleLeaderboardPageClick` looks up the stored filter/order/page/game
 for that message id in the `leaderboards` table, recomputes the requested
 page, and edits the original message via
 `interaction.response.edit_message()`. `/team list` pages the exact same
@@ -2692,7 +2716,7 @@ round that never got a row as resolved once play has moved past it.
 | `wagers` | active team-game bets (singleton, one per guild/player) | cleared out (paid or refunded) once the game resolves |
 | `tournament_wagers` | active simultaneous-tournament-match bets (one per match/player) | cleared out once that specific match resolves |
 | `duels` | active `/wager against` challenges | one row per challenge, several can be open at once. `createdAt` backs `expireStalePendingInvites`' 24-hour cleanup, only ever for a still-`PENDING_ACCEPT` row |
-| `leaderboards` | posted `/leaderboard` messages | which filter/order/page each message is currently showing, plus `cards`/`cardShown` for the Cards-button view |
+| `leaderboards` | posted `/leaderboard` messages | which filter/order/page/game each message is currently showing, plus `cards`/`cardShown` for the Cards-button view |
 | `team_list_views` | posted `/team list` messages | which filter/sort/page each message is currently showing (`memberIds`/`memberNames` for the member filter, `mine` folded straight into it, see "Consolidating /team lookup into /team list" below), plus `cards`/`cardShown` for cards:true mode |
 | `last_result` | one row per guild | a snapshot of the most recently resolved game, for `/set correct-winner` |
 | `teams` | persistent named teams | one row per team: captain, roster, target size, voice channel, `logo_path` |
